@@ -1,0 +1,1388 @@
+{
+  "project": "/Users/adam/Code/registry-research-toolkit",
+  "storeBytes": 94875648,
+  "walBytes": 4177712,
+  "schema": [
+    {
+      "version": 48
+    }
+  ],
+  "span": [
+    {
+      "first": "2026-08-29T06:29:20.874Z",
+      "last": "2026-09-26T19:52:22.744Z"
+    }
+  ],
+  "tickets": {
+    "byStatus": [
+      {
+        "status": "done",
+        "n": 239
+      },
+      {
+        "status": "open",
+        "n": 15
+      }
+    ],
+    "byWorkflow": [
+      {
+        "workflow": "data-move",
+        "n": 1
+      },
+      {
+        "workflow": "default",
+        "n": 127
+      },
+      {
+        "workflow": "heavy",
+        "n": 11
+      },
+      {
+        "workflow": "light",
+        "n": 26
+      },
+      {
+        "workflow": "light-ui",
+        "n": 9
+      },
+      {
+        "workflow": "muse",
+        "n": 13
+      },
+      {
+        "workflow": "pipeline",
+        "n": 3
+      },
+      {
+        "workflow": "pipeline-muse",
+        "n": 25
+      },
+      {
+        "workflow": "trial",
+        "n": 1
+      },
+      {
+        "workflow": "ui",
+        "n": 38
+      }
+    ],
+    "planFirst": [
+      {
+        "plan_first": 0,
+        "n": 223
+      },
+      {
+        "plan_first": 1,
+        "n": 31
+      }
+    ],
+    "parkedNow": [
+      {
+        "n": 11
+      }
+    ],
+    "triaged": [
+      {
+        "n": 0
+      }
+    ],
+    "fromProposal": [
+      {
+        "n": 35
+      }
+    ],
+    "links": [
+      {
+        "n": 195
+      }
+    ],
+    "scopeHints": [
+      {
+        "n": 514
+      }
+    ],
+    "plans": [
+      {
+        "n": 33
+      }
+    ],
+    "editsPerTicket": [
+      {
+        "mean": 3.9645669291338583,
+        "max": 33
+      }
+    ]
+  },
+  "lanes": {
+    "byStatus": [
+      {
+        "status": "abandoned",
+        "n": 41
+      },
+      {
+        "status": "active",
+        "n": 4
+      },
+      {
+        "status": "done",
+        "n": 243
+      }
+    ],
+    "attemptsPerTicket": [
+      {
+        "attempts": 1,
+        "tickets": 189
+      },
+      {
+        "attempts": 2,
+        "tickets": 37
+      },
+      {
+        "attempts": 3,
+        "tickets": 2
+      },
+      {
+        "attempts": 4,
+        "tickets": 3
+      },
+      {
+        "attempts": 7,
+        "tickets": 1
+      }
+    ]
+  },
+  "executions": {
+    "byKindStatus": [
+      {
+        "kind": "batch",
+        "status": "done",
+        "n": 38
+      },
+      {
+        "kind": "batch",
+        "status": "failed",
+        "n": 8
+      },
+      {
+        "kind": "cleanup",
+        "status": "done",
+        "n": 284
+      },
+      {
+        "kind": "conflict",
+        "status": "done",
+        "n": 16
+      },
+      {
+        "kind": "conflict",
+        "status": "failed",
+        "n": 4
+      },
+      {
+        "kind": "gate",
+        "status": "done",
+        "n": 1707
+      },
+      {
+        "kind": "gate",
+        "status": "failed",
+        "n": 8
+      },
+      {
+        "kind": "gate",
+        "status": "cancelled",
+        "n": 8
+      },
+      {
+        "kind": "implementation",
+        "status": "done",
+        "n": 235
+      },
+      {
+        "kind": "implementation",
+        "status": "failed",
+        "n": 20
+      },
+      {
+        "kind": "implementation",
+        "status": "cancelled",
+        "n": 7
+      },
+      {
+        "kind": "merge",
+        "status": "done",
+        "n": 221
+      },
+      {
+        "kind": "merge",
+        "status": "failed",
+        "n": 14
+      },
+      {
+        "kind": "planning",
+        "status": "done",
+        "n": 22
+      },
+      {
+        "kind": "planning",
+        "status": "failed",
+        "n": 4
+      },
+      {
+        "kind": "retarget",
+        "status": "done",
+        "n": 92
+      },
+      {
+        "kind": "retarget",
+        "status": "failed",
+        "n": 25
+      },
+      {
+        "kind": "review",
+        "status": "done",
+        "n": 411
+      },
+      {
+        "kind": "review",
+        "status": "cancelled",
+        "n": 85
+      },
+      {
+        "kind": "review",
+        "status": "failed",
+        "n": 31
+      }
+    ],
+    "generationDepth": [
+      {
+        "kind": "batch",
+        "maxGeneration": 1,
+        "meanGeneration": 1
+      },
+      {
+        "kind": "cleanup",
+        "maxGeneration": 1,
+        "meanGeneration": 1
+      },
+      {
+        "kind": "conflict",
+        "maxGeneration": 5,
+        "meanGeneration": 1.5
+      },
+      {
+        "kind": "gate",
+        "maxGeneration": 1,
+        "meanGeneration": 1
+      },
+      {
+        "kind": "implementation",
+        "maxGeneration": 21,
+        "meanGeneration": 2.7480916030534353
+      },
+      {
+        "kind": "merge",
+        "maxGeneration": 1,
+        "meanGeneration": 1
+      },
+      {
+        "kind": "planning",
+        "maxGeneration": 2,
+        "meanGeneration": 1.0769230769230769
+      },
+      {
+        "kind": "retarget",
+        "maxGeneration": 1,
+        "meanGeneration": 1
+      },
+      {
+        "kind": "review",
+        "maxGeneration": 1,
+        "meanGeneration": 1
+      }
+    ],
+    "deepGenerations": [
+      {
+        "kind": "conflict",
+        "generation": 5,
+        "n": 1
+      },
+      {
+        "kind": "implementation",
+        "generation": 5,
+        "n": 14
+      },
+      {
+        "kind": "implementation",
+        "generation": 6,
+        "n": 6
+      },
+      {
+        "kind": "implementation",
+        "generation": 7,
+        "n": 6
+      },
+      {
+        "kind": "implementation",
+        "generation": 8,
+        "n": 9
+      },
+      {
+        "kind": "implementation",
+        "generation": 9,
+        "n": 1
+      },
+      {
+        "kind": "implementation",
+        "generation": 10,
+        "n": 1
+      },
+      {
+        "kind": "implementation",
+        "generation": 11,
+        "n": 1
+      },
+      {
+        "kind": "implementation",
+        "generation": 12,
+        "n": 2
+      },
+      {
+        "kind": "implementation",
+        "generation": 13,
+        "n": 1
+      },
+      {
+        "kind": "implementation",
+        "generation": 16,
+        "n": 1
+      },
+      {
+        "kind": "implementation",
+        "generation": 21,
+        "n": 1
+      }
+    ],
+    "resumedSessions": [
+      {
+        "kind": "conflict",
+        "n": 20
+      },
+      {
+        "kind": "implementation",
+        "n": 256
+      },
+      {
+        "kind": "planning",
+        "n": 26
+      }
+    ],
+    "nudges": [
+      {
+        "n": 0
+      }
+    ],
+    "costUsdByKind": [
+      {
+        "kind": "batch",
+        "usd": null,
+        "withUsage": 0
+      },
+      {
+        "kind": "cleanup",
+        "usd": null,
+        "withUsage": 0
+      },
+      {
+        "kind": "conflict",
+        "usd": 55.41,
+        "withUsage": 19
+      },
+      {
+        "kind": "gate",
+        "usd": null,
+        "withUsage": 0
+      },
+      {
+        "kind": "implementation",
+        "usd": 2762.61,
+        "withUsage": 250
+      },
+      {
+        "kind": "merge",
+        "usd": null,
+        "withUsage": 0
+      },
+      {
+        "kind": "planning",
+        "usd": 41.88,
+        "withUsage": 26
+      },
+      {
+        "kind": "retarget",
+        "usd": null,
+        "withUsage": 0
+      },
+      {
+        "kind": "review",
+        "usd": 103.43,
+        "withUsage": 403
+      }
+    ],
+    "startDispositions": [
+      {
+        "start_disposition": null,
+        "n": 3075
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"024d2c247404024fe99ee6d7b0b45b5d947b48e0\",\"head\":\"1f869a518a8446d395ea1b7a9f7b3116a6efdf79\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"0904f504f639b8e850b80992328b4bd45a75d334\",\"head\":\"1058a3f810f5dc79186fbca0a1db394413610c8d\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"0ab8360e4293673fa3d08e63dcfe7632468402f2\",\"head\":\"3464f3ee5a347ccd04bbb8490ff0093a1184996a\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"11f3871922c8d9996169580f43a55f53f4d9dcf5\",\"head\":\"3e721d791b52d82303024e2732bc192099449888\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"126a9b364c755546cb85a00cbc0e04e3aabba126\",\"head\":\"81e6b9ba7f42580d178baf35cdb0d7e18109a743\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"13eb35d322a973b028a023e199ed19412d911617\",\"head\":\"87d4c8acfbfa3cd405b0c91c787401921712ceff\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-31/1/e6\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"168073043ea738694c43c5ff1d67246c826a7df2\",\"head\":\"af8038a31bb64f231dfff992b1ceef6a27314bca\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"16c8ac0f9c86b2c707512ca646821f58d349d9a5\",\"head\":\"4ae61329aef3e90423a08df5c9bfff204a11f8b5\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"16dda6a790e9a77573953187e4c7a466c580fa09\",\"head\":\"0a9fdf9440f5feaca9d9e3a893a372ccebb49503\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"170bca4b598b873b16face1e2653210e26cc4dae\",\"head\":\"d9c3f3e1598ac367b9c444ce6cba5a36fcd2a816\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-251/1/e7\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"170bca4b598b873b16face1e2653210e26cc4dae\",\"head\":\"d9c3f3e1598ac367b9c444ce6cba5a36fcd2a816\"},\"gate\":{\"name\":\"lint\",\"command\":\"sh -ec '\\nexport UV_CACHE_DIR=/opt/uv/cache UV_PYTHON_INSTALL_DIR=/opt/uv/python UV_LINK_MODE=copy\\nuv sync --frozen --offline --no-install-workspace\\nuv sync --frozen --offline --no-build-isolation\\nuv run ruff check\\nuv run ruff format --check\\nuvx --offline --from ty==0.0.79 ty check\\nuvx --offline --from panache-cli==3.9.0 panache format --check .\\nuvx --offline --from panache-cli==3.9.0 panache lint .\\nbash scripts/check_versions.sh\\n'\",\"timeoutMinutes\":20,\"stage\":\"candidate\",\"environment\":\"container\"},\"confirmedFailure\":{\"executionId\":\"Y-251/1/e7\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/registry-research-toolkit/.yard/local/evidence/Y-251/1/e7/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"1814c30596182790877fcbec35d3c21920796151\",\"head\":\"b14b2d1d553495338d68888b64d3fe4c2e6f314c\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"19188337d52d754048412d8368a3be633ce793ee\",\"head\":\"8227b80d5febc820f1830fc86fecc5d04a05c971\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-137/1/e3\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"19188337d52d754048412d8368a3be633ce793ee\",\"head\":\"8227b80d5febc820f1830fc86fecc5d04a05c971\"},\"gate\":{\"name\":\"frontend\",\"command\":\"sh -ec '\\nexport PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers\\ncd reg_webapp/frontend\\ncp -a /opt/frontend/node_modules .\\nbun run lint\\nbun run check\\nbun run test\\nbun run build\\nbun run gen:types\\ngit diff --exit-code -- src/lib/api-types.ts\\n'\",\"timeoutMinutes\":30,\"environment\":\"container\"},\"round\":1,\"maxRounds\":5,\"confirmedFailure\":{\"executionId\":\"Y-137/1/e3\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/registry-research-toolkit/.yard/local/evidence/Y-137/1/e3/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"1a3a0e6a6455446ace5433a00426eb2c3f6d1212\",\"head\":\"f7938db4e726d68f10a948fbf69498dcc1c99e70\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"1e0264d5b005fee7e435f3a93d301074a3d88b49\",\"head\":\"2de41d72323ecc1e8638f3c1149a289f5dc1844d\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-127/1/e7\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"20e7c9d9ff0c137cdd8d67a6bc9e169965acf121\",\"head\":\"244679cc12f0508b60291eda21b5034ebc5e18af\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"24a50dfc5f978650abdb6a4cd21829fa0be9d407\",\"head\":\"330d577b11a915ae4a558541c093f69972db33b1\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"275ba184af536484f5372e8f42129df2800b88a0\",\"head\":\"c14bd7d3bb40c094fd093974d8f0b084609dc92c\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"282f98d7e6b61878942775e1cfbe79af32281ff7\",\"head\":\"31bca7351e3ee9a44e52f08c9f5930d2287416b2\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"282f98d7e6b61878942775e1cfbe79af32281ff7\",\"head\":\"915f4169aa990b4afb7e5bef10b9795ad4b52776\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"2882fa99cab6b2ae51d79ac4d65a9b56907bf2fe\",\"head\":\"f3658754723b5bc4ed09c2d6991381872db1b1fb\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"29a4b822939a881b338e1268d3b4194d71f49ba1\",\"head\":\"ca5210946565582ee27c753e6ba097d2b8ac52c8\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"2cde77118c6d9d2568de9ba128004d0f33155106\",\"head\":\"6614e32f5802666f9407927b2caa1408d9ec6173\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"2cde77118c6d9d2568de9ba128004d0f33155106\",\"head\":\"c0747e160bdee0ca2217949fc9b8371fff830c22\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"2dc1ec33c9976b84cdc517466b5fe053fff65fcb\",\"head\":\"73c430bbd164e355cf3ddbd4ae50a81fd3a81f47\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"2e9901c7aae2447c5a0d4418834a36a3b8a12019\",\"head\":\"25ba3cfc71cfdaba65745098b1d4b429ed7fea8f\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-234/1/e3\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"2e9901c7aae2447c5a0d4418834a36a3b8a12019\",\"head\":\"25ba3cfc71cfdaba65745098b1d4b429ed7fea8f\"},\"gate\":{\"name\":\"lint\",\"command\":\"sh -ec '\\nexport UV_CACHE_DIR=/opt/uv/cache UV_PYTHON_INSTALL_DIR=/opt/uv/python UV_LINK_MODE=copy\\nuv sync --frozen --offline --no-install-workspace\\nuv sync --frozen --offline --no-build-isolation\\nuv run ruff check\\nuv run ruff format --check\\nuvx --offline --from ty==0.0.79 ty check\\nuvx --offline --from panache-cli==3.9.0 panache format --check .\\nuvx --offline --from panache-cli==3.9.0 panache lint .\\nbash scripts/check_versions.sh\\n'\",\"timeoutMinutes\":20,\"stage\":\"candidate\",\"environment\":\"container\"},\"confirmedFailure\":{\"executionId\":\"Y-234/1/e3\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/registry-research-toolkit/.yard/local/evidence/Y-234/1/e3/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"2e9901c7aae2447c5a0d4418834a36a3b8a12019\",\"head\":\"bc28b14c1f7f6dab3da6308ba3f2951621c84844\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-230/3/e5\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"2f75898705891416ac72523532acc93c2b9858d0\",\"head\":\"cf823775eaac002d2d8abd8b9e6f53de7f11b459\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-250/1/e3\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"2f75898705891416ac72523532acc93c2b9858d0\",\"head\":\"cf823775eaac002d2d8abd8b9e6f53de7f11b459\"},\"gate\":{\"name\":\"lint\",\"command\":\"sh -ec '\\nexport UV_CACHE_DIR=/opt/uv/cache UV_PYTHON_INSTALL_DIR=/opt/uv/python UV_LINK_MODE=copy\\nuv sync --frozen --offline --no-install-workspace\\nuv sync --frozen --offline --no-build-isolation\\nuv run ruff check\\nuv run ruff format --check\\nuvx --offline --from ty==0.0.79 ty check\\nuvx --offline --from panache-cli==3.9.0 panache format --check .\\nuvx --offline --from panache-cli==3.9.0 panache lint .\\nbash scripts/check_versions.sh\\n'\",\"timeoutMinutes\":20,\"stage\":\"candidate\",\"environment\":\"container\"},\"confirmedFailure\":{\"executionId\":\"Y-250/1/e3\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/registry-research-toolkit/.yard/local/evidence/Y-250/1/e3/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"3036f399c3366fa6580a3b84954a70b72dd20f04\",\"head\":\"6c4d2d947174d17fd30027ba13be0aa36699f003\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-223/1/e16\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"3106dd0cfba2e8bf0b9744f85e1d232e67fb0963\",\"head\":\"2bb8561245c0fd339ad0d547c8c90437d6bbfe64\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"345a63f89859f201a25fdb3d6424129a1f8bfc5d\",\"head\":\"78b1b296f245f47f79f22acd73364662969fcbcc\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"34e5a5ec63cdf473e7b558010ec69167be6d11c3\",\"head\":\"5297ebcb3c1592d0340f5dce9d0a5bb77f6c9b29\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-61/1/e2\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"3854dfdaf3ee8434753306b4be737a92befe26c6\",\"head\":\"4baa8fc508eedf7f442258f8adb260d653d6afde\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-240/1/e2\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"3854dfdaf3ee8434753306b4be737a92befe26c6\",\"head\":\"4baa8fc508eedf7f442258f8adb260d653d6afde\"},\"gate\":{\"name\":\"frontend\",\"command\":\"sh -ec '\\nexport PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers\\ncd reg_webapp/frontend\\ncp -a /opt/frontend/node_modules .\\nbun run lint\\nbun run check\\nbun run test\\nbun run build\\nbun run gen:types\\ngit diff --exit-code -- src/lib/api-types.ts\\n'\",\"timeoutMinutes\":30,\"stage\":\"candidate\",\"environment\":\"container\"},\"confirmedFailure\":{\"executionId\":\"Y-240/1/e2\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/registry-research-toolkit/.yard/local/evidence/Y-240/1/e2/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"3884809c26dcfa36eedcbb41ecc64336240547f9\",\"head\":\"3c1b3e1b15ee09bd2a474ea1d1ce48afca8b4d39\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"39958efc0a488fd88c876cdf0c4382ce36fa8baa\",\"head\":\"52ec82bb7c755a8fdeab9666fcfd9709f1a0f6c2\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"40d0e1213a8d83032ce939f10b1464527be39797\",\"head\":\"6427a1d4c4161419c477d1048e948ccfa568bd69\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"4161e5ad9d6ce99d92e2467857b9b2de6dd177aa\",\"head\":\"92de0b3394b19b8299b65d5871a367155b00d893\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"429890c8e7f87f69b61f62bfcfb0fff8e482c4f0\",\"head\":\"1598e232d7afad9b0a9f8e844cd0ce1d257d9346\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-128/1/e41\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"4bd4386abc3b86b5a314dc203590f273fd673127\",\"head\":\"7eb50737d1859d208d10bf64fd267670c6160278\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-227/2/e5\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"4bd4386abc3b86b5a314dc203590f273fd673127\",\"head\":\"7eb50737d1859d208d10bf64fd267670c6160278\"},\"gate\":{\"name\":\"lint\",\"command\":\"sh -ec '\\nexport UV_CACHE_DIR=/opt/uv/cache UV_PYTHON_INSTALL_DIR=/opt/uv/python UV_LINK_MODE=copy\\nuv sync --frozen --offline --no-install-workspace\\nuv sync --frozen --offline --no-build-isolation\\nuv run ruff check\\nuv run ruff format --check\\nuvx --offline --from ty==0.0.79 ty check\\nuvx --offline --from panache-cli==3.9.0 panache format --check .\\nuvx --offline --from panache-cli==3.9.0 panache lint .\\nbash scripts/check_versions.sh\\n'\",\"timeoutMinutes\":20,\"stage\":\"candidate\",\"environment\":\"container\"},\"confirmedFailure\":{\"executionId\":\"Y-227/2/e5\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/registry-research-toolkit/.yard/local/evidence/Y-227/2/e5/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"4bde969baf45f7b87f4a1647456f85b5d8480bf8\",\"head\":\"97534859a103fe9ef946fac28836082a3538f0c3\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"4c2881a99951acb6680ad0da02da7bb38b69280a\",\"head\":\"a500d7d85572c9cb44a606220c25847b865c4061\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"4c4268f83896d302e6c50f9b2a89f3b50be8afc5\",\"head\":\"0232ff2aab9681385d5ac3514c356f4a93c34763\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"4dcfa535453c37bc878acbb302a95943a98b175e\",\"head\":\"04bed1e428d2f811abcc75000105ed1206804919\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"4e2fe1f538a1397c61ea7fdad9d4579fff5d0377\",\"head\":\"bca325a8c1f00dbf7f5ef173c3dbe2058c8f2c74\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-75/2/e4\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"53cee7b64d9a7d69e5991cf6488ae91beeae26a5\",\"head\":\"3fedc778d2a4a2cc426df2dff03fc9fdbb511b4e\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"552882c810bd5b97c09e4555ea472b7dd8c53ac9\",\"head\":\"965993196828fe67bddf027e2e7b38000425ff09\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-153/2/e3\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"552882c810bd5b97c09e4555ea472b7dd8c53ac9\",\"head\":\"965993196828fe67bddf027e2e7b38000425ff09\"},\"gate\":{\"name\":\"lint\",\"command\":\"sh -ec '\\nexport UV_CACHE_DIR=/opt/uv/cache UV_PYTHON_INSTALL_DIR=/opt/uv/python UV_LINK_MODE=copy\\nuv sync --frozen --offline --no-install-workspace\\nuv sync --frozen --offline --no-build-isolation\\nuv run ruff check\\nuv run ruff format --check\\nuvx --offline --from ty==0.0.79 ty check\\nuvx --offline --from panache-cli==3.9.0 panache format --check .\\nuvx --offline --from panache-cli==3.9.0 panache lint .\\nbash scripts/check_versions.sh\\n'\",\"timeoutMinutes\":20,\"environment\":\"container\"},\"round\":1,\"maxRounds\":5,\"confirmedFailure\":{\"executionId\":\"Y-153/2/e3\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/registry-research-toolkit/.yard/local/evidence/Y-153/2/e3/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"553f619c2a94482ac9b078ce199178ee45346b75\",\"head\":\"94c57a61129b641d84d50c92647ad28530344434\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-131/1/e3\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"553f619c2a94482ac9b078ce199178ee45346b75\",\"head\":\"94c57a61129b641d84d50c92647ad28530344434\"},\"gate\":{\"name\":\"lint\",\"command\":\"sh -ec '\\nexport UV_CACHE_DIR=/opt/uv/cache UV_PYTHON_INSTALL_DIR=/opt/uv/python UV_LINK_MODE=copy\\nuv sync --frozen --offline --no-install-workspace\\nuv sync --frozen --offline --no-build-isolation\\nuv run ruff check\\nuv run ruff format --check\\nuvx --offline --from ty==0.0.79 ty check\\nuvx --offline --from panache-cli==3.9.0 panache format --check .\\nuvx --offline --from panache-cli==3.9.0 panache lint .\\nbash scripts/check_versions.sh\\n'\",\"timeoutMinutes\":20,\"environment\":\"container\"},\"round\":1,\"maxRounds\":5,\"confirmedFailure\":{\"executionId\":\"Y-131/1/e3\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/registry-research-toolkit/.yard/local/evidence/Y-131/1/e3/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"5710d5d8b1fa73bbd04e6e42774539e7ab5b00eb\",\"head\":\"04b8339e5ac5bf5b46e59b9c9494c591d4aea8d2\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"5710d5d8b1fa73bbd04e6e42774539e7ab5b00eb\",\"head\":\"18f1fdb758887a9a42dc8c10c3450ad91d006b2e\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-238/1/e17\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"5710d5d8b1fa73bbd04e6e42774539e7ab5b00eb\",\"head\":\"18f1fdb758887a9a42dc8c10c3450ad91d006b2e\"},\"gate\":{\"name\":\"test\",\"command\":\"sh -ec '\\nexport UV_CACHE_DIR=/opt/uv/cache UV_PYTHON_INSTALL_DIR=/opt/uv/python UV_LINK_MODE=copy\\nuv sync --frozen --offline --no-install-workspace\\nuv sync --frozen --offline --no-build-isolation\\nuv run python -m pytest -q -n auto -m \\\"not integration and not release\\\" --junitxml=\\\"$YARD_TEST_REPORT\\\"\\n'\",\"timeoutMinutes\":40,\"stage\":\"candidate\",\"testReport\":\"junit\",\"environment\":\"container\"},\"confirmedFailure\":{\"executionId\":\"Y-238/1/e17\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/registry-research-toolkit/.yard/local/evidence/Y-238/1/e17/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"649206684095aa81e3bf6bf77f08c0ae82661036\",\"head\":\"01409f70775032e3d5467f0497191311bb51d11a\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"656b606d7551d16f8ffb4de36c84cdd58b78ce28\",\"head\":\"7f4ac604f88c2ad3ec278e1f786afe6cfa047b42\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"69b908689a14e4716a19300920d91042d665e3b5\",\"head\":\"2ab385692bea7adf7e29f75a33c9df6e5c25d967\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"6a08d2cb7d86e791e7678d8b22f9c389e4d5b19b\",\"head\":\"ff7efc48e9bd3059605347d59e2e15b6af58c57c\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"6ac99c850ba143afd2622c78cebb533292c1fea1\",\"head\":\"7f472515787bc964fdfea025056f35664d61f5a9\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-110/1/e9\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"6ac99c850ba143afd2622c78cebb533292c1fea1\",\"head\":\"7f472515787bc964fdfea025056f35664d61f5a9\"},\"gate\":{\"name\":\"frontend\",\"command\":\"sh -ec '\\nexport PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers\\ncd reg_webapp/frontend\\ncp -a /opt/frontend/node_modules .\\nbun run lint\\nbun run check\\nbun run test\\nbun run build\\nbun run gen:types\\ngit diff --exit-code -- src/lib/api-types.ts\\n'\",\"timeoutMinutes\":30,\"environment\":\"container\"},\"round\":1,\"maxRounds\":5,\"confirmedFailure\":{\"executionId\":\"Y-110/1/e9\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/registry-research-toolkit/.yard/local/evidence/Y-110/1/e9/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"6f9d443095eca66f144132c6d42a1002200d860c\",\"head\":\"b571d8cfcbc135469a7b008df1667befc892a6d6\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"748f21bb6d8de1d3f4b4caa5a71c2136c2098d6e\",\"head\":\"a4e4232b49ffae91e3b08df20eb0bdbc7b4ae4ca\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-89/1/e3\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"748f21bb6d8de1d3f4b4caa5a71c2136c2098d6e\",\"head\":\"a4e4232b49ffae91e3b08df20eb0bdbc7b4ae4ca\"},\"gate\":{\"name\":\"lint\",\"command\":\"sh -ec '\\nexport UV_CACHE_DIR=/opt/uv/cache UV_PYTHON_INSTALL_DIR=/opt/uv/python UV_LINK_MODE=copy\\nuv sync --frozen --offline --no-install-workspace\\nuv sync --frozen --offline --no-build-isolation\\nuv run ruff check\\nuv run ruff format --check\\nuvx --offline --from ty==0.0.79 ty check\\nuvx --offline --from panache-cli==3.9.0 panache format --check .\\nuvx --offline --from panache-cli==3.9.0 panache lint .\\nbash scripts/check_versions.sh\\n'\",\"timeoutMinutes\":20,\"environment\":\"container\"},\"round\":1,\"maxRounds\":5,\"confirmedFailure\":{\"executionId\":\"Y-89/1/e3\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/registry-research-toolkit/.yard/local/evidence/Y-89/1/e3/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"74e83ede41dfef561074309df8d3d5e441581fae\",\"head\":\"2a7e16072f1d0f99084554fa321fc7637f963f14\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"752bdbb938a34c5e996c8814e5bc0b13ab5c3ff3\",\"head\":\"b70f1b707719e8896a6c90e32dedb5c7d779d2e8\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"769170e81df7108a50997df9f28f955baeea4936\",\"head\":\"456c55d608f3d223f4cef295a178ce935d79157a\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"76ae2a26dd51fe20477cf889cc359d5c60385364\",\"head\":\"4010d0085a1bc4178066e8dabc9f23008462d843\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"76ae2a26dd51fe20477cf889cc359d5c60385364\",\"head\":\"6e228348f5e2c72f0ea0b7916af69d590f36f1b3\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-167/1/e5\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"7859bccbf6a2f02e2b5d1dad1a31143643083798\",\"head\":\"53e0fa38f56099253c7b44c9b8a9822a4411fc77\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-24/2/e6\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"7859bccbf6a2f02e2b5d1dad1a31143643083798\",\"head\":\"53e0fa38f56099253c7b44c9b8a9822a4411fc77\"},\"gate\":{\"name\":\"lint\",\"command\":\"sh -ec '\\nexport UV_CACHE_DIR=/opt/uv/cache UV_PYTHON_INSTALL_DIR=/opt/uv/python UV_LINK_MODE=copy\\nuv sync --frozen --offline --no-install-workspace\\nuv sync --frozen --offline --no-build-isolation\\nuv run ruff check\\nuv run ruff format --check\\nuvx --offline --from ty==0.0.72 ty check\\nuvx --offline --from panache-cli==3.4.0 panache format --check .\\nuvx --offline --from panache-cli==3.4.0 panache lint .\\nbash scripts/check_versions.sh\\n'\",\"timeoutMinutes\":20,\"environment\":\"container\"},\"round\":1,\"maxRounds\":2,\"firstFailure\":{\"executionId\":\"Y-24/2/e4\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/registry-research-toolkit/.yard/local/evidence/Y-24/2/e4/gate.log\",\"logTruncated\":false},\"confirmedFailure\":{\"executionId\":\"Y-24/2/e6\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/registry-research-toolkit/.yard/local/evidence/Y-24/2/e6/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"7859bccbf6a2f02e2b5d1dad1a31143643083798\",\"head\":\"602a098e1e9afd205add94deb971e91c43df48c9\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"7b069b60404f59db7161d1d8cb378bb53180f30b\",\"head\":\"51b589589ab3cb77020b99dccaade856533c1e99\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"7b069b60404f59db7161d1d8cb378bb53180f30b\",\"head\":\"f71a2c80baac3163126f538d16d4c0748116785e\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"7d973c5060918eb2486ad63ec220fea49f365af1\",\"head\":\"c3f71128393187c8e0a327006662cbbb78a85401\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-126/1/e3\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"7d973c5060918eb2486ad63ec220fea49f365af1\",\"head\":\"c3f71128393187c8e0a327006662cbbb78a85401\"},\"gate\":{\"name\":\"lint\",\"command\":\"sh -ec '\\nexport UV_CACHE_DIR=/opt/uv/cache UV_PYTHON_INSTALL_DIR=/opt/uv/python UV_LINK_MODE=copy\\nuv sync --frozen --offline --no-install-workspace\\nuv sync --frozen --offline --no-build-isolation\\nuv run ruff check\\nuv run ruff format --check\\nuvx --offline --from ty==0.0.79 ty check\\nuvx --offline --from panache-cli==3.9.0 panache format --check .\\nuvx --offline --from panache-cli==3.9.0 panache lint .\\nbash scripts/check_versions.sh\\n'\",\"timeoutMinutes\":20,\"environment\":\"container\"},\"round\":1,\"maxRounds\":5,\"confirmedFailure\":{\"executionId\":\"Y-126/1/e3\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/registry-research-toolkit/.yard/local/evidence/Y-126/1/e3/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"7ffd58b628ed9a86c7abc5653af07d4f457eb400\",\"head\":\"6be688742be8dbaf6d5900c77fa90c80ddba2d15\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"82335181a68f556a18f152983d5f19bb8de6b9fc\",\"head\":\"b22fffe64e6c89eb08a463c38faf19b1720834f9\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-51/1/e6\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"82335181a68f556a18f152983d5f19bb8de6b9fc\",\"head\":\"b22fffe64e6c89eb08a463c38faf19b1720834f9\"},\"gate\":{\"name\":\"lint\",\"command\":\"sh -ec '\\nexport UV_CACHE_DIR=/opt/uv/cache UV_PYTHON_INSTALL_DIR=/opt/uv/python UV_LINK_MODE=copy\\nuv sync --frozen --offline --no-install-workspace\\nuv sync --frozen --offline --no-build-isolation\\nuv run ruff check\\nuv run ruff format --check\\nuvx --offline --from ty==0.0.74 ty check\\nuvx --offline --from panache-cli==3.6.1 panache format --check .\\nuvx --offline --from panache-cli==3.6.1 panache lint .\\nbash scripts/check_versions.sh\\n'\",\"timeoutMinutes\":20,\"environment\":\"container\"},\"round\":1,\"maxRounds\":2,\"firstFailure\":{\"executionId\":\"Y-51/1/e4\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/registry-research-toolkit/.yard/local/evidence/Y-51/1/e4/gate.log\",\"logTruncated\":false},\"confirmedFailure\":{\"executionId\":\"Y-51/1/e6\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/registry-research-toolkit/.yard/local/evidence/Y-51/1/e6/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"87d4c8acfbfa3cd405b0c91c787401921712ceff\",\"head\":\"118d2c199201039689ef85f55852766e42ed5e0f\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-43/1/e6\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"87d4c8acfbfa3cd405b0c91c787401921712ceff\",\"head\":\"118d2c199201039689ef85f55852766e42ed5e0f\"},\"gate\":{\"name\":\"lint\",\"command\":\"sh -ec '\\nexport UV_CACHE_DIR=/opt/uv/cache UV_PYTHON_INSTALL_DIR=/opt/uv/python UV_LINK_MODE=copy\\nuv sync --frozen --offline --no-install-workspace\\nuv sync --frozen --offline --no-build-isolation\\nuv run ruff check\\nuv run ruff format --check\\nuvx --offline --from ty==0.0.74 ty check\\nuvx --offline --from panache-cli==3.6.1 panache format --check .\\nuvx --offline --from panache-cli==3.6.1 panache lint .\\nbash scripts/check_versions.sh\\n'\",\"timeoutMinutes\":20,\"environment\":\"container\"},\"round\":1,\"maxRounds\":2,\"firstFailure\":{\"executionId\":\"Y-43/1/e4\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/registry-research-toolkit/.yard/local/evidence/Y-43/1/e4/gate.log\",\"logTruncated\":false},\"confirmedFailure\":{\"executionId\":\"Y-43/1/e6\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/registry-research-toolkit/.yard/local/evidence/Y-43/1/e6/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"8ce75235b1ed053fe24eaf8439cfa3c2997947b5\",\"head\":\"d7533d78ab99e5acd85022f6e761fe12a26a3b9f\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"91954ec2779a0357b846b28a0f28b747ac5e93d0\",\"head\":\"ce87e46494a13739504a8e77a01c5561bb18c613\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-83/2/e98\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"920c6519eb769fb55f0c75d40c5c35dd651e934c\",\"head\":\"173cf8bc55e7c68318f859e07cf1d87a70d0b074\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-85/1/e5\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"920c6519eb769fb55f0c75d40c5c35dd651e934c\",\"head\":\"173cf8bc55e7c68318f859e07cf1d87a70d0b074\"},\"gate\":{\"name\":\"test\",\"command\":\"sh -ec '\\nexport UV_CACHE_DIR=/opt/uv/cache UV_PYTHON_INSTALL_DIR=/opt/uv/python UV_LINK_MODE=copy\\nuv sync --frozen --offline --no-install-workspace\\nuv sync --frozen --offline --no-build-isolation\\nuv run python -m pytest -q -n auto -m \\\"not integration and not release\\\" --junitxml=\\\"$YARD_TEST_REPORT\\\"\\n'\",\"timeoutMinutes\":40,\"testReport\":\"junit\",\"environment\":\"container\"},\"round\":2,\"maxRounds\":5,\"confirmedFailure\":{\"executionId\":\"Y-85/1/e5\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/registry-research-toolkit/.yard/local/evidence/Y-85/1/e5/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"95bb969ec7fadb196beabe722edf9e9442eee836\",\"head\":\"932c886f298080a515db4653a5117ff27eec9bff\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"967e8486af3e73322ddf1aa34e1a2ded6f87e9cc\",\"head\":\"f6825801806b8d910f128cf9f19e44caee750329\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"98399f9dd81468cb8980ebce59e6bd9aba94fc4e\",\"head\":\"34d4dc7f7a9844fb9389b8669014c0386b8b9a58\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-81/2/e10\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"98399f9dd81468cb8980ebce59e6bd9aba94fc4e\",\"head\":\"34d4dc7f7a9844fb9389b8669014c0386b8b9a58\"},\"gate\":{\"name\":\"lint\",\"command\":\"sh -ec '\\nexport UV_CACHE_DIR=/opt/uv/cache UV_PYTHON_INSTALL_DIR=/opt/uv/python UV_LINK_MODE=copy\\nuv sync --frozen --offline --no-install-workspace\\nuv sync --frozen --offline --no-build-isolation\\nuv run ruff check\\nuv run ruff format --check\\nuvx --offline --from ty==0.0.79 ty check\\nuvx --offline --from panache-cli==3.9.0 panache format --check .\\nuvx --offline --from panache-cli==3.9.0 panache lint .\\nbash scripts/check_versions.sh\\n'\",\"timeoutMinutes\":20,\"environment\":\"container\"},\"round\":1,\"maxRounds\":2,\"firstFailure\":{\"executionId\":\"Y-81/2/e8\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/registry-research-toolkit/.yard/local/evidence/Y-81/2/e8/gate.log\",\"logTruncated\":false},\"confirmedFailure\":{\"executionId\":\"Y-81/2/e10\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/registry-research-toolkit/.yard/local/evidence/Y-81/2/e10/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"997952d91a2c706173d2aba970cd8b62e29b80ea\",\"head\":\"41eb9db6c25a1432d3d86616a73f02db3f330ac1\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"9ab85cf5b57f4d505a6c1916fd1670b71e49d6fd\",\"head\":\"b46a202060c90d172cebef08855631c527ef5293\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-155/2/e19\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"9ab85cf5b57f4d505a6c1916fd1670b71e49d6fd\",\"head\":\"b46a202060c90d172cebef08855631c527ef5293\"},\"gate\":{\"name\":\"lint\",\"command\":\"sh -ec '\\nexport UV_CACHE_DIR=/opt/uv/cache UV_PYTHON_INSTALL_DIR=/opt/uv/python UV_LINK_MODE=copy\\nuv sync --frozen --offline --no-install-workspace\\nuv sync --frozen --offline --no-build-isolation\\nuv run ruff check\\nuv run ruff format --check\\nuvx --offline --from ty==0.0.79 ty check\\nuvx --offline --from panache-cli==3.9.0 panache format --check .\\nuvx --offline --from panache-cli==3.9.0 panache lint .\\nbash scripts/check_versions.sh\\n'\",\"timeoutMinutes\":20,\"environment\":\"container\"},\"round\":3,\"maxRounds\":5,\"confirmedFailure\":{\"executionId\":\"Y-155/2/e19\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/registry-research-toolkit/.yard/local/evidence/Y-155/2/e19/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"9aeceb0961221f17c140bcd098ac619625196e94\",\"head\":\"ee589acafb1c6dcb2caec75c06f8177fbb62c5cd\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-163/2/e11\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"9aeceb0961221f17c140bcd098ac619625196e94\",\"head\":\"ee589acafb1c6dcb2caec75c06f8177fbb62c5cd\"},\"gate\":{\"name\":\"lint\",\"command\":\"sh -ec '\\nexport UV_CACHE_DIR=/opt/uv/cache UV_PYTHON_INSTALL_DIR=/opt/uv/python UV_LINK_MODE=copy\\nuv sync --frozen --offline --no-install-workspace\\nuv sync --frozen --offline --no-build-isolation\\nuv run ruff check\\nuv run ruff format --check\\nuvx --offline --from ty==0.0.79 ty check\\nuvx --offline --from panache-cli==3.9.0 panache format --check .\\nuvx --offline --from panache-cli==3.9.0 panache lint .\\nbash scripts/check_versions.sh\\n'\",\"timeoutMinutes\":20,\"environment\":\"container\"},\"round\":3,\"maxRounds\":5,\"confirmedFailure\":{\"executionId\":\"Y-163/2/e11\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/registry-research-toolkit/.yard/local/evidence/Y-163/2/e11/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"9ba7e183ff713cce65735a396b9e66f1071ce000\",\"head\":\"40992a8cfa744c3c904cb154c3624772cc29971e\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-245/1/e3\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"9ba7e183ff713cce65735a396b9e66f1071ce000\",\"head\":\"40992a8cfa744c3c904cb154c3624772cc29971e\"},\"gate\":{\"name\":\"lint\",\"command\":\"sh -ec '\\nexport UV_CACHE_DIR=/opt/uv/cache UV_PYTHON_INSTALL_DIR=/opt/uv/python UV_LINK_MODE=copy\\nuv sync --frozen --offline --no-install-workspace\\nuv sync --frozen --offline --no-build-isolation\\nuv run ruff check\\nuv run ruff format --check\\nuvx --offline --from ty==0.0.79 ty check\\nuvx --offline --from panache-cli==3.9.0 panache format --check .\\nuvx --offline --from panache-cli==3.9.0 panache lint .\\nbash scripts/check_versions.sh\\n'\",\"timeoutMinutes\":20,\"stage\":\"candidate\",\"environment\":\"container\"},\"confirmedFailure\":{\"executionId\":\"Y-245/1/e3\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/registry-research-toolkit/.yard/local/evidence/Y-245/1/e3/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"9ba7e183ff713cce65735a396b9e66f1071ce000\",\"head\":\"eb6e595a0abc107477a8dcf1a896bfc765e70b23\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"9dcbdeb294bc1398cc6782a4d7fe204963089336\",\"head\":\"60742aa7ab1b5e2c8d4dd51a1f1cf99303ef5107\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-35/2/e8\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"9dcbdeb294bc1398cc6782a4d7fe204963089336\",\"head\":\"60742aa7ab1b5e2c8d4dd51a1f1cf99303ef5107\"},\"gate\":{\"name\":\"lint\",\"command\":\"sh -ec '\\nexport UV_CACHE_DIR=/opt/uv/cache UV_PYTHON_INSTALL_DIR=/opt/uv/python UV_LINK_MODE=copy\\nuv sync --frozen --offline --no-install-workspace\\nuv sync --frozen --offline --no-build-isolation\\nuv run ruff check\\nuv run ruff format --check\\nuvx --offline --from ty==0.0.74 ty check\\nuvx --offline --from panache-cli==3.6.1 panache format --check .\\nuvx --offline --from panache-cli==3.6.1 panache lint .\\nbash scripts/check_versions.sh\\n'\",\"timeoutMinutes\":20,\"environment\":\"container\"},\"round\":1,\"maxRounds\":2,\"firstFailure\":{\"executionId\":\"Y-35/2/e6\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/registry-research-toolkit/.yard/local/evidence/Y-35/2/e6/gate.log\",\"logTruncated\":false},\"confirmedFailure\":{\"executionId\":\"Y-35/2/e8\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/registry-research-toolkit/.yard/local/evidence/Y-35/2/e8/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"9f0cde7c5840ee2c19f13324b9f04687d8c1d8ad\",\"head\":\"09e8f5621132f9dcbcf5ed09856f804c8edf0f26\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-221/1/e11\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"9f0cde7c5840ee2c19f13324b9f04687d8c1d8ad\",\"head\":\"d1831b0774cc37b95f52a278ec2869758c210c23\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-220/1/e5\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"9f0cde7c5840ee2c19f13324b9f04687d8c1d8ad\",\"head\":\"d1831b0774cc37b95f52a278ec2869758c210c23\"},\"gate\":{\"name\":\"lint\",\"command\":\"sh -ec '\\nexport UV_CACHE_DIR=/opt/uv/cache UV_PYTHON_INSTALL_DIR=/opt/uv/python UV_LINK_MODE=copy\\nuv sync --frozen --offline --no-install-workspace\\nuv sync --frozen --offline --no-build-isolation\\nuv run ruff check\\nuv run ruff format --check\\nuvx --offline --from ty==0.0.79 ty check\\nuvx --offline --from panache-cli==3.9.0 panache format --check .\\nuvx --offline --from panache-cli==3.9.0 panache lint .\\nbash scripts/check_versions.sh\\n'\",\"timeoutMinutes\":20,\"stage\":\"candidate\",\"environment\":\"container\"},\"confirmedFailure\":{\"executionId\":\"Y-220/1/e5\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/registry-research-toolkit/.yard/local/evidence/Y-220/1/e5/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"a27af17a4e50d7ce78e8197d03b23ad66a5bc7c4\",\"head\":\"11fd4c5b1fd7f847c2e0316ac73615e7694be26d\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"a8e1ea1f28706305e36f288347b0a4e45d796118\",\"head\":\"8c8b7c6fee376eeca1f0553e188f35a11ade2d6a\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"ab40086f5feeec33405f32bd2f58fab704f1910d\",\"head\":\"18a777ad6438923c0e7754ce88ee845117cc8927\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"ade941503fbd73da5e827b642992d17f87f4692c\",\"head\":\"6e0e4f821e9dc8a5cc8051add1e8c8d136dfb4f9\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-205/1/e3\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"ade941503fbd73da5e827b642992d17f87f4692c\",\"head\":\"6e0e4f821e9dc8a5cc8051add1e8c8d136dfb4f9\"},\"gate\":{\"name\":\"lint\",\"command\":\"sh -ec '\\nexport UV_CACHE_DIR=/opt/uv/cache UV_PYTHON_INSTALL_DIR=/opt/uv/python UV_LINK_MODE=copy\\nuv sync --frozen --offline --no-install-workspace\\nuv sync --frozen --offline --no-build-isolation\\nuv run ruff check\\nuv run ruff format --check\\nuvx --offline --from ty==0.0.79 ty check\\nuvx --offline --from panache-cli==3.9.0 panache format --check .\\nuvx --offline --from panache-cli==3.9.0 panache lint .\\nbash scripts/check_versions.sh\\n'\",\"timeoutMinutes\":20,\"stage\":\"candidate\",\"environment\":\"container\"},\"confirmedFailure\":{\"executionId\":\"Y-205/1/e3\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/registry-research-toolkit/.yard/local/evidence/Y-205/1/e3/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"af0750e1b3ad1d330463428f1ba2ea5683c9dcab\",\"head\":\"77a46cb07d98084dad17156f9a9df093c75fb684\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-129/1/e3\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"af0750e1b3ad1d330463428f1ba2ea5683c9dcab\",\"head\":\"77a46cb07d98084dad17156f9a9df093c75fb684\"},\"gate\":{\"name\":\"lint\",\"command\":\"sh -ec '\\nexport UV_CACHE_DIR=/opt/uv/cache UV_PYTHON_INSTALL_DIR=/opt/uv/python UV_LINK_MODE=copy\\nuv sync --frozen --offline --no-install-workspace\\nuv sync --frozen --offline --no-build-isolation\\nuv run ruff check\\nuv run ruff format --check\\nuvx --offline --from ty==0.0.79 ty check\\nuvx --offline --from panache-cli==3.9.0 panache format --check .\\nuvx --offline --from panache-cli==3.9.0 panache lint .\\nbash scripts/check_versions.sh\\n'\",\"timeoutMinutes\":20,\"environment\":\"container\"},\"round\":1,\"maxRounds\":5,\"confirmedFailure\":{\"executionId\":\"Y-129/1/e3\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/registry-research-toolkit/.yard/local/evidence/Y-129/1/e3/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"b276a77d0d9ca7c7f0b9899209449e4c2d20ec71\",\"head\":\"f266e151da6636c2f3bc5ddb8d39df18ff54776b\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"b3414406950c6481a493dd88e35feffdb4ff632f\",\"head\":\"0ad9f38593b015ee6fd222fd69df3f15a7d9eb9e\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-239/1/e31\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"b3414406950c6481a493dd88e35feffdb4ff632f\",\"head\":\"0ad9f38593b015ee6fd222fd69df3f15a7d9eb9e\"},\"gate\":{\"name\":\"lint\",\"command\":\"sh -ec '\\nexport UV_CACHE_DIR=/opt/uv/cache UV_PYTHON_INSTALL_DIR=/opt/uv/python UV_LINK_MODE=copy\\nuv sync --frozen --offline --no-install-workspace\\nuv sync --frozen --offline --no-build-isolation\\nuv run ruff check\\nuv run ruff format --check\\nuvx --offline --from ty==0.0.79 ty check\\nuvx --offline --from panache-cli==3.9.0 panache format --check .\\nuvx --offline --from panache-cli==3.9.0 panache lint .\\nbash scripts/check_versions.sh\\n'\",\"timeoutMinutes\":20,\"stage\":\"candidate\",\"environment\":\"container\"},\"confirmedFailure\":{\"executionId\":\"Y-239/1/e31\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/registry-research-toolkit/.yard/local/evidence/Y-239/1/e31/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"b3414406950c6481a493dd88e35feffdb4ff632f\",\"head\":\"0ad9f38593b015ee6fd222fd69df3f15a7d9eb9e\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-239/2/e3\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"b3414406950c6481a493dd88e35feffdb4ff632f\",\"head\":\"0ad9f38593b015ee6fd222fd69df3f15a7d9eb9e\"},\"gate\":{\"name\":\"lint\",\"command\":\"sh -ec '\\nexport UV_CACHE_DIR=/opt/uv/cache UV_PYTHON_INSTALL_DIR=/opt/uv/python UV_LINK_MODE=copy\\nuv sync --frozen --offline --no-install-workspace\\nuv sync --frozen --offline --no-build-isolation\\nuv run ruff check\\nuv run ruff format --check\\nuvx --offline --from ty==0.0.79 ty check\\nuvx --offline --from panache-cli==3.9.0 panache format --check .\\nuvx --offline --from panache-cli==3.9.0 panache lint .\\nbash scripts/check_versions.sh\\n'\",\"timeoutMinutes\":20,\"stage\":\"candidate\",\"environment\":\"container\"},\"confirmedFailure\":{\"executionId\":\"Y-239/2/e3\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/registry-research-toolkit/.yard/local/evidence/Y-239/2/e3/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"b3414406950c6481a493dd88e35feffdb4ff632f\",\"head\":\"0ad9f38593b015ee6fd222fd69df3f15a7d9eb9e\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-239/3/e3\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"b3414406950c6481a493dd88e35feffdb4ff632f\",\"head\":\"0ad9f38593b015ee6fd222fd69df3f15a7d9eb9e\"},\"gate\":{\"name\":\"lint\",\"command\":\"sh -ec '\\nexport UV_CACHE_DIR=/opt/uv/cache UV_PYTHON_INSTALL_DIR=/opt/uv/python UV_LINK_MODE=copy\\nuv sync --frozen --offline --no-install-workspace\\nuv sync --frozen --offline --no-build-isolation\\nuv run ruff check\\nuv run ruff format --check\\nuvx --offline --from ty==0.0.79 ty check\\nuvx --offline --from panache-cli==3.9.0 panache format --check .\\nuvx --offline --from panache-cli==3.9.0 panache lint .\\nbash scripts/check_versions.sh\\n'\",\"timeoutMinutes\":20,\"stage\":\"candidate\",\"environment\":\"container\"},\"confirmedFailure\":{\"executionId\":\"Y-239/3/e3\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/registry-research-toolkit/.yard/local/evidence/Y-239/3/e3/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"b3c6e5406556bb252ba66aa1501299a44250eb40\",\"head\":\"e6982e87e7cc7952b5b8755fcd15c4b95b60acbd\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-118/1/e12\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"b3c6e5406556bb252ba66aa1501299a44250eb40\",\"head\":\"e6982e87e7cc7952b5b8755fcd15c4b95b60acbd\"},\"gate\":{\"name\":\"lint\",\"command\":\"sh -ec '\\nexport UV_CACHE_DIR=/opt/uv/cache UV_PYTHON_INSTALL_DIR=/opt/uv/python UV_LINK_MODE=copy\\nuv sync --frozen --offline --no-install-workspace\\nuv sync --frozen --offline --no-build-isolation\\nuv run ruff check\\nuv run ruff format --check\\nuvx --offline --from ty==0.0.79 ty check\\nuvx --offline --from panache-cli==3.9.0 panache format --check .\\nuvx --offline --from panache-cli==3.9.0 panache lint .\\nbash scripts/check_versions.sh\\n'\",\"timeoutMinutes\":20,\"environment\":\"container\"},\"round\":2,\"maxRounds\":5,\"confirmedFailure\":{\"executionId\":\"Y-118/1/e12\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/registry-research-toolkit/.yard/local/evidence/Y-118/1/e12/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"b45c7e20149dc71d24c96669af75ca02b09c5e72\",\"head\":\"fec8b257481eef035f0a996db935fa24c6fc71a6\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"b544223d8de5165f719e9e5a11a17eeb9ed3d146\",\"head\":\"50bca3e6113be84b673c563df85bbe22e3332302\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-1/1/e6\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"b544223d8de5165f719e9e5a11a17eeb9ed3d146\",\"head\":\"50bca3e6113be84b673c563df85bbe22e3332302\"},\"gate\":{\"name\":\"frontend\",\"command\":\"sh -ec '\\nexport PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers\\ncd reg_webapp/frontend\\ncp -a /opt/frontend/node_modules .\\nbun run lint\\nbun run check\\nbun run test\\nbun run build\\nbun run gen:types\\ngit diff --exit-code -- src/lib/api-types.ts\\n'\",\"timeoutMinutes\":30,\"environment\":\"container\"},\"round\":2,\"maxRounds\":2,\"firstFailure\":{\"executionId\":\"Y-1/1/e5\",\"exitCode\":127,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/registry-research-toolkit/.yard/local/evidence/Y-1/1/e5/gate.log\",\"logTruncated\":false},\"confirmedFailure\":{\"executionId\":\"Y-1/1/e6\",\"exitCode\":127,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/registry-research-toolkit/.yard/local/evidence/Y-1/1/e6/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"b580982e350ab72aa44e4662fb0e3124383c6b44\",\"head\":\"f49b58e69266170af92c116c87781748d0c07ee7\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"b6bfb75e6cdf2e634324b63cc3161e1830598d83\",\"head\":\"15b334f75dd56854b53c64a9015f057307fd7c79\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-229/1/e35\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"b6bfb75e6cdf2e634324b63cc3161e1830598d83\",\"head\":\"15b334f75dd56854b53c64a9015f057307fd7c79\"},\"gate\":{\"name\":\"lint\",\"command\":\"sh -ec '\\nexport UV_CACHE_DIR=/opt/uv/cache UV_PYTHON_INSTALL_DIR=/opt/uv/python UV_LINK_MODE=copy\\nuv sync --frozen --offline --no-install-workspace\\nuv sync --frozen --offline --no-build-isolation\\nuv run ruff check\\nuv run ruff format --check\\nuvx --offline --from ty==0.0.79 ty check\\nuvx --offline --from panache-cli==3.9.0 panache format --check .\\nuvx --offline --from panache-cli==3.9.0 panache lint .\\nbash scripts/check_versions.sh\\n'\",\"timeoutMinutes\":20,\"stage\":\"candidate\",\"environment\":\"container\"},\"confirmedFailure\":{\"executionId\":\"Y-229/1/e35\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/registry-research-toolkit/.yard/local/evidence/Y-229/1/e35/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"ba0bfd12b2ad003864c2b87d7969ac739eea25bf\",\"head\":\"a625ea886fca2675f1dfe0d6a743bbce7581682c\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"bd9c4d3fcee9e13aff06f76a5dd06df3a7b16f0e\",\"head\":\"07f8e83f33e464315d2e11e70d9a960d51ed2cf9\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"bd9c4d3fcee9e13aff06f76a5dd06df3a7b16f0e\",\"head\":\"6344e12e0221e21e8b18673d7bb8bf8fb22e243a\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"be0babf271d982745226e07bfe3c1eeffa76b7e8\",\"head\":\"1ecc182a8032676f55fad47d2f6c81323551ee35\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"c44bf415d380f62e14a323c44707edca3d1aaf40\",\"head\":\"c8a2823d8fc477d8ba6aa253a1fcf570818f47b2\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"c584de33865db55ba97d23b90a64f45fcba08bb4\",\"head\":\"afa9b67ffae9509bf1c0ce3b697e5ed3e87b7532\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-235/1/e15\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"c8c36e5616a8857db6b1518b5cd8ea4781c6f8ae\",\"head\":\"527b7d88ea88535686b8efb0220dd9845ba38d12\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"cbe171c2041202b1cd4b69dbd30b0ce2f038de9d\",\"head\":\"48196e2488d5fd419cc3e266df7fcb172370e8c1\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"cc58f19fadaab4676929a0d85da9c7ab97153595\",\"head\":\"8bfebe71743820403d9ca7ed3281731b84d46507\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-249/1/e9\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"cc58f19fadaab4676929a0d85da9c7ab97153595\",\"head\":\"8bfebe71743820403d9ca7ed3281731b84d46507\"},\"gate\":{\"name\":\"test\",\"command\":\"sh -ec '\\nexport UV_CACHE_DIR=/opt/uv/cache UV_PYTHON_INSTALL_DIR=/opt/uv/python UV_LINK_MODE=copy\\nuv sync --frozen --offline --no-install-workspace\\nuv sync --frozen --offline --no-build-isolation\\nuv run python -m pytest -q -n auto -m \\\"not integration and not release\\\" --junitxml=\\\"$YARD_TEST_REPORT\\\"\\n'\",\"timeoutMinutes\":40,\"stage\":\"candidate\",\"testReport\":\"junit\",\"environment\":\"container\"},\"confirmedFailure\":{\"executionId\":\"Y-249/1/e9\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/registry-research-toolkit/.yard/local/evidence/Y-249/1/e9/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"cc58f19fadaab4676929a0d85da9c7ab97153595\",\"head\":\"b840003553db610a9a255fa0a0cf80da1384f00d\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"d90fa2cbb5e524be01d92b1557d4256c434be2a1\",\"head\":\"d209910cf7ce5fce79443c48a215d31b1e0c00e0\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-218/1/e3\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"d90fa2cbb5e524be01d92b1557d4256c434be2a1\",\"head\":\"d209910cf7ce5fce79443c48a215d31b1e0c00e0\"},\"gate\":{\"name\":\"lint\",\"command\":\"sh -ec '\\nexport UV_CACHE_DIR=/opt/uv/cache UV_PYTHON_INSTALL_DIR=/opt/uv/python UV_LINK_MODE=copy\\nuv sync --frozen --offline --no-install-workspace\\nuv sync --frozen --offline --no-build-isolation\\nuv run ruff check\\nuv run ruff format --check\\nuvx --offline --from ty==0.0.79 ty check\\nuvx --offline --from panache-cli==3.9.0 panache format --check .\\nuvx --offline --from panache-cli==3.9.0 panache lint .\\nbash scripts/check_versions.sh\\n'\",\"timeoutMinutes\":20,\"stage\":\"candidate\",\"environment\":\"container\"},\"confirmedFailure\":{\"executionId\":\"Y-218/1/e3\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/registry-research-toolkit/.yard/local/evidence/Y-218/1/e3/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"da0ef5aad5346e96153e55229a589d023645b855\",\"head\":\"7d137f43e94ed39528ce1e4492c777406342902f\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"da2064be3e530c1f2d06ab2b1efe8c7ea94738a8\",\"head\":\"64bb45404deab804d958cd61e692c7913518c449\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"df46f1f11830cb55394f53e43da39c97e934454a\",\"head\":\"db5e3587a23a59472d8e078b4118aa47ce6ed9cb\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-233/1/e15\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"df46f1f11830cb55394f53e43da39c97e934454a\",\"head\":\"db5e3587a23a59472d8e078b4118aa47ce6ed9cb\"},\"gate\":{\"name\":\"test\",\"command\":\"sh -ec '\\nexport UV_CACHE_DIR=/opt/uv/cache UV_PYTHON_INSTALL_DIR=/opt/uv/python UV_LINK_MODE=copy\\nuv sync --frozen --offline --no-install-workspace\\nuv sync --frozen --offline --no-build-isolation\\nuv run python -m pytest -q -n auto -m \\\"not integration and not release\\\" --junitxml=\\\"$YARD_TEST_REPORT\\\"\\n'\",\"timeoutMinutes\":40,\"stage\":\"candidate\",\"testReport\":\"junit\",\"environment\":\"container\"},\"confirmedFailure\":{\"executionId\":\"Y-233/1/e15\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/registry-research-toolkit/.yard/local/evidence/Y-233/1/e15/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"df7ede7ac838a031cc207264a5d7cdc579515f70\",\"head\":\"8117ac8e4ccb054a7ed086502d64a5be253b88c4\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-242/1/e3\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"df7ede7ac838a031cc207264a5d7cdc579515f70\",\"head\":\"8117ac8e4ccb054a7ed086502d64a5be253b88c4\"},\"gate\":{\"name\":\"lint\",\"command\":\"sh -ec '\\nexport UV_CACHE_DIR=/opt/uv/cache UV_PYTHON_INSTALL_DIR=/opt/uv/python UV_LINK_MODE=copy\\nuv sync --frozen --offline --no-install-workspace\\nuv sync --frozen --offline --no-build-isolation\\nuv run ruff check\\nuv run ruff format --check\\nuvx --offline --from ty==0.0.79 ty check\\nuvx --offline --from panache-cli==3.9.0 panache format --check .\\nuvx --offline --from panache-cli==3.9.0 panache lint .\\nbash scripts/check_versions.sh\\n'\",\"timeoutMinutes\":20,\"stage\":\"candidate\",\"environment\":\"container\"},\"confirmedFailure\":{\"executionId\":\"Y-242/1/e3\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/registry-research-toolkit/.yard/local/evidence/Y-242/1/e3/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"dfcec8a822bd22242c490cc3cadc575b7c14deca\",\"head\":\"417f26446c8734e9d15e0912ce6dbaef10e5a3a5\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"e1396a28ed0cfab5edcd211d456eaaec23119c2f\",\"head\":\"ff77cec6ab112fc19c1b82f5b6e3ac6fb9c5c73e\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"e33dbff8a7947ecafc41be580dbf7fe90786d26f\",\"head\":\"fe6256b1cb6700aad2f9639b4edfa2d7ffd9e9ca\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"e38b7f20f26d200b57c7184fc881c462b54c0989\",\"head\":\"309c2ed0920e17df4a21a5843d22a699889aad3f\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-105/1/e3\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"e38b7f20f26d200b57c7184fc881c462b54c0989\",\"head\":\"309c2ed0920e17df4a21a5843d22a699889aad3f\"},\"gate\":{\"name\":\"lint\",\"command\":\"sh -ec '\\nexport UV_CACHE_DIR=/opt/uv/cache UV_PYTHON_INSTALL_DIR=/opt/uv/python UV_LINK_MODE=copy\\nuv sync --frozen --offline --no-install-workspace\\nuv sync --frozen --offline --no-build-isolation\\nuv run ruff check\\nuv run ruff format --check\\nuvx --offline --from ty==0.0.79 ty check\\nuvx --offline --from panache-cli==3.9.0 panache format --check .\\nuvx --offline --from panache-cli==3.9.0 panache lint .\\nbash scripts/check_versions.sh\\n'\",\"timeoutMinutes\":20,\"environment\":\"container\"},\"round\":1,\"maxRounds\":5,\"confirmedFailure\":{\"executionId\":\"Y-105/1/e3\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/registry-research-toolkit/.yard/local/evidence/Y-105/1/e3/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"e4e58f0f03a6eee7d25343ba4e0b31a0acdb27b8\",\"head\":\"94ba5886440edfbc14247bafa68d027e6b7423c3\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-81/1/e2\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"e53294f74d2861c032333118361a0270e22d95f2\",\"head\":\"f0fe8314af41d4795020f581e9646b7a20c485d3\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-99/1/e3\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"e53294f74d2861c032333118361a0270e22d95f2\",\"head\":\"f0fe8314af41d4795020f581e9646b7a20c485d3\"},\"gate\":{\"name\":\"lint\",\"command\":\"sh -ec '\\nexport UV_CACHE_DIR=/opt/uv/cache UV_PYTHON_INSTALL_DIR=/opt/uv/python UV_LINK_MODE=copy\\nuv sync --frozen --offline --no-install-workspace\\nuv sync --frozen --offline --no-build-isolation\\nuv run ruff check\\nuv run ruff format --check\\nuvx --offline --from ty==0.0.79 ty check\\nuvx --offline --from panache-cli==3.9.0 panache format --check .\\nuvx --offline --from panache-cli==3.9.0 panache lint .\\nbash scripts/check_versions.sh\\n'\",\"timeoutMinutes\":20,\"environment\":\"container\"},\"round\":1,\"maxRounds\":5,\"confirmedFailure\":{\"executionId\":\"Y-99/1/e3\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/registry-research-toolkit/.yard/local/evidence/Y-99/1/e3/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"e9cb6ef691dbf80f25c9b4c3228a5a187959c239\",\"head\":\"b08e9a13b07f95fee6e4d6cb6ef638e7e62b5b84\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-253/1/e3\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"e9cb6ef691dbf80f25c9b4c3228a5a187959c239\",\"head\":\"b08e9a13b07f95fee6e4d6cb6ef638e7e62b5b84\"},\"gate\":{\"name\":\"lint\",\"command\":\"sh -ec '\\nexport UV_CACHE_DIR=/opt/uv/cache UV_PYTHON_INSTALL_DIR=/opt/uv/python UV_LINK_MODE=copy\\nuv sync --frozen --offline --no-install-workspace\\nuv sync --frozen --offline --no-build-isolation\\nuv run ruff check\\nuv run ruff format --check\\nuvx --offline --from ty==0.0.79 ty check\\nuvx --offline --from panache-cli==3.9.0 panache format --check .\\nuvx --offline --from panache-cli==3.9.0 panache lint .\\nbash scripts/check_versions.sh\\n'\",\"timeoutMinutes\":20,\"stage\":\"candidate\",\"environment\":\"container\"},\"confirmedFailure\":{\"executionId\":\"Y-253/1/e3\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/registry-research-toolkit/.yard/local/evidence/Y-253/1/e3/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"ea46a7c87b703e673ffff005820b3931efda8845\",\"head\":\"e5e1e30036ba6483bfcbbe89065225cf95ee9c54\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"ed9765414e2fc6ec7b10c96a495472c8d631da7d\",\"head\":\"7a476f0678c16590be7c41612fcd3e7b6da83bd7\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"f06cb332eda8c70466cc124c2ab7b94ab5d2402f\",\"head\":\"4f84dad7591c59dd29ec34b135456322066ad402\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-134/1/e18\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"f06cb332eda8c70466cc124c2ab7b94ab5d2402f\",\"head\":\"4f84dad7591c59dd29ec34b135456322066ad402\"},\"gate\":{\"name\":\"lint\",\"command\":\"sh -ec '\\nexport UV_CACHE_DIR=/opt/uv/cache UV_PYTHON_INSTALL_DIR=/opt/uv/python UV_LINK_MODE=copy\\nuv sync --frozen --offline --no-install-workspace\\nuv sync --frozen --offline --no-build-isolation\\nuv run ruff check\\nuv run ruff format --check\\nuvx --offline --from ty==0.0.79 ty check\\nuvx --offline --from panache-cli==3.9.0 panache format --check .\\nuvx --offline --from panache-cli==3.9.0 panache lint .\\nbash scripts/check_versions.sh\\n'\",\"timeoutMinutes\":20,\"environment\":\"container\"},\"round\":3,\"maxRounds\":5,\"confirmedFailure\":{\"executionId\":\"Y-134/1/e18\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/registry-research-toolkit/.yard/local/evidence/Y-134/1/e18/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"f33c7ffeacb67fbeb5f10d415f0c7a42d74250cd\",\"head\":\"3b620899d8ac1f6f50ce96318f416af8892cbfd7\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-254/1/e9\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"f33c7ffeacb67fbeb5f10d415f0c7a42d74250cd\",\"head\":\"3b620899d8ac1f6f50ce96318f416af8892cbfd7\"},\"gate\":{\"name\":\"lint\",\"command\":\"sh -ec '\\nexport UV_CACHE_DIR=/opt/uv/cache UV_PYTHON_INSTALL_DIR=/opt/uv/python UV_LINK_MODE=copy\\nuv sync --frozen --offline --no-install-workspace\\nuv sync --frozen --offline --no-build-isolation\\nuv run ruff check\\nuv run ruff format --check\\nuvx --offline --from ty==0.0.79 ty check\\nuvx --offline --from panache-cli==3.9.0 panache format --check .\\nuvx --offline --from panache-cli==3.9.0 panache lint .\\nbash scripts/check_versions.sh\\n'\",\"timeoutMinutes\":20,\"stage\":\"candidate\",\"environment\":\"container\"},\"confirmedFailure\":{\"executionId\":\"Y-254/1/e9\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/registry-research-toolkit/.yard/local/evidence/Y-254/1/e9/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"f5f2fcf0d2d2de17964b6c26f20e4fa5810cabd9\",\"head\":\"e8920674cdd6dcb579776da9505b2ed48535d21b\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"f69eed695b0e5dd92066b04df4143a0f8574cfc7\",\"head\":\"4829f81e510ef4c941c9fb01f6af7d1e9e40951f\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"fb18374c5d0ed7c942c65bd8bc33d90e205c1dd3\",\"head\":\"f0f51c4ea16c711c0ab98db464a569fbe956fbc8\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"fb766b2c24be9d07db4ea0bb11aaf559b1d27a30\",\"head\":\"0015ce48b9a11f8928651aba076dec09ff0b9860\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"fd7ee1f90a9f8d4481fe162b00e02bc58d3977ef\",\"head\":\"ff963aa36b02cc146845e6ce7f8ae4bda7861c02\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-97/1/e4\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"fd7ee1f90a9f8d4481fe162b00e02bc58d3977ef\",\"head\":\"ff963aa36b02cc146845e6ce7f8ae4bda7861c02\"},\"gate\":{\"name\":\"lint\",\"command\":\"sh -ec '\\nexport UV_CACHE_DIR=/opt/uv/cache UV_PYTHON_INSTALL_DIR=/opt/uv/python UV_LINK_MODE=copy\\nuv sync --frozen --offline --no-install-workspace\\nuv sync --frozen --offline --no-build-isolation\\nuv run ruff check\\nuv run ruff format --check\\nuvx --offline --from ty==0.0.79 ty check\\nuvx --offline --from panache-cli==3.9.0 panache format --check .\\nuvx --offline --from panache-cli==3.9.0 panache lint .\\nbash scripts/check_versions.sh\\n'\",\"timeoutMinutes\":20,\"environment\":\"container\"},\"round\":1,\"maxRounds\":5,\"confirmedFailure\":{\"executionId\":\"Y-97/1/e4\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/registry-research-toolkit/.yard/local/evidence/Y-97/1/e4/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"ffdf3c8b8e85c0c69a87857a56866e0bde07614f\",\"head\":\"b06cdae8bfbcc435d8ef93ef0f871d4df137de17\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"continuation\"}",
+        "n": 36
+      },
+      {
+        "start_disposition": "{\"kind\":\"fresh\"}",
+        "n": 1
+      }
+    ],
+    "cancellationCauses": []
+  },
+  "checks": [
+    {
+      "kind": "gate",
+      "verdict": "error",
+      "n": 8
+    },
+    {
+      "kind": "gate",
+      "verdict": "fail",
+      "n": 146
+    },
+    {
+      "kind": "gate",
+      "verdict": "pass",
+      "n": 1779
+    },
+    {
+      "kind": "review",
+      "verdict": "error",
+      "n": 31
+    },
+    {
+      "kind": "review",
+      "verdict": "fail",
+      "n": 63
+    },
+    {
+      "kind": "review",
+      "verdict": "pass",
+      "n": 348
+    }
+  ],
+  "approvals": [
+    {
+      "decision": "approve",
+      "actor": "orchestrator",
+      "n": 241
+    },
+    {
+      "decision": "reject",
+      "actor": "orchestrator",
+      "n": 119
+    }
+  ],
+  "merges": [
+    {
+      "outcome": "landed",
+      "n": 221
+    },
+    {
+      "outcome": "not-landed",
+      "n": 14
+    }
+  ],
+  "attention": [
+    {
+      "kind": "approval-needed",
+      "n": 366
+    },
+    {
+      "kind": "proposal",
+      "n": 94
+    },
+    {
+      "kind": "worker-failed",
+      "n": 40
+    },
+    {
+      "kind": "target-moved",
+      "n": 33
+    },
+    {
+      "kind": "review-failed",
+      "n": 31
+    },
+    {
+      "kind": "worker-stopped-unchanged",
+      "n": 17
+    },
+    {
+      "kind": "gate-failed",
+      "n": 15
+    },
+    {
+      "kind": "review-blocked",
+      "n": 6
+    },
+    {
+      "kind": "retarget-conflict",
+      "n": 5
+    },
+    {
+      "kind": "retarget-blocked",
+      "n": 5
+    },
+    {
+      "kind": "ticket-edit-proposed",
+      "n": 4
+    },
+    {
+      "kind": "startup-reconciliation-failed",
+      "n": 4
+    },
+    {
+      "kind": "review-residual",
+      "n": 2
+    },
+    {
+      "kind": "candidate-config",
+      "n": 1
+    },
+    {
+      "kind": "cancel-unverified",
+      "n": 1
+    }
+  ],
+  "attentionOpen": [
+    {
+      "kind": "approval-needed",
+      "n": 4
+    }
+  ],
+  "audit": {
+    "rows": [
+      {
+        "n": 209576
+      }
+    ],
+    "byAction": [
+      {
+        "action": "execution.handle-recorded",
+        "n": 186830,
+        "detailBytes": 14189038
+      },
+      {
+        "action": "execution.started",
+        "n": 3622,
+        "detailBytes": 2977024
+      },
+      {
+        "action": "execution.finished",
+        "n": 3543,
+        "detailBytes": 287482
+      },
+      {
+        "action": "lane.progress",
+        "n": 3290,
+        "detailBytes": 1476636
+      },
+      {
+        "action": "check.recorded",
+        "n": 2375,
+        "detailBytes": 564728
+      },
+      {
+        "action": "execution.usage-recorded",
+        "n": 1110,
+        "detailBytes": 219428
+      },
+      {
+        "action": "execution.round-started",
+        "n": 752,
+        "detailBytes": 43122
+      },
+      {
+        "action": "capability.revoke",
+        "n": 752,
+        "detailBytes": 39888
+      },
+      {
+        "action": "capability.issue",
+        "n": 752,
+        "detailBytes": 90127
+      },
+      {
+        "action": "execution.generation-requested",
+        "n": 637,
+        "detailBytes": 2207327
+      },
+      {
+        "action": "lane.head-recorded",
+        "n": 553,
+        "detailBytes": 29300
+      },
+      {
+        "action": "attention.raised",
+        "n": 530,
+        "detailBytes": 819910
+      },
+      {
+        "action": "attention.resolved",
+        "n": 526,
+        "detailBytes": 11575
+      },
+      {
+        "action": "ticket.edited",
+        "n": 475,
+        "detailBytes": 5409820
+      },
+      {
+        "action": "lane.started",
+        "n": 288,
+        "detailBytes": 24977
+      },
+      {
+        "action": "lane.base-recorded",
+        "n": 288,
+        "detailBytes": 19008
+      },
+      {
+        "action": "lane.cleaned",
+        "n": 284,
+        "detailBytes": 54833
+      },
+      {
+        "action": "lane.prepared",
+        "n": 283,
+        "detailBytes": 73605
+      },
+      {
+        "action": "ticket.created",
+        "n": 254,
+        "detailBytes": 1292819
+      },
+      {
+        "action": "lane.done",
+        "n": 243,
+        "detailBytes": 18197
+      },
+      {
+        "action": "lane.approved",
+        "n": 241,
+        "detailBytes": 153760
+      },
+      {
+        "action": "ticket.completed",
+        "n": 239,
+        "detailBytes": 20341
+      },
+      {
+        "action": "merge.recorded",
+        "n": 235,
+        "detailBytes": 58711
+      },
+      {
+        "action": "ticket.linked",
+        "n": 195,
+        "detailBytes": 9483
+      },
+      {
+        "action": "execution.cancelled",
+        "n": 168,
+        "detailBytes": 26275
+      },
+      {
+        "action": "execution.compaction-skipped",
+        "n": 164,
+        "detailBytes": 23721
+      },
+      {
+        "action": "lane.rejected",
+        "n": 119,
+        "detailBytes": 189170
+      },
+      {
+        "action": "lane.retargeted",
+        "n": 108,
+        "detailBytes": 60836
+      },
+      {
+        "action": "project.canonical-synced",
+        "n": 98,
+        "detailBytes": 22814
+      },
+      {
+        "action": "proposal.file",
+        "n": 94,
+        "detailBytes": 362699
+      },
+      {
+        "action": "execution.cancel-requested",
+        "n": 93,
+        "detailBytes": 5314
+      },
+      {
+        "action": "execution.nudge-queued",
+        "n": 88,
+        "detailBytes": 125186
+      },
+      {
+        "action": "proposal.reject",
+        "n": 48,
+        "detailBytes": 22451
+      },
+      {
+        "action": "proposal.accept",
+        "n": 46,
+        "detailBytes": 2769
+      },
+      {
+        "action": "execution.compaction-started",
+        "n": 45,
+        "detailBytes": 5310
+      },
+      {
+        "action": "lane.abandoned",
+        "n": 41,
+        "detailBytes": 8560
+      },
+      {
+        "action": "execution.compaction-completed",
+        "n": 38,
+        "detailBytes": 4484
+      },
+      {
+        "action": "plan.publish",
+        "n": 33,
+        "detailBytes": 2579
+      },
+      {
+        "action": "admission.resumed",
+        "n": 28,
+        "detailBytes": 728
+      },
+      {
+        "action": "admission.paused",
+        "n": 28,
+        "detailBytes": 700
+      },
+      {
+        "action": "lane.approval-superseded",
+        "n": 20,
+        "detailBytes": 11560
+      },
+      {
+        "action": "capability.refuse",
+        "n": 10,
+        "detailBytes": 663
+      },
+      {
+        "action": "execution.compaction-failed",
+        "n": 7,
+        "detailBytes": 2326
+      },
+      {
+        "action": "lane.residual-accepted",
+        "n": 2,
+        "detailBytes": 5148
+      },
+      {
+        "action": "project.initialized",
+        "n": 1,
+        "detailBytes": 152
+      }
+    ],
+    "byActor": [
+      {
+        "actor": "daemon",
+        "n": 205888
+      },
+      {
+        "actor": "orchestrator",
+        "n": 2624
+      },
+      {
+        "actor": "worker",
+        "n": 1064
+      }
+    ]
+  },
+  "operatorVerbs": [
+    {
+      "action": "ticket.edited",
+      "n": 475
+    },
+    {
+      "action": "ticket.linked",
+      "n": 195
+    },
+    {
+      "action": "lane.rejected",
+      "n": 119
+    },
+    {
+      "action": "project.canonical-synced",
+      "n": 98
+    },
+    {
+      "action": "proposal.file",
+      "n": 94
+    },
+    {
+      "action": "execution.nudge-queued",
+      "n": 88
+    },
+    {
+      "action": "proposal.reject",
+      "n": 48
+    },
+    {
+      "action": "proposal.accept",
+      "n": 46
+    },
+    {
+      "action": "lane.abandoned",
+      "n": 41
+    },
+    {
+      "action": "plan.publish",
+      "n": 33
+    },
+    {
+      "action": "admission.resumed",
+      "n": 28
+    },
+    {
+      "action": "admission.paused",
+      "n": 28
+    },
+    {
+      "action": "lane.approval-superseded",
+      "n": 20
+    },
+    {
+      "action": "lane.residual-accepted",
+      "n": 2
+    }
+  ]
+}

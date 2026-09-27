@@ -1,0 +1,1816 @@
+{
+  "project": ".",
+  "storeBytes": 207003648,
+  "walBytes": 0,
+  "schema": [
+    {
+      "version": 49
+    }
+  ],
+  "span": [
+    {
+      "first": "2026-08-07T04:37:11.555Z",
+      "last": "2026-09-26T18:18:24.146Z"
+    }
+  ],
+  "tickets": {
+    "byStatus": [
+      {
+        "status": "done",
+        "n": 770
+      }
+    ],
+    "byWorkflow": [
+      {
+        "workflow": "default",
+        "n": 742
+      },
+      {
+        "workflow": "light",
+        "n": 2
+      },
+      {
+        "workflow": "muse",
+        "n": 26
+      }
+    ],
+    "planFirst": [
+      {
+        "plan_first": 0,
+        "n": 746
+      },
+      {
+        "plan_first": 1,
+        "n": 24
+      }
+    ],
+    "parkedNow": [
+      {
+        "n": 0
+      }
+    ],
+    "triaged": [
+      {
+        "n": 46
+      }
+    ],
+    "fromProposal": [
+      {
+        "n": 159
+      }
+    ],
+    "links": [
+      {
+        "n": 296
+      }
+    ],
+    "scopeHints": [
+      {
+        "n": 411
+      }
+    ],
+    "plans": [
+      {
+        "n": 23
+      }
+    ],
+    "editsPerTicket": [
+      {
+        "mean": 2.825974025974026,
+        "max": 17
+      }
+    ]
+  },
+  "lanes": {
+    "byStatus": [
+      {
+        "status": "abandoned",
+        "n": 52
+      },
+      {
+        "status": "done",
+        "n": 731
+      }
+    ],
+    "attemptsPerTicket": [
+      {
+        "attempts": 1,
+        "tickets": 674
+      },
+      {
+        "attempts": 2,
+        "tickets": 42
+      },
+      {
+        "attempts": 3,
+        "tickets": 7
+      },
+      {
+        "attempts": 4,
+        "tickets": 1
+      }
+    ]
+  },
+  "executions": {
+    "byKindStatus": [
+      {
+        "kind": "batch",
+        "status": "done",
+        "n": 62
+      },
+      {
+        "kind": "batch",
+        "status": "failed",
+        "n": 4
+      },
+      {
+        "kind": "cleanup",
+        "status": "done",
+        "n": 783
+      },
+      {
+        "kind": "cleanup",
+        "status": "failed",
+        "n": 12
+      },
+      {
+        "kind": "conflict",
+        "status": "done",
+        "n": 46
+      },
+      {
+        "kind": "gate",
+        "status": "done",
+        "n": 2390
+      },
+      {
+        "kind": "gate",
+        "status": "cancelled",
+        "n": 64
+      },
+      {
+        "kind": "gate",
+        "status": "failed",
+        "n": 10
+      },
+      {
+        "kind": "implementation",
+        "status": "done",
+        "n": 710
+      },
+      {
+        "kind": "implementation",
+        "status": "cancelled",
+        "n": 27
+      },
+      {
+        "kind": "implementation",
+        "status": "failed",
+        "n": 19
+      },
+      {
+        "kind": "merge",
+        "status": "done",
+        "n": 709
+      },
+      {
+        "kind": "merge",
+        "status": "failed",
+        "n": 72
+      },
+      {
+        "kind": "planning",
+        "status": "done",
+        "n": 22
+      },
+      {
+        "kind": "planning",
+        "status": "cancelled",
+        "n": 4
+      },
+      {
+        "kind": "planning",
+        "status": "failed",
+        "n": 1
+      },
+      {
+        "kind": "retarget",
+        "status": "done",
+        "n": 371
+      },
+      {
+        "kind": "retarget",
+        "status": "failed",
+        "n": 60
+      },
+      {
+        "kind": "review",
+        "status": "done",
+        "n": 1358
+      },
+      {
+        "kind": "review",
+        "status": "cancelled",
+        "n": 301
+      },
+      {
+        "kind": "review",
+        "status": "failed",
+        "n": 19
+      }
+    ],
+    "generationDepth": [
+      {
+        "kind": "batch",
+        "maxGeneration": 1,
+        "meanGeneration": 1
+      },
+      {
+        "kind": "cleanup",
+        "maxGeneration": 1,
+        "meanGeneration": 1
+      },
+      {
+        "kind": "conflict",
+        "maxGeneration": 2,
+        "meanGeneration": 1.108695652173913
+      },
+      {
+        "kind": "gate",
+        "maxGeneration": 1,
+        "meanGeneration": 1
+      },
+      {
+        "kind": "implementation",
+        "maxGeneration": 23,
+        "meanGeneration": 1.9497354497354498
+      },
+      {
+        "kind": "merge",
+        "maxGeneration": 1,
+        "meanGeneration": 1
+      },
+      {
+        "kind": "planning",
+        "maxGeneration": 1,
+        "meanGeneration": 1
+      },
+      {
+        "kind": "retarget",
+        "maxGeneration": 1,
+        "meanGeneration": 1
+      },
+      {
+        "kind": "review",
+        "maxGeneration": 1,
+        "meanGeneration": 1
+      }
+    ],
+    "deepGenerations": [
+      {
+        "kind": "implementation",
+        "generation": 5,
+        "n": 17
+      },
+      {
+        "kind": "implementation",
+        "generation": 6,
+        "n": 17
+      },
+      {
+        "kind": "implementation",
+        "generation": 7,
+        "n": 5
+      },
+      {
+        "kind": "implementation",
+        "generation": 8,
+        "n": 7
+      },
+      {
+        "kind": "implementation",
+        "generation": 9,
+        "n": 3
+      },
+      {
+        "kind": "implementation",
+        "generation": 10,
+        "n": 1
+      },
+      {
+        "kind": "implementation",
+        "generation": 11,
+        "n": 1
+      },
+      {
+        "kind": "implementation",
+        "generation": 12,
+        "n": 1
+      },
+      {
+        "kind": "implementation",
+        "generation": 13,
+        "n": 1
+      },
+      {
+        "kind": "implementation",
+        "generation": 15,
+        "n": 1
+      },
+      {
+        "kind": "implementation",
+        "generation": 16,
+        "n": 1
+      },
+      {
+        "kind": "implementation",
+        "generation": 18,
+        "n": 1
+      },
+      {
+        "kind": "implementation",
+        "generation": 23,
+        "n": 1
+      }
+    ],
+    "resumedSessions": [
+      {
+        "kind": "conflict",
+        "n": 46
+      },
+      {
+        "kind": "implementation",
+        "n": 751
+      },
+      {
+        "kind": "planning",
+        "n": 26
+      }
+    ],
+    "nudges": [
+      {
+        "n": 0
+      }
+    ],
+    "costUsdByKind": [
+      {
+        "kind": "batch",
+        "usd": null,
+        "withUsage": 0
+      },
+      {
+        "kind": "cleanup",
+        "usd": null,
+        "withUsage": 0
+      },
+      {
+        "kind": "conflict",
+        "usd": 140.99,
+        "withUsage": 42
+      },
+      {
+        "kind": "gate",
+        "usd": null,
+        "withUsage": 0
+      },
+      {
+        "kind": "implementation",
+        "usd": 6006.37,
+        "withUsage": 569
+      },
+      {
+        "kind": "merge",
+        "usd": null,
+        "withUsage": 0
+      },
+      {
+        "kind": "planning",
+        "usd": 119.53,
+        "withUsage": 21
+      },
+      {
+        "kind": "retarget",
+        "usd": null,
+        "withUsage": 0
+      },
+      {
+        "kind": "review",
+        "usd": null,
+        "withUsage": 1057
+      }
+    ],
+    "startDispositions": [
+      {
+        "start_disposition": null,
+        "n": 6746
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"030ef6dabe195ec136086a88a641dc3bdf4578ae\",\"head\":\"18ae1ee443ef357d29320decad0ecb8a5f8a1b0d\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-587/1/e10\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"030ef6dabe195ec136086a88a641dc3bdf4578ae\",\"head\":\"18ae1ee443ef357d29320decad0ecb8a5f8a1b0d\"},\"gate\":{\"name\":\"test\",\"command\":\"bun run test:merge-gate\",\"timeoutMinutes\":10,\"testReport\":\"junit\",\"environment\":\"container\"},\"round\":1,\"maxRounds\":2,\"firstFailure\":{\"executionId\":\"Y-587/1/e8\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/home/yard/code/switchyard/.yard/local/evidence/Y-587/1/e8/gate.log\",\"logTruncated\":false},\"confirmedFailure\":{\"executionId\":\"Y-587/1/e10\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/home/yard/code/switchyard/.yard/local/evidence/Y-587/1/e10/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"057a0ec85cf996a732c34f576b4023f44092777c\",\"head\":\"b80d3bce8c92915cb9deb7ee076f74fcb6e56d5c\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-230/1/e2\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"06e064d1d7553ab06eb731d344a0ca39b634acb2\",\"head\":\"325e298b4cef2167cad5fca5858d5afa95c3e5e0\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"0988d7dc2362b922153563d301521837617ef35f\",\"head\":\"25334befdf0e2d21c460705c254bc54e2972ca03\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"0988d7dc2362b922153563d301521837617ef35f\",\"head\":\"ec0e7d059119283e8c453cf6cd5428ae62256e8f\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"099de4ff1bd2927f3881bad7fe443a63634ece45\",\"head\":\"b0576eece679dd46055cf7ae8059e8a78caf66f0\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"0c791eff64e1685bd150ed52ae00f2b802d52b0a\",\"head\":\"2e2ce5f6f1669a82cde8dbebc68fb10a3ba6e976\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-677/1/e3\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"0c791eff64e1685bd150ed52ae00f2b802d52b0a\",\"head\":\"2e2ce5f6f1669a82cde8dbebc68fb10a3ba6e976\"},\"gate\":{\"name\":\"check\",\"command\":\"bun run check\",\"timeoutMinutes\":30,\"environment\":\"container\"},\"round\":1,\"maxRounds\":5,\"firstFailure\":{\"executionId\":\"Y-677/1/e2\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/home/yard/code/switchyard/.yard/local/evidence/Y-677/1/e2/gate.log\",\"logTruncated\":false},\"confirmedFailure\":{\"executionId\":\"Y-677/1/e3\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/home/yard/code/switchyard/.yard/local/evidence/Y-677/1/e3/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"0c791eff64e1685bd150ed52ae00f2b802d52b0a\",\"head\":\"b83ba294e3fd8ae058e03e189d08a98de1050bf3\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-682/1/e4\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"0c8792a55510cb7afb48bf4bb4b339392867a854\",\"head\":\"99b23d414ad375427c555942babc9671d5aec716\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-280/1/e7\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"0e80be5a001baa2a7c39464b119733185211d64a\",\"head\":\"777de1d008ab39e6b398b53891d9464c2678a218\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"101fdb88d05986ff3a8c5d48a698dd4b1d5ef8ac\",\"head\":\"f11644964312f31abdc0d6e3bdd2713e8acee8ad\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"10dd3eb8a9f9642be0c477422e2356656299f2ed\",\"head\":\"4c205c858bb5c3a12907a569f1f4476a06575691\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-654/1/e4\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"10dd3eb8a9f9642be0c477422e2356656299f2ed\",\"head\":\"4c205c858bb5c3a12907a569f1f4476a06575691\"},\"gate\":{\"name\":\"test\",\"command\":\"bun run test:merge-gate\",\"timeoutMinutes\":10,\"testReport\":\"junit\",\"environment\":\"container\"},\"round\":1,\"maxRounds\":5,\"firstFailure\":{\"executionId\":\"Y-654/1/e3\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/home/yard/code/switchyard/.yard/local/evidence/Y-654/1/e3/gate.log\",\"logTruncated\":false},\"confirmedFailure\":{\"executionId\":\"Y-654/1/e4\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/home/yard/code/switchyard/.yard/local/evidence/Y-654/1/e4/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"1244e4dc2923f38ab4507160034849d23c0d7c28\",\"head\":\"6220e0c76a38a05b09e1cc11df7e2218bf6780d5\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"1396d55e8a874d2122e61e8eef2be980a6d6ed59\",\"head\":\"f7489f6767e91e77d2909cfea81178b4fa715530\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-256/1/e8\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"164be94cdf062a32b44baf9e0b919251c032bc71\",\"head\":\"6bbf689ac191cc141bddf4c8bad39abb00029487\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"16f73df051d3a7f784553ec717a73856985ae72f\",\"head\":\"c9a7c028261da403f69ed39ffa732ff1bb4032d6\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"19903129db8a14c99b77abd501cde1fbca6b0e87\",\"head\":\"db94ce6a39ee3636ea756452e1863aaee2796b81\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"1a80ba82028d6a79a4a467910be08ea807dc5662\",\"head\":\"908e1c642fbe76c720808f31d1e6634532dd579f\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"1a9e5612317367a3e2129c29a02aff00c9f10546\",\"head\":\"d9b14aea25be0773c27490241a74b4911473e424\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-575/1/e4\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"1b53c5abab3b24ebbd0ae242d9a30dcfe789cfcb\",\"head\":\"af2ba9f95d0a27d57722e21a414722b0d2eb1cd3\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-727/1/e4\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"22bf347c9b521dfaea7e70090ca3856a20b63818\",\"head\":\"27e0755d8fd57f91a320593e1a100667b666fe6f\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-596/1/e6\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"279e57b1bcc1b4896483dcd322d27b0af6083b25\",\"head\":\"4e083eeeb5880baa910611bfcb38e4210c09bb3a\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-182/1/e12\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"279e57b1bcc1b4896483dcd322d27b0af6083b25\",\"head\":\"4e083eeeb5880baa910611bfcb38e4210c09bb3a\"},\"gate\":{\"name\":\"test\",\"command\":\"bun run test:gate:linux\",\"timeoutMinutes\":30,\"testReport\":\"junit\",\"environment\":\"container\"},\"round\":1,\"maxRounds\":2,\"firstFailure\":{\"executionId\":\"Y-182/1/e11\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/switchyard/.yard/local/evidence/Y-182/1/e11/gate.log\",\"logTruncated\":false},\"confirmedFailure\":{\"executionId\":\"Y-182/1/e12\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/switchyard/.yard/local/evidence/Y-182/1/e12/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"279e57b1bcc1b4896483dcd322d27b0af6083b25\",\"head\":\"5df7d7bf9bce4ffd68012d2e17d1ab99607ab51d\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-156/4/e5\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"279e57b1bcc1b4896483dcd322d27b0af6083b25\",\"head\":\"5df7d7bf9bce4ffd68012d2e17d1ab99607ab51d\"},\"gate\":{\"name\":\"test\",\"command\":\"bun run test:gate:linux\",\"timeoutMinutes\":30,\"testReport\":\"junit\",\"environment\":\"container\"},\"round\":1,\"maxRounds\":2,\"firstFailure\":{\"executionId\":\"Y-156/4/e4\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/switchyard/.yard/local/evidence/Y-156/4/e4/gate.log\",\"logTruncated\":false},\"confirmedFailure\":{\"executionId\":\"Y-156/4/e5\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/switchyard/.yard/local/evidence/Y-156/4/e5/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"27af409e663f0a5752f2391f306341893d6c3192\",\"head\":\"f698b1339ed5f6d4925657f83b0204352b3bb380\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-678/1/e3\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"27af409e663f0a5752f2391f306341893d6c3192\",\"head\":\"f698b1339ed5f6d4925657f83b0204352b3bb380\"},\"gate\":{\"name\":\"check\",\"command\":\"bun run check\",\"timeoutMinutes\":30,\"environment\":\"container\"},\"round\":1,\"maxRounds\":5,\"firstFailure\":{\"executionId\":\"Y-678/1/e2\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/home/yard/code/switchyard/.yard/local/evidence/Y-678/1/e2/gate.log\",\"logTruncated\":false},\"confirmedFailure\":{\"executionId\":\"Y-678/1/e3\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/home/yard/code/switchyard/.yard/local/evidence/Y-678/1/e3/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"27e598e924e6e049f707b8c3916d25bae8628d6c\",\"head\":\"9d2cfa23e9664afe06fc8edfee33c77277a3197e\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-259/1/e6\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"280ff398cfd8d59d866d390c55dae860fd2d1d04\",\"head\":\"67901afbb91083887746befb7957ca0528259acc\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"28416b4b11ea98e7563661cb052d951a090fa7f6\",\"head\":\"c80bbeed9c90b166cc1c144b25d88159274441d6\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"289ca6163a44298a7d14f8789f0dc78cfce1727b\",\"head\":\"f3708cc8d1c26a9d5b34468cddc192853a1dce3e\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"29c7eb66b38aa2e0b7ea906ed0bc7c68195b9595\",\"head\":\"9b6c001efd1b69d38b377949f0e460039fc9b93c\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"2b2b47a3f3ee1aed0482cf42b3c9297f206fc930\",\"head\":\"5b0ffeb1c53827136b442b63df9badf2754d8b40\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-174/1/e6\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"2b2b47a3f3ee1aed0482cf42b3c9297f206fc930\",\"head\":\"5b0ffeb1c53827136b442b63df9badf2754d8b40\"},\"gate\":{\"name\":\"test\",\"command\":\"bun run test:full\",\"timeoutMinutes\":30},\"round\":1,\"maxRounds\":2,\"firstFailure\":{\"executionId\":\"Y-174/1/e5\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/switchyard/.yard/local/evidence/Y-174/1/e5/gate.log\",\"logTruncated\":false},\"confirmedFailure\":{\"executionId\":\"Y-174/1/e6\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/switchyard/.yard/local/evidence/Y-174/1/e6/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"2b2b47a3f3ee1aed0482cf42b3c9297f206fc930\",\"head\":\"a0a7baf6d00f932bd0dd904f6e0f64d48014b7fa\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"2e146fc09ecb23e7f8344e20b5b65e27b715a114\",\"head\":\"4eceb771139fb9c895355863f0e102070897196f\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"2e24f1ee5888845aec6670cbf36875c21ef6a7b7\",\"head\":\"0889cf857087e3eeb7c52738042808a70f7b3762\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"3016276132334b15940be816ebd3d31af6aa985a\",\"head\":\"1bd13c09b3e215a575fcfe000136f52977b5ef3e\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"3016276132334b15940be816ebd3d31af6aa985a\",\"head\":\"2ade140f15855fda7def241b2a0a69b6e503a167\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"30d78169f3ffc042328c2eccea52b8dd80d62afa\",\"head\":\"df9353180702d1972bb98c7fa52889014ce7453d\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"320000d3f2bcb0e0a6e161ddc8df36e9c1d85687\",\"head\":\"6de102a5647bfcb1c622ba1a18aa94ac3922c3c4\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-497/1/e7\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"328d95a678049f8d5b2ea1784464541518cf4447\",\"head\":\"f5e0524fbf07bfc74636e431600c057e61dbcea9\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"383e76dcf8d4e96177a9971fdc4de013f2b3bd70\",\"head\":\"42b623c1cc6fd4121647806a7b9627a7f7aedb08\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"383e76dcf8d4e96177a9971fdc4de013f2b3bd70\",\"head\":\"42b623c1cc6fd4121647806a7b9627a7f7aedb08\"},\"gate\":{\"name\":\"test\",\"command\":\"bun run test:merge-gate\",\"timeoutMinutes\":10,\"stage\":\"batch\",\"environment\":\"container\",\"testReport\":\"junit\"},\"confirmedFailure\":{\"executionId\":\"Y-741/1/e5\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/home/yard/code/switchyard/.yard/local/evidence/Y-741/1/e5/3-test/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"395bb0a6eb40336421cab3b09a54ae2c86fe3784\",\"head\":\"13846b953b7b7e5386ab13dc777e33ee4ad41827\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"395bb0a6eb40336421cab3b09a54ae2c86fe3784\",\"head\":\"13846b953b7b7e5386ab13dc777e33ee4ad41827\"},\"gate\":{\"name\":\"test\",\"command\":\"bun run test:merge-gate\",\"timeoutMinutes\":10,\"stage\":\"batch\",\"environment\":\"container\",\"testReport\":\"junit\"},\"confirmedFailure\":{\"executionId\":\"Y-724/1/e6\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/home/yard/code/switchyard/.yard/local/evidence/Y-724/1/e6/3-test/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"3995c19c2b655588ab346718fd97e531be6908e0\",\"head\":\"382f3d83040a421eedfacb62dbfbc3ae01e0cf95\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"39e2bcea37650c2d5d37eb7140687d70aa7c9717\",\"head\":\"6041c9d2376ffedaa6cbd941768e5cd3c02c43f3\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-278/1/e5\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"39e2bcea37650c2d5d37eb7140687d70aa7c9717\",\"head\":\"6041c9d2376ffedaa6cbd941768e5cd3c02c43f3\"},\"gate\":{\"name\":\"test\",\"command\":\"bun run test:merge-gate\",\"timeoutMinutes\":10,\"testReport\":\"junit\",\"environment\":\"container\"},\"round\":1,\"maxRounds\":2,\"firstFailure\":{\"executionId\":\"Y-278/1/e4\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/switchyard/.yard/local/evidence/Y-278/1/e4/gate.log\",\"logTruncated\":false},\"confirmedFailure\":{\"executionId\":\"Y-278/1/e5\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/switchyard/.yard/local/evidence/Y-278/1/e5/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"3c087bcc837a295f0b35492602349a71e2fe95f2\",\"head\":\"abe16c90843eaf99762e77901dc40fabfa911c8f\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"3e8906212fb8802dc13bcdfda06303a7da2bfa9b\",\"head\":\"74e0498b0d768494aa62699905a95da42104d5ce\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"406dc846660489d3206b3eb0b6f1c9f59d9f2b75\",\"head\":\"caa91b0157fa2af2bab10a32e5a40abed0d7648f\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-350/1/e40\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"42f2ee00319a889bf1fcf37f5a509dfd07c026ec\",\"head\":\"1b6cd2428119077dc5950ae4a3080b4e1333cbd0\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-698/1/e4\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"440088425cd9bd9912e0fa328656f9cf54c44b2a\",\"head\":\"7ec8dea9d4af879df7c83986ff8e9d241d8159a5\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-195/1/e5\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"440088425cd9bd9912e0fa328656f9cf54c44b2a\",\"head\":\"7ec8dea9d4af879df7c83986ff8e9d241d8159a5\"},\"gate\":{\"name\":\"test\",\"command\":\"bun run test:gate:linux\",\"timeoutMinutes\":30,\"testReport\":\"junit\",\"environment\":\"container\"},\"round\":1,\"maxRounds\":2,\"firstFailure\":{\"executionId\":\"Y-195/1/e4\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/switchyard/.yard/local/evidence/Y-195/1/e4/gate.log\",\"logTruncated\":false},\"confirmedFailure\":{\"executionId\":\"Y-195/1/e5\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/switchyard/.yard/local/evidence/Y-195/1/e5/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"440088425cd9bd9912e0fa328656f9cf54c44b2a\",\"head\":\"c4ae506d33038c5cd6c2800364e1933170d0ea26\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"44221680f2ee06b88ee8dc6dc998453118821822\",\"head\":\"59cccfc1ef5d057cd76dbcfd9f7d31b0e9800eb9\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"45f08d47b8a9d94b7ce8760b66ed62829c4f05ed\",\"head\":\"9a1d9509cf77f147f81bcb32bc7b08fd89170ba6\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"463eb1aac36c5ec4d5a2c494d7821f729fc90fa2\",\"head\":\"e457995744605a144ed111fc49ea7427b6c2b6b1\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"48052a3e910479fe239beb83ba3046df46f5f10b\",\"head\":\"65b45f82a416d9e9c5fa015fe90e0fa3f4d3e22c\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-334/1/e16\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"4d1d1a04efac2179591fb05106ba8cb4eedb6c50\",\"head\":\"1d53a6a30a306eee9a3116563160d69c8b94eb29\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-422/1/e2\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"4d296416e494cc0df895085375fa976016074bb8\",\"head\":\"d182c25f2150120f86e345aa336d45cd35bf1ce3\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"4d296416e494cc0df895085375fa976016074bb8\",\"head\":\"dee80d3cd4c389bb6db794c147ba0490a71e08cd\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"4e6ca9416806bb138f98dc6fd11f7746baee5e79\",\"head\":\"1d4f00ebcf6c1aa73d19c3f9e4202abe0fed10ea\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-237/2/e4\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"4e934054811f338056e31f75c5ba5aed665e4999\",\"head\":\"16b99ad5b610cc9cbb0a13595207fad9b5a651d1\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-342/1/e4\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"510ca8d367173ef3e9cad7e7938c0760b0c1e3c7\",\"head\":\"911f2a6516a2512682ba4b060f77913cd0383e89\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"510ca8d367173ef3e9cad7e7938c0760b0c1e3c7\",\"head\":\"ded1525a55b9305b9331f262a332df9e98607c17\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"5368020115ab0a1239c9d2171d9a41e64edd70b3\",\"head\":\"7d9c5d651893a019b591a443478d6181f0da3933\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-665/1/e3\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"5368020115ab0a1239c9d2171d9a41e64edd70b3\",\"head\":\"7d9c5d651893a019b591a443478d6181f0da3933\"},\"gate\":{\"name\":\"check\",\"command\":\"bun run check\",\"timeoutMinutes\":30,\"environment\":\"container\"},\"round\":1,\"maxRounds\":5,\"firstFailure\":{\"executionId\":\"Y-665/1/e2\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/home/yard/code/switchyard/.yard/local/evidence/Y-665/1/e2/gate.log\",\"logTruncated\":false},\"confirmedFailure\":{\"executionId\":\"Y-665/1/e3\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/home/yard/code/switchyard/.yard/local/evidence/Y-665/1/e3/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"551122f287f04721fc167bb51952bdf4326b6ac0\",\"head\":\"0acd7521f0cbbc93fc4772916b49c7f98c3e275c\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"551122f287f04721fc167bb51952bdf4326b6ac0\",\"head\":\"ee5b7e0c8bcf17f4aa7a082e30ed1581ffed7fe1\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"5a1a35781465a995adaf1abd54855361c39d02e3\",\"head\":\"617dac922963d06b97c687c6b958cdd8455919e8\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"5a5bb3bd756134fe4ed3efcd1d6d6fcbdee22465\",\"head\":\"0a6e9c4a9db428b92069ca6bb5b1d9b1221a1244\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"5b060bf4e25b43761494b7d067096d177af5054c\",\"head\":\"6f3b26b9a3f0c571e0f9d9798ffe5278588a005b\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"5d8aabe6eb602bef59cfc0dd340bad5d0dced2a7\",\"head\":\"770ff1903ccab109c781ca01085c9de19608e3e7\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"5d983bfac6538be4a7e73d15da4cc0274a8d8748\",\"head\":\"35107475d8ab5c0b471558bb5a34a1b847cee16f\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"5de1d2dba628c49ee41d61d8d424ff5b210cccb9\",\"head\":\"0cc421789c28f5b492c24575003a71625fc1801a\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"5e5fc6af122af121c2cee459d9bee92acc6c5d55\",\"head\":\"72f081479f0b951cb8b9656c1e7dccc2e0abc284\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"5e80c04b516e62fb946446766a1947fb5fa40a2e\",\"head\":\"7178e63b1bf7fc9b0f7daf185973a9ae17bfb85f\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"5f7997448407ca2977fde52181556863981aef7e\",\"head\":\"40005152fddc9eb62aba582d4fdd012169b5180f\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"5f7997448407ca2977fde52181556863981aef7e\",\"head\":\"40005152fddc9eb62aba582d4fdd012169b5180f\"},\"gate\":{\"name\":\"check\",\"command\":\"bun run check\",\"timeoutMinutes\":30,\"stage\":\"batch\",\"environment\":\"container\"},\"confirmedFailure\":{\"executionId\":\"Y-709/1/e5\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/home/yard/code/switchyard/.yard/local/evidence/Y-709/1/e5/1-check/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"5fd52be0c1e860b339b2e520696a4f418f00ba97\",\"head\":\"eab313038c1276eea578a43a1e2fd7a46363e652\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"60b03446040e6c4bdf1715bff0b89e82629bdadd\",\"head\":\"091c011df940bbe4d201854b9d1f1ef35a175b3e\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-455/1/e8\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"60b03446040e6c4bdf1715bff0b89e82629bdadd\",\"head\":\"402c843b435c1b934c6e299ae23002be808828cf\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"60d2de45e9c6371cab96c70de6b8784ba14b369a\",\"head\":\"ed65a458775ae626b67be5e803d791bcd63472d0\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-413/1/e29\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"62997c54dba4c63b0345ddfc1e0348ea954cb4c0\",\"head\":\"891987a6cc0e935a2a2c76602c482606a9aaeea5\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"64320ca928749be104a895673ac0adfc352b7c61\",\"head\":\"d504acfe43266ada360850c7db1b0ff5ae32f4f2\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"654d234dc2c11c0a187e80a4f4ab893f6e0d74c6\",\"head\":\"68c11662f09f532c0139b8ffc31df0584d1dc7f8\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"654d234dc2c11c0a187e80a4f4ab893f6e0d74c6\",\"head\":\"98ccc7f52d204a77317e40a11639c60e8f499667\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"65b45f82a416d9e9c5fa015fe90e0fa3f4d3e22c\",\"head\":\"c257f9eba44e49f5c0c3201042db00937bd12e7d\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"65d30b365c42f249f767576944a2aa22e9ea8aba\",\"head\":\"db46e54319b91dc4e5a0b9ce9023295657d1dab5\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"68ecb199dbfb1e240a5f733125f7590a72134a8e\",\"head\":\"1eab9c3f08f97c9292d6db64321ab6f30f50ff45\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"68ecb199dbfb1e240a5f733125f7590a72134a8e\",\"head\":\"27dd256e6d85a1b029c6d0ed1ef5416504d1041d\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"69766e42ab8a6944653b6aa93348bb9d789a6faa\",\"head\":\"fe8c628f7f1f9b3cbf15cb7bf806d017dadb9e8b\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"6a794608516fe71a8938a73899e859ddeabb3b6c\",\"head\":\"8f56820be9951b2f59d0f9d0243be55adf201ba9\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"6b597be409dfc02b07b7a03901f8a9ce14c94df4\",\"head\":\"d6d83d908f56aab080fa6f2758cf9017efbf2ae9\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"6cee5d313b61490589809fb8688181c1e7f8feea\",\"head\":\"1e20a4ced1aa5ddfbfb87a4e7eb42deabfabf5f8\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"6cee5d313b61490589809fb8688181c1e7f8feea\",\"head\":\"88f4e254650157add2d4c24245269c48ce77aca1\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"6d66f8ada0758cb788331d2a611446c0b0cc000c\",\"head\":\"6a28ce64ded70ad32bb32fbbaecf003f8b93fbff\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"6e6cea20106c4329bee4a09fbd9b26880b50dc62\",\"head\":\"579d0f2ca4a6f09c8a9759fe8e77e0089c9d62ed\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"6e80ab19e090c57b0b15ef99cfce52795e854afb\",\"head\":\"2e8d80527ef5e61300de7cc88c5afd7406dbdf28\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"6f020034b4b593bacac7e7ac224b60e167c025ce\",\"head\":\"b76129b0fb3ec06145a9476eb2a38640dfe90a48\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-294/1/e4\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"710eebb150236fb4cb97ac160f2341123bdd663b\",\"head\":\"96c55f35e67963078f3ee97e54b499241e4dfe74\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-535/1/e6\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"710eebb150236fb4cb97ac160f2341123bdd663b\",\"head\":\"96c55f35e67963078f3ee97e54b499241e4dfe74\"},\"gate\":{\"name\":\"test\",\"command\":\"bun run test:merge-gate\",\"timeoutMinutes\":10,\"testReport\":\"junit\",\"environment\":\"container\"},\"round\":1,\"maxRounds\":2,\"firstFailure\":{\"executionId\":\"Y-535/1/e4\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/home/yard/code/switchyard/.yard/local/evidence/Y-535/1/e4/gate.log\",\"logTruncated\":false},\"confirmedFailure\":{\"executionId\":\"Y-535/1/e6\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/home/yard/code/switchyard/.yard/local/evidence/Y-535/1/e6/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"710eebb150236fb4cb97ac160f2341123bdd663b\",\"head\":\"ac5e6a982e652dab2b513deef8f7428cb8b38366\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-533/1/e19\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"72721a13ac24606b27698949449e9ae6e7720cd0\",\"head\":\"4bfda152aafe034dd716c9da83b11b2dd39f99c1\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"72721a13ac24606b27698949449e9ae6e7720cd0\",\"head\":\"fc76eadf880c6f11e36449427f297841ad182aa4\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-204/2/e9\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"72721a13ac24606b27698949449e9ae6e7720cd0\",\"head\":\"fc76eadf880c6f11e36449427f297841ad182aa4\"},\"gate\":{\"name\":\"test\",\"command\":\"bun run test:gate:linux\",\"timeoutMinutes\":30,\"testReport\":\"junit\",\"environment\":\"container\"},\"round\":1,\"maxRounds\":2,\"firstFailure\":{\"executionId\":\"Y-204/2/e8\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/switchyard/.yard/local/evidence/Y-204/2/e8/gate.log\",\"logTruncated\":false},\"confirmedFailure\":{\"executionId\":\"Y-204/2/e9\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/switchyard/.yard/local/evidence/Y-204/2/e9/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"74a569a256d62580c98920e32638cdeeb75cc8d3\",\"head\":\"305248af6e38846ff9385cc4688a08c6ca35cade\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"76efc25f06d746be4f8c88c792428fae3ba09fd0\",\"head\":\"45dc32367b52acf19897638f627a1ce5ad497f03\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"76efc25f06d746be4f8c88c792428fae3ba09fd0\",\"head\":\"c612490153a10d5ec639a4056d7c8b00a8166e62\"},\"gate\":{\"name\":\"test\",\"command\":\"bun run test:gate:linux\",\"timeoutMinutes\":30,\"testReport\":\"junit\",\"environment\":\"container\"},\"round\":2,\"maxRounds\":2,\"firstFailure\":{\"executionId\":\"Y-197/1/e15\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/switchyard/.yard/local/evidence/Y-197/1/e15/gate.log\",\"logTruncated\":false},\"confirmedFailure\":{\"executionId\":\"Y-197/1/e16\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/switchyard/.yard/local/evidence/Y-197/1/e16/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"7775da8d781cd6b639c12b9e182e501c9915578b\",\"head\":\"83e8cb0cde6e7f58e94fd09a6e61c91d7d726e75\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"78589e013392ca9085b4697d04466f4cb1ef6092\",\"head\":\"46a098e46ccd51de53e642245c6c54912880931b\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-138/1/e5\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"78589e013392ca9085b4697d04466f4cb1ef6092\",\"head\":\"46a098e46ccd51de53e642245c6c54912880931b\"},\"gate\":{\"name\":\"test\",\"command\":\"bun run test:full\",\"timeoutMinutes\":30},\"round\":1,\"maxRounds\":2,\"firstFailure\":{\"executionId\":\"Y-138/1/e4\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/yard2/.yard/local/evidence/Y-138/1/e4/gate.log\",\"logTruncated\":false},\"confirmedFailure\":{\"executionId\":\"Y-138/1/e5\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/yard2/.yard/local/evidence/Y-138/1/e5/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"78589e013392ca9085b4697d04466f4cb1ef6092\",\"head\":\"ae0fa9b775df96fb234017fab1776ce34328a240\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"7af463f153af38484361bdf3fb7f3714063c6505\",\"head\":\"21d15f362cdeda0b6e6ee6a1227a3f9f3bc22ce2\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"7cb664a43a61fcf0abb14c5b75a9ffe8bde19cc1\",\"head\":\"28e9923ad99aabbace4aa0df0cfeaa9e8ada5028\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"7cfd6b632045fdc5bd431c273eac6cf213dd26ce\",\"head\":\"8cf89856cf9f97bd01e07856e1ab702922ec9751\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"7e9e3c45d15e47d1ee81abad724d6ca23d9bca48\",\"head\":\"abad7c2dbf267ba99e26e3840994ef58ec25c2ee\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-315/1/e4\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"7e9e3c45d15e47d1ee81abad724d6ca23d9bca48\",\"head\":\"b887044d97cf8dfa1ce95a3d168a08a2b56a2bb1\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"7f5accf1c85e1e2226b6e2d46217beccc716dae8\",\"head\":\"4c3a16989a70cc5ca568aa90448b6bdf16b90658\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-507/2/e2\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"800ec1064f312d3f1616db28a178540c5077fcaa\",\"head\":\"4cd96fecf84d5e997d2ead28b714c7dfbc0f68fd\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-431/1/e3\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"82d65c3d1fa16dbb1dd8ec6c59c18cee1098c492\",\"head\":\"5729954ba0757ef35d4d8b15c533d07aeee56e08\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"82dab23f3eb62db4d442a3e8180de3d394e6d4a3\",\"head\":\"e9e3400f16bd7a7a5be32e3a0171d6e75c17258a\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"835058f877d1908e938c7e86958518d6821acec9\",\"head\":\"a18513e2e07e20e9229e98cb2258b25671a86208\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-700/1/e11\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"83caf75f15ec4e2d47758c86cf40a038e85e2816\",\"head\":\"af954be13e5abf6181d84072b2e63427d7af9489\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-696/1/e5\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"840c07adf1e2d44f844e9223ddcab4c4c1d76327\",\"head\":\"6508051a6665d079746a8aac02c0fad97d26d8f4\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"849c300a8df150946e3e3e9edae5d08063aba777\",\"head\":\"98a554e8aa829ca8bfd9b6213940c9880d4fddbc\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"8b0ad33e43831ae2dc50204a26fa69d70c8e81b3\",\"head\":\"2b52d21b384ba43eb289d199e2229ce964bb30a5\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-285/1/e7\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"8b0ad33e43831ae2dc50204a26fa69d70c8e81b3\",\"head\":\"6b1d4a437e3622f1f26e85f8819f935ddda27be3\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-286/1/e4\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"8bab8977caf10c14b56c2de4a9d32f21eac6bed8\",\"head\":\"ea641e694b2441b940d112ebe06622849f9e0b5c\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"8c17a34083729cce94fb9f2084934f95b78df2b4\",\"head\":\"841765faea0ff0ee3e93e20c2ee645dc1720bffd\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"8c17a34083729cce94fb9f2084934f95b78df2b4\",\"head\":\"bce9c9bde5b9860c9fddd994e66262ee34f5a13f\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"8f463418c95f95c39621ab03893f66ab9927f983\",\"head\":\"5a070ace98f9c38d73fd47ba09ca962ff650b8e9\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"90114853ae165d304c7ed626667b80221d15e8a6\",\"head\":\"12ad9e84436cd181834f0a7174ba8521e1f221a5\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"90114853ae165d304c7ed626667b80221d15e8a6\",\"head\":\"d5ad6128d70de7629ad5fdbba9b10f5f46d4f2c5\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"90583b5d0a8e20d1c962d9f46834fe70ddaf7d41\",\"head\":\"1f8a40c056af39ef73b3682e8e39007d7fcf4fd0\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"91422aed30092e31b7669df99d7a91539c6e2f68\",\"head\":\"a8ac8d2809113f1cdfff7b02e4df4301e8b1746b\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"94ec44d9cf904b7e899c144afd02e3de49d57567\",\"head\":\"7ad16822608cdf8083dabf5ebd7b94d3e7d94eca\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-341/1/e18\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"94fbf1f8e1611a0c31654d46c6a96ca6ad8b76f3\",\"head\":\"e2f893730762f9b9170f74ec41c5b111953b1c71\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"95b8c774da6468ce8650b004721f4dc47e796f88\",\"head\":\"c9dfed05d887f8861c5a0c469ad0dc61eb84949f\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"961a8ebeb1371ef0cf5f1b529017af5db0a01847\",\"head\":\"0a5ae9f91a585ad07a5c0d8ba7a1f84745b155ef\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"96f73cad46a649404f517d27de005ccc267d9e6a\",\"head\":\"09646230415905830c15606936207749116d4181\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"99b7f6401ef80f265fbb584dc4bac1fce924dd85\",\"head\":\"4aa55cb6061958a89c5a5b291c3249386e4c7813\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"9bcf15d7de3066c236caec42c99b0767561d2e7c\",\"head\":\"417536555d9c3c954666253b6e042f10c3e348fc\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"9c2816dce07193d61bf022bc94b7b40b8a591fb4\",\"head\":\"973960d004c125a512af75c4cb7295da9c521d42\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-570/1/e4\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"9dc0e321c4bf9280450b2d472ea04c98b26cc69e\",\"head\":\"c80d45853bf1fb738150e63d08d6581fb95d0732\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"9e341e6d25f17c0792a84dc24be5ed05b3049a33\",\"head\":\"1ac2540d19f40e5585df6bdbad3c5f0aa3c80871\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"a11b3e7ac7512fcf4f5ff0a154f22cdf47e4ee9b\",\"head\":\"bc990d367b6cdffc2c8479e9b2c53eaa0d7b463f\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-502/1/e4\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"a17a2e110e71e2ebec568dd87011287eb1d6656a\",\"head\":\"2e0b449faeb407665fe316c389f28a06de6fd3e9\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"a2aaa7ab08fd705d75e978a7c3028f98b4a06d5e\",\"head\":\"f2c8557859081c085acb0a31b570663088793a98\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-549/1/e2\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"a345c100460bd7d6c749b12735c3436705316f6c\",\"head\":\"3e03f64a30ccc81e687a1f057e27a4dc9892307c\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"a3c43032aa7e8d89eee905a586302a38bfc6c916\",\"head\":\"a7a744ccc1281eda66f134d410245455f37a6374\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-721/1/e5\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"a3c43032aa7e8d89eee905a586302a38bfc6c916\",\"head\":\"a7a744ccc1281eda66f134d410245455f37a6374\"},\"gate\":{\"name\":\"check\",\"command\":\"bun run check\",\"timeoutMinutes\":5,\"stage\":\"candidate\",\"environment\":\"container\"},\"firstFailure\":{\"executionId\":\"Y-721/1/e4\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/home/yard/code/switchyard/.yard/local/evidence/Y-721/1/e4/gate.log\",\"logTruncated\":false},\"confirmedFailure\":{\"executionId\":\"Y-721/1/e5\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/home/yard/code/switchyard/.yard/local/evidence/Y-721/1/e5/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"a41b49f374b2892d2f0c1201fcdf53f4f28ff9b4\",\"head\":\"3b730dd13fd54c043d12873896d928b73557f4a2\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"a7b3d8bc87cadf6a152fb97ee209821be1447b36\",\"head\":\"796a2a0a64f40269c90dcc1b62803780a51e3ad2\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"a918944d6f39d5efe5821e3826ccd7fccc920207\",\"head\":\"49c59dfd2cec7e677de025a14d0837844c21e789\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"aa3bca1e2fbe37c2c792246bca193168fc77faa0\",\"head\":\"cc7c3cafd7172563d53dfba4b683cedf754bf076\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"aacde2cbdd0bd5fde24b8abc1773ae3fc023f37b\",\"head\":\"02b675ae20ec06349dc92bfbbf1e5950eb416b53\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"aaefb188ea6f274032ed7b8d6e94d64de3cc9450\",\"head\":\"5074c58a47c4fd668a8a7303754e808e19e8c8a5\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"ad36bb8dc962202dd01c67f96731e74dbd8a2d9d\",\"head\":\"ff996340b2e133b3f6cb22ff304254733f2fdb57\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-467/1/e2\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"adc1da181bff65bb7ef154e1bb494946b768fca8\",\"head\":\"5b84bf1f9388491e80153b95b46546e164785fcf\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"add20ba6e464ae210ad08ca2b7a188eacb7d3926\",\"head\":\"611307bf0cb57604ac87fd469499b465a9fcdb2f\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"addb754f66bb0109ab00ff8547cf9ff2231b1870\",\"head\":\"270e7a314aadab9b6c4f64a53dc3ec2b8290b36f\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"af6c306cc3adb290de02efc7766a7d6b314ef8ba\",\"head\":\"21042b8ff1de6b2d37196eeb44c1cb14df10dcc3\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"afe1102743e309cc66b8cd0f5ea7e5e009b93dc4\",\"head\":\"a31d17b0c569693f4242d7604c748fb769c88a30\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"b024da95980a4c58ddec3e9e83d124b9149f6300\",\"head\":\"82c1fa25d4804195b34f992a2e594f1df4e6db7e\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"b09c6a79b0b7e3a78d2742824c601c395aceb0dc\",\"head\":\"e5ce77aa3558c3aa2f14c367ce697144b26c145a\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"b0c58aac706e5cb528c9aa5cdb7226086d0a22b9\",\"head\":\"16a63efe7192cad6f1ba7b9f985dfa73f278c982\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-673/2/e12\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"b0f2018c1ad9be56ae4607ca597b452be79d4a66\",\"head\":\"445196f0ddaf492ffe0c23e996bcaf24b26511dd\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"b1475739203dd3aa8b43b6bf9c4be2bec7a8bdf6\",\"head\":\"228ff3fb65199ca43f0414d47cd39a80a386646b\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"b1b3ae5c24dcd6766aa607974e9c05c63fc34e6d\",\"head\":\"805f28090c5073e83dbbcdc628026b34075f5577\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"b376808542584484f3ba60a81af2f7f23668fc7d\",\"head\":\"8f6b76dfbdd957b3bea088c5b9ad74de889ac7a0\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-704/1/e2\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"b3dba6d5a424cead7170aa0f90ea510fad99af23\",\"head\":\"129006e1831fca52338a29913258fd9fb8dfd5f1\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-351/1/e13\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"b48404c50b1d6f370659b62df8e712ae3dd67576\",\"head\":\"332874917379aaacd5b513547fda98feca888423\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"b4cb40df57ffd9c3bdfcb04b78197ebad406b717\",\"head\":\"5fc3f630767ee3fae5a92a4b355f6771b4f463ec\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"b4e68356e8d0fcf7d6251f9ee31bf1a58f1eea3d\",\"head\":\"5155a1beadb3d0482c1082b8efdc756d29b00ed5\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"b5e0b3df69914aa213f87bcaf7fa2215e45500a8\",\"head\":\"763d8b969c31fa46e19b48605eb7b6bd4255b1a2\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-372/1/e12\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"b6c2da9496154412f4a801f09f005bd4fc39caa4\",\"head\":\"e4a8cf5e1078ce2dff796ae5c2fede00e985a519\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"b7d7b33de216e174086aa60344e168fe4b6fba9d\",\"head\":\"bb1d5799a408f40d6c9ec9f4eee6f82476da936d\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-465/1/e2\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"b85b2c5eec0708fee06dd46c0c2342c8e7f1c582\",\"head\":\"d74afb3627dfc832abf7143379d5a96911f8c7f4\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-563/1/e7\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"b9cc6647ed33d8597ac38740e5baf87532dbd762\",\"head\":\"56ee4e8c3cf59d687bb8ef542bf649587e76334d\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"b9cc6647ed33d8597ac38740e5baf87532dbd762\",\"head\":\"f5cabc49034ecf0657ac2352c89d0c95128abafa\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"ba30779d0e12ebf28567d92008f2665d036d3a1d\",\"head\":\"1282bf80bcfcf4266dd6abd22845823b8f2a5928\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-454/1/e13\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"ba5e864998a5272f4cf198f7f7023d81af880013\",\"head\":\"54838cc383a1fa947b776bae7358bf701ca21b2c\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"bb1621775c2d415f661ee3467a04a0657ad1b93f\",\"head\":\"42c4df2f56e21c8f517164c60a1178ff7dd6be7b\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"bf51d06ff4f94fd6a57b377965f93cc9ad90bb52\",\"head\":\"c00bb9f2470f36b0f3bc316485b78a92e47d8b6b\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-187/1/e11\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"bf51d06ff4f94fd6a57b377965f93cc9ad90bb52\",\"head\":\"c00bb9f2470f36b0f3bc316485b78a92e47d8b6b\"},\"gate\":{\"name\":\"test\",\"command\":\"bun run test:gate:linux\",\"timeoutMinutes\":30,\"testReport\":\"junit\",\"environment\":\"container\"},\"round\":1,\"maxRounds\":2,\"firstFailure\":{\"executionId\":\"Y-187/1/e10\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/switchyard/.yard/local/evidence/Y-187/1/e10/gate.log\",\"logTruncated\":false},\"confirmedFailure\":{\"executionId\":\"Y-187/1/e11\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/switchyard/.yard/local/evidence/Y-187/1/e11/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"c0b5466b4f26df405377106e6443ea14313b25ca\",\"head\":\"af95e48456a9b67b55d76e496a1f920660136d10\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"c55b1c394a405323f67055417d1cb42b97fa8270\",\"head\":\"9555a3378d2b5cddd5c778d28d2df0de3a46b651\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"c5e5ba571e36edaa6118fc3b4cd9910fd734b952\",\"head\":\"a8f5a563fac86bf5cc4b088c5ad8b9669d9d50c9\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"c5e5ba571e36edaa6118fc3b4cd9910fd734b952\",\"head\":\"e845347f39b4d49f376dd2f45fc0abb66f3f0a05\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"c62ef950e988947fa99063376df7f9714afb77f8\",\"head\":\"e4b32bd6f31ea354c2fdc5cb777945fbe3f3afba\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"c656d75a8bfd524e9d26703e9e97dda328b4708a\",\"head\":\"eb771fef94a50d94b48662fcddf6d8b5011f10af\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"c836f73fb6c6b2b323aa36eee97df1791d46d967\",\"head\":\"8533dbac97e12a63cedf970b313f97f2769d6301\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"ca4c37dff86e520bfb35762ec55d9f31e581991f\",\"head\":\"9d984f7ae3ebc10683ceaf4ec3576d6733279eec\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-557/1/e11\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"cdc30b5c07bec8ed75e67776d58c42bc243ac080\",\"head\":\"f95bb8d9967f56cdaf0efcb4e253134efb40d91b\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-474/1/e5\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"cdc30b5c07bec8ed75e67776d58c42bc243ac080\",\"head\":\"f95bb8d9967f56cdaf0efcb4e253134efb40d91b\"},\"gate\":{\"name\":\"test\",\"command\":\"bun run test:merge-gate\",\"timeoutMinutes\":10,\"testReport\":\"junit\",\"environment\":\"container\"},\"round\":1,\"maxRounds\":2,\"firstFailure\":{\"executionId\":\"Y-474/1/e4\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/home/yard/code/switchyard/.yard/local/evidence/Y-474/1/e4/gate.log\",\"logTruncated\":false},\"confirmedFailure\":{\"executionId\":\"Y-474/1/e5\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/home/yard/code/switchyard/.yard/local/evidence/Y-474/1/e5/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"cdfc77edbe66b6faade86fb811340736c69d66eb\",\"head\":\"9bdc7fa599235659637ff652e3cf95d5324f3030\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-173/1/e5\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"cdfc77edbe66b6faade86fb811340736c69d66eb\",\"head\":\"9bdc7fa599235659637ff652e3cf95d5324f3030\"},\"gate\":{\"name\":\"test\",\"command\":\"bun run test:full\",\"timeoutMinutes\":30,\"environment\":\"container\"},\"round\":1,\"maxRounds\":2,\"firstFailure\":{\"executionId\":\"Y-173/1/e4\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/switchyard/.yard/local/evidence/Y-173/1/e4/gate.log\",\"logTruncated\":false},\"confirmedFailure\":{\"executionId\":\"Y-173/1/e5\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/switchyard/.yard/local/evidence/Y-173/1/e5/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"ce8d4df20de066b801ef886b0fbec81a11df8022\",\"head\":\"832eb0d53baed0c4682de49cc083e777d55a536d\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-746/1/e6\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"d11da39577f1a4ef5499fa9222e0b4f669d87c94\",\"head\":\"1e088ece1654ac98548496b7070f5aa350bcb4ba\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"d191ff09ab6008912e98876a02eadbfdcd84c24a\",\"head\":\"abcec5aebac90932381377bc1d24b329814ee712\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-611/1/e6\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"d26fcc1fd643b5d2089ba25fc179cda2102f1a00\",\"head\":\"e31de74773bbfb66431d0343493e49719206edc4\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"d274ead9a09703f5e01b125f53ca50de25fc635f\",\"head\":\"bbfa7a0bc633505ed5ce3c7c0ca6e9b161b3b699\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-768/1/e29\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"d274ead9a09703f5e01b125f53ca50de25fc635f\",\"head\":\"b3b5a8a64ed81d3ebcf176346d30d7f593efb308\"},\"gate\":{\"name\":\"test\",\"command\":\"bun run test:merge-gate\",\"timeoutMinutes\":10,\"stage\":\"batch\",\"testReport\":\"junit\",\"environment\":\"container\"},\"confirmedFailure\":{\"executionId\":\"Y-768/1/e26\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/home/yard/code/switchyard/.yard/local/evidence/Y-768/1/e26/3-test/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"d27d4f1af988dbc8327f9cabed5cd050f5409030\",\"head\":\"55bf1b395a52f96ce115b3d9e39e49666252d3bc\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"d411e612cf9c52cb205c24b3fce3c1e8a8ba1d9b\",\"head\":\"7c2795024a620121d3a1f7f87a8160e7debe7234\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"d41391f9820b99df5d6a7adfc780529ff1365903\",\"head\":\"be67dfc22a8eb43c12eee1f9ce23bb392309711f\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"d67c97ff29f5caaebff24ece2435ec7dcbcda3bf\",\"head\":\"7bd30d403be1cbf2eab8d8d60fceee3417de24a2\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-529/1/e11\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"d78ad2a48c8edae060d2031638102e997cd7a24f\",\"head\":\"e9abe45955f057ee080bbbfd71bd21e1738b1e66\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"d8200667a81473040e2f13a3bfab36bef85128f4\",\"head\":\"80522c9e1cf207d4eddf579880899bc7587e260c\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-526/1/e5\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"d8ae33ac9f34204e2772a866869b103a42df25b5\",\"head\":\"966a6eaa3a11ab55464b449ad369cca05737a9af\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"d8b6d1b326659cdaf67007faa2fbce7710a189fd\",\"head\":\"6b0a5a4917de5d03eb335bdbb98e7eb724a4be14\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"d8b6d1b326659cdaf67007faa2fbce7710a189fd\",\"head\":\"894e5fb31e980fc84f948f01db1662183fd14198\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"d90444297ae08c1b615ad2a55ba2bc0ad439bbb4\",\"head\":\"e4b11f94ac604f755e44079fbe356b7591f3d80d\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-362/1/e12\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"dabf3154530bfb8cd674f8429f7510f1f8a6adce\",\"head\":\"249dc8f4cf2efe84a2e3c74349c3a792d5816a48\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"db24c7888491cade31470df646a184a01d476462\",\"head\":\"fa084a518ffdd23c57ba1cf2ab8678c1c5f8ca66\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-652/1/e3\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"db24c7888491cade31470df646a184a01d476462\",\"head\":\"fa084a518ffdd23c57ba1cf2ab8678c1c5f8ca66\"},\"gate\":{\"name\":\"check\",\"command\":\"bun run check\",\"timeoutMinutes\":30,\"environment\":\"container\"},\"round\":1,\"maxRounds\":5,\"firstFailure\":{\"executionId\":\"Y-652/1/e2\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/home/yard/code/switchyard/.yard/local/evidence/Y-652/1/e2/gate.log\",\"logTruncated\":false},\"confirmedFailure\":{\"executionId\":\"Y-652/1/e3\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/home/yard/code/switchyard/.yard/local/evidence/Y-652/1/e3/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"dd6d1047e0414071db6663c59e87d3961297d7dc\",\"head\":\"c534c45732fc2882bd1abde457ac9f0a8bbf5a6f\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-489/1/e2\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"dd9d6a82c6c3f1e744be0eb88547605d89b1a1d2\",\"head\":\"187ad5c418963ae048f2e17d5bbac06bb6c4745f\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-268/1/e10\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"dd9d6a82c6c3f1e744be0eb88547605d89b1a1d2\",\"head\":\"187ad5c418963ae048f2e17d5bbac06bb6c4745f\"},\"gate\":{\"name\":\"test\",\"command\":\"bun run test:merge-gate\",\"timeoutMinutes\":10,\"testReport\":\"junit\",\"environment\":\"container\"},\"round\":1,\"maxRounds\":2,\"firstFailure\":{\"executionId\":\"Y-268/1/e9\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/switchyard/.yard/local/evidence/Y-268/1/e9/gate.log\",\"logTruncated\":false},\"confirmedFailure\":{\"executionId\":\"Y-268/1/e10\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/switchyard/.yard/local/evidence/Y-268/1/e10/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"dfb858e0d16619e9c9524f07f11f2d8c50a300ed\",\"head\":\"0ddda515a5f799730b5c649b88e433bd19dc9718\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"e1b36c542fe42f0c9c6dca1f0cc3f7dcd07ce341\",\"head\":\"e3c131e2c5ec7d15f91fd3772b28a71f1fc9b9fb\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-560/1/e7\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"e1ff27ed96ed3f72e919b9dc521bd2602ec742be\",\"head\":\"fd94235f1239fef7c71f8725e81d8d05abbf3526\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"e37bab379c011086c96de61489422baeb3807653\",\"head\":\"d44ade077583d72b76d10aba6c9cf655357f92f8\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"e56192aec0f7f6bffbae51a546c7871b6a326bfe\",\"head\":\"06a6184b8540ebb95c6f0a459efd780a799e577f\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"e627515dcc5e8e6cb4b740d628c308d716cef214\",\"head\":\"4c7db7f52cc9dd7360921b2197e15f1fdb32d1aa\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-708/1/e3\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"e7494ff57f6ae99ed45666a105b1ba60d7e4a2f2\",\"head\":\"687c1c2cc9ad094df76cc6029d62b6864da31f4e\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"e77d5cca2a6cd30a4b7550079b30da4857b3a338\",\"head\":\"9a8c40fa0b95fb60049258c70bc0d2174db346ab\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"e77d5cca2a6cd30a4b7550079b30da4857b3a338\",\"head\":\"c266dc2f44114f134c88d30bb4bb56cd48fbe4b2\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"e7c7e558ef219d6e951267490d8ee09a89723e35\",\"head\":\"37a22380c38c35bb6d9d288adf0fab79b6d27a03\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-374/1/e5\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"ea1bf8a34bfc31527d63f0f47896464cf458df37\",\"head\":\"5461d923c76583cde07c6108e3ccbfee8e5bbdc7\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"ea510eb172179efdd73969f3c37eb3721b1ac5a1\",\"head\":\"c9bf65200f22d6c814308981042d711a0d96252a\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"edcbd406befe0f7b7c52bb813faaf0442e915a5a\",\"head\":\"475731804f19f96aba87adf49e0d96f2f65b3811\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"f074479fcf3641d8a9955c00cc2906633a0d19ce\",\"head\":\"2bb4c6c0373e6608def7caf6a030390fe1c0c708\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"f43a9ba3e929efd7484715b92e4a7edeb73e2712\",\"head\":\"7e32499c02408e05320b4537a44aaffaf0b23f51\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"f4688a6be67103203e150890acd15ce5b2495ce4\",\"head\":\"e9dc9308f5dc3dd6955eced8afdec4393e82a2c4\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-679/1/e3\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"f4688a6be67103203e150890acd15ce5b2495ce4\",\"head\":\"e9dc9308f5dc3dd6955eced8afdec4393e82a2c4\"},\"gate\":{\"name\":\"check\",\"command\":\"bun run check\",\"timeoutMinutes\":30,\"environment\":\"container\"},\"round\":1,\"maxRounds\":5,\"firstFailure\":{\"executionId\":\"Y-679/1/e2\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/home/yard/code/switchyard/.yard/local/evidence/Y-679/1/e2/gate.log\",\"logTruncated\":false},\"confirmedFailure\":{\"executionId\":\"Y-679/1/e3\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/home/yard/code/switchyard/.yard/local/evidence/Y-679/1/e3/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"f6969beaecf0bf17e852574e99ba60d3e1b1ae71\",\"head\":\"1ee5febf24afe4e12f3fbad3b10d806a9cbb224e\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-504/1/e3\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"f773760e52eec33c7a9cbba306d350e91ac0396e\",\"head\":\"2702203c50145f12c9d5f850dc886fbf172c90cf\"},\"automaticGateRepair\":{\"triggerExecutionId\":\"Y-180/1/e5\"},\"gateRepairOrigin\":{\"failedCandidate\":{\"base\":\"f773760e52eec33c7a9cbba306d350e91ac0396e\",\"head\":\"2702203c50145f12c9d5f850dc886fbf172c90cf\"},\"gate\":{\"name\":\"test\",\"command\":\"bun run test:full\",\"timeoutMinutes\":30,\"environment\":\"container\"},\"round\":1,\"maxRounds\":2,\"firstFailure\":{\"executionId\":\"Y-180/1/e4\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/switchyard/.yard/local/evidence/Y-180/1/e4/gate.log\",\"logTruncated\":false},\"confirmedFailure\":{\"executionId\":\"Y-180/1/e5\",\"exitCode\":1,\"timedOut\":false,\"logPath\":\"/Users/adam/Code/switchyard/.yard/local/evidence/Y-180/1/e5/gate.log\",\"logTruncated\":false}}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"f7aa24c5216ab52daad0555d33cbb439038bc6c1\",\"head\":\"7933f5406d602d7ad5b7d704e2ceff7fe46ea9c7\"},\"reviewRepair\":{\"triggerExecutionId\":\"Y-612/1/e3\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"f858b75864245390598eff48ac031e0548709212\",\"head\":\"fb6c23a4424a4ed236bf12dc8850239701d8a7cc\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"f8b3385ea5c5923a6ed29e11e7364903269dff08\",\"head\":\"d9948eabc2dcac5ee1d641cadeaa944a5c120056\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"f9a4b76f3b4f5b171836af9a791e920ed9bc5d29\",\"head\":\"d19793e44601c549604d58a0b61b0bf323f6d11d\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"fa38742d00cf65602cce375cd49821fd4d5b1fec\",\"head\":\"ea1f41782d891f9411521dae4cab3bce599acea7\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"fb0b06127f4e3d39dda9f092267ce44c27b22e79\",\"head\":\"9c5d8638a3fe33f42185aef655477aa83e802449\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"fdc1b1e294c18f85bc99d1292ef16c14b7f3072e\",\"head\":\"fe2b80cd92570f85b2b57da7a04b3ea5652847d7\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"ffc00806b88761de426c95799e747ebf61c84220\",\"head\":\"5ba17e730f9e76bd94a087230ae75b6b460ea623\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"candidate-repair\",\"candidate\":{\"base\":\"ffc00806b88761de426c95799e747ebf61c84220\",\"head\":\"f21d8f0192372c8bb0dbf9c5670a819f4e1ef351\"}}",
+        "n": 1
+      },
+      {
+        "start_disposition": "{\"kind\":\"continuation\"}",
+        "n": 60
+      },
+      {
+        "start_disposition": "{\"kind\":\"fresh\"}",
+        "n": 10
+      }
+    ],
+    "cancellationCauses": []
+  },
+  "checks": [
+    {
+      "kind": "gate",
+      "verdict": "error",
+      "n": 10
+    },
+    {
+      "kind": "gate",
+      "verdict": "fail",
+      "n": 218
+    },
+    {
+      "kind": "gate",
+      "verdict": "pass",
+      "n": 2331
+    },
+    {
+      "kind": "review",
+      "verdict": "error",
+      "n": 19
+    },
+    {
+      "kind": "review",
+      "verdict": "fail",
+      "n": 249
+    },
+    {
+      "kind": "review",
+      "verdict": "pass",
+      "n": 1109
+    }
+  ],
+  "approvals": [
+    {
+      "decision": "approve",
+      "actor": "orchestrator",
+      "n": 740
+    },
+    {
+      "decision": "approve",
+      "actor": "policy",
+      "n": 46
+    },
+    {
+      "decision": "reject",
+      "actor": "orchestrator",
+      "n": 144
+    }
+  ],
+  "merges": [
+    {
+      "outcome": "landed",
+      "n": 709
+    },
+    {
+      "outcome": "not-landed",
+      "n": 71
+    },
+    {
+      "outcome": "unverified",
+      "n": 1
+    }
+  ],
+  "attention": [
+    {
+      "kind": "approval-needed",
+      "n": 950
+    },
+    {
+      "kind": "proposal",
+      "n": 270
+    },
+    {
+      "kind": "target-moved",
+      "n": 129
+    },
+    {
+      "kind": "worker-failed",
+      "n": 53
+    },
+    {
+      "kind": "gate-failed",
+      "n": 41
+    },
+    {
+      "kind": "review-blocked",
+      "n": 22
+    },
+    {
+      "kind": "review-failed",
+      "n": 19
+    },
+    {
+      "kind": "worker-stopped-unchanged",
+      "n": 15
+    },
+    {
+      "kind": "cleanup-failed",
+      "n": 12
+    },
+    {
+      "kind": "retarget-blocked",
+      "n": 9
+    },
+    {
+      "kind": "candidate-config",
+      "n": 7
+    },
+    {
+      "kind": "worker-stopped-dirty",
+      "n": 6
+    },
+    {
+      "kind": "review-residual",
+      "n": 6
+    },
+    {
+      "kind": "execution-interrupted",
+      "n": 5
+    },
+    {
+      "kind": "retarget-conflict",
+      "n": 4
+    },
+    {
+      "kind": "cancel-unverified",
+      "n": 3
+    },
+    {
+      "kind": "worker-cli-incompatible",
+      "n": 2
+    },
+    {
+      "kind": "ticket-edit-proposed",
+      "n": 2
+    },
+    {
+      "kind": "startup-reconciliation-failed",
+      "n": 1
+    },
+    {
+      "kind": "retarget-unverified",
+      "n": 1
+    },
+    {
+      "kind": "retarget-failed",
+      "n": 1
+    },
+    {
+      "kind": "orphan-container",
+      "n": 1
+    },
+    {
+      "kind": "merge-unverified",
+      "n": 1
+    },
+    {
+      "kind": "compaction-unquiesced",
+      "n": 1
+    }
+  ],
+  "attentionOpen": [],
+  "audit": {
+    "rows": [
+      {
+        "n": 485055
+      }
+    ],
+    "byAction": [
+      {
+        "action": "execution.handle-recorded",
+        "n": 439064,
+        "detailBytes": 36185237
+      },
+      {
+        "action": "execution.started",
+        "n": 7514,
+        "detailBytes": 9659257
+      },
+      {
+        "action": "execution.finished",
+        "n": 7303,
+        "detailBytes": 577446
+      },
+      {
+        "action": "lane.progress",
+        "n": 5368,
+        "detailBytes": 2106783
+      },
+      {
+        "action": "check.recorded",
+        "n": 3936,
+        "detailBytes": 936706
+      },
+      {
+        "action": "execution.usage-recorded",
+        "n": 2221,
+        "detailBytes": 437133
+      },
+      {
+        "action": "capability.revoke",
+        "n": 1460,
+        "detailBytes": 77426
+      },
+      {
+        "action": "capability.issue",
+        "n": 1460,
+        "detailBytes": 170533
+      },
+      {
+        "action": "attention.resolved",
+        "n": 1291,
+        "detailBytes": 29704
+      },
+      {
+        "action": "attention.raised",
+        "n": 1291,
+        "detailBytes": 1223781
+      },
+      {
+        "action": "lane.head-recorded",
+        "n": 1266,
+        "detailBytes": 64566
+      },
+      {
+        "action": "execution.generation-requested",
+        "n": 1106,
+        "detailBytes": 8269966
+      },
+      {
+        "action": "lane.approved",
+        "n": 786,
+        "detailBytes": 324078
+      },
+      {
+        "action": "lane.started",
+        "n": 783,
+        "detailBytes": 56698
+      },
+      {
+        "action": "lane.prepared",
+        "n": 783,
+        "detailBytes": 190995
+      },
+      {
+        "action": "lane.cleaned",
+        "n": 783,
+        "detailBytes": 124417
+      },
+      {
+        "action": "lane.base-recorded",
+        "n": 783,
+        "detailBytes": 51678
+      },
+      {
+        "action": "merge.recorded",
+        "n": 781,
+        "detailBytes": 198287
+      },
+      {
+        "action": "ticket.created",
+        "n": 770,
+        "detailBytes": 1924491
+      },
+      {
+        "action": "ticket.completed",
+        "n": 770,
+        "detailBytes": 59150
+      },
+      {
+        "action": "lane.done",
+        "n": 731,
+        "detailBytes": 56360
+      },
+      {
+        "action": "execution.round-started",
+        "n": 602,
+        "detailBytes": 39589
+      },
+      {
+        "action": "ticket.edited",
+        "n": 545,
+        "detailBytes": 1113775
+      },
+      {
+        "action": "execution.compaction-skipped",
+        "n": 494,
+        "detailBytes": 71127
+      },
+      {
+        "action": "execution.cancelled",
+        "n": 467,
+        "detailBytes": 96769
+      },
+      {
+        "action": "lane.retargeted",
+        "n": 417,
+        "detailBytes": 187116
+      },
+      {
+        "action": "capability.refuse",
+        "n": 337,
+        "detailBytes": 20838
+      },
+      {
+        "action": "ticket.linked",
+        "n": 313,
+        "detailBytes": 15235
+      },
+      {
+        "action": "proposal.file",
+        "n": 270,
+        "detailBytes": 529387
+      },
+      {
+        "action": "execution.cancel-requested",
+        "n": 228,
+        "detailBytes": 32621
+      },
+      {
+        "action": "proposal.accept",
+        "n": 165,
+        "detailBytes": 7502
+      },
+      {
+        "action": "project.canonical-synced",
+        "n": 150,
+        "detailBytes": 35063
+      },
+      {
+        "action": "lane.rejected",
+        "n": 144,
+        "detailBytes": 161528
+      },
+      {
+        "action": "admission.resumed",
+        "n": 109,
+        "detailBytes": 2834
+      },
+      {
+        "action": "admission.paused",
+        "n": 109,
+        "detailBytes": 2725
+      },
+      {
+        "action": "proposal.reject",
+        "n": 105,
+        "detailBytes": 35351
+      },
+      {
+        "action": "execution.compaction-started",
+        "n": 93,
+        "detailBytes": 10886
+      },
+      {
+        "action": "execution.compaction-completed",
+        "n": 88,
+        "detailBytes": 10296
+      },
+      {
+        "action": "lane.abandoned",
+        "n": 52,
+        "detailBytes": 6594
+      },
+      {
+        "action": "execution.nudge-queued",
+        "n": 44,
+        "detailBytes": 64766
+      },
+      {
+        "action": "plan.publish",
+        "n": 23,
+        "detailBytes": 2105
+      },
+      {
+        "action": "lane.approval-superseded",
+        "n": 19,
+        "detailBytes": 10988
+      },
+      {
+        "action": "ticket.unlinked",
+        "n": 17,
+        "detailBytes": 835
+      },
+      {
+        "action": "lane.residual-accepted",
+        "n": 6,
+        "detailBytes": 11348
+      },
+      {
+        "action": "execution.compaction-failed",
+        "n": 5,
+        "detailBytes": 1460
+      },
+      {
+        "action": "project.relocated",
+        "n": 2,
+        "detailBytes": 314
+      },
+      {
+        "action": "project.initialized",
+        "n": 1,
+        "detailBytes": 30
+      }
+    ],
+    "byActor": [
+      {
+        "actor": "daemon",
+        "n": 477666
+      },
+      {
+        "actor": "orchestrator",
+        "n": 5173
+      },
+      {
+        "actor": "worker",
+        "n": 2216
+      }
+    ]
+  },
+  "operatorVerbs": [
+    {
+      "action": "ticket.edited",
+      "n": 545
+    },
+    {
+      "action": "ticket.linked",
+      "n": 313
+    },
+    {
+      "action": "proposal.file",
+      "n": 270
+    },
+    {
+      "action": "proposal.accept",
+      "n": 165
+    },
+    {
+      "action": "project.canonical-synced",
+      "n": 150
+    },
+    {
+      "action": "lane.rejected",
+      "n": 144
+    },
+    {
+      "action": "admission.resumed",
+      "n": 109
+    },
+    {
+      "action": "admission.paused",
+      "n": 109
+    },
+    {
+      "action": "proposal.reject",
+      "n": 105
+    },
+    {
+      "action": "lane.abandoned",
+      "n": 52
+    },
+    {
+      "action": "execution.nudge-queued",
+      "n": 44
+    },
+    {
+      "action": "plan.publish",
+      "n": 23
+    },
+    {
+      "action": "lane.approval-superseded",
+      "n": 19
+    },
+    {
+      "action": "ticket.unlinked",
+      "n": 17
+    },
+    {
+      "action": "lane.residual-accepted",
+      "n": 6
+    },
+    {
+      "action": "project.relocated",
+      "n": 2
+    }
+  ]
+}
