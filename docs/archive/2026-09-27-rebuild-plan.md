@@ -98,10 +98,12 @@ lessons a guarantee test should reproduce:
 |---|---|
 | `src/process/spawn-gate.ts`, `birth.ts`, `kill.ts` | intent before spawn, birth identity against pid reuse, verified process-group reap |
 | `src/pinfold.ts` | the box spec Yard sends, the JSON lines it validates, exit 3 for an absent box |
-| `src/provider/{pi,claude,codex}.ts`, `pi-mcp-extension.ts` | launch argv, the frames each harness emits, registration proof, session-id capture; the Pi extension is embedded verbatim |
-| `src/provider/connection-credentials.ts`, `connections.ts` | where each login's token and extra headers come from, and the lapse refusal |
+| `src/provider/pi.ts`, `pi-mcp-extension.ts` | Pi's launch argv, frames, registration proof, session-id capture; the extension is embedded verbatim |
+| `src/provider/{claude,codex}.ts` | for the adapters after v1: Claude's `system/init` frame lists the server and its tools; Codex marks the server `required`, so `thread.started` is the proof and the refusal on stderr the other answer; Codex needs `-s danger-full-access` and exits 0 on panic |
+| `src/provider/connection-credentials.ts`, `connections.ts` | where each login's token and extra headers come from; input to pinfold #62, not to Yard |
+| `src/process/host-gate.ts`, `spawn-gate.ts`, `birth.ts`, `kill.ts` | the host gate's environment, and the verified process-group reap a restart needs |
 | `src/daemon/reconcile.ts` | what a restart must prove and what it must leave alone |
-| `src/git.ts` `HARDENING`, `updateCanonicalTargetWithLease`, the containment proof | the git contract behind G4 and G9 |
+| `src/git.ts` `HARDENING`, `updateCanonicalTargetWithLease`, the containment proof | the git contract behind G3 and G14 |
 | `src/daemon/mcp.ts` | the four JSON-RPC methods and the per-execution bearer |
 | `DESIGN.md` §The loop | the reasoning behind nudge delivery, the dirty-clone rule, the queue's bisect and retirement |
 | `docs/history/` | every failure the old tests encoded |
@@ -117,30 +119,30 @@ route that real harnesses talk to.
 2. **Inventory and harness.** `crates/e2e`: the harness (a temp machine:
    `XDG_*` dirs, `operator.env`, a registered project with a Containerfile,
    real pinfold), the fake-model fixture, and the scenario inventory: every
-   guarantee row as named tests, `#[ignore]`d until their slice exists. CI
-   runs the crate on Linux. The fake model is the largest piece: it speaks
-   Anthropic Messages for Claude, OpenAI Responses for Codex and chat
-   completions for Pi, each streamed, scripted per scenario. Pinfold's own
-   suite proves only Pi against a fake model, so a spike runs Claude and
-   Codex against it before their adapters are planned. Orchestrator work.
-3. **The thin path, one harness.** The first executable milestone is
-   guarantee 10 plus the landing-crash row of 4: register a project, file a
-   ticket, a real Pi worker commits against the fake model, a gate runs,
-   approve, land, kill the daemon after `update-ref` and recover, clean.
-   That path settles the store, process, git, box, identity and recovery
-   boundaries together, and measures the budget. Orchestrator work, with
-   subagents.
+   guarantee's scenarios as named tests, `#[ignore]`d until their slice
+   exists. The fake model speaks the one wire protocol Pi uses for the test
+   connection, streamed and scripted per scenario; pinfold's own suite
+   already runs Pi against such a fixture. Orchestrator work.
+3. **The thin path.** The first executable milestone is G7 plus G3's
+   landing-crash scenario: register a project, file a ticket, a real Pi
+   worker commits against the fake model, a gate runs, approve, land, kill
+   the daemon after `update-ref` and recover, clean. That path settles the
+   store, process, git, box, identity and recovery boundaries together, and
+   measures the budget. Orchestrator work, with subagents.
 4. **Green, outward from the path, one guarantee per ticket where
-   possible:** the other harnesses (20), review and panels (15, 16, 21),
-   the queue (1, 2, 3, 17, 18, 19), executions and reconcile (6, 23, 12,
-   13, 14), planning and proposals (26, 27), sync and git (25, 9), machine
-   and CLI (28, 29, 30), cleanup and audit (24, 7), the bounds (11). Once
-   the path is green the project gets its own `.yard` and the old Yard on
-   yard-sthlm runs these as lanes, gated by fmt, clippy and build. The e2e
-   suite is not a lane gate, because a gate box has no container runtime:
-   it runs on GitHub after the operator pushes, and a red suite is the next
-   ticket.
-5. **Cutover, per machine.** Pause admission and drain the board. Run the
+   possible:** identity (2), capacity (4), restart (5), inputs (6), review
+   (8), the implementer's next start (9), the queue (1, 10), sync (11),
+   boxes and gates (12, 13), worker git (14), plans and proposals (15), and
+   the rest of G3 and G7. Once the path is green the project gets its own
+   `.yard` and the old Yard on yard-sthlm runs these as lanes: `cargo fmt`,
+   `clippy` and `cargo build` as boxed candidate gates, and the e2e suite as
+   a landing-stage host gate, which the old Yard also supports.
+5. **Claude and Codex, before the cutover.** Each harness returns as its own
+   adapter once pinfold's login routes (#62) carry subscription logins; the
+   second adapter brings the adapter interface and a second protocol in the
+   fake model. The machines' live agents run through these two harnesses,
+   so the cutover waits for them.
+6. **Cutover, per machine.** Pause admission and drain the board. Run the
    old `yard sync` so the checkout holds canonical's target head, and
    compare the two heads by hand. Stop the old daemon and move `.yard/local`
    to an archive directory outside every project and build context. Start
@@ -148,7 +150,7 @@ route that real harnesses talk to.
    and verify the new canonical's target equals the archived one's. Keep the
    archived state, the old runtime, its config and its service unit until
    rollback is no longer wanted; rollback is moving the directory back. Rename the repositories.
-6. **Release.** `cargo build --release` per target, ad-hoc `codesign` on
+7. **Release.** `cargo build --release` per target, ad-hoc `codesign` on
    the Mac as today, one workflow that tests, builds and publishes.
 
 ## The 2026-09-27 design review
@@ -213,41 +215,44 @@ attention kinds; nine tables; 30 guarantees still but eight of them smaller.
 A second read asked whether the plan was ready to build. Taken, with the
 operator's decisions:
 
-- **Invariants are the guarantees.** The separate I-1 to I-9 list was never
-  written down; the guarantees table is the one list, cited as G1 to G30.
+- **The guarantees are the invariants, fifteen of them.** The separate
+  I-1 to I-9 list was never written down. The thirty rows were one
+  mechanism split across several rows in many places; they merged into
+  fifteen with every scenario kept, cited as G1 to G15, and the
+  `--version` row went.
 - **`start` answers every `red`.** On a landing that could not run it
   re-queues under the existing approval; on an undecided landing intent it
   reads canonical against the restart table again.
 - **Per-project status.** Each project has its own store and audit
   sequence. The daemon owns a registry of project paths; the CLI resolves
   its project from the working directory or `--project`.
-- **No test waits out a timeout.** Guarantee 11 keeps only the review-round
-  limit; the clocks are configuration and untested.
+- **No test waits out a timeout.** The clocks are configuration and
+  untested; the review-round limit stays a guarantee.
 - **Manual close.** `yard ticket done` with a reason, refused while an
   attempt or landing intent is live; it is how a planning parent ends.
 - **A daemon installer.** `yard daemon install` writes a systemd user unit
   or a launchd agent and enables lingering on Linux.
-- **Logins.** Pinfold injects; Yard sources the value. A key comes from
-  `operator.env`; a subscription login is read from the machine's
-  credential file at box start, never refreshed, refused if it would lapse
-  within the total-work clock. Carried from the old design of 2026-09-26.
-- **The suite runs after the push.** Yard lands into its own canonical, so
-  GitHub's merge queue never sees a Yard landing; this repository's lanes
-  are proved by fmt, clippy and build, and a red suite on `main` is the
-  next ticket.
-- Guarantee 13's resume arithmetic and guarantee 9's observation were
-  corrected; the dependency list gained the hyper glue crates and
-  `getrandom`.
-
-Decided after that by the operator:
-
 - **Gates reach the project's allowlist.** No model route, no MCP route, no
   credential. The image builds only from canonical's target head, so no
-  worker-edited file ever drives a build that runs outside pinfold's
-  sandbox; a dependency a candidate adds is fetched by the gate.
+  worker-edited file drives a build outside pinfold's sandbox; a dependency
+  a candidate adds is fetched by the gate.
+- **Each gate chooses box or host.** `environment = "host"` runs a gate on
+  the host, at landing only, on a merged ref whose candidate was approved,
+  so no unreviewed code runs on the host. This replaces any post-push
+  suite: Yard's gates decide what lands. Here the e2e suite is that host
+  gate; GitHub runs it only when releasing.
 - **A lane is a slot, an attempt runs through it.** `max_lanes` keeps its
-  name; the CLI noun becomes `attempt` and the worker tools become
-  `yard_context`, `yard_progress`, `yard_propose`, `yard_publish_review`.
+  name; the CLI noun is `attempt` and the worker tools are `yard_context`,
+  `yard_progress`, `yard_propose`, `yard_publish_review`.
+- **Pi only in v1.** One adapter and one protocol in the fake model; Claude
+  and Codex return before the cutover as step 5 of the order of work.
+- **Logins are pinfold's.** Knowing where a harness keeps its login, which
+  headers carry it and how the harness is pointed at a route belongs with
+  the harness pins, so it was filed as pinfold #62. Yard keeps API keys
+  from `operator.env` only.
+- Two guarantee scenarios were corrected: the session cap's resume
+  arithmetic and the observation for staying local. The dependency list
+  gained the hyper glue crates and `getrandom`.
 
 ## Effort
 

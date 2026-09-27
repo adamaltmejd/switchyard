@@ -21,7 +21,7 @@ without a guarantee in ARCHITECTURE.md that needs it.
   compatibility paths, or speedups that haven't been measured to matter.
   Delete rather than keep.
 - The controls in ARCHITECTURE.md (the threat model, the guarantees G1 to
-  G30, the box table, the worker-tool grants) are exact. Weakening one is a
+  G15, the box table, the worker-tool grants) are exact. Weakening one is a
   spec change, never an implementation detail.
 - Jobs, not states. Every long-running thing is an execution on the one
   state machine. No feature gets its own lifecycle, owner, lease, receipt or
@@ -87,18 +87,19 @@ without a guarantee in ARCHITECTURE.md that needs it.
      the test's comment.
 - **Deterministic.** No sleeps: wait on `status --watch --since`. No
   retries: a flaky test is a bug to fix or delete. No test waits out a
-  timeout or a clock; timeouts are configuration, not guarantees. The workers are the real
-  harnesses in real boxes against a scripted fake model on the host, reached
-  through a pinfold route; the script decides what the "model" commits,
+  timeout or a clock; timeouts are configuration, not guarantees. The
+  workers are real Pi in real boxes against a scripted fake model on the
+  host, reached through a pinfold route; the script decides what the "model" commits,
   proposes, publishes or refuses. No public endpoint is called.
 - **Crashes are deterministic.** A crash test kills the daemon at a point
   the outside can prove it reached: a row the store shows, a box pinfold
   lists, a ref canonical holds. Where no such point exists the scenario is
   not written; the binary grows no barrier for it.
-- **Where it runs.** On a host with the container runtime: GitHub's ubuntu
-  runners and the operator's Mac. Never inside a Yard gate box. This
-  repository's own Yard gates are `cargo fmt`, `clippy` and `cargo build`.
-- **Budget:** about 5 minutes on GitHub's Linux runner with a warm image
+- **Where it runs.** On a host with the container runtime, never inside a
+  box. It is this repository's landing-stage host gate, on yard-sthlm and
+  the operator's Mac, after the boxed candidate gates `cargo fmt`, `clippy`
+  and `cargo build`. GitHub runs it only in the release workflow.
+- **Budget:** about 5 minutes per landing on yard-sthlm with a warm image
   cache, measured on the first vertical slice and revised in a dated archive
   file; a scenario is never deleted to meet it.
 
