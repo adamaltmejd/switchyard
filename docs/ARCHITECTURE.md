@@ -8,7 +8,7 @@ approved work through one verified merge queue.
 
 - **Operator:** a person, or an agent driving `yard` on their behalf. The
   operator is trusted and holds the whole host API.
-- **Worker:** an agent in a pinfold box. It holds a lane-scoped MCP surface
+- **Worker:** an agent in a pinfold box. It holds an execution-scoped MCP surface
   and nothing else.
 
 This is the current spec. Evidence and rationale are in `docs/archive/`.
@@ -24,7 +24,11 @@ _Avoid_: issue, task, story
 **Attempt**: one try at a ticket: a clone of canonical on its own branch, a
 candidate, and the executions that produced and judged it. A ticket has at
 most one live attempt and any number of ended ones.
-_Avoid_: lane (the old name), worktree
+_Avoid_: worktree
+
+**Lane**: one of the slots attempts run through. `max_lanes` and
+`YARD_MAX_LANES` count them; an attempt holds one from admission until
+approval or abandonment.
 
 **Candidate**: an attempt's exact `base..head` at a moment. Every check,
 approval and landing binds a candidate, never an attempt.
@@ -74,7 +78,7 @@ _Avoid_: alert, notification, blocker
 | git | canonical, clones, candidates, landing; git shelled out under a scrubbed environment | jobs |
 | box | the pinfold process interface; specs, mounts, routes, stat | jobs |
 | harness | per-harness launch argv, frame normalisation, the staged MCP client for pi | jobs |
-| mcp | the lane tool surface workers call | daemon |
+| mcp | the tool surface workers call | daemon |
 | daemon | one process per machine: the unix-socket API, the MCP listener, the scheduler tick | `yard` |
 | cli | argument parsing, one call per command, rendering | the operator |
 
@@ -91,9 +95,9 @@ credentials, or damages the host.
 |---|---|
 | One merge path | Only the daemon's queue moves canonical, and only to a ref its gates passed (G1, G4). |
 | Exact identity | Every check, approval and landing binds a candidate, the ticket revision and the gate and review digests; a changed identity carries nothing (G2, G3). |
-| Lane capability | A worker's MCP bearer is issued per execution, scoped to its kind, revoked when the execution ends. |
+| Worker capability | A worker's MCP bearer is issued per execution, scoped to its kind, revoked when the execution ends. |
 | No credential in a box | Upstream keys and login tokens ride pinfold's injecting routes; a box sees a placeholder. The only secret a box holds is its own execution-scoped MCP bearer, which authenticates calls from inside it and authorises nothing else. |
-| Box is the sandbox | Harnesses run fully permissive; access is what the box mounts writable. A reviewer's clone is read-only. A gate box has no egress. |
+| Box is the sandbox | Harnesses run fully permissive; access is what the box mounts writable. A reviewer's clone is read-only. A gate box reaches only the project's allowlist: no model, no MCP, no credential. |
 | Worker git is untrusted | A worker's clone shares no objects with canonical and its configuration is never read by the daemon: every daemon git call disables hooks, `core.fsmonitor`, signing and every transport but validated local paths. |
 | No checkout writes | Yard never writes the operator's checkout except inside `yard sync` the operator ran. |
 | Fail safe | Unknown liveness or outcome never duplicates work, lands, deletes or kills (G6). |
@@ -126,7 +130,7 @@ cross-reference resolves at load; an unknown name is a load error.
 | `max_lanes` | live attempts at once on this project |
 | `approve` | `manual` (default) or `auto` |
 | `[target]` | `ref`, `protected_paths` |
-| `[isolation]` | `dockerfile`, `egress` (hosts a worker box may reach beyond its model) |
+| `[isolation]` | `dockerfile`, `egress` (hosts implementer and gate boxes may reach beyond their routes, typically package registries) |
 | `[agents.<name>]` | `harness` (`pi`, `claude`, `codex`), `provider`, `model`, `effort`; a key the harness has no control for is a load error |
 | `[workflows.<name>]` | `implementer`, `review` (seat names in panel order, or `none`), `instructions`, `access` (`write` or `read-only`), `max_session_executions`, `inactivity_timeout_minutes`, `total_work_timeout_minutes`; every workflow inherits unset keys from `default` |
 | `[gates.<name>]` | `command`, `timeout_minutes`, `stage` (`landing` default, or `candidate`) |
@@ -199,7 +203,7 @@ whose workflow is read-only after its children exist.
 A replan is a ticket edit, which supersedes every check that read the old
 revision.
 
-**Proposals.** A worker proposes through its lane tool; a proposal is an
+**Proposals.** A worker proposes through `yard_propose`; a proposal is an
 attention item whose acceptance runs an ordinary command against current
 state: create a ticket (possibly parked), edit this ticket, link tickets. A
 proposal to edit the ticket a worker is on pauses that attempt until it is
@@ -218,7 +222,7 @@ ticket too large proposes the split and stops.
    implementer, and records the first execution before anything external
    runs, in one transaction (G5).
 4. **Work.** An execution runs the implementer in a box with the clone
-   mounted as the workflow's `access` says and the lane MCP route. A
+   mounted as the workflow's `access` says and the MCP route. A
    nudge queues one message and delivers it at the next execution boundary;
    it never interrupts. `stop` ends the execution now and keeps the tree.
    The attempt's inactivity and total-work clocks end it the same way. When
@@ -238,7 +242,7 @@ ticket too large proposes the split and stops.
    any review. A failure is believed and buys a repair
    execution; a gate error raises `red`. Every gate runs again at landing.
 6. **Review.** One review round per candidate: one execution per seat,
-   each in its own box with the clone read-only at the head. A seat publishes once through `lane_publish_review`;
+   each in its own box with the clone read-only at the head. A seat publishes once through `yard_publish_review`;
    an execution without a publication is a review error. Findings carry
    priority, file, line, category. The verdict is derived: no finding at or
    above `blocking` is a pass. Blocking findings return to the implementer as
@@ -400,19 +404,20 @@ On restart, an unresolved landing intent is decided by canonical alone:
 ## Boxes
 
 Yard builds the project image with `pinfold image build` before an
-execution, from a build context the daemon materialises from the exact
-commit, and records the image id the box reports. A box spec names mounts,
+execution, from canonical's target head, in a build context the daemon
+materialises from that commit, and records the image id the box reports. A box spec names mounts,
 env, the harness, egress and memory.
 
 | Box | `/workspace` | Harness state | Egress |
 |---|---|---|---|
 | implementer | the attempt's clone, writable, or read-only where the workflow's `access` says so | writable | model route, MCP route, `isolation.egress` |
 | reviewer | the clone, read-only | its own, writable | model route, MCP route |
-| gate | a private disposable checkout of the exact commit, writable | none | none |
+| gate | a private disposable checkout of the exact commit, writable | none | `isolation.egress` only |
 
 A gate's checkout is fresh: it carries none of the implementer's ignored
 files or caches, so a clean `git status` in the clone is not what a gate
-runs against. Dependencies a gate needs offline come from the image.
+runs against. The image carries the target head's dependencies; one a
+candidate adds is fetched by the gate through the allowlist.
 
 Harness state (a session store, `CODEX_HOME`, Pi's settings) is one
 directory per attempt under its files, mounted at one fixed path, written
@@ -447,7 +452,7 @@ where the harness reports one, and otherwise by the first refused call. The outc
 frame, never from its exit status alone. Yard never parses a transcript for
 a verdict.
 
-## Lane tools
+## Worker tools
 
 The MCP listener is HTTP on loopback, reached through a pinfold route,
 authenticated by a per-execution bearer. Four tools, granted by execution
@@ -455,10 +460,10 @@ kind:
 
 | Tool | Kinds |
 |---|---|
-| `lane_context` — ticket, brief, base, head | implementation, review |
-| `lane_progress` — one bounded note | implementation, review |
-| `lane_propose` — a ticket, an edit, a link | implementation |
-| `lane_publish_review` — findings; once | review |
+| `yard_context` — ticket, brief, base, head | implementation, review |
+| `yard_progress` — one bounded note | implementation, review |
+| `yard_propose` — a ticket, an edit, a link | implementation |
+| `yard_publish_review` — findings; once | review |
 
 Every payload is validated at the boundary (G8). A tool call outside the
 grant is refused and recorded.
@@ -494,14 +499,14 @@ yard init | doctor | sync | status [--watch --since SEQ] [--json]
 yard daemon run | install | uninstall | status | restart
 yard project list | forget
 yard ticket new | show | edit | park | unpark | depend | list | done | abandon
-yard lane start | stop | nudge | approve | reject | abandon | show | diff | tail
+yard attempt start | stop | nudge | approve | reject | abandon | show | diff | tail
 yard proposal accept | reject
 yard version
 ```
 
 `status --watch` follows the audit stream from a sequence and prints one
 line per event the operator subscribed to; it is the wake primitive and
-the only history view. `lane tail` prints the live transcript file as the
+the only history view. `attempt tail` prints the live transcript file as the
 harness wrote it. Every
 command runs without a terminal and answers `--json`. `doctor` reports what
 pinfold says of itself, the service, the project image, which connections
@@ -516,11 +521,11 @@ waits one out.
 
 | # | Guarantee | Shown by |
 |---|---|---|
-| 1 | Only the queue lands | A worker with the lane bearer and the clone: `git push` fails, no RPC lands, `update-ref` on canonical from the box fails. Control: the queue lands the same candidate. |
+| 1 | Only the queue lands | A worker with its MCP bearer and the clone: `git push` fails, no RPC lands, `update-ref` on canonical from the box fails. Control: the queue lands the same candidate. |
 | 2 | Checks bind a candidate and a digest | A passed gate and review; then a new commit and a ticket edit each leave the candidate unverified; a synced gate change reruns the gate and keeps the review; a synced seat change reruns the review and keeps the gate. |
 | 3 | Approval binds the exact candidate | Approve with `--head`; a repair commit later; the queue refuses and raises `approval` again. Under `auto`, a protected path still raises it. |
 | 4 | Landing is compare-and-swap and proved | Move canonical by hand between verify and land: the landing retires and re-queues; on green, canonical contains the head and is the verified ref. Kill the daemon after `update-ref` and before the landing is recorded: on restart the landing is recorded once, no merge runs, the ticket closes. A ticket edit racing the landing intent is refused with the intent named. |
-| 5 | Admission is atomic | Two `lane start` races for the last slot: one wins; a ticket never has two live attempts. |
+| 5 | Admission is atomic | Two `attempt start` races for the last slot: one wins; a ticket never has two live attempts. |
 | 6 | Intent precedes effect and unknown fails safe | SIGKILL the daemon after intent, before the box reports: on restart the execution is `interrupted`, no second box, the tree kept. |
 | 7 | Audit and rows are complete | After a full ticket: every decision has one event with its target and text; execution rows carry tokens, cost, model, reason; no `handle` events exist. |
 | 8 | Inputs are validated at the boundary | A malformed tool payload, a TOML with an unknown key, an unknown workflow name: refused by name, nothing written. |
@@ -537,7 +542,7 @@ waits one out.
 | 19 | `.yard` is the operator's | A worker that commits a change under `.yard` gets it back with the reason and no gate runs; the same change through `yard sync` is in force for the next execution. |
 | 20 | Boxes hold nothing secret | The key is absent from the box env and from the clone; the fixture behind the injecting route receives it. |
 | 21 | A reviewer cannot write, and worker git is untrusted | A seat that writes to `/workspace` fails; the candidate head is unchanged. A worker that plants `core.fsmonitor` and a hook in its clone and corrupts an object: the daemon's fetch runs neither, canonical's objects are intact, and the candidate is refused by name. |
-| 22 | Gates have no egress and a fresh tree | A gate that curls the fixture route gets nothing; an ignored file the implementer left in the clone is absent from the gate's checkout; the gate writes `target/` and passes. Control: the worker box reaches the route. |
+| 22 | Gates reach no route and get a fresh tree | A gate that calls the model route or the MCP route gets nothing; an ignored file the implementer left in the clone is absent from the gate's checkout; the gate writes `target/` and passes. Control: the worker box reaches the route. |
 | 23 | Restart loses only the turn | Kill the daemon mid-execution: on restart the box is gone, the execution `interrupted`, the tree kept, the operator's `start` continues. |
 | 24 | Cleanup removes everything and only that | After landing, the attempt directory and its boxes are gone; other attempts' directories and canonical are untouched. |
 | 25 | `sync` refuses divergence | Checkout and canonical each with a commit the other lacks: both directions refuse naming both heads; a fast-forward passes. |

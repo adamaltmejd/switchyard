@@ -21,7 +21,7 @@ without a guarantee in ARCHITECTURE.md that needs it.
   compatibility paths, or speedups that haven't been measured to matter.
   Delete rather than keep.
 - The controls in ARCHITECTURE.md (the threat model, the guarantees G1 to
-  G30, the box table, the lane-tool grants) are exact. Weakening one is a
+  G30, the box table, the worker-tool grants) are exact. Weakening one is a
   spec change, never an implementation detail.
 - Jobs, not states. Every long-running thing is an execution on the one
   state machine. No feature gets its own lifecycle, owner, lease, receipt or
@@ -41,7 +41,7 @@ without a guarantee in ARCHITECTURE.md that needs it.
   CLI, or a consolidation of one module that changes no test assertion and
   names what it removes: a concept, a path, a special case, a duplicate.
   Fewer lines is the usual evidence, not the gate; a consolidation that adds
-  an abstraction and removes nothing is rejected. A proposal born in a lane
+  an abstraction and removes nothing is rejected. A proposal born in an attempt
   is rejected unless it names the guarantee or bug it serves.
 - Before each release, a whole-tree read for yagni, duplication,
   wrong-altitude fixes, unmeasured cost and assertion blocks under the bar,
@@ -59,7 +59,7 @@ without a guarantee in ARCHITECTURE.md that needs it.
   host files, or acts from inside a box through `pinfold box exec`. The e2e
   crate never imports yard's internals; its only seams are a user's: the CLI,
   the socket, `config.toml`, `operator.env`, the git repositories, and the
-  lane tools a worker calls.
+  tools a worker calls.
 - **A fixed list.** Every test names the guarantee in ARCHITECTURE.md it
   establishes (`only_the_queue_lands`, not `test_merge_3`). A guarantee may
   have several independently runnable scenarios, each a different way its

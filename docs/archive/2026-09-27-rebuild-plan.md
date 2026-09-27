@@ -239,9 +239,15 @@ operator's decisions:
   corrected; the dependency list gained the hyper glue crates and
   `getrandom`.
 
-Left open for the operator: whether gate boxes keep no egress, which decides
-where an image's build context comes from; and whether the CLI and tools
-keep the word "lane" for an attempt.
+Decided after that by the operator:
+
+- **Gates reach the project's allowlist.** No model route, no MCP route, no
+  credential. The image builds only from canonical's target head, so no
+  worker-edited file ever drives a build that runs outside pinfold's
+  sandbox; a dependency a candidate adds is fetched by the gate.
+- **A lane is a slot, an attempt runs through it.** `max_lanes` keeps its
+  name; the CLI noun becomes `attempt` and the worker tools become
+  `yard_context`, `yard_progress`, `yard_propose`, `yard_publish_review`.
 
 ## Effort
 
