@@ -20,8 +20,8 @@ without a guarantee in ARCHITECTURE.md that needs it.
 - Build the smallest thing that meets the spec. No speculative abstractions,
   compatibility paths, or speedups that haven't been measured to matter.
   Delete rather than keep.
-- The controls in ARCHITECTURE.md (the threat model, the invariants I-1 to
-  I-9, the box table, the lane-tool grants) are exact. Weakening one is a
+- The controls in ARCHITECTURE.md (the threat model, the guarantees G1 to
+  G30, the box table, the lane-tool grants) are exact. Weakening one is a
   spec change, never an implementation detail.
 - Jobs, not states. Every long-running thing is an execution on the one
   state machine. No feature gets its own lifecycle, owner, lease, receipt or
@@ -86,7 +86,8 @@ without a guarantee in ARCHITECTURE.md that needs it.
   3. Names its sabotage: the change to the binary that makes it fail, in
      the test's comment.
 - **Deterministic.** No sleeps: wait on `status --watch --since`. No
-  retries: a flaky test is a bug to fix or delete. The workers are the real
+  retries: a flaky test is a bug to fix or delete. No test waits out a
+  timeout or a clock; timeouts are configuration, not guarantees. The workers are the real
   harnesses in real boxes against a scripted fake model on the host, reached
   through a pinfold route; the script decides what the "model" commits,
   proposes, publishes or refuses. No public endpoint is called.

@@ -32,13 +32,13 @@ now works and calls pinfold for everything about a box or a harness.
 | Decision | Reason |
 |---|---|
 | No migration, no import. New board, new schema, cutover on an empty board on every machine. | Byte-compatible migration of the live store was the single most expensive item; both boards can be drained. |
-| Pinfold's docs structure and testing rules, verbatim. | One spec, one guarantees table, e2e only, no stubs. |
-| TDD-refactor: guarantees table and red e2e crate first; a ticket turns rows green. | Completion is the table green, nothing else. |
-| Two levels: attempt → execution. "Generation" and "lane" are gone. | One execution is one process in one box; statistics are per execution row. |
+| Pinfold's docs structure and testing rules, adapted in `AGENTS.md`. | One spec, one guarantees table that is also the invariant list, e2e only, no stubs. |
+| TDD-refactor: the guarantees table and the scenario inventory first, ignored until their slice exists; the thin path goes green first; a ticket turns rows green. | Completion is the table green, nothing else. |
+| Two levels: attempt, then execution. "Generation" is gone. | One execution is one unit of external work: a box, or a bounded host effect for landing and cleanup. Statistics are per execution row. |
 | Audit stream holds decisions only; statistics are rows. | Disk, and `status --watch` pages over signal. |
 | Operator behaviour is analysable: every decision names its exact target and keeps its text; tickets keep origin, workflow, plan-first, body size, edit count. | "Are we filing the right tickets?", "why do we nudge?" |
-| No evidence after cleanup: transcripts, logs, bundles and the clone go at land or abandon; rows remain. I-7 now reads "survives the workspace", not "survives the lane". | 1.8 GB vs 198 MB. Git holds what landed. |
-| Compaction is the harness's: Yard stages the native auto-compaction threshold and never compacts. `max_executions` per workflow is the spend backstop (fresh session from a brief past it). | Pi cannot compact out of band; the old between-rounds compaction was deleted for that on 2026-09-25 (Y-744). ~45 attempts per project ran past five executions, tail to 23. |
+| No evidence after cleanup: transcripts, logs, bundles and the clone go at land or abandon; rows remain. | 1.8 GB vs 198 MB. Git holds what landed. |
+| Compaction is the harness's: Yard stages the native auto-compaction threshold and never compacts. `max_session_executions` per workflow starts a fresh session from a brief; the total-work clock is the only spend bound. | Pi cannot compact out of band; the old between-rounds compaction was deleted for that on 2026-09-25 (Y-744). ~45 attempts per project ran past five executions, tail to 23. |
 | Auto-approve stays. | 46 uses here; one config line and an actor value. |
 | One daemon per machine, one scheduler, every registered project. `YARD_MAX_LANES` is a machine setting. | Box slots and memory are machine resources; the operator runs several projects on one Mac. |
 | `preflight` becomes a minimal `doctor`. | Pinfold owns harness versions and the runtime. |
@@ -67,7 +67,7 @@ both live stores on 2026-09-27; the outputs are beside it (770 tickets over
 | candidate-config attention | 7 | 1 | retire |
 | ticket-edit-proposed | 2 | 4 | fold into proposal |
 | project relocate | 2 | 0 | retire |
-| implementer executions past 5 per attempt | 57 | 44 | `max_executions` |
+| implementer executions past 5 per attempt | 57 | 44 | `max_session_executions` |
 
 Also retired, with the reason:
 
@@ -85,9 +85,9 @@ Also retired, with the reason:
   `YARD_BOX_MEMORY` gives it.
 - **`[workspace] build_artifacts`.** Disposal is whole-clone.
 - **The per-project auto-spawned daemon and the registry/single split.**
-- **Twenty-four attention kinds** become five with reason tokens.
+- **Twenty-four attention kinds** become four with reason tokens.
 
-Open, in ARCHITECTURE.md: `replay`, `history`, Yard-invoked compaction.
+The open questions are kept in ARCHITECTURE.md.
 
 ## What the old tree is good for
 
@@ -99,8 +99,9 @@ lessons a guarantee test should reproduce:
 | `src/process/spawn-gate.ts`, `birth.ts`, `kill.ts` | intent before spawn, birth identity against pid reuse, verified process-group reap |
 | `src/pinfold.ts` | the box spec Yard sends, the JSON lines it validates, exit 3 for an absent box |
 | `src/provider/{pi,claude,codex}.ts`, `pi-mcp-extension.ts` | launch argv, the frames each harness emits, registration proof, session-id capture; the Pi extension is embedded verbatim |
+| `src/provider/connection-credentials.ts`, `connections.ts` | where each login's token and extra headers come from, and the lapse refusal |
 | `src/daemon/reconcile.ts` | what a restart must prove and what it must leave alone |
-| `src/git.ts` `HARDENING`, `updateCanonicalTargetWithLease`, the containment proof | the git contract behind I-4 and I-9 |
+| `src/git.ts` `HARDENING`, `updateCanonicalTargetWithLease`, the containment proof | the git contract behind G4 and G9 |
 | `src/daemon/mcp.ts` | the four JSON-RPC methods and the per-execution bearer |
 | `DESIGN.md` §The loop | the reasoning behind nudge delivery, the dirty-clone rule, the queue's bisect and retirement |
 | `docs/history/` | every failure the old tests encoded |
@@ -111,13 +112,17 @@ route that real harnesses talk to.
 
 ## Order of work
 
-1. **Spec.** `docs/ARCHITECTURE.md` and this file. Done 2026-09-27, pending
-   the operator's read.
+1. **Spec.** `docs/ARCHITECTURE.md` and this file. Done 2026-09-27, with
+   the readiness review below.
 2. **Inventory and harness.** `crates/e2e`: the harness (a temp machine:
    `XDG_*` dirs, `operator.env`, a registered project with a Containerfile,
    real pinfold), the fake-model fixture, and the scenario inventory: every
    guarantee row as named tests, `#[ignore]`d until their slice exists. CI
-   runs the crate on Linux. Orchestrator work.
+   runs the crate on Linux. The fake model is the largest piece: it speaks
+   Anthropic Messages for Claude, OpenAI Responses for Codex and chat
+   completions for Pi, each streamed, scripted per scenario. Pinfold's own
+   suite proves only Pi against a fake model, so a spike runs Claude and
+   Codex against it before their adapters are planned. Orchestrator work.
 3. **The thin path, one harness.** The first executable milestone is
    guarantee 10 plus the landing-crash row of 4: register a project, file a
    ticket, a real Pi worker commits against the fake model, a gate runs,
@@ -131,9 +136,10 @@ route that real harnesses talk to.
    13, 14), planning and proposals (26, 27), sync and git (25, 9), machine
    and CLI (28, 29, 30), cleanup and audit (24, 7), the bounds (11). Once
    the path is green the project gets its own `.yard` and the old Yard on
-   yard-sthlm runs these as lanes, gated by fmt, clippy and build; the e2e
-   suite is GitHub's merge-queue proof, not a lane gate, because a gate box
-   has no container runtime.
+   yard-sthlm runs these as lanes, gated by fmt, clippy and build. The e2e
+   suite is not a lane gate, because a gate box has no container runtime:
+   it runs on GitHub after the operator pushes, and a red suite is the next
+   ticket.
 5. **Cutover, per machine.** Pause admission and drain the board. Run the
    old `yard sync` so the checkout holds canonical's target head, and
    compare the two heads by hand. Stop the old daemon and move `.yard/local`
@@ -159,9 +165,9 @@ writable checkout, as the old one was; a per-attempt harness-state mount;
 per-adapter MCP evidence instead of a frame shape Codex never emits;
 `max_session_executions` as a session rollover with the total-work clock as
 the only spend bound; capacity accounting; batch subsets bound to their
-target and conflicts resolved against canonical; publication separate from
+target and conflicts resolved against canonical, both cut later that day; publication separate from
 outcome; OOM `null`; `stopped:limit`; `access` on the mount; decisions as
-the audited transactions; plans and findings as rows; replay dropped; the
+the audited transactions; plans and findings as rows, the plan table cut later that day; replay dropped; the
 suite runs on hosts, never in a gate box; several scenarios per guarantee;
 the budget measured; the thin path before the full red crate; the cutover
 that archives rather than deletes.
@@ -199,8 +205,43 @@ Cut from the spec, each returnable as one ticket when a need is measured:
 - **Attachments**, deferred: landed two days before the review, no use to
   point at.
 
-Result: four execution kinds, four lane tools, four attention kinds, nine
-tables, 30 guarantees still but eight of them smaller.
+Result: five execution kinds, cleanup included; four lane tools; four
+attention kinds; nine tables; 30 guarantees still but eight of them smaller.
+
+## The readiness review, same day
+
+A second read asked whether the plan was ready to build. Taken, with the
+operator's decisions:
+
+- **Invariants are the guarantees.** The separate I-1 to I-9 list was never
+  written down; the guarantees table is the one list, cited as G1 to G30.
+- **`start` answers every `red`.** On a landing that could not run it
+  re-queues under the existing approval; on an undecided landing intent it
+  reads canonical against the restart table again.
+- **Per-project status.** Each project has its own store and audit
+  sequence. The daemon owns a registry of project paths; the CLI resolves
+  its project from the working directory or `--project`.
+- **No test waits out a timeout.** Guarantee 11 keeps only the review-round
+  limit; the clocks are configuration and untested.
+- **Manual close.** `yard ticket done` with a reason, refused while an
+  attempt or landing intent is live; it is how a planning parent ends.
+- **A daemon installer.** `yard daemon install` writes a systemd user unit
+  or a launchd agent and enables lingering on Linux.
+- **Logins.** Pinfold injects; Yard sources the value. A key comes from
+  `operator.env`; a subscription login is read from the machine's
+  credential file at box start, never refreshed, refused if it would lapse
+  within the total-work clock. Carried from the old design of 2026-09-26.
+- **The suite runs after the push.** Yard lands into its own canonical, so
+  GitHub's merge queue never sees a Yard landing; this repository's lanes
+  are proved by fmt, clippy and build, and a red suite on `main` is the
+  next ticket.
+- Guarantee 13's resume arithmetic and guarantee 9's observation were
+  corrected; the dependency list gained the hyper glue crates and
+  `getrandom`.
+
+Left open for the operator: whether gate boxes keep no egress, which decides
+where an image's build context comes from; and whether the CLI and tools
+keep the word "lane" for an attempt.
 
 ## Effort
 

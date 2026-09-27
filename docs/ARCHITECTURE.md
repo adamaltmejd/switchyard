@@ -89,14 +89,14 @@ credentials, or damages the host.
 
 | Control | Effect |
 |---|---|
-| One merge path | Only the daemon's queue moves canonical, and only to a ref its gates passed (I-1, I-4). |
-| Exact identity | Every check, approval and landing binds a candidate and a contract digest; a changed identity carries nothing (I-2, I-3). |
+| One merge path | Only the daemon's queue moves canonical, and only to a ref its gates passed (G1, G4). |
+| Exact identity | Every check, approval and landing binds a candidate, the ticket revision and the gate and review digests; a changed identity carries nothing (G2, G3). |
 | Lane capability | A worker's MCP bearer is issued per execution, scoped to its kind, revoked when the execution ends. |
-| No credential in a box | Upstream keys ride pinfold's injecting routes; a box sees a placeholder. The only secret a box holds is its own execution-scoped MCP bearer, which authenticates calls from inside it and authorises nothing else. |
+| No credential in a box | Upstream keys and login tokens ride pinfold's injecting routes; a box sees a placeholder. The only secret a box holds is its own execution-scoped MCP bearer, which authenticates calls from inside it and authorises nothing else. |
 | Box is the sandbox | Harnesses run fully permissive; access is what the box mounts writable. A reviewer's clone is read-only. A gate box has no egress. |
 | Worker git is untrusted | A worker's clone shares no objects with canonical and its configuration is never read by the daemon: every daemon git call disables hooks, `core.fsmonitor`, signing and every transport but validated local paths. |
 | No checkout writes | Yard never writes the operator's checkout except inside `yard sync` the operator ran. |
-| Fail safe | Unknown liveness or outcome never duplicates work, lands, deletes or kills (I-6). |
+| Fail safe | Unknown liveness or outcome never duplicates work, lands, deletes or kills (G6). |
 
 Everything pinfold's programmatic core guarantees (no network but the proxy,
 no privilege, the environment is the spec) Yard relies on and does not
@@ -141,7 +141,7 @@ admission, for session continuity. Two digests bind verification: the
 instructions, and `review.blocking`. A sync that changes a digest
 supersedes every in-flight check taken under the old one, and only those: a
 new seat re-reviews queued candidates and reruns no gate; a Dockerfile bump
-reruns gates and no review (I-2).
+reruns gates and no review (G2).
 
 **Verification identity.** What a judgment binds is written as data:
 
@@ -163,12 +163,27 @@ machine's credentials, one per connection, and the machine's own settings:
 `YARD_MAX_LANES` caps live attempts across every project on the machine;
 `YARD_BOX_MEMORY` gives each box a share of memory. Neither is a project key.
 
+**Connections.** An agent's `provider` names a connection: the upstream
+origin, the header its credential rides in, and where the credential comes
+from. Pinfold does the injecting; Yard decides the value and hands it to
+`box up` as a `from` variable. A key comes from `operator.env`. A login
+(Claude's subscription token, Codex's ChatGPT login) is read from the
+machine's own credential file when the box comes up, with any extra header
+the upstream needs, such as Codex's account id. Yard never refreshes a
+login: a token that lapses before the attempt's total-work clock would end
+is refused before the box starts, naming the login to renew. Each harness is
+pointed at its route with a placeholder credential in its own launch files.
+
 ## Tickets
 
-A ticket is `open`, `done` or `abandoned`, and may be `parked`. It carries
+A ticket is `open`, `done` or `abandoned`, and may be `parked`. It becomes
+`done` when its candidate lands, or when the operator closes it with `yard
+ticket done` and a reason, which is recorded like every decision. Closing is
+refused while the ticket has a live attempt or a landing intent; abandon the
+attempt first. A done ticket satisfies its dependents either way. It carries
 `depends_on` edges to other tickets; that is the only scheduling relation.
 Edits bump its revision; a check that read an older revision no longer
-counts (I-2).
+counts (G2).
 
 A ticket is **ready** when it is open, not parked, every dependency is done,
 it has no live attempt, and no open proposal blocks it.
@@ -178,8 +193,9 @@ it has no live attempt, and no open proposal blocks it.
 changes no code and instead proposes child tickets and an edit to its own
 body. Accepting a child adds the `parent depends_on child` edge; accepting
 the edit makes the body the plan. Once the children are done the operator
-moves the ticket to an implementing workflow and starts it; the scheduler
-never starts a ticket whose workflow is read-only after its children exist.
+either closes the ticket with `yard ticket done` or moves it to an
+implementing workflow and starts it; the scheduler never starts a ticket
+whose workflow is read-only after its children exist.
 A replan is a ticket edit, which supersedes every check that read the old
 revision.
 
@@ -200,7 +216,7 @@ ticket too large proposes the split and stops.
 3. **Start.** The scheduler admits ready tickets in priority order up to
    `max_lanes`. Admission creates the attempt, freezes its workflow and
    implementer, and records the first execution before anything external
-   runs, in one transaction (I-5).
+   runs, in one transaction (G5).
 4. **Work.** An execution runs the implementer in a box with the clone
    mounted as the workflow's `access` says and the lane MCP route. A
    nudge queues one message and delivers it at the next execution boundary;
@@ -231,7 +247,7 @@ ticket too large proposes the split and stops.
    as clean as a pass.
 7. **Approve.** The operator sees ticket, diff, checks, review and
    protected paths. Approval binds the exact candidate and its
-   checks (I-3). Under `approve = "auto"` a clean, unprotected candidate is
+   checks (G3). Under `approve = "auto"` a clean, unprotected candidate is
    enqueued in the transaction that verified it, with the setting recorded as
    the actor. Reject records notes and dispatches a repair execution.
    Abandon ends the attempt.
@@ -239,7 +255,7 @@ ticket too large proposes the split and stops.
    canonical's head (a merge commit, or a fast-forward when it already sits
    there), runs the full gate set once on the merged ref, and on green
    fast-forwards canonical to that ref under compare-and-swap, then proves
-   canonical contains the candidate head (I-4). A landing binds its exact
+   canonical contains the candidate head (G4). A landing binds its exact
    target and merged head; nothing verified on an older target authorises a
    landing on a newer one. A red landing is that candidate's: the attempt
    gets one repair execution with the failure and the target head in its
@@ -276,7 +292,7 @@ the statistics; nothing is derived from the audit stream.
 
 **Intent before effect.** Before a box comes up, the execution row exists.
 The box name is the execution id. A crash between intent and handle is
-reconciled by asking pinfold (I-6).
+reconciled by asking pinfold (G6).
 
 **Publication is durable output, not outcome.** A review's findings, a
 proposal and a progress note are rows the moment the tool call
@@ -306,7 +322,14 @@ surface reads that declaration.
 | `approval` | a candidate is verified and `approve` is `manual`, or it touches a protected path | approve, reject, abandon |
 | `proposal` | a worker proposes | accept, reject |
 | `stopped` | an execution ended without a candidate advancing: `unchanged`, `failed`, `interrupted`, `timeout`, `limit` | start, nudge, abandon |
-| `red` | a gate error, a review error, a second landing red, a landing that could not run | start, nudge, abandon |
+| `red` | a gate error, a review error, a second landing red, a landing that could not run, a landing intent canonical cannot decide | start, nudge, abandon |
+
+`start` always means "try again from here". On an attempt it starts the
+next implementer execution. On a landing that could not run it re-queues
+the candidate under its existing approval. On an undecided landing intent it
+reads canonical against the restart table again, typically after the
+operator has repaired canonical by hand; while canonical still decides
+nothing the item stays. A nudge applies only to an attempt.
 
 A candidate waiting in the queue raises nothing. A landing whose target
 moved raises nothing. An item is resolved in the transaction of the command that
@@ -316,7 +339,7 @@ answers it.
 
 SQLite, WAL, foreign keys, one writer: the daemon holds an exclusive
 `flock` on `store.lock` for its life. Every decision is one short
-transaction that also appends its audit event (I-7): admissions, execution
+transaction that also appends its audit event (G7): admissions, execution
 starts and ends, checks, approvals, landings, operator commands.
 Observational updates (handles, progress, usage) are column writes with no
 event. No transaction is held across external work. Nothing replays the
@@ -437,14 +460,29 @@ kind:
 | `lane_propose` — a ticket, an edit, a link | implementation |
 | `lane_publish_review` — findings; once | review |
 
-Every payload is validated at the boundary (I-8). A tool call outside the
+Every payload is validated at the boundary (G8). A tool call outside the
 grant is refused and recorded.
 
 ## Daemon and CLI
 
 One daemon per machine, run by the user's service manager, serving every
 registered project from one process and one scheduler tick. One unix socket
-at `$XDG_RUNTIME_DIR/yard.sock`. The API is `POST /rpc` with
+at `$XDG_RUNTIME_DIR/yard.sock`. `yard daemon install` writes and starts the
+service: a systemd user unit on Linux, a launchd agent on macOS, both
+running `yard daemon run` from the installed binary's absolute path. On
+Linux it enables lingering so the daemon outlives the login session, and
+says so where it cannot. `yard daemon uninstall` stops and removes it;
+`yard daemon restart` goes through the service manager.
+
+The daemon owns the project registry, a list of absolute project paths in
+`$XDG_STATE_HOME/yard/projects`. `yard init` registers a project and `yard
+project forget` removes one; a registered path that is gone is skipped and
+reported by `doctor`. The CLI resolves its project from the working
+directory upward to the nearest `.yard/config.toml`, or from `--project`.
+Each project has its own store and its own audit sequence, so `status` and
+`status --watch --since` are per project.
+
+The API is `POST /rpc` with
 `{method, params}` and one envelope `{boundary, ok, result | error}`.
 Client and daemon ship as one binary; a boundary mismatch is refused with
 the instruction to restart the daemon. Every mutation carries the smallest
@@ -453,8 +491,9 @@ is a machine-readable stale result.
 
 ```
 yard init | doctor | sync | status [--watch --since SEQ] [--json]
-yard daemon run | status | restart
-yard ticket new | show | edit | park | unpark | depend | list | abandon
+yard daemon run | install | uninstall | status | restart
+yard project list | forget
+yard ticket new | show | edit | park | unpark | depend | list | done | abandon
 yard lane start | stop | nudge | approve | reject | abandon | show | diff | tail
 yard proposal accept | reject
 yard version
@@ -465,27 +504,31 @@ line per event the operator subscribed to; it is the wake primitive and
 the only history view. `lane tail` prints the live transcript file as the
 harness wrote it. Every
 command runs without a terminal and answers `--json`. `doctor` reports what
-pinfold says of itself, the project image, and which connections have a key.
+pinfold says of itself, the service, the project image, which connections
+have a credential and when each login lapses.
 
 ## Guarantees
 
-Each has one end-to-end test. Testing policy is in `AGENTS.md`.
+These are the invariants: binding, cited elsewhere in this spec as G1 to
+G30. Each is shown by one or more end-to-end scenarios; testing policy is in
+`AGENTS.md`. Timeouts are configuration, not guarantees, and no scenario
+waits one out.
 
 | # | Guarantee | Shown by |
 |---|---|---|
-| 1 | Only the queue lands (I-1) | A worker with the lane bearer and the clone: `git push` fails, no RPC lands, `update-ref` on canonical from the box fails. Control: the queue lands the same candidate. |
-| 2 | Checks bind a candidate and a digest (I-2) | A passed gate and review; then a new commit and a ticket edit each leave the candidate unverified; a synced gate change reruns the gate and keeps the review; a synced seat change reruns the review and keeps the gate. |
-| 3 | Approval binds the exact candidate (I-3) | Approve with `--head`; a repair commit later; the queue refuses and raises `approval` again. Under `auto`, a protected path still raises it. |
-| 4 | Landing is compare-and-swap and proved (I-4) | Move canonical by hand between verify and land: the landing retires and re-queues; on green, canonical contains the head and is the verified ref. Kill the daemon after `update-ref` and before the landing is recorded: on restart the landing is recorded once, no merge runs, the ticket closes. A ticket edit racing the landing intent is refused with the intent named. |
-| 5 | Admission is atomic (I-5) | Two `lane start` races for the last slot: one wins; a ticket never has two live attempts. |
-| 6 | Intent precedes effect and unknown fails safe (I-6) | SIGKILL the daemon after intent, before the box reports: on restart the execution is `interrupted`, no second box, the tree kept. |
-| 7 | Audit and rows are complete (I-7) | After a full ticket: every decision has one event with its target and text; execution rows carry tokens, cost, model, reason; no `handle` events exist. |
-| 8 | Inputs are validated at the boundary (I-8) | A malformed tool payload, a TOML with an unknown key, an unknown workflow name: refused by name, nothing written. |
-| 9 | Local only (I-9) | Strace-free: `protocol.allow=never` in every git call; the daemon opens no socket but its own and the MCP listener. |
+| 1 | Only the queue lands | A worker with the lane bearer and the clone: `git push` fails, no RPC lands, `update-ref` on canonical from the box fails. Control: the queue lands the same candidate. |
+| 2 | Checks bind a candidate and a digest | A passed gate and review; then a new commit and a ticket edit each leave the candidate unverified; a synced gate change reruns the gate and keeps the review; a synced seat change reruns the review and keeps the gate. |
+| 3 | Approval binds the exact candidate | Approve with `--head`; a repair commit later; the queue refuses and raises `approval` again. Under `auto`, a protected path still raises it. |
+| 4 | Landing is compare-and-swap and proved | Move canonical by hand between verify and land: the landing retires and re-queues; on green, canonical contains the head and is the verified ref. Kill the daemon after `update-ref` and before the landing is recorded: on restart the landing is recorded once, no merge runs, the ticket closes. A ticket edit racing the landing intent is refused with the intent named. |
+| 5 | Admission is atomic | Two `lane start` races for the last slot: one wins; a ticket never has two live attempts. |
+| 6 | Intent precedes effect and unknown fails safe | SIGKILL the daemon after intent, before the box reports: on restart the execution is `interrupted`, no second box, the tree kept. |
+| 7 | Audit and rows are complete | After a full ticket: every decision has one event with its target and text; execution rows carry tokens, cost, model, reason; no `handle` events exist. |
+| 8 | Inputs are validated at the boundary | A malformed tool payload, a TOML with an unknown key, an unknown workflow name: refused by name, nothing written. |
+| 9 | Local only | Across the path of G10, the host fixture that stands in for the network receives nothing but the model's requests through their route, and the host's socket table shows the daemon listening on its unix socket and the MCP listener only. |
 | 10 | A ticket lands end to end | New ticket → worker commits → candidate gate → review pass → approve → landing green → canonical moves → ticket done → attempt directory gone. |
-| 11 | Repair loops are bounded | A seat that always blocks: exactly `max_rounds` reviews, then `stopped:limit`; a gate that always fails: repairs until the total-work clock, then `stopped:timeout`. |
+| 11 | Review rounds are bounded | A seat that always blocks: exactly `max_rounds` reviews, then `stopped:limit` and no further execution. |
 | 12 | A nudge waits for the boundary | Nudge mid-execution: the execution ends on its own, the tree is kept, the next execution's prompt carries the message. `stop` delivers it sooner. |
-| 13 | The session cap starts fresh | With `max_session_executions = 2`, the third implementer execution resumes nothing and its prompt is the brief; the fifth resumes the fourth. Control: the second resumed the first. |
+| 13 | The session cap starts fresh | With `max_session_executions = 2`, the third implementer execution resumes nothing and its prompt is the brief; the fourth resumes the third; the fifth resumes nothing. Control: the second resumed the first. |
 | 14 | A dirty clone never reaches review | A worker that leaves an untracked file: no review runs; the next execution's prompt lists it. |
 | 15 | A review is a publication or an error | A seat that exits 0 without publishing is `review-error`; a seat killed after publishing has published; a second publication is refused; findings below `blocking` pass. |
 | 16 | Panel `none` is clean but unreviewed | The candidate reaches approval; status says unreviewed. |
@@ -498,19 +541,19 @@ Each has one end-to-end test. Testing policy is in `AGENTS.md`.
 | 23 | Restart loses only the turn | Kill the daemon mid-execution: on restart the box is gone, the execution `interrupted`, the tree kept, the operator's `start` continues. |
 | 24 | Cleanup removes everything and only that | After landing, the attempt directory and its boxes are gone; other attempts' directories and canonical are untouched. |
 | 25 | `sync` refuses divergence | Checkout and canonical each with a commit the other lacks: both directions refuse naming both heads; a fast-forward passes. |
-| 26 | A read-only workflow plans, then waits | A ticket on `plan`: its worker's clone refuses writes, it proposes children and a body edit; accepting them blocks the parent; the scheduler does not start the parent once its children are done. |
+| 26 | A read-only workflow plans, then waits | A ticket on `plan`: its worker's clone refuses writes, it proposes children and a body edit; accepting them blocks the parent; the scheduler does not start the parent once its children are done; `yard ticket done` then closes it and its dependents become ready. Closing a ticket with a live attempt is refused. |
 | 27 | Proposals resolve siblings | One execution proposes A and B with B depending on A; accepting both mints A first and B's edge names it. |
 | 28 | One daemon, many projects | Two registered projects; `YARD_MAX_LANES` bounds attempts across both; each store is its own. |
 | 29 | Stale identity mutates nothing | Approve with an old candidate, edit with an old revision: stale result, no row changed. |
 | 30 | `--version` and `--help` need no daemon | Both answer with no socket and no store. |
 
 The suite starts real daemons and real boxes, so it runs on a host with
-the runtime: GitHub's ubuntu runners (podman) on every push and in GitHub's
-merge queue, and the operator's Mac (Apple `container`). It cannot run
-inside a Yard gate box, which has no runtime; this repository's own Yard
-gates are `cargo fmt`, `clippy` and `cargo build`, and a landing here is
-green only by that gate set, with the suite as the merge queue's proof on
-GitHub.
+the runtime: GitHub's ubuntu runners (podman) on every push to `main`, and
+the operator's Mac (Apple `container`). It cannot run inside a Yard gate
+box, which has no runtime, so this repository's own Yard gates are `cargo
+fmt`, `clippy` and `cargo build`, and a landing here is proved by those
+alone. The suite runs after the operator syncs and pushes to GitHub; a red
+suite on `main` is the next ticket.
 
 ## Code
 
@@ -521,8 +564,9 @@ Rust. One binary, `yard`, client and daemon. Linux builds are static musl.
 | `aarch64-apple-darwin` | Mac |
 | `aarch64-unknown-linux-musl`, `x86_64-unknown-linux-musl` | Linux hosts |
 
-Dependencies: `tokio`, `hyper`, `serde`, `serde_json`, `toml`, `rusqlite`
-(bundled), `nix`, `sha2`, `clap`. Git and pinfold are child processes.
+Dependencies: `tokio`, `hyper` with `hyper-util` and `http-body-util`,
+`serde`, `serde_json`, `toml`, `rusqlite` (bundled), `nix`, `sha2`,
+`getrandom` (MCP bearers), `clap`. Git and pinfold are child processes.
 
 ```
 crates/yard/src/
