@@ -272,11 +272,18 @@ pinfold 0.0.6. Taken:
   pinfold's preflight refuses; pinfold's own harness relocates only state,
   config and cache for that reason. The daemon passes the host's runtime
   directory and session bus to pinfold.
-- **Pi's discovery is off.** Pi loads a project's `.pi/` and skills by
-  default, so a candidate could carry an extension that a reviewer's Pi
-  loads and that publishes a pass with the seat's own bearer. The old
-  adapter passed `--no-extensions` and every sibling flag; the spec had
-  dropped it. Project guidance reaches workers through `instructions`.
+- **Pi loads no extension but Yard's.** Pi discovers a project's
+  extensions by default, so a candidate could carry one that a reviewer's
+  Pi loads and that publishes a pass with the seat's own bearer. The old
+  adapter passed `--no-extensions` and every sibling flag, including
+  `--no-context-files`, which also hid `AGENTS.md` and `CLAUDE.md` from
+  every old Pi worker; its comment names the operator's own Pi state as the
+  reason, which a Yard-owned harness home removes. The first fix copied all
+  the flags; the operator caught the lost project rules. Now extensions,
+  prompt templates and themes stay off, context files and skills load from
+  the workspace, and the scaffold protects `AGENTS.md`, `CLAUDE.md`,
+  `.agents/` and `.pi/` so a candidate editing worker guidance always
+  needs a human approval.
 - A read-only attempt ends when its execution stops, and the scheduler
   starts a read-only ticket once.
 - `start` on a gate or review error reruns that check; `timeout` and

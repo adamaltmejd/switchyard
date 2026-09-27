@@ -120,7 +120,10 @@ changes only through `yard sync`, and a candidate whose diff touches it is
 refused at the candidate boundary and returned to the implementer with the
 reason. A worker that needs a package or a gate proposes the change.
 `.yard/local/` is ignored and holds the store and live state; losing it
-loses the backlog.
+loses the backlog. The scaffold's `protected_paths` names the files that
+guide workers, `AGENTS.md`, `CLAUDE.md`, `.agents/` and `.pi/`, so a
+candidate changing them always needs the operator's approval, under
+`approve = "auto"` too.
 
 Configuration is one TOML document. Unknown keys are errors. Every
 cross-reference resolves at load; an unknown name is a load error.
@@ -458,12 +461,14 @@ is gone and marks each execution that recorded one as interrupted.
 Pi is the one harness. Its adapter is the launch argv that starts or
 resumes a session, the normalisation of its frames into `started`,
 `progress`, `finished`, `failed`, and the launch files it needs, including
-Yard's staged MCP client extension. Every discovery path Pi has is off:
-project and user extensions, skills, prompt templates, themes and context
-files. The staged client is the only extension that loads, so nothing a
-candidate commits (a `.pi/` directory, `.agents/skills`, an `AGENTS.md`) runs
-or is read as instructions in any box; project guidance reaches a worker
-through its workflow's `instructions`. An execution proceeds to its first turn
+Yard's staged MCP client extension. Extension discovery is off, and so are
+prompt templates and themes: the staged client is the only code that loads
+in the harness, so nothing a candidate commits runs with a worker's bearer.
+Context files (`AGENTS.md`, `CLAUDE.md`) and skills load as Pi finds them in
+`/workspace`, so every worker reads the project's own rules; Pi's user level
+is the attempt's harness state, which Yard owns and leaves empty. A
+candidate that edits that guidance changes what its own reviewers read, so
+the scaffold protects it (see Projects). An execution proceeds to its first turn
 only once the staged client has printed its registration line; whether every
 granted tool is present is proved by the tool list it fetched. The outcome
 is read from the terminal frame, never from the exit status alone. Yard
@@ -551,7 +556,7 @@ waits one out.
 | 5 | Intent precedes effect, and a restart loses only the turn | Intent is ordered before effect: an execution's audit event precedes its box's creation time in `pinfold box list` and the fixture's first request. The daemon killed mid-execution: on restart the execution is `interrupted`, no second box exists, the tree is kept, and `start` continues. The daemon killed while a host landing gate runs: the gate's group is gone after restart and the landing re-queues. No command is answered before reconciliation has committed. |
 | 6 | Inputs are validated at the boundary | A malformed tool payload, a TOML with an unknown key, an unknown workflow name: refused by name, nothing written. |
 | 7 | A ticket lands end to end and leaves only rows | New ticket, worker commit, candidate gate, review pass, approval, green landing: canonical moves and the ticket is done. Afterwards every decision has one audit event naming its target and text, the execution rows carry tokens, cost, model and start reason, no handle event exists, the attempt directory and its boxes are gone, and another live attempt's directory and canonical are untouched. |
-| 8 | Review is a publication, and bounded | A seat that exits 0 without publishing is a review error; a seat killed after publishing has published; a second publication is refused; findings below `blocking` pass; a panel of `none` reaches approval marked unreviewed; a seat that always blocks gets exactly `max_rounds` rounds, then `stopped:limit`. A candidate that commits a `.pi` extension which publishes a pass: nothing loads it, and the seat's own publication is the one recorded. A gate error's `start` reruns that gate on the same head. |
+| 8 | Review is a publication, and bounded | A seat that exits 0 without publishing is a review error; a seat killed after publishing has published; a second publication is refused; findings below `blocking` pass; a panel of `none` reaches approval marked unreviewed; a seat that always blocks gets exactly `max_rounds` rounds, then `stopped:limit`. A candidate that commits a `.pi` extension which publishes a pass: nothing loads it, and the seat's own publication is the one recorded. Control: the seat's prompt carries a rule from the project's `AGENTS.md`. A gate error's `start` reruns that gate on the same head. |
 | 9 | Each implementer execution starts from the right place | A nudge mid-execution lets the execution end on its own and reaches the next prompt; `stop` delivers it sooner. A worker that leaves an untracked file gets no review and the next prompt lists the file. With `max_session_executions = 2`: the second execution resumes the first, the third resumes nothing and its prompt is the brief, the fourth resumes the third, the fifth resumes nothing. |
 | 10 | The queue lands one at a time and re-judges what does not merge | Three approved candidates, the second red on its merged ref: the first lands, the second gets one repair and a second red raises `red`, the third lands on the moved target with its own gate run. A candidate that does not merge gets a repair naming the paths, and its next head takes gates, review and approval again. |
 | 11 | Only the operator's sync changes `.yard` and canonical from outside | A worker commit under `.yard` comes back with the reason and no gate runs; the same change through `yard sync` is in force for the next execution. A checkout and canonical that each hold a commit the other lacks: both directions refuse naming both heads; a fast-forward passes. |
