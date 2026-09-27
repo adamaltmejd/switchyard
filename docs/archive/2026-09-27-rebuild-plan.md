@@ -236,9 +236,12 @@ operator's decisions:
   credential. The image builds only from canonical's target head, so no
   worker-edited file drives a build outside pinfold's sandbox; a dependency
   a candidate adds is fetched by the gate.
-- **Each gate chooses box or host.** `environment = "host"` runs a gate on
-  the host, at landing only, on a merged ref whose candidate was approved,
-  so no unreviewed code runs on the host. This replaces any post-push
+- **Each gate chooses box or host.** `runs_in = "host"` runs a gate on the
+  host at either stage, as the project's decision: at the candidate stage
+  that is unreviewed agent code with the operator's privileges. A
+  landing-only restriction was proposed and dropped, since the old Yard
+  allowed candidate host gates without an observed failure and auto-approve
+  or a `none` panel would void it anyway. This replaces any post-push
   suite: Yard's gates decide what lands. Here the e2e suite is that host
   gate; GitHub runs it only when releasing.
 - **A lane is a slot, an attempt runs through it.** `max_lanes` keeps its

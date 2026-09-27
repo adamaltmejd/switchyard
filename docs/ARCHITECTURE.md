@@ -100,7 +100,7 @@ credentials, or damages the host.
 | Box is the sandbox | The harness runs fully permissive; access is what the box mounts writable. A reviewer's clone is read-only. A gate box reaches only the project's allowlist: no model, no MCP, no credential. |
 | Worker git is untrusted | A worker's clone shares no objects with canonical and its configuration is never read by the daemon: every daemon git call disables hooks, `core.fsmonitor`, signing and every transport but validated local paths. |
 | No checkout writes | Yard never writes the operator's checkout except inside `yard sync` the operator ran. |
-| Host gates run approved code only | A project chooses per gate whether it runs in a box or on the host. A host gate runs outside any box, so it runs only at landing, on a merged ref every candidate of which was approved; no unreviewed code runs on the host. |
+| Gates run where the project says | A project chooses per gate whether it runs in a box or on the host. A host gate runs agent-written code with the operator's privileges and no containment: before any review at the candidate stage, after approval at landing. Which gates accept that is the project's decision. |
 | Fail safe | Unknown liveness or outcome never duplicates work, lands, deletes or kills (G5). |
 
 Everything pinfold's programmatic core guarantees (no network but the proxy,
@@ -134,14 +134,14 @@ cross-reference resolves at load; an unknown name is a load error.
 | `[isolation]` | `dockerfile`, `egress` (hosts implementer and gate boxes may reach beyond their routes, typically package registries) |
 | `[agents.<name>]` | `harness` (`pi`), `provider`, `model`, `effort`; a key the harness has no control for is a load error |
 | `[workflows.<name>]` | `implementer`, `review` (seat names in panel order, or `none`), `instructions`, `access` (`write` or `read-only`), `max_session_executions`, `inactivity_timeout_minutes`, `total_work_timeout_minutes`; every workflow inherits unset keys from `default` |
-| `[gates.<name>]` | `command`, `timeout_minutes`, `stage` (`landing` default, or `candidate`), `environment` (`box` default, or `host`; `host` only with `stage = "landing"`), `env` (host variables a host gate receives, by name) |
+| `[gates.<name>]` | `command`, `timeout_minutes`, `stage` (`landing` default, or `candidate`), `runs_in` (`box` default, or `host`), `env` (host variables a host gate receives, by name) |
 | `[review]` | `max_rounds`, `timeout_minutes`, `blocking` (P0–P3) |
 | `[review.seats.<name>]` | `agent`, `instructions` |
 
 There is one configuration: canonical's target head's. Every execution
 reads it when it starts. An attempt freezes only its implementer at
 admission, for session continuity. Two digests bind verification: the
-**gate digest** over the Dockerfile and every gate with its `stage`, `environment` and `env` names, and the
+**gate digest** over the Dockerfile and every gate with its `stage`, `runs_in` and `env` names, and the
 **review digest** over the workflow's panel, each seat's agent settings and
 instructions, and `review.blocking`. A sync that changes a digest
 supersedes every in-flight check taken under the old one, and only those: a
@@ -234,11 +234,11 @@ ticket too large proposes the split and stops.
    starts again. Spend is bounded by the attempt's total-work clock alone:
    it counts wall time from admission across every execution and every
    wait, nothing automatic resets it, and only a nudge renews it.
-5. **Gate.** Candidate-stage gates run on the head in a gate box, in a
-   private writable checkout of the exact commit, in declared order, before
-   any review. A failure is believed and buys a repair
-   execution; a gate error raises `red`. Every gate runs again at landing,
-   and host gates run only there.
+5. **Gate.** Candidate-stage gates run on the head in a private writable
+   checkout of the exact commit, in a gate box or on the host as each gate's
+   `runs_in` says, in declared order, before any review. A failure is
+   believed and buys a repair execution; a gate error raises `red`. Every
+   gate runs again at landing.
 6. **Review.** One review round per candidate: one execution per seat,
    each in its own box with the clone read-only at the head. A seat publishes once through `yard_publish_review`;
    an execution without a publication is a review error. Findings carry
@@ -282,8 +282,8 @@ owners, leases, receipts or per-feature recovery. One lifecycle is not one
 recovery predicate: a box-backed execution is proved by asking pinfold for
 its box, a landing by canonical's refs, a cleanup by the directory's
 absence, a host gate by its process group and that group's birth identity:
-one still alive after a restart is killed by verified group, the execution
-is `interrupted` and the landing re-queues.
+one still alive after a restart is killed by verified group and the
+execution is `interrupted` like a boxed one; a landing re-queues.
 
 A worker execution records, on its row: agent, harness and version,
 provider, model, effort, the execution it resumed and its session id, start
@@ -421,7 +421,7 @@ runs against. The image carries the target head's dependencies; one a
 candidate adds is fetched by the gate through the allowlist.
 
 A host gate runs in the same kind of private checkout, made on the host
-under the landing's directory, as a child process in its own group with an
+under the attempt's or the landing's directory, as a child process in its own group with an
 explicit cwd, an environment of `PATH`, `HOME` and the variables its `env`
 names, bounded output and its `timeout_minutes`. It exists for gates that
 need what a box cannot give, such as a container runtime.
@@ -528,7 +528,7 @@ waits one out.
 | 2 | Judgments bind exact identity | A passed gate and review, then a new commit and a ticket edit each leave the candidate unverified; a synced gate change reruns the gate and keeps the review, a synced seat change the reverse. An approval given with `--head`, then a repair commit: the queue refuses and raises `approval` again; under `auto` a protected path still raises it. An approve naming an old candidate and an edit naming an old revision get a stale result and change no row. |
 | 3 | Landing is compare-and-swap and proved | Canonical moved by hand between verify and land: the landing retires and re-queues. On green, canonical is the verified ref and contains the head. The daemon killed after `update-ref`, before the landing is recorded: on restart it is recorded once, no merge runs, the ticket closes. A ticket edit racing the landing intent is refused naming the intent. |
 | 4 | Capacity holds | Two `attempt start`s race for the last slot: one wins and a ticket never has two live attempts. Two registered projects: `YARD_MAX_LANES` bounds attempts across both, and each keeps its own store. |
-| 5 | Intent precedes effect, and a restart loses only the turn | The daemon killed after an execution's intent, before its box reports, and again mid-execution: on restart the execution is `interrupted`, no second box exists, the tree is kept, and `start` continues. The daemon killed while a host gate runs: the gate's group is gone after restart and the landing re-queues. |
+| 5 | Intent precedes effect, and a restart loses only the turn | The daemon killed after an execution's intent, before its box reports, and again mid-execution: on restart the execution is `interrupted`, no second box exists, the tree is kept, and `start` continues. The daemon killed while a host landing gate runs: the gate's group is gone after restart and the landing re-queues. |
 | 6 | Inputs are validated at the boundary | A malformed tool payload, a TOML with an unknown key, an unknown workflow name: refused by name, nothing written. |
 | 7 | A ticket lands end to end and leaves only rows | New ticket, worker commit, candidate gate, review pass, approval, green landing: canonical moves and the ticket is done. Afterwards every decision has one audit event naming its target and text, the execution rows carry tokens, cost, model and start reason, no handle event exists, the attempt directory and its boxes are gone, and another live attempt's directory and canonical are untouched. |
 | 8 | Review is a publication, and bounded | A seat that exits 0 without publishing is a review error; a seat killed after publishing has published; a second publication is refused; findings below `blocking` pass; a panel of `none` reaches approval marked unreviewed; a seat that always blocks gets exactly `max_rounds` rounds, then `stopped:limit`. |
@@ -536,7 +536,7 @@ waits one out.
 | 10 | The queue lands one at a time and re-judges what does not merge | Three approved candidates, the second red on its merged ref: the first lands, the second gets one repair and a second red raises `red`, the third lands on the moved target with its own gate run. A candidate that does not merge gets a repair naming the paths, and its next head takes gates, review and approval again. |
 | 11 | Only the operator's sync changes `.yard` and canonical from outside | A worker commit under `.yard` comes back with the reason and no gate runs; the same change through `yard sync` is in force for the next execution. A checkout and canonical that each hold a commit the other lacks: both directions refuse naming both heads; a fast-forward passes. |
 | 12 | Boxes hold nothing secret | The key is absent from the box's environment and clone; the fixture behind the injecting route receives it. |
-| 13 | Every gate and seat runs where its row says | A seat that writes to `/workspace` fails and the head is unchanged. A gate box that calls the model or MCP route gets nothing, and an ignored file the implementer left is absent from its checkout; control: the worker box reaches the route. A gate with `environment = "host"` and `stage = "candidate"` is a load error; a host landing gate runs on the merged ref, sees only the variables its `env` names, and never runs for a candidate whose approval was superseded. |
+| 13 | Every gate and seat runs where its row says | A seat that writes to `/workspace` fails and the head is unchanged. A gate box that calls the model or MCP route gets nothing, and an ignored file the implementer left is absent from its checkout; control: the worker box reaches the route. A host candidate gate runs on the head before any review and sees only the variables its `env` names; a host landing gate runs on the merged ref and never for a candidate whose approval was superseded. |
 | 14 | Worker git is untrusted, and Yard stays local | A worker that plants `core.fsmonitor`, a hook and a remote in its clone and corrupts an object: the daemon's fetch runs none of them, canonical's objects are intact, the candidate is refused by name. Across G7's path the fixture standing in for the network receives only the model's requests through their route, and the daemon listens on its unix socket and the MCP listener only. |
 | 15 | Plans and proposals resolve | A ticket on `plan`: its clone refuses writes, it proposes children and a body edit; accepting them blocks the parent, which the scheduler does not start once they are done; `yard ticket done` then closes it and its dependents become ready. Closing a ticket with a live attempt is refused. One execution proposing A and B, B depending on A: accepting both mints A first and B's edge names it. |
 
