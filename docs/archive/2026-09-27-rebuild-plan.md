@@ -43,7 +43,7 @@ now works and calls pinfold for everything about a box or a harness.
 | One daemon per machine, one scheduler, every registered project. `YARD_MAX_LANES` is a machine setting. | Box slots and memory are machine resources; the operator runs several projects on one Mac. |
 | `preflight` becomes a minimal `doctor`. | Pinfold owns harness versions and the runtime. |
 | Pinfold owns everything about harnesses; Yard only calls it. | |
-| Build starts outside Yard; moves into Yard at the first red test, with the old Yard on yard-sthlm running lanes on this repo. An Opus orchestrator with subagents drives it. | The spec, table and skeleton have no ticket boundaries; "make guarantee N green" is exactly one lane's worth. |
+| Build starts outside Yard; moves into Yard once the thin path is green, with the old Yard on yard-sthlm running lanes on this repo. An Opus orchestrator with subagents drives it. | The spec, table and skeleton have no ticket boundaries; "make guarantee N green" is exactly one lane's worth. |
 | Mac cuts over on a clean Yard; no coexisting binaries. | |
 | E2e budget: about five minutes, measured not asserted. | Real boxes are slower than the old stubbed 90-second gate. |
 | This repo takes the `adamaltmejd/switchyard` name after the old one is renamed. | |
@@ -117,7 +117,9 @@ route that real harnesses talk to.
 1. **Spec.** `docs/ARCHITECTURE.md` and this file. Done 2026-09-27, with
    the readiness review below.
 2. **Inventory and harness.** `crates/e2e`: the harness (a temp machine:
-   `XDG_*` dirs, `operator.env`, a registered project with a Containerfile,
+   its own `XDG_STATE_HOME`, `XDG_CONFIG_HOME` and `XDG_CACHE_HOME`, never
+   `XDG_RUNTIME_DIR`, which rootless podman needs as the host's;
+   `operator.env`; a registered project with a `.yard/Dockerfile`;
    real pinfold), the fake-model fixture, and the scenario inventory: every
    guarantee's scenarios as named tests, `#[ignore]`d until their slice
    exists. The fake model speaks the one wire protocol Pi uses for the test
@@ -136,7 +138,9 @@ route that real harnesses talk to.
    the rest of G3 and G7. Once the path is green the project gets its own
    `.yard` and the old Yard on yard-sthlm runs these as lanes: `cargo fmt`,
    `clippy` and `cargo build` as boxed candidate gates, and the e2e suite as
-   a landing-stage host gate, which the old Yard also supports.
+   a landing-stage host gate, which the old Yard also supports. That gate's
+   `env` names `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS`, or podman
+   falls back to a cgroup manager pinfold refuses.
 5. **Claude and Codex, before the cutover.** Each harness returns as its own
    adapter once pinfold's login routes (#62) carry subscription logins; the
    second adapter brings the adapter interface and a second protocol in the
@@ -256,6 +260,37 @@ operator's decisions:
 - Two guarantee scenarios were corrected: the session cap's resume
   arithmetic and the observation for staying local. The dependency list
   gained the hyper glue crates and `getrandom`.
+
+## The second design review, same day
+
+A fresh reviewer read the package at 118ed94 against the old code and
+pinfold 0.0.6. Taken:
+
+- **The socket moved out of `XDG_RUNTIME_DIR`**, to
+  `$XDG_STATE_HOME/yard/yard.sock`. Relocating the runtime directory for a
+  test machine makes rootless podman fall back to `cgroupfs`, which
+  pinfold's preflight refuses; pinfold's own harness relocates only state,
+  config and cache for that reason. The daemon passes the host's runtime
+  directory and session bus to pinfold.
+- **Pi's discovery is off.** Pi loads a project's `.pi/` and skills by
+  default, so a candidate could carry an extension that a reviewer's Pi
+  loads and that publishes a pass with the seat's own bearer. The old
+  adapter passed `--no-extensions` and every sibling flag; the spec had
+  dropped it. Project guidance reaches workers through `instructions`.
+- A read-only attempt ends when its execution stops, and the scheduler
+  starts a read-only ticket once.
+- `start` on a gate or review error reruns that check; `timeout` and
+  `limit` exit through a nudge, which renews the clock or allows one more
+  round.
+- `yard attempt start` has a contract: the scheduler's admission for one
+  named ticket, refused with the reason.
+- G5's intent-before-effect crash window was not a provable point; it is
+  shown by ordering instead.
+- A review publication is an audited decision holding the findings and the
+  check, so tests wait on it through `status --watch`.
+- The daemon serves nothing until reconciliation has committed.
+- Minor: the host-gate machine mutex was cut, no failure named it; OOM is
+  `failed` with cause `oom`; a nudge is refused on a landing's item.
 
 ## Effort
 
