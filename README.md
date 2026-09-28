@@ -62,7 +62,8 @@ the branch into canonical:
 
     yard sync
 
-Check pinfold, the configuration, the image and the credentials:
+Check pinfold, the service, the configuration, the image, the credentials
+and registered project paths that are gone:
 
     yard doctor
 
