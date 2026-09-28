@@ -190,8 +190,6 @@ pub async fn doctor(daemon: &Daemon, project: &Project) -> Result<Value, Fail> {
     }))
 }
 
-/// Import the checkout's branch into canonical, or consume canonical into
-/// the checkout. Both refuse divergence.
 /// Import the checkout's head when it descends from canonical's; `None`
 /// when it does not.
 async fn import(
@@ -268,21 +266,9 @@ pub async fn sync(daemon: &Daemon, project: &Project) -> Result<Value, Fail> {
     if ours.as_deref() == Some(theirs.as_str()) {
         return Ok(json!({ "sync": "current", "head": theirs }));
     }
-    daemon
-        .git
-        .fetch(
-            &canonical,
-            &project.root,
-            &format!("+{target}:refs/yard/import"),
-        )
-        .await?;
-    // Whatever the import decides, the fetched ref goes.
-    let decided = import(daemon, project, &branch, ours.as_deref(), &theirs).await;
-    daemon
-        .git
-        .delete_ref(&canonical, "refs/yard/import")
-        .await?;
-    if let Some(result) = decided? {
+    // The objects only: no ref names them until the import moves the target.
+    daemon.git.fetch(&canonical, &project.root, &target).await?;
+    if let Some(result) = import(daemon, project, &branch, ours.as_deref(), &theirs).await? {
         return Ok(result);
     }
     let ours = ours.expect("a consumed canonical has a head");
@@ -415,7 +401,6 @@ pub async fn ticket_edit(
             params["body"].as_str(),
             priority,
             workflow.as_deref(),
-            None,
         )
     })?;
     project.read(|conn| Ok(tickets::get(conn, id)?.to_json()))
@@ -423,7 +408,6 @@ pub async fn ticket_edit(
 
 /// One ticket edit: bumps the revision, which supersedes every check and
 /// approval item that read the old one.
-#[allow(clippy::too_many_arguments)]
 fn edit(
     tx: &rusqlite::Connection,
     id: i64,
@@ -432,7 +416,6 @@ fn edit(
     body: Option<&str>,
     priority: Option<i64>,
     workflow: Option<&str>,
-    text: Option<&str>,
 ) -> Result<(), Fail> {
     let ticket = tickets::get(tx, id)?;
     if ticket.revision != revision {
@@ -460,7 +443,7 @@ fn edit(
             ticket: Some(id),
             ..Default::default()
         },
-        text,
+        None,
         json!({ "revision": revision + 1, "title": title, "body_bytes": body.map(str::len),
                 "priority": priority, "workflow": workflow }),
     )?;
@@ -499,11 +482,11 @@ pub fn ticket_depend(project: &Project, params: &Value) -> Result<Value, Fail> {
         .as_str()
         .and_then(ticket_id)
         .ok_or_else(|| Fail::invalid("depend names no ticket to depend on"))?;
-    project.tx(|tx| link(tx, id, on, None))?;
+    project.tx(|tx| link(tx, id, on))?;
     ticket_show(project, params)
 }
 
-fn link(tx: &rusqlite::Connection, id: i64, on: i64, text: Option<&str>) -> Result<(), Fail> {
+fn link(tx: &rusqlite::Connection, id: i64, on: i64) -> Result<(), Fail> {
     tickets::get(tx, id)?;
     tickets::get(tx, on)?;
     if tickets::would_cycle(tx, id, on)? {
@@ -524,7 +507,7 @@ fn link(tx: &rusqlite::Connection, id: i64, on: i64, text: Option<&str>) -> Resu
             ticket: Some(id),
             ..Default::default()
         },
-        text,
+        None,
         json!({ "depends_on": ticket_name(on) }),
     )?;
     Ok(())
@@ -614,11 +597,11 @@ pub async fn attempt_start(
         let _admission = daemon.admission.lock().expect("admission lock");
         let ready = project.read(tickets::ready)?;
         let Some(ticket) = ready.into_iter().find(|ticket| ticket.id == id) else {
-            let ticket = project.read(|conn| tickets::get(conn, id))?;
+            let blocker = project.read(|conn| tickets::blocker(conn, id))?;
             return Err(Fail::refused(format!(
                 "{} is not ready: {}",
                 ticket_name(id),
-                not_ready_reason(project, &ticket)?
+                blocker.unwrap_or_default()
             )));
         };
         if free_lanes(daemon, project, &loaded)? <= 0 {
@@ -631,31 +614,6 @@ pub async fn attempt_start(
         Ok(attempts::live_for(conn, id)?
             .map(|attempt| attempt.to_json())
             .unwrap_or(Value::Null))
-    })
-}
-
-fn not_ready_reason(project: &Project, ticket: &tickets::Ticket) -> Result<String, Fail> {
-    if ticket.state != "open" {
-        return Ok(format!("it is {}", ticket.state));
-    }
-    if ticket.parked {
-        return Ok("it is parked".into());
-    }
-    project.read(|conn| {
-        if attempts::live_for(conn, ticket.id)?.is_some() {
-            return Ok("it has a live attempt".into());
-        }
-        let open: Vec<String> = tickets::dependencies(conn, ticket.id)?
-            .into_iter()
-            .filter(|dependency| {
-                tickets::get(conn, *dependency).is_ok_and(|ticket| ticket.state != "done")
-            })
-            .map(ticket_name)
-            .collect();
-        if !open.is_empty() {
-            return Ok(format!("it depends on {}", open.join(", ")));
-        }
-        Ok("a proposal to edit it is open".into())
     })
 }
 
@@ -752,13 +710,12 @@ pub fn attempt_stop(daemon: &Daemon, project: &Project, params: &Value) -> Resul
     Ok(json!({ "stopping": running.id }))
 }
 
-pub fn attempt_nudge(daemon: &Daemon, project: &Project, params: &Value) -> Result<Value, Fail> {
+pub fn attempt_nudge(project: &Project, params: &Value) -> Result<Value, Fail> {
     let id = ticket_param(params)?;
     let text = params["text"].as_str().unwrap_or_default();
     if text.trim().is_empty() {
         return Err(Fail::invalid("a nudge carries text"));
     }
-    let _ = daemon;
     project.tx(|tx| {
         let attempt = attempts::live_for(tx, id)?
             .ok_or_else(|| Fail::refused(format!("{} has no live attempt", ticket_name(id))))?;
@@ -1039,16 +996,13 @@ pub async fn proposal_answer(
                     &tickets::NewTicket {
                         title: field("title").unwrap_or_default(),
                         body: field("body").unwrap_or_default(),
-                        priority: field("priority")
-                            .and_then(crate::config::priority)
-                            .map(i64::from)
-                            .unwrap_or(2),
+                        priority: priority_param(&payload["priority"])?.unwrap_or(2),
                         workflow,
                         depends_on: &depends_on,
                         parked: payload["parked"].as_bool().unwrap_or(false),
                         origin: "proposal",
                     },
-                    text.as_deref(),
+                    None,
                 )?;
                 let planning = item
                     .attempt
@@ -1061,7 +1015,7 @@ pub async fn proposal_answer(
                             .is_ok_and(|workflow| workflow.read_only)
                     });
                 if planning {
-                    link(tx, proposer, ticket, None)?;
+                    link(tx, proposer, ticket)?;
                 }
                 Some(ticket)
             }
@@ -1075,7 +1029,6 @@ pub async fn proposal_answer(
                     field("body"),
                     None,
                     None,
-                    text.as_deref(),
                 )?;
                 None
             }
@@ -1088,7 +1041,7 @@ pub async fn proposal_answer(
                         item.execution,
                         reference.as_str().unwrap_or_default(),
                     )?;
-                    link(tx, from, on, None)?;
+                    link(tx, from, on)?;
                 }
                 None
             }

@@ -421,7 +421,7 @@ pub async fn command(daemon: &Arc<Daemon>, method: &str, params: Value) -> Resul
         "ticket.abandon" => admit::ticket_close(&project, &params, "abandoned"),
         "attempt.start" => admit::attempt_start(daemon, &project, &params).await,
         "attempt.stop" => admit::attempt_stop(daemon, &project, &params),
-        "attempt.nudge" => admit::attempt_nudge(daemon, &project, &params),
+        "attempt.nudge" => admit::attempt_nudge(&project, &params),
         "attempt.approve" => admit::attempt_approve(daemon, &project, &params).await,
         "attempt.reject" => admit::attempt_reject(&project, &params),
         "attempt.abandon" => admit::attempt_abandon(daemon, &project, &params),

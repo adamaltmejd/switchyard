@@ -316,13 +316,6 @@ impl Git {
         Ok(out.code == 0)
     }
 
-    pub async fn delete_ref(&self, repo: &Path, name: &str) -> Result<(), String> {
-        self.run(repo, &["update-ref", "-d", name])
-            .await?
-            .ok("update-ref -d")?;
-        Ok(())
-    }
-
     pub async fn is_ancestor(
         &self,
         repo: &Path,
