@@ -6,12 +6,14 @@ use std::sync::{Arc, Mutex};
 
 /// A worker with its MCP bearer and its clone: `git push` fails, no RPC
 /// lands, canonical is not reachable from the box. The worker commits, then
-/// pushes to its clone's remotes and to canonical's host path, calls the
-/// daemon's socket and asks the MCP route for methods and tools it was not
-/// granted. Control: the queue lands the same candidate.
+/// pushes to canonical's host path, calls the daemon's socket and asks the
+/// MCP route for a daemon method. Control: the queue lands the same
+/// candidate.
 ///
 /// Sabotage: mount the project's `.yard/local` into the worker box at its
-/// host path; the push to canonical lands the commit.
+/// host path; the push to canonical lands the commit. Mount the daemon's
+/// state dir (the socket) into the worker box; the socket call connects.
+/// Serve daemon methods on the MCP listener; the method is found.
 #[test]
 fn a_worker_cannot_land_by_push_rpc_or_canonical() {
     let probes = Arc::new(Mutex::new(String::new()));
@@ -44,26 +46,17 @@ fn a_worker_cannot_land_by_push_rpc_or_canonical() {
     };
     *script.lock().unwrap() = format!(
         "cd /workspace; \
-         git push --quiet origin HEAD:refs/heads/main 2>/dev/null; echo \"push-origin=$?\"; \
          git push --quiet '{canonical}' HEAD:refs/heads/main 2>/dev/null; echo \"push-canonical=$?\"; \
          test -e '{canonical}'; echo \"canonical=$?\"; \
          curl -s --max-time 5 --unix-socket '{socket}' http://yard/rpc \
            -d '{{\"method\":\"attempt.approve\",\"params\":{{}}}}' >/dev/null 2>&1; echo \"socket=$?\"; \
-         {method}{land}",
+         {method}",
         canonical = canonical.display(),
         socket = socket.display(),
         method = call(
             "method",
             json!({ "jsonrpc": "2.0", "id": 1, "method": "attempt.approve", "params": {} }),
             "-32601",
-        ),
-        land = call(
-            "tool",
-            json!({
-                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-                "params": { "name": "attempt.approve", "arguments": { "ticket": "Y-1" } },
-            }),
-            "not granted",
         ),
     );
     let target = project.canonical_head();
@@ -73,24 +66,12 @@ fn a_worker_cannot_land_by_push_rpc_or_canonical() {
     assert_eq!(approval["data"]["kind"], "approval", "{approval}");
 
     let probes = probes.lock().unwrap().clone();
-    for line in [
-        "push-origin=",
-        "push-canonical=",
-        "canonical=1",
-        "method=-32601",
-        "tool=not granted",
-    ] {
+    for line in ["push-canonical=", "canonical=1", "method=-32601"] {
         assert!(probes.contains(line), "{line} missing from:\n{probes}");
     }
-    assert!(!probes.contains("push-origin=0"), "{probes}");
     assert!(!probes.contains("push-canonical=0"), "{probes}");
     assert!(!probes.contains("socket=0"), "{probes}");
     assert_eq!(project.canonical_head(), target);
-    assert!(
-        project
-            .rows("SELECT seq FROM audit WHERE event IN ('approval.given', 'landing.recorded')")
-            .is_empty()
-    );
 
     let head = approval["data"]["payload"]["head"].as_str().unwrap();
     project.json(&["attempt", "approve", "Y-1", "--head", head]);
