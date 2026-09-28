@@ -8,13 +8,9 @@ use crate::store::{attempts, executions};
 use std::sync::Arc;
 
 pub fn next(daemon: &Arc<Daemon>, project: &Arc<Project>) -> Result<(), Fail> {
+    let running = project.read(executions::running)?;
     for attempt in project.read(attempts::uncleaned)? {
-        let busy = project.read(|conn| {
-            Ok(executions::for_attempt(conn, attempt.id)?
-                .iter()
-                .any(|row| row.status == "running"))
-        })?;
-        if busy {
+        if running.iter().any(|row| row.attempt == attempt.id) {
             continue;
         }
         let execution = project.tx(|tx| {

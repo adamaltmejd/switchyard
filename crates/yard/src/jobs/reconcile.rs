@@ -8,7 +8,7 @@ use crate::daemon::{Daemon, Project};
 use crate::store::{attempts, executions};
 use serde_json::{Value, json};
 
-pub async fn project(daemon: &Daemon, project: &Project) -> Result<(), String> {
+pub async fn project(daemon: &Daemon, project: &Project) -> Result<(), Fail> {
     // The old daemon's boxes: their `up` lost its stdin with the daemon.
     let label = format!("dev.yard.project={}", project.key);
     for name in daemon.pinfold.list(&label).await? {
@@ -16,9 +16,7 @@ pub async fn project(daemon: &Daemon, project: &Project) -> Result<(), String> {
     }
     daemon.pinfold.prune().await?;
 
-    let running = project
-        .read(executions::running)
-        .map_err(|fail| fail.message)?;
+    let running = project.read(executions::running)?;
     // Children first: a landing's host gates end before the landing is read.
     for row in running.iter().filter(|row| row.kind != "landing") {
         if let Some(handle) = row
@@ -50,24 +48,28 @@ pub async fn project(daemon: &Daemon, project: &Project) -> Result<(), String> {
                     }
                 }
                 Ok(())
-            })
-            .map_err(|fail| fail.message)?;
+            })?;
     }
     for row in running
         .iter()
         .filter(|row| row.kind == "landing" && row.intent_state.is_none())
     {
         let free = lock_free(&landing_dir(project, row.id))?;
-        project
-            .tx(|tx| {
-                executions::end(tx, row.id, executions::End {
+        project.tx(|tx| {
+            executions::end(
+                tx,
+                row.id,
+                executions::End {
                     outcome: "interrupted",
                     detail: Some("the daemon restarted before the landing's intent"),
                     ..Default::default()
-                })?;
-                if !free {
-                    let attempt = attempts::get(tx, row.attempt)?;
-                    attempts::raise(tx, attempts::Raise {
+                },
+            )?;
+            if !free {
+                let attempt = attempts::get(tx, row.attempt)?;
+                attempts::raise(
+                    tx,
+                    attempts::Raise {
                         kind: "red",
                         reason: "landing",
                         ticket: Some(attempt.ticket),
@@ -75,19 +77,14 @@ pub async fn project(daemon: &Daemon, project: &Project) -> Result<(), String> {
                         execution: Some(row.id),
                         payload: json!({ "detail": "a child of the landing still holds its lock" }),
                         text: None,
-                    })?;
-                }
-                Ok(())
-            })
-            .map_err(|fail| fail.message)?;
+                    },
+                )?;
+            }
+            Ok(())
+        })?;
     }
-    for row in project
-        .read(executions::open_intents)
-        .map_err(|fail| fail.message)?
-    {
-        decide_intent(daemon, project, &row)
-            .await
-            .map_err(|fail| fail.message)?;
+    for row in project.read(executions::open_intents)? {
+        decide_intent(daemon, project, &row).await?;
     }
     Ok(())
 }
@@ -126,7 +123,7 @@ pub async fn decide_intent(
         project.tx(|tx| {
             let open = attempts::open_attention(tx)?
                 .into_iter()
-                .any(|item| item.execution == Some(row.id) && item.kind == "red" && item.state == "open");
+                .any(|item| item.execution == Some(row.id) && item.kind == "red");
             if !open {
                 let attempt = attempts::get(tx, row.attempt)?;
                 attempts::raise(tx, attempts::Raise {
@@ -146,12 +143,8 @@ pub async fn decide_intent(
         return undecided("a git child of the landing still holds its lock");
     }
     let canonical = project.canonical_dir();
-    let branch = daemon.git.head_branch(&canonical).await?;
-    let target = daemon
-        .git
-        .rev_parse(&canonical, &crate::git::target_ref(&branch))
-        .await;
-    let (Ok(Some(target)), Some(old), Some(merged)) = (
+    let target = daemon.git.target_head(&canonical).await;
+    let (Ok((_, Some(target))), Some(old), Some(merged)) = (
         target,
         row.intent_old.as_deref(),
         row.intent_merged.as_deref(),

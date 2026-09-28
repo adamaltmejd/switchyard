@@ -216,7 +216,7 @@ async fn call(daemon: &Arc<Daemon>, grant: &Grant, params: &Value) -> Value {
         match name {
             "yard_context" => crate::jobs::supervise::context(daemon, grant).await,
             "yard_progress" => progress(grant, &arguments),
-            "yard_propose" => crate::jobs::propose(daemon, grant, &arguments),
+            "yard_propose" => crate::jobs::propose(grant, &arguments),
             "yard_publish_review" => crate::jobs::review::publish(daemon, grant, &arguments),
             _ => unreachable!("granted tools are the four above"),
         }

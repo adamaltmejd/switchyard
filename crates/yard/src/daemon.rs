@@ -171,7 +171,9 @@ async fn serve() -> Result<(), String> {
             continue;
         }
         let project = open_project(&root)?;
-        crate::jobs::reconcile::project(&daemon, &project).await?;
+        crate::jobs::reconcile::project(&daemon, &project)
+            .await
+            .map_err(|fail| fail.message)?;
         daemon
             .projects
             .lock()

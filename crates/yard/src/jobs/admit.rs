@@ -258,14 +258,13 @@ async fn import(
 pub async fn sync(daemon: &Daemon, project: &Project) -> Result<Value, Fail> {
     let _canonical = project.canonical.lock().await;
     let canonical = project.canonical_dir();
-    let branch = daemon.git.head_branch(&canonical).await?;
+    let (branch, ours) = daemon.git.target_head(&canonical).await?;
     let target = crate::git::target_ref(&branch);
     let theirs = daemon
         .git
         .rev_parse(&project.root, &target)
         .await?
         .ok_or_else(|| Fail::refused(format!("the checkout has no branch {branch}")))?;
-    let ours = daemon.git.rev_parse(&canonical, &target).await?;
     if ours.as_deref() == Some(theirs.as_str()) {
         return Ok(json!({ "sync": "current", "head": theirs }));
     }
@@ -837,18 +836,14 @@ pub async fn attempt_approve(
         let (attempt, item) = approval_item(tx, id, head)?;
         let ticket = tickets::get(tx, id)?;
         let review_digest = loaded.review_digest(&attempt.workflow)?;
-        for (key, current) in [
-            ("revision", json!(ticket.revision)),
-            ("gate_digest", json!(loaded.gate_digest)),
-            ("review_digest", json!(review_digest)),
-        ] {
-            if item.payload[key] != current {
-                return Err(Fail::stale(
-                    format!("the item's {key} is no longer current"),
-                    item.payload[key].clone(),
-                    current,
-                ));
-            }
+        if let Some((key, recorded, current)) =
+            super::stale_part(&item.payload, &attempt, &ticket, &loaded)?
+        {
+            return Err(Fail::stale(
+                format!("the item's {key} is no longer current"),
+                recorded,
+                current,
+            ));
         }
         let checks: Vec<i64> = item.payload["checks"]
             .as_array()

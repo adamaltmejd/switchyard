@@ -140,6 +140,13 @@ impl Git {
             .ok_or_else(|| "HEAD names no branch".to_string())
     }
 
+    /// Canonical's target branch and its head, if it has one yet.
+    pub async fn target_head(&self, canonical: &Path) -> Result<(String, Option<String>), String> {
+        let branch = self.head_branch(canonical).await?;
+        let head = self.rev_parse(canonical, &target_ref(&branch)).await?;
+        Ok((branch, head))
+    }
+
     /// The commit `rev` names, or None.
     pub async fn rev_parse(&self, repo: &Path, rev: &str) -> Result<Option<String>, String> {
         let out = self

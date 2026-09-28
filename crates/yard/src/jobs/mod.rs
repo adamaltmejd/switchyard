@@ -33,16 +33,12 @@ impl Loaded {
 
 pub async fn load(daemon: &Daemon, project: &Project) -> Result<Arc<Loaded>, Fail> {
     let canonical = project.canonical_dir();
-    let branch = daemon.git.head_branch(&canonical).await?;
-    let head = daemon
-        .git
-        .rev_parse(&canonical, &crate::git::target_ref(&branch))
-        .await?
-        .ok_or_else(|| {
-            Fail::refused(format!(
-                "canonical has no {branch} yet; commit .yard in the checkout and run `yard sync`"
-            ))
-        })?;
+    let (branch, head) = daemon.git.target_head(&canonical).await?;
+    let head = head.ok_or_else(|| {
+        Fail::refused(format!(
+            "canonical has no {branch} yet; commit .yard in the checkout and run `yard sync`"
+        ))
+    })?;
     if let Some(loaded) = project.loaded.lock().expect("loaded lock").as_ref()
         && loaded.head == head
     {
@@ -187,7 +183,7 @@ async fn advance(
     // An approval item counts while everything it binds is current; a new
     // head, ticket revision or digest supersedes it.
     if let Some(item) = open.iter().find(|item| item.kind == "approval") {
-        if binds_current(&item.payload, attempt, &ticket, loaded)? {
+        if stale_part(&item.payload, attempt, &ticket, loaded)?.is_none() {
             return Ok(());
         }
         project.tx(|tx| attempts::resolve(tx, item, "superseded", None))?;
@@ -213,6 +209,14 @@ async fn advance(
         .max()
         .unwrap_or(0);
 
+    let shared = executions::Start {
+        attempt: attempt.id,
+        base: Some(base),
+        head: Some(head),
+        ticket_revision: Some(ticket.revision),
+        ticket: Some(ticket.id),
+        ..Default::default()
+    };
     let gate_input = checks::Input {
         attempt: attempt.id,
         base: base.to_string(),
@@ -233,16 +237,11 @@ async fn advance(
                     executions::start(
                         tx,
                         executions::Start {
-                            attempt: attempt.id,
                             kind: "gate",
                             reason: Some("candidate"),
-                            base: Some(base),
-                            head: Some(head),
-                            ticket_revision: Some(ticket.revision),
                             digest: Some(&loaded.gate_digest),
                             name: Some(&gate.name),
-                            ticket: Some(ticket.id),
-                            ..Default::default()
+                            ..shared
                         },
                     )
                 })?;
@@ -280,18 +279,13 @@ async fn advance(
                     executions::start(
                         tx,
                         executions::Start {
-                            attempt: attempt.id,
                             kind: "review",
                             reason: Some("first"),
-                            base: Some(base),
-                            head: Some(head),
-                            ticket_revision: Some(ticket.revision),
                             digest: Some(&review_digest),
                             name: Some(seat),
                             round: Some(attempt.rounds + 1),
-                            ticket: Some(ticket.id),
                             agent: Some((agent, &settings)),
-                            ..Default::default()
+                            ..shared
                         },
                     )
                 })?;
@@ -366,23 +360,30 @@ pub fn raise_approval(
     )
 }
 
-/// Whether an approval item's candidate, ticket revision and digests are
-/// all still current.
-pub fn binds_current(
+/// The first part of an approval item's candidate, ticket revision and
+/// digests that is no longer current: `(key, recorded, current)`.
+pub fn stale_part(
     payload: &Value,
     attempt: &attempts::Attempt,
     ticket: &tickets::Ticket,
     loaded: &Loaded,
-) -> Result<bool, Fail> {
-    Ok(attempt.candidate()
-        == Some((
-            payload["base"].as_str().unwrap_or_default(),
-            payload["head"].as_str().unwrap_or_default(),
-        ))
-        && payload["revision"].as_i64() == Some(ticket.revision)
-        && payload["gate_digest"].as_str() == Some(loaded.gate_digest.as_str())
-        && payload["review_digest"].as_str()
-            == Some(loaded.review_digest(&attempt.workflow)?.as_str()))
+) -> Result<Option<(&'static str, Value, Value)>, Fail> {
+    let (base, head) = attempt.candidate().unwrap_or_default();
+    for (key, current) in [
+        ("base", json!(base)),
+        ("head", json!(head)),
+        ("revision", json!(ticket.revision)),
+        ("gate_digest", json!(loaded.gate_digest)),
+        (
+            "review_digest",
+            json!(loaded.review_digest(&attempt.workflow)?),
+        ),
+    ] {
+        if payload[key] != current {
+            return Ok(Some((key, payload[key].clone(), current)));
+        }
+    }
+    Ok(None)
 }
 
 /// The protected paths `base..head` touches.
@@ -435,11 +436,7 @@ pub async fn command(daemon: &Arc<Daemon>, method: &str, params: Value) -> Resul
 
 /// `yard_propose`: a proposal is an attention item. A proposal to edit the
 /// worker's own ticket pauses its attempt until decided.
-pub fn propose(
-    _daemon: &Arc<Daemon>,
-    grant: &crate::mcp::Grant,
-    arguments: &Value,
-) -> Result<Value, Fail> {
+pub fn propose(grant: &crate::mcp::Grant, arguments: &Value) -> Result<Value, Fail> {
     let object = crate::mcp::strict(
         arguments,
         &[
@@ -460,7 +457,7 @@ pub fn propose(
         .and_then(Value::as_str)
         .ok_or_else(|| Fail::invalid("kind is required"))?;
     let text = |key: &str| object.get(key).and_then(Value::as_str);
-    let reason = match kind {
+    match kind {
         "ticket" => {
             if text("title").is_none_or(|title| title.trim().is_empty()) {
                 return Err(Fail::invalid("a ticket proposal needs a title"));
@@ -472,26 +469,23 @@ pub fn propose(
                     "priority {priority:?} is not P0 to P3"
                 )));
             }
-            "ticket"
         }
         "edit" => {
             if text("title").is_none() && text("body").is_none() {
                 return Err(Fail::invalid("an edit proposal needs a title or a body"));
             }
-            "edit"
         }
         "link" => {
             if text("ticket").is_none() || object.get("depends_on").is_none() {
                 return Err(Fail::invalid("a link proposal needs ticket and depends_on"));
             }
-            "link"
         }
         other => {
             return Err(Fail::invalid(format!(
                 "kind {other:?} is ticket, edit or link"
             )));
         }
-    };
+    }
     if let Some(depends) = object.get("depends_on")
         && !depends
             .as_array()
@@ -508,7 +502,7 @@ pub fn propose(
             tx,
             attempts::Raise {
                 kind: "proposal",
-                reason,
+                reason: kind,
                 ticket: Some(attempt.ticket),
                 attempt: Some(attempt.id),
                 execution: Some(grant.execution),
@@ -520,15 +514,6 @@ pub fn propose(
     Ok(json!({ "proposal": id }))
 }
 
-/// The attempt's audit target.
-pub fn target(attempt: &attempts::Attempt) -> Target {
-    Target {
-        ticket: Some(attempt.ticket),
-        attempt: Some(attempt.id),
-        ..Target::default()
-    }
-}
-
 pub fn audit_attempt(
     tx: &rusqlite::Connection,
     event: &str,
@@ -536,5 +521,10 @@ pub fn audit_attempt(
     text: Option<&str>,
     data: Value,
 ) -> Result<i64, Fail> {
-    store::audit(tx, event, target(attempt), text, data)
+    let target = Target {
+        ticket: Some(attempt.ticket),
+        attempt: Some(attempt.id),
+        ..Target::default()
+    };
+    store::audit(tx, event, target, text, data)
 }
