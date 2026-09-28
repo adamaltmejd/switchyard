@@ -98,10 +98,7 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
             daemon.grants.revoke(execution);
             return Err(Fail::new(
                 "box",
-                format!(
-                    "the review box did not come up: {}: {}",
-                    error.reason, error.detail
-                ),
+                format!("the review box did not come up: {error}"),
             ));
         }
     };

@@ -5,7 +5,6 @@ use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
-use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 /// Overrides no repository configuration can undo.
@@ -51,16 +50,6 @@ pub struct Git {
     path: String,
 }
 
-/// How one call treats its child.
-#[derive(Clone, Copy, Default)]
-pub struct Opts {
-    /// A lock descriptor the child inherits, so its life is visible to a
-    /// restarted daemon through `flock`.
-    pub inherit: Option<RawFd>,
-    /// Landing children are never killed; a timeout leaves them running.
-    pub never_kill: bool,
-}
-
 pub enum Merge {
     Clean { tree: String },
     Conflict { paths: Vec<String> },
@@ -73,10 +62,18 @@ impl Git {
     }
 
     pub async fn run(&self, cwd: &Path, args: &[&str]) -> Result<Out, String> {
-        self.run_with(cwd, args, Opts::default()).await
+        self.run_with(cwd, args, None).await
     }
 
-    pub async fn run_with(&self, cwd: &Path, args: &[&str], opts: Opts) -> Result<Out, String> {
+    /// `lock` makes a landing child: it inherits the landing's lock
+    /// descriptor, so its life is visible to a restarted daemon through
+    /// `flock`, and it is never killed; a timeout leaves it running.
+    pub async fn run_with(
+        &self,
+        cwd: &Path,
+        args: &[&str],
+        lock: Option<RawFd>,
+    ) -> Result<Out, String> {
         let mut command = Command::new("git");
         command
             .current_dir(cwd)
@@ -84,7 +81,6 @@ impl Git {
             .env("PATH", &self.path)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("LC_ALL", "C")
             .env("GIT_AUTHOR_NAME", "Switchyard")
@@ -94,83 +90,54 @@ impl Git {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(!opts.never_kill);
+            .kill_on_drop(lock.is_none());
         for pair in HARDENING {
             command.arg("-c").arg(pair);
         }
         command.args(args);
-        if let Some(fd) = opts.inherit {
-            // SAFETY: fcntl is async-signal-safe; it only clears
-            // close-on-exec on a descriptor this process owns.
-            unsafe {
-                command.pre_exec(move || {
-                    let flags = nix::libc::fcntl(fd, nix::libc::F_GETFD);
-                    if flags < 0
-                        || nix::libc::fcntl(fd, nix::libc::F_SETFD, flags & !nix::libc::FD_CLOEXEC)
-                            < 0
-                    {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    Ok(())
-                });
-            }
+        if let Some(fd) = lock {
+            inherit(&mut command, fd);
         }
         let mut child = command
             .spawn()
             .map_err(|error| format!("spawn git: {error}"))?;
-        let mut stdout = child.stdout.take().expect("piped stdout");
-        let mut stderr = child.stderr.take().expect("piped stderr");
-        let read = async {
-            let mut out = Vec::new();
-            let mut err = Vec::new();
-            let mut stdout = (&mut stdout).take(OUTPUT_MAX as u64);
-            let mut stderr = (&mut stderr).take(OUTPUT_MAX as u64);
-            let (a, b) = tokio::join!(stdout.read_to_end(&mut out), stderr.read_to_end(&mut err));
-            a.and(b).map(|_| (out, err))
-        };
+        let stdout = child.stdout.take().expect("piped stdout");
+        let stderr = child.stderr.take().expect("piped stderr");
         let run = async {
-            let (out, err) = read.await.map_err(|error| error.to_string())?;
+            let (stdout, stderr) = tokio::join!(
+                crate::r#box::read_capped(stdout, OUTPUT_MAX),
+                crate::r#box::read_capped(stderr, OUTPUT_MAX)
+            );
             let status = child.wait().await.map_err(|error| error.to_string())?;
-            Ok::<_, String>((status, out, err))
+            Ok::<_, String>(Out {
+                code: exit_code(status),
+                stdout,
+                stderr,
+            })
         };
         match tokio::time::timeout(TIMEOUT, run).await {
-            Ok(result) => {
-                let (status, out, err) = result?;
-                Ok(Out {
-                    code: exit_code(status),
-                    stdout: String::from_utf8_lossy(&out).into_owned(),
-                    stderr: String::from_utf8_lossy(&err).into_owned(),
-                })
-            }
+            Ok(result) => result,
             // Dropping the future drops the child, which kills it unless it
             // is a landing child.
             Err(_) => Err(format!("git {} timed out", args.first().unwrap_or(&""))),
         }
     }
 
-    pub async fn init_bare(&self, dir: &Path) -> Result<(), String> {
+    /// A bare repository whose HEAD names `branch`: the target's name.
+    pub async fn init_bare(&self, dir: &Path, branch: &str) -> Result<(), String> {
         std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
-        self.run(dir, &["init", "--bare", "--quiet", "."])
+        let initial = format!("--initial-branch={branch}");
+        self.run(dir, &["init", "--bare", "--quiet", &initial, "."])
             .await?
             .ok("init")?;
         Ok(())
     }
 
-    /// Point a bare repository's HEAD at `branch`: the target's name.
-    pub async fn set_head(&self, repo: &Path, branch: &str) -> Result<(), String> {
-        self.run(repo, &["symbolic-ref", "HEAD", &target_ref(branch)])
-            .await?
-            .ok("symbolic-ref")?;
-        Ok(())
-    }
-
     /// The branch a bare repository's HEAD names.
     pub async fn head_branch(&self, repo: &Path) -> Result<String, String> {
-        let out = self
-            .run(repo, &["symbolic-ref", "--short", "HEAD"])
+        self.current_branch(repo)
             .await?
-            .ok("symbolic-ref")?;
-        Ok(out.stdout.trim().to_string())
+            .ok_or_else(|| "HEAD names no branch".to_string())
     }
 
     /// The commit `rev` names, or None.
@@ -213,7 +180,6 @@ impl Git {
                 "--quiet",
                 "--no-tags",
                 "--no-write-fetch-head",
-                "--no-recurse-submodules",
                 "--end-of-options",
                 from,
                 refspec,
@@ -332,13 +298,13 @@ impl Git {
         name: &str,
         new: &str,
         old: Option<&str>,
-        opts: Opts,
+        lock: Option<RawFd>,
     ) -> Result<bool, String> {
         // An absent ref is expected as the zero id.
         let zero = "0".repeat(40);
         let old = old.unwrap_or(&zero);
         let out = self
-            .run_with(repo, &["update-ref", "--no-deref", name, new, old], opts)
+            .run_with(repo, &["update-ref", "--no-deref", name, new, old], lock)
             .await?;
         Ok(out.code == 0)
     }
@@ -350,20 +316,15 @@ impl Git {
         Ok(())
     }
 
-    pub async fn is_ancestor(&self, repo: &Path, ancestor: &str, of: &str) -> Result<bool, String> {
-        self.is_ancestor_with(repo, ancestor, of, Opts::default())
-            .await
-    }
-
-    pub async fn is_ancestor_with(
+    pub async fn is_ancestor(
         &self,
         repo: &Path,
         ancestor: &str,
         of: &str,
-        opts: Opts,
+        lock: Option<RawFd>,
     ) -> Result<bool, String> {
         let out = self
-            .run_with(repo, &["merge-base", "--is-ancestor", ancestor, of], opts)
+            .run_with(repo, &["merge-base", "--is-ancestor", ancestor, of], lock)
             .await?;
         match out.code {
             0 => Ok(true),
@@ -445,13 +406,30 @@ impl Git {
                 &format!("refs/heads/{branch}"),
                 commit,
                 Some(old),
-                Opts::default(),
+                None,
             )
             .await?
         {
             return Err(format!("the checkout's {branch} moved"));
         }
         Ok(())
+    }
+}
+
+/// Clear close-on-exec on `fd` in the child, so it inherits the descriptor.
+pub fn inherit(command: &mut Command, fd: RawFd) {
+    // SAFETY: fcntl is async-signal-safe; it only clears close-on-exec on a
+    // descriptor this process owns.
+    unsafe {
+        command.pre_exec(move || {
+            let flags = nix::libc::fcntl(fd, nix::libc::F_GETFD);
+            if flags < 0
+                || nix::libc::fcntl(fd, nix::libc::F_SETFD, flags & !nix::libc::FD_CLOEXEC) < 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
     }
 }
 

@@ -11,8 +11,8 @@ use serde_json::{Value, json};
 pub async fn project(daemon: &Daemon, project: &Project) -> Result<(), String> {
     // The old daemon's boxes: their `up` lost its stdin with the daemon.
     let label = format!("dev.yard.project={}", project.key);
-    for listed in daemon.pinfold.list(&label).await? {
-        daemon.pinfold.down(&listed.name).await?;
+    for name in daemon.pinfold.list(&label).await? {
+        daemon.pinfold.down(&name).await?;
     }
     daemon.pinfold.prune().await?;
 
@@ -176,7 +176,12 @@ pub async fn decide_intent(
         })?;
         return Ok(true);
     }
-    if target == merged || daemon.git.is_ancestor(&canonical, merged, &target).await? {
+    if target == merged
+        || daemon
+            .git
+            .is_ancestor(&canonical, merged, &target, None)
+            .await?
+    {
         project.tx(|tx| record_landing(tx, row.id))?;
         return Ok(true);
     }

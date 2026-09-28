@@ -444,8 +444,7 @@ async fn init(daemon: &Arc<Daemon>, params: &Value) -> Result<Value, Fail> {
     }
     let canonical = crate::git::canonical_dir(&root);
     if !canonical.join("HEAD").exists() {
-        daemon.git.init_bare(&canonical).await?;
-        daemon.git.set_head(&canonical, &branch).await?;
+        daemon.git.init_bare(&canonical, &branch).await?;
     }
     let mut roots = registry()?;
     if !roots.contains(&root) {

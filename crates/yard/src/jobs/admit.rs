@@ -163,11 +163,10 @@ pub fn status(project: &Project) -> Result<Value, Fail> {
 }
 
 pub async fn doctor(daemon: &Daemon, project: &Project) -> Result<Value, Fail> {
-    let pinfold = tokio::process::Command::new("pinfold")
-        .arg("--version")
-        .output()
+    let pinfold = daemon
+        .pinfold
+        .version()
         .await
-        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
         .unwrap_or_else(|error| format!("not found: {error}"));
     let loaded = load(daemon, project).await;
     let connections: Vec<Value> = crate::pi::CONNECTIONS
@@ -205,7 +204,12 @@ async fn import(
     let canonical = project.canonical_dir();
     let imported = match ours {
         None => true,
-        Some(ours) => daemon.git.is_ancestor(&canonical, ours, theirs).await?,
+        Some(ours) => {
+            daemon
+                .git
+                .is_ancestor(&canonical, ours, theirs, None)
+                .await?
+        }
     };
     if !imported {
         return Ok(None);
@@ -230,7 +234,7 @@ async fn import(
     let target = crate::git::target_ref(branch);
     let moved = daemon
         .git
-        .update_ref(&canonical, &target, theirs, ours, Default::default())
+        .update_ref(&canonical, &target, theirs, ours, None)
         .await?;
     if !moved {
         return Err(Fail::refused(
@@ -283,7 +287,11 @@ pub async fn sync(daemon: &Daemon, project: &Project) -> Result<Value, Fail> {
         return Ok(result);
     }
     let ours = ours.expect("a consumed canonical has a head");
-    if !daemon.git.is_ancestor(&canonical, &theirs, &ours).await? {
+    if !daemon
+        .git
+        .is_ancestor(&canonical, &theirs, &ours, None)
+        .await?
+    {
         return Err(Fail::refused(format!(
             "the checkout's {branch} at {theirs} and canonical at {ours} have diverged"
         ))

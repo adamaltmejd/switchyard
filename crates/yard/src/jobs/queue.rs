@@ -5,7 +5,7 @@ use super::{Loaded, load, spawn};
 use crate::api::Fail;
 use crate::config::Approve;
 use crate::daemon::{Daemon, Project};
-use crate::git::{Merge, Opts};
+use crate::git::Merge;
 use crate::store::{self, attempts, checks, executions, ticket_name, tickets};
 use serde_json::json;
 use std::os::fd::AsRawFd;
@@ -183,10 +183,7 @@ pub async fn land(
     let target_ref = crate::git::target_ref(&loaded.branch);
     let dir = landing_dir(project, execution);
     let lock = super::supervise::hold_lock(&dir)?;
-    let opts = Opts {
-        inherit: Some(lock.as_raw_fd()),
-        never_kill: true,
-    };
+    let fd = Some(lock.as_raw_fd());
     let head = approval.head.clone();
 
     let (target, merged) = {
@@ -196,7 +193,11 @@ pub async fn land(
             .rev_parse(&canonical, &target_ref)
             .await?
             .ok_or_else(|| Fail::refused("canonical has no target"))?;
-        let merged = if daemon.git.is_ancestor(&canonical, &target, &head).await? {
+        let merged = if daemon
+            .git
+            .is_ancestor(&canonical, &target, &head, None)
+            .await?
+        {
             head.clone()
         } else {
             match daemon.git.merge_tree(&canonical, &target, &head).await? {
@@ -235,7 +236,7 @@ pub async fn land(
                 &format!("refs/yard/landings/{execution}"),
                 &merged,
                 None,
-                Opts::default(),
+                None,
             )
             .await?;
         (target, merged)
@@ -346,7 +347,7 @@ pub async fn land(
     }
     let moved = daemon
         .git
-        .update_ref(&canonical, &target_ref, &merged, Some(&target), opts)
+        .update_ref(&canonical, &target_ref, &merged, Some(&target), fd)
         .await;
     match moved {
         Ok(false) => {
@@ -375,7 +376,7 @@ pub async fn land(
     }
     if !daemon
         .git
-        .is_ancestor_with(&canonical, &head, &target_ref, opts)
+        .is_ancestor(&canonical, &head, &target_ref, fd)
         .await?
     {
         return Err(Fail::new(

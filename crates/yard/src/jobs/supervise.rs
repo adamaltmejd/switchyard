@@ -9,6 +9,7 @@ use crate::daemon::{Daemon, Project};
 use crate::store::{self, attempts, checks, executions, ticket_name, tickets};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -81,11 +82,12 @@ pub async fn image(daemon: &Daemon, project: &Project, loaded: &Loaded) -> Resul
     let _ = std::fs::remove_dir_all(&context);
     let built = built
         .map_err(|error| Fail::new("image", format!("the project image did not build: {error}")))?;
-    daemon.images.lock().expect("images lock").insert(
-        project.key.clone(),
-        (loaded.head.clone(), built.reference.clone()),
-    );
-    Ok(built.reference)
+    daemon
+        .images
+        .lock()
+        .expect("images lock")
+        .insert(project.key.clone(), (loaded.head.clone(), built.clone()));
+    Ok(built)
 }
 
 /// A worker box: the harness, the model route and the MCP route.
@@ -165,7 +167,6 @@ pub fn worker_spec(daemon: &Daemon, project: &Project, worker: &Worker) -> BoxSp
             allow: worker.egress.to_vec(),
             routes,
         }),
-        cpus: None,
         memory: daemon.machine.box_memory.clone(),
     }
 }
@@ -424,10 +425,7 @@ pub async fn implement(
             daemon.grants.revoke(execution);
             return Err(Fail::new(
                 "box",
-                format!(
-                    "the box did not come up: {}: {}",
-                    error.reason, error.detail
-                ),
+                format!("the box did not come up: {error}"),
             ));
         }
     };
@@ -481,13 +479,7 @@ pub async fn implement(
             .filter(|out| out.code == 0)
             .map(|out| out.stdout)
     };
-    let oom = daemon
-        .pinfold
-        .stat(&live.name)
-        .await
-        .ok()
-        .flatten()
-        .and_then(|stat| stat.oom_kills);
+    let oom = daemon.pinfold.oom_kills(&live.name).await;
     daemon.grants.revoke(execution);
     let _ = live.down(DOWN_TIMEOUT).await;
 
@@ -525,7 +517,7 @@ pub async fn implement(
         (Some(target), Some(head))
             if daemon
                 .git
-                .is_ancestor(&project.canonical_dir(), target, head)
+                .is_ancestor(&project.canonical_dir(), target, head, None)
                 .await? =>
         {
             target.clone()
@@ -929,19 +921,13 @@ async fn box_gate(
             allow: loaded.config.egress.clone(),
             routes: BTreeMap::new(),
         }),
-        cpus: None,
         memory: daemon.machine.box_memory.clone(),
     };
     let live = daemon
         .pinfold
         .up(&spec, &[], UP_TIMEOUT)
         .await
-        .map_err(|error| {
-            format!(
-                "the gate box did not come up: {}: {}",
-                error.reason, error.detail
-            )
-        })?;
+        .map_err(|error| format!("the gate box did not come up: {error}"))?;
     let _ = project
         .read(|conn| executions::set_handle(conn, execution, &live.name, live.image_id.as_deref()));
     let result = daemon
@@ -953,13 +939,7 @@ async fn box_gate(
             Duration::from_secs(gate.timeout_minutes * 60),
         )
         .await;
-    let oom = daemon
-        .pinfold
-        .stat(&live.name)
-        .await
-        .ok()
-        .flatten()
-        .and_then(|stat| stat.oom_kills);
+    let oom = daemon.pinfold.oom_kills(&live.name).await;
     let image = live.image_id.clone();
     let _ = live.down(DOWN_TIMEOUT).await;
     match result {
@@ -1021,7 +1001,7 @@ async fn host_gate(
             command.env(name, value);
         }
     }
-    inherit(&mut command, lock);
+    crate::git::inherit(&mut command, lock.as_raw_fd());
     let mut child = command
         .spawn()
         .map_err(|error| format!("spawn the host gate: {error}"))?;
@@ -1103,24 +1083,6 @@ pub fn lock_free(dir: &Path) -> Result<bool, String> {
         }
         Err((_, nix::errno::Errno::EWOULDBLOCK)) => Ok(false),
         Err((_, error)) => Err(error.to_string()),
-    }
-}
-
-pub fn inherit(command: &mut tokio::process::Command, lock: &Lock) {
-    use std::os::fd::AsRawFd;
-    let fd = lock.as_raw_fd();
-    // SAFETY: fcntl is async-signal-safe; it clears close-on-exec on a
-    // descriptor this process owns.
-    unsafe {
-        command.pre_exec(move || {
-            let flags = nix::libc::fcntl(fd, nix::libc::F_GETFD);
-            if flags < 0
-                || nix::libc::fcntl(fd, nix::libc::F_SETFD, flags & !nix::libc::FD_CLOEXEC) < 0
-            {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
     }
 }
 

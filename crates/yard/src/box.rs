@@ -3,9 +3,8 @@
 //! returns what pinfold said as data and never touches a store.
 
 use std::collections::BTreeMap;
-use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-use std::process::{ExitStatus, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 use nix::sys::signal::{Signal, kill, killpg};
@@ -43,8 +42,6 @@ pub struct BoxSpec {
     pub env: BTreeMap<String, EnvValue>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub egress: Option<Egress>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cpus: Option<f64>,
     /// A whole number and `M` or `G`, at least `256M`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory: Option<String>,
@@ -102,16 +99,6 @@ pub struct Header {
     pub prefix: String,
 }
 
-/// `reason` is pinfold's refusal (`spec`, `profile`, `runtime`,
-/// `image-missing`, `name-in-use`), or `failed`, `down` (a signal ended `up`
-/// before ready), `timeout`, `spawn`, `eof` or `protocol` (a line that is
-/// not pinfold's).
-#[derive(Debug)]
-pub struct UpError {
-    pub reason: String,
-    pub detail: String,
-}
-
 #[derive(Debug)]
 pub struct ExecOutput {
     /// 128+n for a signal death.
@@ -137,44 +124,6 @@ impl std::fmt::Display for ExecError {
     }
 }
 
-impl std::fmt::Display for BuildError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            BuildError::Failed(log) => write!(f, "the build failed:\n{}", log.join("\n")),
-            BuildError::Refused { reason, detail } => write!(f, "refused ({reason}): {detail}"),
-            BuildError::Other(detail) => write!(f, "{detail}"),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct Stat {
-    /// Monotonic for the box's life; null where the runtime cannot answer.
-    pub oom_kills: Option<u64>,
-}
-
-#[derive(Debug)]
-pub struct Listed {
-    pub name: String,
-}
-
-#[derive(Debug)]
-pub struct Built {
-    /// The build's own `ref`, unique to this build.
-    pub reference: String,
-}
-
-#[derive(Debug)]
-pub enum BuildError {
-    /// The last lines of the runtime's build output.
-    Failed(Vec<String>),
-    Refused {
-        reason: String,
-        detail: String,
-    },
-    Other(String),
-}
-
 /// A box this process brought up. Dropping it closes `up`'s stdin, which is
 /// pinfold's `down`; the `up` process is never killed for it.
 #[derive(Debug)]
@@ -196,8 +145,7 @@ struct Line {
     #[serde(rename = "ref")]
     reference: Option<String>,
     log: Option<Vec<String>>,
-    #[serde(rename = "box")]
-    name: Option<String>,
+    oom_kills: Option<u64>,
 }
 
 impl Line {
@@ -216,36 +164,6 @@ impl Line {
     fn image_id(&self) -> Option<String> {
         let id = self.image.as_ref()?.get("id")?.as_str()?;
         Some(id.to_string())
-    }
-}
-
-#[derive(Deserialize)]
-struct ListLine {
-    name: String,
-}
-
-#[derive(Deserialize)]
-struct StatLine {
-    oom_kills: Option<u64>,
-}
-
-struct Collected {
-    code: i32,
-    stdout: String,
-    stderr: String,
-}
-
-enum RunError {
-    Timeout,
-    Spawn(String),
-}
-
-impl std::fmt::Display for RunError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RunError::Timeout => f.write_str("timed out"),
-            RunError::Spawn(detail) => write!(f, "could not start pinfold: {detail}"),
-        }
     }
 }
 
@@ -284,17 +202,15 @@ impl Pinfold {
     /// Writes the spec and keeps stdin open until `ready`. `secrets` reach
     /// this child's environment only, for the spec's `{"from": NAME}`.
     /// `timeout` bounds bring-up; a late `up` is SIGTERMed, which removes
-    /// whatever it made.
+    /// whatever it made. The error leads with pinfold's refusal reason, or
+    /// `failed`, `down`, `timeout`, `spawn`, `eof` or `protocol`.
     pub async fn up(
         &self,
         spec: &BoxSpec,
         secrets: &[(String, String)],
         timeout: Duration,
-    ) -> Result<LiveBox, UpError> {
-        let error = |reason: &str, detail: String| UpError {
-            reason: reason.to_string(),
-            detail,
-        };
+    ) -> Result<LiveBox, String> {
+        let error = |reason: &str, detail: String| format!("{reason}: {detail}");
         let mut wire = serde_json::to_vec(spec).map_err(|e| error("spec", e.to_string()))?;
         wire.push(b'\n');
         let mut command = self.command(&["box", "up"]);
@@ -304,7 +220,10 @@ impl Pinfold {
         let mut child = command.spawn().map_err(|e| error("spawn", e.to_string()))?;
         let mut stdin = child.stdin.take();
         let mut stdout = BufReader::new(child.stdout.take().expect("piped stdout"));
-        let stderr = tokio::spawn(read_capped(child.stderr.take().expect("piped stderr")));
+        let stderr = tokio::spawn(read_capped(
+            child.stderr.take().expect("piped stderr"),
+            OUTPUT_CAP,
+        ));
 
         let first = tokio::time::timeout(timeout, async {
             // A failed write is answered by pinfold's own line, or by EOF.
@@ -372,32 +291,23 @@ impl Pinfold {
         argv: &[String],
         timeout: Duration,
     ) -> Result<ExecOutput, ExecError> {
-        let out = collect(self.exec_command(name, workdir, argv), timeout)
-            .await
-            .map_err(|e| match e {
-                RunError::Timeout => ExecError::Timeout,
-                RunError::Spawn(detail) => ExecError::Spawn(detail),
-            })?;
+        let out = collect(self.exec_command(name, workdir, argv), timeout).await?;
         if out.code == ABSENT_EXIT && out.stderr.starts_with("pinfold box exec: no box named") {
             return Err(ExecError::Absent);
         }
-        Ok(ExecOutput {
-            code: out.code,
-            stdout: out.stdout,
-            stderr: out.stderr,
-        })
+        Ok(out)
     }
 
-    pub async fn stat(&self, name: &str) -> Result<Option<Stat>, String> {
-        let out = self.control(&["box", "stat", name]).await?;
-        if out.code == ABSENT_EXIT {
-            return Ok(None);
-        }
-        let line: StatLine = serde_json::from_str(checked(out)?.trim())
-            .map_err(|e| format!("pinfold box stat: {e}"))?;
-        Ok(Some(Stat {
-            oom_kills: line.oom_kills,
-        }))
+    /// The box's OOM kill count, monotonic for its life; `None` where the
+    /// runtime cannot answer, the box is absent, or `stat` failed.
+    pub async fn oom_kills(&self, name: &str) -> Option<u64> {
+        let out = checked(self.control(&["box", "stat", name]).await.ok()?).ok()?;
+        Line::parse(out.trim().as_bytes())?.oom_kills
+    }
+
+    /// What pinfold says of itself.
+    pub async fn version(&self) -> Result<String, String> {
+        checked(self.control(&["--version"]).await?).map(|out| out.trim().to_string())
     }
 
     /// Signals the box's `up` to tear down. An absent box is already down.
@@ -406,36 +316,26 @@ impl Pinfold {
     }
 
     /// `label` is `KEY=VALUE`, or `KEY` for any value.
-    pub async fn list(&self, label: &str) -> Result<Vec<Listed>, String> {
-        let out = checked(self.control(&["box", "list", "--label", label]).await?)?;
-        lines(&out)
-            .map(|text| {
-                let line: ListLine = serde_json::from_str(text)
-                    .map_err(|e| format!("pinfold box list: {e}: {text}"))?;
-                Ok(Listed { name: line.name })
-            })
-            .collect()
+    /// The names of the boxes with this label.
+    pub async fn list(&self, label: &str) -> Result<Vec<String>, String> {
+        names(checked(
+            self.control(&["box", "list", "--label", label]).await?,
+        )?)
     }
 
     /// Removes every box on the host whose `up` is gone.
     pub async fn prune(&self) -> Result<Vec<String>, String> {
-        let out = checked(self.control(&["box", "prune"]).await?)?;
-        lines(&out)
-            .map(|text| {
-                Line::parse(text.as_bytes())
-                    .and_then(|line| line.name)
-                    .ok_or_else(|| format!("pinfold box prune: {text}"))
-            })
-            .collect()
+        names(checked(self.control(&["box", "prune"]).await?)?)
     }
 
+    /// The build's own `ref`, unique to this build.
     pub async fn image_build(
         &self,
         name: &str,
         containerfile: &Path,
         context: &Path,
         timeout: Duration,
-    ) -> Result<Built, BuildError> {
+    ) -> Result<String, String> {
         let containerfile = path_arg(containerfile)?;
         let context = path_arg(context)?;
         let args = [
@@ -449,31 +349,31 @@ impl Pinfold {
         ];
         let out = collect(self.command(&args), timeout)
             .await
-            .map_err(|e| BuildError::Other(format!("pinfold image build: {e}")))?;
+            .map_err(|e| format!("pinfold image build: {e}"))?;
         let line = lines(&out.stdout)
             .next()
             .and_then(|text| Line::parse(text.as_bytes()));
         match line {
-            Some(line) if line.event.as_deref() == Some("built") && out.code == 0 => Ok(Built {
-                reference: line
-                    .reference
-                    .ok_or_else(|| BuildError::Other(format!("no ref: {}", out.stdout)))?,
-            }),
-            Some(line) if line.event.as_deref() == Some("failed") => {
-                Err(BuildError::Failed(line.log.unwrap_or_default()))
-            }
-            Some(line) if line.event.as_deref() == Some("refused") => Err(BuildError::Refused {
-                detail: line.detail(),
-                reason: line.reason.unwrap_or_default(),
-            }),
-            _ => Err(BuildError::Other(format!(
+            Some(line) if line.event.as_deref() == Some("built") && out.code == 0 => line
+                .reference
+                .ok_or_else(|| format!("no ref: {}", out.stdout)),
+            Some(line) if line.event.as_deref() == Some("failed") => Err(format!(
+                "the build failed:\n{}",
+                line.log.unwrap_or_default().join("\n")
+            )),
+            Some(line) if line.event.as_deref() == Some("refused") => Err(format!(
+                "refused ({}): {}",
+                line.reason.as_deref().unwrap_or_default(),
+                line.detail()
+            )),
+            _ => Err(format!(
                 "pinfold image build exited {}: {}{}",
                 out.code, out.stdout, out.stderr
-            ))),
+            )),
         }
     }
 
-    async fn control(&self, args: &[&str]) -> Result<Collected, String> {
+    async fn control(&self, args: &[&str]) -> Result<ExecOutput, String> {
         collect(self.command(args), CONTROL_TIMEOUT)
             .await
             .map_err(|e| format!("pinfold {}: {e}", args.join(" ")))
@@ -536,52 +436,48 @@ async fn read_line(reader: &mut BufReader<ChildStdout>) -> Option<Vec<u8>> {
     }
 }
 
-/// The first `OUTPUT_CAP` bytes; the rest is read and dropped so the child
-/// never blocks on a full pipe.
-async fn read_capped(mut reader: impl AsyncRead + Unpin) -> String {
+/// The first `cap` bytes; the rest is read and dropped so the child never
+/// blocks on a full pipe.
+pub async fn read_capped(mut reader: impl AsyncRead + Unpin, cap: usize) -> String {
     let mut kept = Vec::new();
     let mut chunk = [0u8; 8192];
     while let Ok(n @ 1..) = reader.read(&mut chunk).await {
-        let room = OUTPUT_CAP - kept.len();
+        let room = cap - kept.len();
         kept.extend_from_slice(&chunk[..n.min(room)]);
     }
     String::from_utf8_lossy(&kept).into_owned()
 }
 
-async fn collect(mut command: Command, timeout: Duration) -> Result<Collected, RunError> {
+async fn collect(mut command: Command, timeout: Duration) -> Result<ExecOutput, ExecError> {
     let mut child = command
         .kill_on_drop(true)
         .spawn()
-        .map_err(|e| RunError::Spawn(e.to_string()))?;
+        .map_err(|e| ExecError::Spawn(format!("could not start pinfold: {e}")))?;
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
     let work = async {
-        let (stdout, stderr) = tokio::join!(read_capped(stdout), read_capped(stderr));
+        let (stdout, stderr) = tokio::join!(
+            read_capped(stdout, OUTPUT_CAP),
+            read_capped(stderr, OUTPUT_CAP)
+        );
         (stdout, stderr, child.wait().await)
     };
     match tokio::time::timeout(timeout, work).await {
-        Ok((stdout, stderr, Ok(status))) => Ok(Collected {
-            code: exit_code(status),
+        Ok((stdout, stderr, Ok(status))) => Ok(ExecOutput {
+            code: crate::git::exit_code(status),
             stdout,
             stderr,
         }),
-        Ok((_, _, Err(e))) => Err(RunError::Spawn(e.to_string())),
+        Ok((_, _, Err(e))) => Err(ExecError::Spawn(e.to_string())),
         Err(_) => {
             kill_group(&child);
             let _ = child.wait().await;
-            Err(RunError::Timeout)
+            Err(ExecError::Timeout)
         }
     }
 }
 
-fn exit_code(status: ExitStatus) -> i32 {
-    status
-        .code()
-        .or_else(|| status.signal().map(|n| 128 + n))
-        .unwrap_or(-1)
-}
-
-fn checked(out: Collected) -> Result<String, String> {
+fn checked(out: ExecOutput) -> Result<String, String> {
     if out.code == 0 {
         Ok(out.stdout)
     } else {
@@ -597,9 +493,23 @@ fn lines(text: &str) -> impl Iterator<Item = &str> {
     text.lines().filter(|line| !line.trim().is_empty())
 }
 
-fn path_arg(path: &Path) -> Result<&str, BuildError> {
+/// Each line's box: `list` calls it `name`, `prune` calls it `box`.
+fn names(out: String) -> Result<Vec<String>, String> {
+    lines(&out)
+        .map(|text| {
+            let line: Value = serde_json::from_str(text).unwrap_or_default();
+            line["name"]
+                .as_str()
+                .or(line["box"].as_str())
+                .map(str::to_string)
+                .ok_or_else(|| format!("pinfold: {text}"))
+        })
+        .collect()
+}
+
+fn path_arg(path: &Path) -> Result<&str, String> {
     path.to_str()
-        .ok_or_else(|| BuildError::Other(format!("not UTF-8: {}", path.display())))
+        .ok_or_else(|| format!("not UTF-8: {}", path.display()))
 }
 
 /// `id()` is `None` once the child is reaped, so a reused pid is never hit.
