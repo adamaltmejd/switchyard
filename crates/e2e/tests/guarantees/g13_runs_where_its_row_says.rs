@@ -198,7 +198,7 @@ fn a_gate_box_reaches_no_route_and_no_ignored_file() {
 /// the unnamed variable reaches the gate. Or check out the base, not the
 /// head, for a host candidate gate; `head=` names the base. Or start the
 /// review round alongside the candidate gates; the seat starts before the
-/// gate ends.
+/// gate ends. Or omit `YARD_BASE`, or set it to the head; `base=` names it.
 #[test]
 fn a_host_candidate_gate_sees_the_head_and_only_its_env() {
     let mut machine = Machine::new("g13-host-candidate", |request| {
@@ -210,7 +210,8 @@ fn a_host_candidate_gate_sees_the_head_and_only_its_env() {
     machine.env.push(("GATE_NAMED".into(), "named".into()));
     machine.env.push(("GATE_UNNAMED".into(), "unnamed".into()));
     machine.start();
-    let gate = "[gates.host]\ncommand = \"echo head=$(git rev-parse HEAD); echo named=${GATE_NAMED:-unset}; \
+    let gate = "[gates.host]\ncommand = \"echo head=$(git rev-parse HEAD); echo base=${YARD_BASE:-unset}; \
+                echo named=${GATE_NAMED:-unset}; \
                 echo unnamed=${GATE_UNNAMED:-unset}\"\nstage = \"candidate\"\nruns_in = \"host\"\n\
                 env = [\"GATE_NAMED\"]\n";
     let project = Project::new(&machine, "p", &config(gate));
@@ -219,11 +220,14 @@ fn a_host_candidate_gate_sees_the_head_and_only_its_env() {
     let approval = watch.attention();
     assert_eq!(approval["data"]["kind"], "approval", "{approval}");
     let head = approval["data"]["payload"]["head"].as_str().unwrap();
+    // The fixture's canonical head is the base the candidate was built on.
+    let base = project.canonical_head();
 
     let gates = gate_details(&project);
     assert_eq!(gates.len(), 1);
     let detail = gates[0]["detail"].as_str().unwrap();
     assert!(detail.contains(&format!("head={head}")), "{detail}");
+    assert!(detail.contains(&format!("base={base}")), "{detail}");
     assert!(detail.contains("named=named"), "{detail}");
     assert!(detail.contains("unnamed=unset"), "{detail}");
     // Before any review: the gate ended before the seat started.
@@ -256,7 +260,9 @@ fn a_host_candidate_gate_sees_the_head_and_only_its_env() {
 /// Sabotage: make `queue::land` start its gates from the rows it read
 /// before merging, without `admit`; the edited ticket's landing runs the
 /// host gate. Or run the landing gate on the candidate head instead of the
-/// merged ref; its head is not a merge of the target and the first head.
+/// merged ref; its head is not a merge of the target and the first head. Or
+/// set `YARD_BASE` to the candidate head; `base=` names it instead of the
+/// target.
 #[test]
 fn a_host_landing_gate_runs_on_the_merged_ref_only_when_approved() {
     let machine = Machine::new("g13-host-landing", |request| {
@@ -287,7 +293,7 @@ fn a_host_landing_gate_runs_on_the_merged_ref_only_when_approved() {
         .unwrap();
     machine.start();
     let gate = format!(
-        "[gates.held]\ncommand = \"echo head=$(git rev-parse HEAD); read line < {}\"\nruns_in = \"host\"\n",
+        "[gates.held]\ncommand = \"echo base=${{YARD_BASE:-unset}}; echo head=$(git rev-parse HEAD); read line < {}\"\nruns_in = \"host\"\n",
         hold.display()
     );
     let project = Project::new(
@@ -360,6 +366,14 @@ fn a_host_landing_gate_runs_on_the_merged_ref_only_when_approved() {
             .as_str()
             .unwrap()
             .contains(&format!("head={merged}"))
+    );
+    assert!(
+        gates[0]["detail"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("base={target}")),
+        "{:?}",
+        gates[0]["detail"]
     );
     let parents = git(
         &project.canonical(),

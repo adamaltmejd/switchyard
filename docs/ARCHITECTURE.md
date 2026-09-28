@@ -494,11 +494,17 @@ Yard builds the project image with `pinfold image build` before an
 execution (see Threat model) and records the image id the box reports. A
 box spec names mounts, env, the harness, egress and memory.
 
-| Box | `/workspace` | Harness state | Egress |
-|---|---|---|---|
-| implementer | the attempt's clone, writable, or read-only where the workflow's `access` says so | writable | model route, MCP route, `isolation.egress` |
-| reviewer | a fresh checkout of the head, read-only | its own, writable | model route, MCP route |
-| gate | a private disposable checkout of the exact commit, writable | none | `isolation.egress` only |
+| Box | `/workspace` | Harness state | Egress | Env |
+|---|---|---|---|---|
+| implementer | the attempt's clone, writable, or read-only where the workflow's `access` says so | writable | model route, MCP route, `isolation.egress` | the harness's env, git identity, `YARD_MCP_BEARER` (from) |
+| reviewer | a fresh checkout of the head, read-only | its own, writable | model route, MCP route | the harness's env, git identity, `YARD_MCP_BEARER` (from) |
+| gate | a private disposable checkout of the exact commit, writable | none | `isolation.egress` only | `HOME`, `PATH`, `YARD_BASE` |
+
+Every gate gets `YARD_BASE`, the commit its change is judged against: at
+the candidate stage the candidate's base, at landing the target head the
+candidate was merged onto. The checkout is a full clone, so the base
+commit is present and `git diff --name-only "$YARD_BASE" HEAD` lists
+exactly the candidate's change at either stage.
 
 Gate and reviewer checkouts are fresh, made by the daemon from canonical's
 objects: they carry none of the implementer's ignored files, caches or
@@ -507,8 +513,8 @@ candidate adds is fetched by the gate through the allowlist.
 
 A host gate runs in the same kind of private checkout, made on the host
 under the attempt's or the landing's directory, as a child process in its own group with an
-explicit cwd, an environment of `PATH`, `HOME` and the variables its `env`
-names, bounded output and its `timeout_minutes`. It exists for gates that
+explicit cwd, an environment of `PATH`, `HOME`, `YARD_BASE` and the
+variables its `env` names, bounded output and its `timeout_minutes`. It exists for gates that
 need what a box cannot give, such as a container runtime.
 
 Harness state (a harness's session store and launch files) is one
@@ -659,7 +665,7 @@ G15. Each is shown by one or more end-to-end scenarios; testing policy is in
 | 10 | The queue lands one at a time and re-judges what does not merge | Three approved candidates, the second red on its merged ref: the first lands, the second gets one repair and a second red raises `red`, the third lands on the moved target with its own gate run. A candidate that does not merge gets a repair naming the paths, and its next head takes gates, review and approval again. A conflict against a target that changed `.yard/config.toml`, in a clone made before it: the worker fetches the target from its bundle, merges, and the new candidate's base is the target, so it passes the `.yard` refusal and lands with the operator's configuration intact. |
 | 11 | Only the operator's sync changes `.yard` and canonical from outside | A worker commit under `.yard` comes back with the reason and no gate runs; the same change through `yard sync` is in force for the next execution. A checkout and canonical that each hold a commit the other lacks: both directions refuse naming both heads; a fast-forward passes. |
 | 12 | Boxes hold nothing secret | The key is absent from the box's environment and clone; the fixture behind the injecting route receives it. The claude token is absent from the box's environment, files and clone; the fixture behind the login route receives it as `Authorization: Bearer`. |
-| 13 | Every gate and seat runs where its row says | A seat that writes to `/workspace` fails and the head is unchanged. An `AGENTS.override.md` the implementer leaves in its clone, excluded through `.git/info/exclude`: the seat's prompt lacks its rule and carries the committed guidance's. A `CLAUDE.md` override the implementer leaves, hidden from git's status, does not reach the seat; the committed `CLAUDE.md` does. A gate box that calls the model or MCP route gets nothing, and an ignored file the implementer left is absent from its checkout; control: the worker box reaches the route. A host candidate gate runs on the head before any review and sees only the variables its `env` names; a host landing gate runs on the merged ref and never for a candidate whose approval was superseded, even by an edit while its landing merges. |
+| 13 | Every gate and seat runs where its row says | A seat that writes to `/workspace` fails and the head is unchanged. An `AGENTS.override.md` the implementer leaves in its clone, excluded through `.git/info/exclude`: the seat's prompt lacks its rule and carries the committed guidance's. A `CLAUDE.md` override the implementer leaves, hidden from git's status, does not reach the seat; the committed `CLAUDE.md` does. A gate box that calls the model or MCP route gets nothing, and an ignored file the implementer left is absent from its checkout; control: the worker box reaches the route. A host candidate gate runs on the head before any review and sees `YARD_BASE` and only the variables its `env` names; a host landing gate runs on the merged ref and never for a candidate whose approval was superseded, even by an edit while its landing merges. |
 | 14 | Worker git is untrusted, and Yard stays local | A worker that plants `core.fsmonitor`, a hook, a clean filter and a remote in its clone, corrupts an object and links its harness's models file to a host path: none of them acts on the host, canonical's objects are intact, the candidate is refused by name. Across G7's path every request the model's fixture receives came through the model route, and the daemon listens on its unix socket and the MCP listener only. |
 | 15 | Plans and proposals resolve | A ticket on `plan`: its clone refuses writes, it proposes children and a body edit, and the attempt ends with nothing raised; accepting them blocks the parent, which the scheduler does not start once they are done; `yard ticket done` then closes it and its dependents become ready. Closing a ticket with a live attempt is refused. One execution proposing A and B, B depending on A: accepting both mints A first and B's edge names it. |
 
