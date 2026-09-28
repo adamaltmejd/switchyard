@@ -8,7 +8,8 @@ One line per assertion block that fails the bar, no hedging:
 
 - `taut:` the expected value comes from yard's own output or a copy of its
   logic, and the guarantee is not that two outputs agree.
-- `easy:` the row's simplest case. Name the harder one.
+- `easy:` a weak case of the same mechanism. Name the harder one that
+  subsumes it. Preserve positive controls.
 - `unrelated:` a refusal that passes for another reason: a timeout, a box
   that never started, or a guard or reason token the row does not name.
 - `twin:` the same mechanism and observation as another block. Name the
@@ -16,7 +17,8 @@ One line per assertion block that fails the bar, no hedging:
 - `detector:` asserts argv shape, file layout, help text, log or reason
   prose, or a count the row does not name.
 - `promise:` the name or comment claims more than the scenario exercises.
-- `seam:` a helper in `lib.rs` or `model.rs` that only this block uses.
+- `seam:` an observation through yard's internals or a test-only binary
+  hook instead of a user seam. A helper's caller count is not a defect.
 - `clock:` a sleep, a retry, or a deadline poll where `status --watch
   --since` would do, or a scenario that waits out a timeout.
 - `unheld:` a crash at a point that doesn't hold until the kill (seeing a

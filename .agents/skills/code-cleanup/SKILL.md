@@ -7,6 +7,10 @@ description: Audit switchyard's whole tree for yagni, duplication, fixes at the 
 
 Start from a clean, green tree. Read the whole tree, not a diff.
 
+Yard is mainly for private use. Prefer fewer concepts and paths.
+Hypothetical contingencies alone justify neither code nor tests. Keep the
+spec's controls exact.
+
 ## 1. Measure
 
 Take these now and again at the end. The base is the last tag, or the root
@@ -37,29 +41,30 @@ Run these yourself; each hit is a finding for step 3.
   a finding. So is an entry under `## Open questions` that the suite now
   answers.
 
-## 3. Read, in parallel
+## 3. Read
 
-Launch every agent in one message with the Agent tool
-(`subagent_type: "general-purpose"`), each told to edit nothing:
+Use the available delegation tools within their concurrency limit, or
+read sequentially. Reviewers edit nothing:
 
-- **Modules**, `model: "opus"`. Group related files from the `## Code`
+- **Modules.** Group related files from the `## Code`
   tree, never splitting a file: roughly one agent per `jobs/` pair, one for
   `store/`, and so on. Add `crates/e2e/src/`, and ARCHITECTURE.md with
   AGENTS.md as one more module. Prompt: the file paths, the step 2
   findings that touch them, the rejected list from the newest
   `docs/archive/*-code-cleanup.md`, and "Follow
   `.agents/skills/code-cleanup/module.md`."
-- **Traces**, `model: "sonnet"`, with the prompt "Follow
+- **Traces**, with the prompt "Follow
   `.agents/skills/code-cleanup/trace.md`."
-- **User docs**, `model: "sonnet"`, with the prompt "Follow
+- **User docs**, with the prompt "Follow
   `.agents/skills/code-cleanup/docs.md`."
-- **Tests**: `test-audit`'s sweep agents.
+- **Tests**: [test-audit](../test-audit/SKILL.md)'s sweep.
 
 ## 4. Judge
 
-Merge the lists and dedup findings on the same mechanism. Before sorting
-a finding, read its lines, and check any claim of "one caller" or "no
-setter" with `rg`. Then sort it into one of three piles:
+Route test findings through test-audit's "Judge and land", including its
+operator decisions and commits per test file. For the remaining findings,
+dedup on the same mechanism, read their lines, and check any claim of "one
+caller" or "no setter" with `rg`. Then sort them into three piles:
 
 - **Land.** One module, no test assertion changes, names what it removes
   (AGENTS.md's admission rule).

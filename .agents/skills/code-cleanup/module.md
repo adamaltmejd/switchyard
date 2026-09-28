@@ -1,8 +1,9 @@
 Read AGENTS.md and docs/ARCHITECTURE.md, then your files whole. Edit
 nothing. Hunt for what the spec does not ask for, what the platform already
-does, and what is said twice. Your best outcome is a shorter module. Skip
-anything on the rejected list you were given unless its condition now
-holds.
+does, and what is said twice. Prefer fewer concepts and paths. A fallback,
+option or recovery path needs a current spec requirement or a reproduced
+bug; a hypothetical contingency alone is not enough. Keep the spec's
+controls exact. Skip rejected findings unless their condition now holds.
 
 One line per finding, no hedging:
 
@@ -11,10 +12,11 @@ One line per finding, no hedging:
 - `delete:` dead code; an option nothing sets; a fallback for a state the
   spec rules out; a flag, variable or path that exists only for tests; a
   comment restating the code.
-- `yagni:` a trait with one implementation, a helper with one caller, a
-  layer that only delegates, a compatibility path, or a feature's own
+- `yagni:` an abstraction for hypothetical reuse, a layer that only
+  delegates, an unused compatibility path, or a feature's own
   lifecycle, owner, lease or recovery path beside the execution state
   machine. Inline it, or make it an execution.
+  A single caller or implementation alone is not a defect.
 - `stdlib:` hand-rolled code that `std`, `tokio`, `nix`, `hyper`, `serde`
   or `rusqlite` already provides. Name it.
 - `native:` code doing what git, pinfold or SQLite already does. Name the

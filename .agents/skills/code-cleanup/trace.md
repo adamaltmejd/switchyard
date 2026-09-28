@@ -1,15 +1,15 @@
-Edit nothing. Use `rg` over crates/ and docs/ARCHITECTURE.md to trace:
+Read AGENTS.md and docs/ARCHITECTURE.md. Edit nothing. Use `rg` to trace:
 
-1. every key `config.rs` reads to its row under `## Projects`, and then to
-   a test that sets it;
-2. every verb and flag `cli.rs` parses to `## Daemon and CLI`, and then to
-   a test;
-3. every worker tool `mcp.rs` serves to `## Worker tools`, and then to a
-   test;
-4. every reason, attention kind and audit event name the binary emits to
-   the spec line that names it;
-5. every clause of every guarantee row's "Shown by" to the test function
-   that shows it.
+1. configuration, CLI and worker-tool behavior to the spec. Report
+   contradictions or unsupported features; the spec need not enumerate
+   every implementation detail;
+2. spec-named reasons, attention kinds and audit events to their emitted
+   values;
+3. every guarantee row's "Shown by" clauses to the tests that show them.
+
+Report missing tests only for existing "Shown by" clauses. An untested
+key, flag or combination alone is not a finding. Do not expand the spec or
+suite to fill a coverage matrix.
 
 Report only gaps, one per line:
 `<file>:L<line>: <item>: no spec line | no test | no code.`
