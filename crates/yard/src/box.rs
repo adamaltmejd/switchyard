@@ -135,6 +135,13 @@ pub struct LiveBox {
     end: JoinHandle<Result<String, String>>,
 }
 
+/// One entry of `pinfold artifacts`.
+#[derive(Deserialize)]
+struct Artifact {
+    name: String,
+    version: String,
+}
+
 /// Any line pinfold prints; each call reads the fields it needs.
 #[derive(Default, Deserialize)]
 struct Line {
@@ -308,6 +315,17 @@ impl Pinfold {
     /// What pinfold says of itself.
     pub async fn version(&self) -> Result<String, String> {
         checked(self.control(&["--version"]).await?).map(|out| out.trim().to_string())
+    }
+
+    /// Each artifact pinfold carries, by name.
+    pub async fn artifacts(&self) -> Result<BTreeMap<String, String>, String> {
+        let text = checked(self.control(&["artifacts"]).await?)?;
+        let artifacts: Vec<Artifact> =
+            serde_json::from_str(&text).map_err(|error| format!("pinfold artifacts: {error}"))?;
+        Ok(artifacts
+            .into_iter()
+            .map(|artifact| (artifact.name, artifact.version))
+            .collect())
     }
 
     /// Signals the box's `up` to tear down. An absent box is already down.

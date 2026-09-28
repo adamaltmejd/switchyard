@@ -6,6 +6,7 @@ mod cli;
 mod config;
 mod daemon;
 mod git;
+mod harness;
 mod jobs;
 mod mcp;
 mod pi;

@@ -279,6 +279,8 @@ async fn advance(
                 let agent = &loaded.config.seats[seat].agent;
                 let settings =
                     serde_json::to_value(&loaded.config.agents[agent]).expect("agent serializes");
+                let harness_version = crate::harness::get(&loaded.config.agents[agent].harness)
+                    .map(|harness| harness.version());
                 let execution = project.tx(|tx| {
                     executions::start(
                         tx,
@@ -289,6 +291,7 @@ async fn advance(
                             name: Some(seat),
                             round: Some(attempt.rounds + 1),
                             agent: Some((agent, &settings)),
+                            harness_version,
                             ..shared
                         },
                     )

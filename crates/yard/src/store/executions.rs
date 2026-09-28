@@ -26,11 +26,13 @@ pub struct Execution {
     pub intent_merged: Option<String>,
     pub intent_state: Option<String>,
     pub progress: Option<String>,
+    pub harness_version: Option<String>,
+    pub resumed: Option<i64>,
 }
 
 const COLUMNS: &str = "id, attempt, parent, kind, reason, status, outcome, detail, base, head,
     ticket_revision, digest, name, round, handle, session_id, approval, intent_old, intent_merged,
-    intent_state, progress";
+    intent_state, progress, harness_version, resumed";
 
 fn row(row: &Row) -> rusqlite::Result<Execution> {
     Ok(Execution {
@@ -55,6 +57,8 @@ fn row(row: &Row) -> rusqlite::Result<Execution> {
         intent_merged: row.get(18)?,
         intent_state: row.get(19)?,
         progress: row.get(20)?,
+        harness_version: row.get(21)?,
+        resumed: row.get(22)?,
     })
 }
 
@@ -98,27 +102,44 @@ pub fn for_attempt(conn: &Connection, attempt: i64) -> Result<Vec<Execution>, Fa
     query(conn, "attempt = ?1 ORDER BY id", [attempt])
 }
 
-/// The attempt's session to resume: its latest implementation that has a
-/// session id, and how many executions have run on that session.
-pub fn session(conn: &Connection, attempt: i64) -> Result<Option<(Execution, i64)>, Fail> {
-    let Some(latest) = query(
+/// The attempt's session to resume: the most recent implementation before
+/// `current` that reported a session id, and how many executions have run on
+/// that session. A run that began fresh (`resumed` is NULL) is a boundary: an
+/// older session is not resumed across it. The caller checks the session
+/// owner's version, so a harness version change also ends continuity.
+pub fn session(
+    conn: &Connection,
+    attempt: i64,
+    current: i64,
+) -> Result<Option<(Execution, i64)>, Fail> {
+    let mut owner: Option<Execution> = None;
+    for execution in query(
         conn,
-        "attempt = ?1 AND kind = 'implementation' AND session_id IS NOT NULL
-         ORDER BY id DESC LIMIT 1",
-        [attempt],
-    )?
-    .pop() else {
+        "attempt = ?1 AND kind = 'implementation' AND id != ?2 ORDER BY id DESC",
+        params![attempt, current],
+    )? {
+        if execution.session_id.is_some() {
+            owner = Some(execution);
+            break;
+        }
+        // A run that reported no session but began fresh broke the chain:
+        // an older session is not resumed across it.
+        if execution.resumed.is_none() {
+            break;
+        }
+    }
+    let Some(owner) = owner else {
         return Ok(None);
     };
     let mut count = 0;
-    let mut next = Some(latest.id);
+    let mut next = Some(owner.id);
     while let Some(id) = next {
         count += 1;
         next = conn.query_row("SELECT resumed FROM execution WHERE id = ?1", [id], |row| {
             row.get(0)
         })?;
     }
-    Ok(Some((latest, count)))
+    Ok(Some((owner, count)))
 }
 
 /// Landings whose intent is still open.
@@ -160,6 +181,8 @@ pub struct Start<'a> {
     pub ticket: Option<i64>,
     /// Worker settings: agent name and its `{harness, provider, model, effort}`.
     pub agent: Option<(&'a str, &'a Value)>,
+    /// The pinfold pin of the worker's harness, recorded with the intent.
+    pub harness_version: Option<&'a str>,
 }
 
 /// The intent: the row exists before any effect.
@@ -168,8 +191,8 @@ pub fn start(tx: &Connection, start: Start) -> Result<i64, Fail> {
     let field = |key: &str| settings.and_then(|value| value[key].as_str().map(str::to_string));
     tx.execute(
         "INSERT INTO execution (attempt, parent, kind, reason, status, base, head, ticket_revision,
-            digest, name, round, approval, agent, harness, provider, model, effort, started_at)
-         VALUES (?1, ?2, ?3, ?4, 'running', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            digest, name, round, approval, agent, harness, harness_version, provider, model, effort, started_at)
+         VALUES (?1, ?2, ?3, ?4, 'running', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         params![
             start.attempt,
             start.parent,
@@ -184,6 +207,7 @@ pub fn start(tx: &Connection, start: Start) -> Result<i64, Fail> {
             start.approval,
             start.agent.map(|(name, _)| name),
             field("harness"),
+            start.harness_version,
             field("provider"),
             field("model"),
             field("effort"),
@@ -226,19 +250,16 @@ pub fn set_worker(
     conn: &Connection,
     id: i64,
     session_id: Option<&str>,
-    harness_version: Option<&str>,
     usage: Option<(u64, u64, f64)>,
 ) -> Result<(), Fail> {
     conn.execute(
         "UPDATE execution SET session_id = COALESCE(?2, session_id),
-            harness_version = COALESCE(?3, harness_version),
-            tokens_in = COALESCE(?4, tokens_in), tokens_out = COALESCE(?5, tokens_out),
-            cost = COALESCE(?6, cost)
+            tokens_in = COALESCE(?3, tokens_in), tokens_out = COALESCE(?4, tokens_out),
+            cost = COALESCE(?5, cost)
          WHERE id = ?1",
         params![
             id,
             session_id,
-            harness_version,
             usage.map(|usage| usage.0 as i64),
             usage.map(|usage| usage.1 as i64),
             usage.map(|usage| usage.2)

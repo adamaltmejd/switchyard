@@ -169,7 +169,7 @@ pub async fn doctor(daemon: &Daemon, project: &Project) -> Result<Value, Fail> {
         .await
         .unwrap_or_else(|error| format!("not found: {error}"));
     let loaded = load(daemon, project).await;
-    let connections: Vec<Value> = crate::pi::CONNECTIONS
+    let connections: Vec<Value> = crate::harness::CONNECTIONS
         .iter()
         .map(|connection| {
             json!({

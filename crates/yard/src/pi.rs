@@ -3,6 +3,11 @@
 //!
 //! Measured against Pi 0.87.1 as pinfold carries it.
 
+use crate::config::Agent;
+use crate::daemon::Machine;
+use crate::harness::{
+    Connection, Event, Harness, Launch, ModelRoute, Reader, Registration, Stage, Usage,
+};
 use serde_json::{Value, json};
 
 /// Yard's MCP client extension. The same bytes for every execution: the
@@ -10,15 +15,6 @@ use serde_json::{Value, json};
 pub const EXTENSION: &str = include_str!("pi-mcp-extension.ts");
 /// The extension's file name in the daemon-written input directory.
 pub const EXTENSION_FILE: &str = "yard-mcp.ts";
-/// Where the attempt's harness state is mounted, writable.
-pub const STATE_GUEST: &str = "/yard/state";
-/// Where the daemon-written input directory is mounted, read-only.
-pub const INPUT_GUEST: &str = "/yard/input";
-/// The route name that reaches the daemon's MCP listener.
-pub const MCP_ROUTE: &str = "yard.mcp";
-/// The variable the extension reads its bearer from. The caller sets it in
-/// the box spec as `{"from": BEARER_VAR}`, never as a literal.
-pub const BEARER_VAR: &str = "YARD_MCP_BEARER";
 
 const PI: &str = "/opt/pinfold/pi/pi";
 const SESSIONS_GUEST: &str = "/yard/state/sessions";
@@ -35,55 +31,81 @@ const SENTINEL: &str = "yard-mcp ";
 const PROMPT_MAX_BYTES: usize = 128 * 1024 - 1;
 const MODEL_MAX_BYTES: usize = 256;
 const SESSION_ID_MAX_BYTES: usize = 128;
+// Pi's native automatic-compaction reserve: it compacts once the context
+// passes `contextWindow - COMPACTION_RESERVE_TOKENS`, leaving room for the
+// response. Staged as the harness's threshold so a worker's own settings do
+// not carry into its next execution.
+const COMPACTION_RESERVE_TOKENS: u64 = 16384;
 // Yard's effort ladder is Pi's `--thinking` ladder word for word. Pi only
 // warns on an unknown level and runs at the default, so configuration checks
 // it at load.
 pub const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
-/// An upstream a model request reaches through an injecting route.
-#[derive(Debug)]
-pub struct Connection {
-    /// Pi's provider name, and the connection's name in configuration.
-    pub name: &'static str,
-    /// The route name the box reaches it by.
-    pub route: &'static str,
-    /// Where the route forwards on the host.
-    pub origin: &'static str,
-    /// The provider's API path under both origin and route.
-    pub base_path: &'static str,
-    /// The variable Pi reads the key from; the box holds a placeholder.
-    pub key_var: &'static str,
-}
+/// The one harness.
+pub struct Pi;
 
-pub const CONNECTIONS: &[Connection] = &[
-    Connection {
-        name: "openrouter",
-        route: "openrouter.yard",
-        origin: "https://openrouter.ai",
-        base_path: "/api/v1",
-        key_var: "OPENROUTER_API_KEY",
-    },
-    Connection {
-        name: "opencode-go",
-        route: "opencode-go.yard",
-        origin: "https://opencode.ai",
-        base_path: "/zen/go/v1",
-        key_var: "OPENCODE_API_KEY",
-    },
-];
+impl Harness for Pi {
+    fn name(&self) -> &'static str {
+        "pi"
+    }
 
-pub fn connection(name: &str) -> Option<&'static Connection> {
-    CONNECTIONS.iter().find(|c| c.name == name)
-}
+    fn version(&self) -> &str {
+        crate::harness::pinned(self.name()).unwrap_or("unknown")
+    }
 
-/// One Pi run. `resume` is a session id a previous run reported.
-#[derive(Debug)]
-pub struct Launch<'a> {
-    pub provider: &'a str,
-    pub model: &'a str,
-    pub effort: Option<&'a str>,
-    pub resume: Option<&'a str>,
-    pub prompt: &'a str,
+    fn accepts(&self, agent: &Agent) -> Result<(), String> {
+        if crate::harness::connection(&agent.provider).is_none() {
+            return Err(format!("provider {:?} names no connection", agent.provider));
+        }
+        if let Some(effort) = &agent.effort
+            && !EFFORTS.contains(&effort.as_str())
+        {
+            return Err(format!("effort {effort:?} is unknown"));
+        }
+        Ok(())
+    }
+
+    fn stage(&self, st: &Stage) -> std::io::Result<()> {
+        stage_state(st.state, st.connection)?;
+        std::fs::create_dir_all(st.input)?;
+        std::fs::write(st.input.join(EXTENSION_FILE), EXTENSION)
+    }
+
+    fn env(&self, st: &Stage) -> Vec<(String, String)> {
+        env(st.connection)
+    }
+
+    fn route(&self, st: &Stage, machine: &Machine) -> Result<ModelRoute, String> {
+        let connection = st.connection;
+        let key = machine.vars.get(connection.key_var).ok_or_else(|| {
+            format!(
+                "operator.env holds no {} for connection {}",
+                connection.key_var, connection.name
+            )
+        })?;
+        Ok(ModelRoute {
+            name: connection.route.to_string(),
+            route: crate::r#box::Route::Inject {
+                to: machine.origin(connection),
+                headers: std::collections::BTreeMap::from([(
+                    "Authorization".to_string(),
+                    crate::r#box::Header {
+                        from: connection.key_var.into(),
+                        prefix: "Bearer ".into(),
+                    },
+                )]),
+            },
+            secret: (connection.key_var.to_string(), key.clone()),
+        })
+    }
+
+    fn argv(&self, launch: &Launch) -> Result<Vec<String>, String> {
+        argv(launch)
+    }
+
+    fn reader(&self) -> Box<dyn Reader> {
+        Box::new(Normalizer::default())
+    }
 }
 
 /// The full argv, run with `/workspace` as its cwd and stdin on /dev/null:
@@ -91,13 +113,13 @@ pub struct Launch<'a> {
 ///
 /// Discovery of extensions, prompt templates and themes is off, so the staged
 /// client is the only code that loads. Context files and skills stay on.
-pub fn argv(launch: &Launch) -> Result<Vec<String>, String> {
-    let Some(connection) = connection(launch.provider) else {
+fn argv(launch: &Launch) -> Result<Vec<String>, String> {
+    let Some(connection) = crate::harness::connection(launch.provider) else {
         return Err(format!("unknown connection {:?}", launch.provider));
     };
     check_model(launch.model)?;
     check_prompt(launch.prompt)?;
-    let extension = format!("{INPUT_GUEST}/{EXTENSION_FILE}");
+    let extension = format!("{}/{EXTENSION_FILE}", crate::harness::INPUT_GUEST);
     let mut argv: Vec<String> = [
         PI,
         "--mode",
@@ -180,7 +202,7 @@ fn check_session_id(id: &str) -> Result<(), String> {
 
 /// The box env Pi needs, literal values only. The caller adds
 /// `BEARER_VAR` as `{"from": BEARER_VAR}`.
-pub fn env(connection: &Connection) -> Vec<(String, String)> {
+fn env(connection: &Connection) -> Vec<(String, String)> {
     [
         ("PI_CODING_AGENT_DIR", AGENT_GUEST),
         ("HOME", HOME_GUEST),
@@ -196,12 +218,14 @@ pub fn env(connection: &Connection) -> Vec<(String, String)> {
 /// Stage a harness-state directory, keeping what is already there.
 /// `agent/models.json` moves the provider's base URL onto its route; every
 /// other fact of the provider stays Pi's built-in catalog entry.
+/// `agent/settings.json` fixes automatic compaction to Pi's native reserve,
+/// so no settings a worker wrote carry into its next execution.
 ///
 /// The worker's box mounts this directory writable, so a link in it can
-/// point anywhere on the host. The write follows none: an `agent` that is
-/// not a directory fails, and `models.json` is replaced, never written
+/// point anywhere on the host. Each write follows none: an `agent` that is
+/// not a directory fails, and every staged file is replaced, never written
 /// through.
-pub fn stage_state(state: &std::path::Path, connection: &Connection) -> std::io::Result<()> {
+fn stage_state(state: &std::path::Path, connection: &Connection) -> std::io::Result<()> {
     use nix::fcntl::{OFlag, open, openat};
     use nix::sys::stat::Mode;
     use nix::unistd::{UnlinkatFlags, unlinkat};
@@ -214,30 +238,32 @@ pub fn stage_state(state: &std::path::Path, connection: &Connection) -> std::io:
         OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
         Mode::empty(),
     )?;
-    match unlinkat(&agent, "models.json", UnlinkatFlags::NoRemoveDir) {
-        Ok(()) | Err(nix::errno::Errno::ENOENT) => {}
-        Err(errno) => return Err(errno.into()),
-    }
-    let file = openat(
-        &agent,
-        "models.json",
-        OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
-        Mode::from_bits_truncate(0o644),
-    )?;
+    let replace = |name: &str, value: &Value| -> std::io::Result<()> {
+        match unlinkat(&agent, name, UnlinkatFlags::NoRemoveDir) {
+            Ok(()) | Err(nix::errno::Errno::ENOENT) => {}
+            Err(errno) => return Err(errno.into()),
+        }
+        let file = openat(
+            &agent,
+            name,
+            OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            Mode::from_bits_truncate(0o644),
+        )?;
+        std::fs::File::from(file).write_all(value.to_string().as_bytes())
+    };
     let base_url = format!("http://{}{}", connection.route, connection.base_path);
-    let models = json!({ "providers": { connection.name: { "baseUrl": base_url } } });
-    std::fs::File::from(file).write_all(models.to_string().as_bytes())
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum Registration {
-    /// The tool names the server listed, in its order.
-    Registered(Vec<String>),
-    Refused(String),
+    replace(
+        "models.json",
+        &json!({ "providers": { connection.name: { "baseUrl": base_url } } }),
+    )?;
+    replace(
+        "settings.json",
+        &json!({ "compaction": { "reserveTokens": COMPACTION_RESERVE_TOKENS } }),
+    )
 }
 
 /// Reads one stderr line. `None` for any line that is not the extension's.
-pub fn registration(stderr_line: &str) -> Option<Registration> {
+fn registration(stderr_line: &str) -> Option<Registration> {
     let payload = stderr_line
         .trim_end_matches(['\r', '\n'])
         .strip_prefix(SENTINEL)?;
@@ -257,22 +283,6 @@ pub fn registration(stderr_line: &str) -> Option<Registration> {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Usage {
-    /// Prompt tokens, cache reads and writes included.
-    pub input: u64,
-    pub output: u64,
-    /// USD, as Pi prices it.
-    pub cost: f64,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum Event {
-    Started { session_id: String },
-    Finished { usage: Usage },
-    Failed { message: String, usage: Usage },
-}
-
 struct Final {
     stop_reason: String,
     error: Option<String>,
@@ -289,8 +299,8 @@ pub struct Normalizer {
     usage: Usage,
 }
 
-impl Normalizer {
-    pub fn frame(&mut self, line: &str) -> Option<Event> {
+impl Reader for Normalizer {
+    fn stdout(&mut self, line: &str) -> Option<Event> {
         let frame = serde_json::from_str::<Value>(line.trim_end_matches('\r')).ok()?;
         match frame.get("type").and_then(Value::as_str) {
             Some("session") => match frame.get("id").and_then(Value::as_str) {
@@ -308,6 +318,12 @@ impl Normalizer {
         }
     }
 
+    fn stderr(&mut self, line: &str) -> Option<Registration> {
+        registration(line)
+    }
+}
+
+impl Normalizer {
     fn message_end(&mut self, message: &Value) {
         if message.get("role").and_then(Value::as_str) != Some("assistant") {
             return;
