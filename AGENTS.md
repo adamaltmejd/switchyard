@@ -43,7 +43,8 @@ without a guarantee in ARCHITECTURE.md that needs it.
   Fewer lines is the usual evidence, not the gate; a consolidation that adds
   an abstraction and removes nothing is rejected. A proposal born in an attempt
   is rejected unless it names the guarantee or bug it serves.
-- Before each release, a whole-tree read for yagni, duplication,
+- Before each release, the `code-cleanup` skill with `test-audit`'s sweep
+  (`.agents/skills/`): a whole-tree read for yagni, duplication,
   wrong-altitude fixes, unmeasured cost and assertion blocks under the bar,
   landed one commit per module; then the operator's spec pass over
   ARCHITECTURE.md and README.md. The pass reports the release's delete/add
@@ -103,7 +104,8 @@ without a guarantee in ARCHITECTURE.md that needs it.
 - **Where it runs.** On a host with the container runtime, never inside a
   box. It is this repository's landing-stage host gate, on yard-sthlm and
   the operator's Mac, after the boxed candidate gates `cargo fmt`, `clippy`
-  and `cargo build`. GitHub runs it only in the release workflow.
+  and `cargo build`. GitHub runs it only in the release workflow, on both
+  platforms, before publishing.
 - **Budget:** about 5 minutes per landing on yard-sthlm with a warm image
   cache, measured on the first vertical slice and revised in a dated archive
   file; a scenario is never deleted to meet it.
