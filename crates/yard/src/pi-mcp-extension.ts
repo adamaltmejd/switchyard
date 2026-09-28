@@ -30,13 +30,8 @@ interface McpTool {
   inputSchema?: unknown;
 }
 
-interface McpContentBlock {
-  type?: string;
-  text?: string;
-}
-
 interface McpToolResult {
-  content?: unknown;
+  content?: { text?: unknown }[];
   isError?: boolean;
 }
 
@@ -79,7 +74,7 @@ class McpClient {
   // One message, one POST, bounded in time and bytes, cancellable by the turn.
   private async post(message: unknown, signal?: AbortSignal): Promise<string> {
     const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
-    const bound = signal === undefined ? timeout : anySignal([signal, timeout]);
+    const bound = signal === undefined ? timeout : AbortSignal.any([signal, timeout]);
     let response: Response;
     try {
       response = await fetch(this.endpoint, {
@@ -98,10 +93,6 @@ class McpClient {
         throw new Error(`the server did not answer within ${REQUEST_TIMEOUT_MS} ms`);
       }
       throw new Error(`could not reach the MCP endpoint: ${errorText(cause)}`);
-    }
-    if (response.status === 401 || response.status === 403) {
-      await discardBody(response);
-      throw new Error(`the MCP endpoint refused the bearer (HTTP ${response.status})`);
     }
     if (response.status === 202) {
       await discardBody(response);
@@ -174,38 +165,14 @@ function registerOne(pi: ExtensionAPI, client: McpClient, tool: McpTool): void {
         { name: tool.name, arguments: params ?? {} },
         signal,
       )) as McpToolResult;
-      const content = contentBlocks(result.content);
+      // Yard answers one text block.
+      const text = result.content?.[0]?.text;
+      if (typeof text !== "string") throw new Error("tools/call answered no text");
       // Pi ignores a returned isError; only a throw reaches the model as an error.
-      if (result.isError === true) throw new Error(contentText(content));
-      return { content, details: {} };
+      if (result.isError === true) throw new Error(text);
+      return { content: [{ type: "text", text }], details: {} };
     },
   } as never);
-}
-
-// Text blocks pass through; any other block is carried as its JSON, not dropped.
-function contentBlocks(content: unknown): McpContentBlock[] {
-  if (!Array.isArray(content)) {
-    return [{ type: "text", text: JSON.stringify(content ?? null) }];
-  }
-  return content.map((block) => {
-    if (
-      block !== null &&
-      typeof block === "object" &&
-      (block as McpContentBlock).type === "text" &&
-      typeof (block as McpContentBlock).text === "string"
-    ) {
-      return block as McpContentBlock;
-    }
-    return { type: "text", text: JSON.stringify(block ?? null) };
-  });
-}
-
-function contentText(content: McpContentBlock[]): string {
-  const text = content
-    .map((block) => (typeof block.text === "string" ? block.text : JSON.stringify(block)))
-    .join("\n")
-    .trim();
-  return text === "" ? "the tool call failed with no message" : text;
 }
 
 function report(payload: Record<string, unknown>): void {
@@ -214,18 +181,6 @@ function report(payload: Record<string, unknown>): void {
 
 function errorText(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
-}
-
-function anySignal(signals: AbortSignal[]): AbortSignal {
-  const controller = new AbortController();
-  for (const signal of signals) {
-    if (signal.aborted) {
-      controller.abort(signal.reason);
-      return controller.signal;
-    }
-    signal.addEventListener("abort", () => controller.abort(signal.reason), { once: true });
-  }
-  return controller.signal;
 }
 
 async function readBounded(response: Response, signal: AbortSignal): Promise<string> {
@@ -248,13 +203,7 @@ async function readBounded(response: Response, signal: AbortSignal): Promise<str
   } finally {
     await reader.cancel().catch(() => {});
   }
-  const joined = new Uint8Array(size);
-  let offset = 0;
-  for (const chunk of chunks) {
-    joined.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return new TextDecoder().decode(joined);
+  return Buffer.concat(chunks).toString("utf8");
 }
 
 async function discardBody(response: Response): Promise<void> {

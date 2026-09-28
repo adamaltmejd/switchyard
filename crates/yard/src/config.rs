@@ -246,7 +246,7 @@ impl Config {
                 ));
             }
             if let Some(effort) = &agent.effort
-                && !["low", "medium", "high", "xhigh", "max"].contains(&effort.as_str())
+                && !crate::pi::EFFORTS.contains(&effort.as_str())
             {
                 return Err(format!("agents.{name}.effort {effort:?} is unknown"));
             }

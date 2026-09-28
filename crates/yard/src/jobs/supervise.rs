@@ -196,20 +196,6 @@ pub fn worker_secrets(
     ])
 }
 
-/// Write the harness state's files, keeping what is already there.
-pub fn stage_state(state: &Path, connection: &crate::pi::Connection) -> Result<(), Fail> {
-    for (path, contents) in crate::pi::state_files(connection) {
-        let target = state.join(&path);
-        match contents {
-            None => std::fs::create_dir_all(&target).map_err(|error| error.to_string())?,
-            Some(contents) => {
-                std::fs::write(&target, contents).map_err(|error| error.to_string())?
-            }
-        }
-    }
-    Ok(())
-}
-
 pub fn stage_input(input: &Path) -> Result<(), Fail> {
     std::fs::create_dir_all(input).map_err(|error| error.to_string())?;
     std::fs::write(input.join(crate::pi::EXTENSION_FILE), crate::pi::EXTENSION)
@@ -259,7 +245,7 @@ pub async fn run_pi(
         .map_err(|error| error.to_string())?;
     let mut stdout = BufReader::new(child.stdout.take().expect("piped")).lines();
     let mut stderr = BufReader::new(child.stderr.take().expect("piped")).lines();
-    let mut normalizer = crate::pi::Normalizer::new();
+    let mut normalizer = crate::pi::Normalizer::default();
     let mut run = Run {
         terminal: None,
         registered: None,
@@ -280,7 +266,7 @@ pub async fn run_pi(
                 Ok(Some(line)) => {
                     let _ = file.write_all(line.as_bytes()).await;
                     let _ = file.write_all(b"\n").await;
-                    for event in normalizer.frame(&line) {
+                    if let Some(event) = normalizer.frame(&line) {
                         match &event {
                             crate::pi::Event::Started { session_id } => {
                                 run.session_id = Some(session_id.clone());
@@ -290,7 +276,6 @@ pub async fn run_pi(
                                 usage = Some((spent.input, spent.output, spent.cost));
                                 run.terminal = Some(event.clone());
                             }
-                            crate::pi::Event::Progress { .. } => {}
                         }
                     }
                 }
@@ -353,7 +338,7 @@ pub async fn implement(
             .await?;
     }
     let state = dir.join("state");
-    stage_state(&state, connection)?;
+    crate::pi::stage_state(&state, connection).map_err(|error| error.to_string())?;
     let input = dir.join("input");
     stage_input(&input)?;
 

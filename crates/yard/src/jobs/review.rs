@@ -40,7 +40,7 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
         .git
         .clone_detached(&project.canonical_dir(), &checkout, &head)
         .await?;
-    supervise::stage_state(&state, connection)?;
+    crate::pi::stage_state(&state, connection).map_err(|error| error.to_string())?;
     supervise::stage_input(&input)?;
 
     let stat = daemon

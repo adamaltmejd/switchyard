@@ -533,7 +533,7 @@ is gone and marks each execution that recorded one as interrupted.
 
 Pi is the one harness. Its adapter is the launch argv that starts or
 resumes a session, the normalisation of its frames into `started`,
-`progress`, `finished`, `failed`, and the launch files it needs, including
+`finished`, `failed`, and the launch files it needs, including
 Yard's staged MCP client extension. Extension discovery is off, and so are
 prompt templates and themes: the staged client is the only code that loads
 in the harness, so nothing a candidate commits runs with a worker's bearer.

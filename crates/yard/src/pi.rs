@@ -36,8 +36,9 @@ const PROMPT_MAX_BYTES: usize = 128 * 1024 - 1;
 const MODEL_MAX_BYTES: usize = 256;
 const SESSION_ID_MAX_BYTES: usize = 128;
 // Yard's effort ladder is Pi's `--thinking` ladder word for word. Pi only
-// warns on an unknown level and runs at the default, so it is checked here.
-const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+// warns on an unknown level and runs at the default, so configuration checks
+// it at load.
+pub const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
 /// An upstream a model request reaches through an injecting route.
 #[derive(Debug)]
@@ -118,9 +119,6 @@ pub fn argv(launch: &Launch) -> Result<Vec<String>, String> {
     .map(String::from)
     .into();
     if let Some(effort) = launch.effort {
-        if !EFFORTS.contains(&effort) {
-            return Err(format!("unknown effort {effort:?}"));
-        }
         argv.extend(["--thinking".into(), effort.into()]);
     }
     if let Some(id) = launch.resume {
@@ -180,13 +178,6 @@ fn check_session_id(id: &str) -> Result<(), String> {
     }
 }
 
-/// `agent/models.json`: the provider's base URL moved onto its route. Every
-/// other fact of the provider stays Pi's built-in catalog entry.
-pub fn models_json(connection: &Connection) -> String {
-    let base_url = format!("http://{}{}", connection.route, connection.base_path);
-    json!({ "providers": { connection.name: { "baseUrl": base_url } } }).to_string()
-}
-
 /// The box env Pi needs, literal values only. The caller adds
 /// `BEARER_VAR` as `{"from": BEARER_VAR}`.
 pub fn env(connection: &Connection) -> Vec<(String, String)> {
@@ -202,16 +193,16 @@ pub fn env(connection: &Connection) -> Vec<(String, String)> {
     .into()
 }
 
-/// What the daemon creates under an attempt's harness-state directory before
-/// the first launch, parents first: `(relative path, None)` is a directory,
-/// `(relative path, Some(contents))` a file.
-pub fn state_files(connection: &Connection) -> Vec<(String, Option<String>)> {
-    vec![
-        ("agent".into(), None),
-        ("agent/models.json".into(), Some(models_json(connection))),
-        ("sessions".into(), None),
-        ("home".into(), None),
-    ]
+/// Stage a harness-state directory, keeping what is already there.
+/// `agent/models.json` moves the provider's base URL onto its route; every
+/// other fact of the provider stays Pi's built-in catalog entry.
+pub fn stage_state(state: &std::path::Path, connection: &Connection) -> std::io::Result<()> {
+    std::fs::create_dir_all(state.join("sessions"))?;
+    std::fs::create_dir_all(state.join("home"))?;
+    std::fs::create_dir_all(state.join("agent"))?;
+    let base_url = format!("http://{}{}", connection.route, connection.base_path);
+    let models = json!({ "providers": { connection.name: { "baseUrl": base_url } } });
+    std::fs::write(state.join("agent/models.json"), models.to_string())
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -253,26 +244,13 @@ pub struct Usage {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
-    Started {
-        session_id: String,
-    },
-    Progress {
-        tool: Option<String>,
-        text: Option<String>,
-    },
-    Finished {
-        text: String,
-        usage: Usage,
-    },
-    Failed {
-        message: String,
-        usage: Usage,
-    },
+    Started { session_id: String },
+    Finished { usage: Usage },
+    Failed { message: String, usage: Usage },
 }
 
 struct Final {
     stop_reason: String,
-    text: String,
     error: Option<String>,
 }
 
@@ -288,37 +266,27 @@ pub struct Normalizer {
 }
 
 impl Normalizer {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn frame(&mut self, line: &str) -> Vec<Event> {
-        let Ok(frame) = serde_json::from_str::<Value>(line.trim_end_matches('\r')) else {
-            return vec![];
-        };
+    pub fn frame(&mut self, line: &str) -> Option<Event> {
+        let frame = serde_json::from_str::<Value>(line.trim_end_matches('\r')).ok()?;
         match frame.get("type").and_then(Value::as_str) {
             Some("session") => match frame.get("id").and_then(Value::as_str) {
-                Some(id) if !id.is_empty() => vec![Event::Started {
+                Some(id) if !id.is_empty() => Some(Event::Started {
                     session_id: id.into(),
-                }],
-                _ => vec![],
+                }),
+                _ => None,
             },
-            Some("tool_execution_start") => match frame.get("toolName").and_then(Value::as_str) {
-                Some(name) if !name.is_empty() => vec![Event::Progress {
-                    tool: Some(name.into()),
-                    text: None,
-                }],
-                _ => vec![],
-            },
-            Some("message_end") => self.message_end(&frame["message"]),
-            Some("agent_settled") => vec![self.settled()],
-            _ => vec![],
+            Some("message_end") => {
+                self.message_end(&frame["message"]);
+                None
+            }
+            Some("agent_settled") => Some(self.settled()),
+            _ => None,
         }
     }
 
-    fn message_end(&mut self, message: &Value) -> Vec<Event> {
+    fn message_end(&mut self, message: &Value) {
         if message.get("role").and_then(Value::as_str) != Some("assistant") {
-            return vec![];
+            return;
         }
         // Counted here only: `turn_end` repeats the same message.
         let usage = &message["usage"];
@@ -329,34 +297,18 @@ impl Normalizer {
             .pointer("/cost/total")
             .and_then(Value::as_f64)
             .unwrap_or(0.0);
-        let text: String = message
-            .get("content")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
-            .filter_map(|part| part.get("text").and_then(Value::as_str))
-            .collect();
         self.last = Some(Final {
             stop_reason: message
                 .get("stopReason")
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .into(),
-            text: text.clone(),
             error: message
                 .get("errorMessage")
                 .and_then(Value::as_str)
                 .filter(|m| !m.is_empty())
                 .map(String::from),
         });
-        if text.is_empty() {
-            return vec![];
-        }
-        vec![Event::Progress {
-            tool: None,
-            text: Some(text),
-        }]
     }
 
     // Settling is not succeeding: only a final message with stopReason "stop"
@@ -364,14 +316,11 @@ impl Normalizer {
     fn settled(&mut self) -> Event {
         let usage = self.usage.clone();
         match self.last.take() {
-            Some(last) if last.stop_reason == "stop" => Event::Finished {
-                text: last.text,
-                usage,
-            },
+            Some(last) if last.stop_reason == "stop" => Event::Finished { usage },
             Some(last) => Event::Failed {
-                message: last.error.unwrap_or_else(|| {
-                    format!("settled on a {} message", or_none(&last.stop_reason))
-                }),
+                message: last
+                    .error
+                    .unwrap_or_else(|| format!("settled on a {:?} message", last.stop_reason)),
                 usage,
             },
             None => Event::Failed {
@@ -379,13 +328,5 @@ impl Normalizer {
                 usage,
             },
         }
-    }
-}
-
-fn or_none(stop_reason: &str) -> &str {
-    if stop_reason.is_empty() {
-        "stopless"
-    } else {
-        stop_reason
     }
 }
