@@ -167,7 +167,7 @@ pub fn worker_spec(daemon: &Daemon, project: &Project, worker: &Worker) -> BoxSp
     );
     BoxSpec {
         name: box_name(project, worker.execution),
-        labels: labels(project, worker.execution),
+        labels: labels(project),
         harness: Some("pi".into()),
         image: worker.image.into(),
         mounts: vec![
@@ -196,11 +196,8 @@ pub fn worker_spec(daemon: &Daemon, project: &Project, worker: &Worker) -> BoxSp
     }
 }
 
-pub fn labels(project: &Project, execution: i64) -> BTreeMap<String, String> {
-    BTreeMap::from([
-        ("dev.yard.project".to_string(), project.key.clone()),
-        ("dev.yard.execution".to_string(), execution.to_string()),
-    ])
+pub fn labels(project: &Project) -> BTreeMap<String, String> {
+    BTreeMap::from([("dev.yard.project".to_string(), project.key.clone())])
 }
 
 /// The secrets `box up` reads for a worker: its bearer and the connection's key.
@@ -229,6 +226,7 @@ pub fn stage_input(input: &Path) -> Result<(), Fail> {
 }
 
 /// What a worker run ended as.
+#[derive(Default)]
 pub struct Run {
     pub terminal: Option<crate::pi::Event>,
     pub registered: Option<crate::pi::Registration>,
@@ -241,17 +239,18 @@ pub struct Run {
 /// Run Pi in a live box, streaming its frames to the transcript, until it
 /// ends, the stop signal fires or a clock runs out. The caller takes the box
 /// down, which is how a run is cancelled.
+// Each argument is a separate input of the one run; a struct would only
+// rename them.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_pi(
     daemon: &Daemon,
     project: &Project,
     execution: i64,
-    name: &str,
+    kind: crate::mcp::Kind,
     argv: &[String],
     transcript: &Path,
     inactivity: Duration,
-    deadline: Option<tokio::time::Instant>,
-    expected_tools: &[&str],
+    deadline: tokio::time::Instant,
 ) -> Result<Run, Fail> {
     let stop = Arc::new(tokio::sync::Notify::new());
     daemon
@@ -266,24 +265,15 @@ pub async fn run_pi(
         .map_err(|error| error.to_string())?;
     let mut child = daemon
         .pinfold
-        .exec_streaming(name, Some("/workspace"), argv)
+        .exec_streaming(&box_name(project, execution), Some("/workspace"), argv)
         .map_err(|error| error.to_string())?;
     let mut stdout = BufReader::new(child.stdout.take().expect("piped")).lines();
     let mut stderr = BufReader::new(child.stderr.take().expect("piped")).lines();
     let mut normalizer = crate::pi::Normalizer::default();
-    let mut run = Run {
-        terminal: None,
-        registered: None,
-        session_id: None,
-        stopped: false,
-        timed_out: false,
-        exit_code: None,
-    };
+    let mut run = Run::default();
     let mut usage = None;
     let mut stdout_open = true;
     let mut stderr_open = true;
-    let far = tokio::time::Instant::now() + Duration::from_secs(365 * 86_400);
-    let deadline = deadline.unwrap_or(far);
     while stdout_open || stderr_open {
         let idle = tokio::time::sleep(inactivity);
         tokio::select! {
@@ -325,9 +315,9 @@ pub async fn run_pi(
     project.read(|conn| executions::set_worker(conn, execution, None, None, usage))?;
     // A granted tool the fetched list lacks is a failed registration.
     if let Some(crate::pi::Registration::Registered(tools)) = &run.registered
-        && let Some(missing) = expected_tools
-            .iter()
-            .find(|tool| !tools.iter().any(|name| name == *tool))
+        && let Some(missing) = crate::mcp::tool_names(kind)
+            .into_iter()
+            .find(|tool| !tools.contains(tool))
     {
         run.registered = Some(crate::pi::Registration::Refused(format!(
             "the MCP client registered no {missing}"
@@ -374,8 +364,6 @@ pub async fn implement(
         }
         _ => None,
     };
-    let next = attempt.next.clone().unwrap_or(json!({}));
-    let nudge = attempt.nudge.clone();
     project.read(|conn| {
         conn.execute(
             "UPDATE attempt SET next = NULL, nudge = NULL WHERE id = ?1",
@@ -394,8 +382,6 @@ pub async fn implement(
         &attempt,
         &ticket,
         row.reason.as_deref().unwrap_or("first"),
-        &next,
-        nudge.as_deref(),
         resume.is_some(),
     )
     .await?;
@@ -444,12 +430,11 @@ pub async fn implement(
         daemon,
         project,
         execution,
-        &live.name,
+        crate::mcp::Kind::Implementation,
         &argv,
         &transcript(project, attempt.id, execution),
         Duration::from_secs(workflow.inactivity_timeout_minutes * 60),
-        Some(deadline),
-        &["yard_context", "yard_progress", "yard_propose"],
+        deadline,
     )
     .await;
     let run = match run {
@@ -557,7 +542,7 @@ pub async fn implement(
             _ => None,
         };
         let stop = |tx: &rusqlite::Connection, reason: &str, detail: &str| -> Result<(), Fail> {
-            if nudge_pending(tx, attempt.id)? && reason != "timeout" {
+            if current.nudge.is_some() && reason != "timeout" {
                 return attempts::set_next(tx, attempt.id, Some(&json!({ "reason": "nudge" })));
             }
             attempts::raise(tx, attempts::Raise {
@@ -606,7 +591,7 @@ pub async fn implement(
             })?;
             // One return per dirty tree: a worker told once and still
             // leaving files is stopped, not looped.
-            if executions::get(tx, execution)?.reason.as_deref() == Some("dirty") {
+            if row.reason.as_deref() == Some("dirty") {
                 return stop(tx, "dirty", &format!("the clone is still dirty:\n{listing}"));
             }
             return attempts::set_next(tx, attempt.id, Some(&json!({ "reason": "dirty", "detail": listing })));
@@ -650,18 +635,13 @@ pub async fn implement(
         super::audit_attempt(tx, "attempt.candidate", &current, None, json!({ "base": base, "head": new_head }))?;
         // A nudge queued during the execution reaches the implementer before
         // anything judges the candidate.
-        if nudge_pending(tx, attempt.id)? {
+        if current.nudge.is_some() {
             attempts::set_next(tx, attempt.id, Some(&json!({ "reason": "nudge" })))?;
         }
         Ok(())
     })
 }
 
-fn nudge_pending(tx: &rusqlite::Connection, attempt: i64) -> Result<bool, Fail> {
-    Ok(attempts::get(tx, attempt)?.nudge.is_some())
-}
-
-#[allow(clippy::too_many_arguments)]
 async fn implementer_prompt(
     daemon: &Daemon,
     project: &Project,
@@ -669,10 +649,10 @@ async fn implementer_prompt(
     attempt: &attempts::Attempt,
     ticket: &tickets::Ticket,
     reason: &str,
-    next: &Value,
-    nudge: Option<&str>,
     resumed: bool,
 ) -> Result<String, Fail> {
+    let next = attempt.next.clone().unwrap_or(json!({}));
+    let nudge = attempt.nudge.as_deref();
     let workflow = loaded.config.workflow(&attempt.workflow)?;
     let mut prompt = String::new();
     if !resumed {
@@ -809,14 +789,6 @@ pub async fn gate(
         Err(error) => ("error", error, None, None, None),
     };
     project.tx(|tx| {
-        if let Some(image) = &image {
-            executions::set_handle(
-                tx,
-                execution,
-                &row.handle.clone().unwrap_or_default(),
-                Some(image),
-            )?;
-        }
         executions::end(
             tx,
             execution,
@@ -878,11 +850,7 @@ pub struct GateResult {
 }
 
 fn tail(output: &str) -> String {
-    let start = output.len().saturating_sub(LOG_TAIL);
-    let start = (start..output.len())
-        .find(|index| output.is_char_boundary(*index))
-        .unwrap_or(output.len());
-    output[start..].to_string()
+    output[output.ceil_char_boundary(output.len().saturating_sub(LOG_TAIL))..].to_string()
 }
 
 async fn box_gate(
@@ -898,7 +866,7 @@ async fn box_gate(
         .map_err(|fail| fail.message)?;
     let spec = BoxSpec {
         name: box_name(project, execution),
-        labels: labels(project, execution),
+        labels: labels(project),
         harness: None,
         image,
         mounts: vec![Mount {
@@ -1021,18 +989,23 @@ async fn host_gate(
         .map_err(|error| format!("start the host gate: {error}"))?;
     drop(stdin);
     let limit = Duration::from_secs(gate.timeout_minutes * 60);
-    match tokio::time::timeout(limit, child.wait_with_output()).await {
-        Ok(Ok(out)) => {
-            let mut output = String::from_utf8_lossy(&out.stdout).into_owned();
-            output.push_str(&String::from_utf8_lossy(&out.stderr));
-            Ok(GateResult {
-                code: crate::git::exit_code(out.status),
-                output,
-                oom: None,
-                image: None,
-            })
-        }
-        Ok(Err(error)) => Err(format!("the host gate could not run: {error}")),
+    let stdout = child.stdout.take().expect("stdout is piped");
+    let stderr = child.stderr.take().expect("stderr is piped");
+    let run = async {
+        let (stdout, stderr) = tokio::join!(
+            crate::r#box::read_capped(stdout, crate::r#box::OUTPUT_CAP),
+            crate::r#box::read_capped(stderr, crate::r#box::OUTPUT_CAP)
+        );
+        (stdout + &stderr, child.wait().await)
+    };
+    match tokio::time::timeout(limit, run).await {
+        Ok((output, Ok(status))) => Ok(GateResult {
+            code: crate::git::exit_code(status),
+            output,
+            oom: None,
+            image: None,
+        }),
+        Ok((_, Err(error))) => Err(format!("the host gate could not run: {error}")),
         Err(_) => {
             let _ = nix::sys::signal::killpg(
                 nix::unistd::Pid::from_raw(pid as i32),
@@ -1087,13 +1060,17 @@ pub fn lock_free(dir: &Path) -> Result<bool, String> {
 /// A process's start time as `ps` reports it: its birth identity against
 /// pid reuse.
 pub async fn birth(pid: u32) -> Option<String> {
-    let out = tokio::process::Command::new("ps")
+    let ps = tokio::process::Command::new("ps")
         .args(["-o", "lstart=", "-p", &pid.to_string()])
+        .current_dir("/")
         .env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())
         .env("LC_ALL", "C")
-        .output()
+        .kill_on_drop(true)
+        .output();
+    let out = tokio::time::timeout(Duration::from_secs(10), ps)
         .await
+        .ok()?
         .ok()?;
     let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
     (!text.is_empty()).then_some(text)

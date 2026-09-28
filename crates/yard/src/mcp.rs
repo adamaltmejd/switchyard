@@ -60,6 +60,14 @@ impl Grants {
     }
 }
 
+/// The names of the tools a kind is granted.
+pub fn tool_names(kind: Kind) -> Vec<String> {
+    tools(kind)
+        .iter()
+        .filter_map(|tool| tool["name"].as_str().map(str::to_string))
+        .collect()
+}
+
 fn tools(kind: Kind) -> Vec<Value> {
     let context = json!({
         "name": "yard_context",

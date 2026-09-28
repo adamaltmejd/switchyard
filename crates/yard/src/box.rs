@@ -18,7 +18,7 @@ use tokio::task::JoinHandle;
 
 const PROGRAM: &str = "pinfold";
 /// What is kept of one output stream, or of one line; the rest is drained.
-const OUTPUT_CAP: usize = 1 << 20;
+pub const OUTPUT_CAP: usize = 1 << 20;
 /// `stat`, `down`, `list` and `prune` answer from the runtime's state.
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a SIGTERMed `up` gets to remove its box before it is killed.

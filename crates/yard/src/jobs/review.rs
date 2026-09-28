@@ -94,12 +94,11 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
         daemon,
         project,
         execution,
-        &live.name,
+        crate::mcp::Kind::Review,
         &argv,
         &supervise::transcript(project, attempt.id, execution),
         timeout,
-        Some(tokio::time::Instant::now() + timeout),
-        &["yard_context", "yard_publish_review"],
+        tokio::time::Instant::now() + timeout,
     )
     .await;
     daemon.grants.revoke(execution);
