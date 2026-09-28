@@ -128,25 +128,34 @@ fn yard_reaches_only_its_routes_and_listens_locally() {
         assert_eq!(request.path, "/api/v1/chat/completions");
     }
 
-    let pid = format!("pid={},", machine.daemon_pid());
-    let listening = |args: &[&str]| -> Vec<String> {
-        let out = std::process::Command::new("ss")
+    // lsof, which both platforms have: the daemon's own sockets.
+    let pid = machine.daemon_pid().to_string();
+    let sockets = |args: &[&str]| -> Vec<String> {
+        let out = std::process::Command::new("lsof")
+            .args(["-nP", "-a", "-p", &pid])
             .args(args)
             .output()
             .unwrap();
         String::from_utf8_lossy(&out.stdout)
             .lines()
-            .filter(|line| line.contains(&pid))
+            .skip(1)
             .map(str::to_string)
             .collect()
     };
-    let inet = listening(&["-H", "-l", "-t", "-u", "-n", "-p"]);
-    assert_eq!(inet.len(), 1, "{inet:?}");
-    assert!(inet[0].contains("127.0.0.1:"), "{inet:?}");
-    let unix = listening(&["-H", "-l", "-x", "-p"]);
-    assert_eq!(unix.len(), 1, "{unix:?}");
-    assert!(
-        unix[0].contains(&machine.state.join("yard/yard.sock").display().to_string()),
-        "{unix:?}"
-    );
+    let tcp = sockets(&["-iTCP", "-sTCP:LISTEN"]);
+    assert_eq!(tcp.len(), 1, "{tcp:?}");
+    assert!(tcp[0].contains("127.0.0.1:"), "{tcp:?}");
+    let udp = sockets(&["-iUDP"]);
+    assert!(udp.is_empty(), "{udp:?}");
+    // Every unix socket bound to a path is the daemon's own; a connection
+    // accepted on it names the same path.
+    let socket = machine.state.join("yard/yard.sock").display().to_string();
+    let unix: Vec<String> = sockets(&["-U"])
+        .into_iter()
+        .filter(|line| line.contains('/'))
+        .collect();
+    assert!(!unix.is_empty(), "no unix socket");
+    for line in &unix {
+        assert!(line.contains(&socket), "{unix:?}");
+    }
 }
