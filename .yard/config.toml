@@ -1,5 +1,5 @@
 # Switchyard project configuration. Changes land only through `yard sync`.
-max_lanes = 1
+max_lanes = 2
 approve = "manual"
 
 [target]
