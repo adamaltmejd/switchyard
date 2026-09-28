@@ -39,8 +39,11 @@ fn live(project: &Project, ticket: i64) -> usize {
 /// with both lanes free, so only the one-live-attempt rule stops the second;
 /// then starts of two tickets race for the last lane.
 ///
-/// Sabotage: make `admit::free_lanes` ignore the lanes held in the project;
-/// both tickets are admitted.
+/// Sabotage: drop the `attempt_one_live` unique index, the live-attempt
+/// clause of `tickets::BLOCKER` and the live check in
+/// `admit::attempt_start`; both starts of one ticket are admitted. Make
+/// `admit::free_lanes` ignore the lanes held in the project; both tickets
+/// are admitted.
 #[test]
 fn racing_starts_admit_one_attempt() {
     let hold = Latch::new();
