@@ -6,15 +6,20 @@ use serde_json::json;
 /// A worker that plants `core.fsmonitor`, a hook, a clean filter and a
 /// remote in its clone and corrupts an object: none of them runs on the
 /// host, canonical's objects are intact, the candidate is refused by name.
-/// Each plant touches a file under a host path that does not exist in the
-/// box, so a marker proves it ran on the host. The corrupt object is a
-/// commit that is well-formed on disk but fails fsck, on top of a good one.
-/// Control: the next execution resets to the good commit, past the same
-/// plants, and its candidate is taken.
+/// It also links its harness state's `agent/models.json` to a host path:
+/// the next execution's staging writes no file through it. Each plant
+/// names a file under a host path that does not exist in the box, so a
+/// marker proves it acted on the host. The corrupt object is a commit that
+/// is well-formed on disk but fails fsck, on top of a good one. Control:
+/// the next execution resets to the good commit, past the same plants, and
+/// its candidate is taken.
 ///
 /// Sabotage: drop `transfer.fsckObjects=true` from `git::Git`; the corrupt
 /// commit becomes the candidate. Or run a host git command with its cwd in
-/// the clone (e.g. `git status`); the fsmonitor marker appears.
+/// the clone (e.g. `git status`); the fsmonitor marker appears. Or write
+/// `models.json` with `std::fs::write` in `pi::stage_state`; the
+/// `models.json` marker appears (and the next execution's Pi, reading the
+/// link, misses its route).
 #[test]
 fn planted_worker_git_never_runs_on_the_host() {
     let markers = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
@@ -40,7 +45,8 @@ fn planted_worker_git_never_runs_on_the_host() {
                  && bad=$(printf 'tree %s\\nparent %s\\nauthor bad\\ncommitter bad\\n\\nbad\\n' \
                       $(git rev-parse 'HEAD^{{tree}}') $(git rev-parse HEAD) \
                       | git hash-object -t commit --literally -w --stdin) \
-                 && git -c core.hooksPath=/dev/null update-ref HEAD $bad && echo planted"
+                 && git -c core.hooksPath=/dev/null update-ref HEAD $bad \
+                 && ln -sf {dir}/models.json /yard/state/agent/models.json && echo planted"
             ))],
         )
     });
@@ -69,6 +75,11 @@ fn planted_worker_git_never_runs_on_the_host() {
 
     project.json(&["attempt", "start", "Y-1"]);
     let approval = watch.attention();
+    let planted: Vec<_> = std::fs::read_dir(&marker_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert!(planted.is_empty(), "ran on the host: {planted:?}");
     assert_eq!(approval["data"]["kind"], "approval", "{approval}");
     let head = approval["data"]["payload"]["head"].as_str().unwrap();
     assert_eq!(
@@ -78,11 +89,6 @@ fn planted_worker_git_never_runs_on_the_host() {
         ),
         "feature\n"
     );
-    let planted: Vec<_> = std::fs::read_dir(&marker_dir)
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name())
-        .collect();
-    assert!(planted.is_empty(), "ran on the host: {planted:?}");
 }
 
 /// Across G7's path every request that reaches the fixture behind the

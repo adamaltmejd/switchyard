@@ -196,13 +196,37 @@ pub fn env(connection: &Connection) -> Vec<(String, String)> {
 /// Stage a harness-state directory, keeping what is already there.
 /// `agent/models.json` moves the provider's base URL onto its route; every
 /// other fact of the provider stays Pi's built-in catalog entry.
+///
+/// The worker's box mounts this directory writable, so a link in it can
+/// point anywhere on the host. The write follows none: an `agent` that is
+/// not a directory fails, and `models.json` is replaced, never written
+/// through.
 pub fn stage_state(state: &std::path::Path, connection: &Connection) -> std::io::Result<()> {
+    use nix::fcntl::{OFlag, open, openat};
+    use nix::sys::stat::Mode;
+    use nix::unistd::{UnlinkatFlags, unlinkat};
+    use std::io::Write;
     std::fs::create_dir_all(state.join("sessions"))?;
     std::fs::create_dir_all(state.join("home"))?;
     std::fs::create_dir_all(state.join("agent"))?;
+    let agent = open(
+        &state.join("agent"),
+        OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    )?;
+    match unlinkat(&agent, "models.json", UnlinkatFlags::NoRemoveDir) {
+        Ok(()) | Err(nix::errno::Errno::ENOENT) => {}
+        Err(errno) => return Err(errno.into()),
+    }
+    let file = openat(
+        &agent,
+        "models.json",
+        OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+        Mode::from_bits_truncate(0o644),
+    )?;
     let base_url = format!("http://{}{}", connection.route, connection.base_path);
     let models = json!({ "providers": { connection.name: { "baseUrl": base_url } } });
-    std::fs::write(state.join("agent/models.json"), models.to_string())
+    std::fs::File::from(file).write_all(models.to_string().as_bytes())
 }
 
 #[derive(Debug, Clone, PartialEq)]
