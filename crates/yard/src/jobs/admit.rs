@@ -84,7 +84,11 @@ pub fn scheduled(
             let Ok(workflow) = loaded.config.workflow(&ticket.workflow) else {
                 continue;
             };
-            if workflow.read_only && ticket.started_once {
+            if workflow.read_only
+                && project
+                    .read(|conn| attempts::latest_for(conn, ticket.id))?
+                    .is_some()
+            {
                 continue;
             }
             admitted.push(project.tx(|tx| admit(tx, loaded, &ticket))?);
@@ -110,10 +114,6 @@ fn admit(
     let mut implementer = serde_json::to_value(agent).expect("agent serializes");
     implementer["name"] = json!(workflow.implementer);
     let attempt = attempts::insert(tx, ticket.id, &ticket.workflow, &implementer, &loaded.head)?;
-    tx.execute(
-        "UPDATE ticket SET started_once = 1 WHERE id = ?1",
-        [ticket.id],
-    )?;
     let row = attempts::get(tx, attempt)?;
     super::audit_attempt(
         tx,
@@ -666,7 +666,7 @@ async fn answer_start(
     project: &Arc<Project>,
     item: &attempts::Attention,
 ) -> Result<Value, Fail> {
-    if item.kind == "stopped" && matches!(item.reason.as_str(), "timeout" | "limit") {
+    if !item.exits().contains(&"start") {
         return Err(Fail::refused(format!(
             "a stopped:{} item exits only by nudge or abandon",
             item.reason
@@ -781,7 +781,7 @@ pub fn attempt_nudge(daemon: &Daemon, project: &Project, params: &Value) -> Resu
                 "timeout" => {
                     tx.execute(
                         "UPDATE attempt SET work_ms = 0, lane_since = CASE WHEN lane = 1 THEN ?2 ELSE lane_since END WHERE id = ?1",
-                        rusqlite::params![attempt.id, store::now_ms().to_string()],
+                        rusqlite::params![attempt.id, store::now_ms()],
                     )?;
                 }
                 "limit" => {

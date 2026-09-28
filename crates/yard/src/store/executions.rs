@@ -110,15 +110,11 @@ pub fn session(conn: &Connection, attempt: i64) -> Result<Option<(Execution, i64
     .pop() else {
         return Ok(None);
     };
-    let mut count = 1;
-    let mut resumed = conn.query_row(
-        "SELECT resumed FROM execution WHERE id = ?1",
-        [latest.id],
-        |row| row.get::<_, Option<i64>>(0),
-    )?;
-    while let Some(id) = resumed {
+    let mut count = 0;
+    let mut next = Some(latest.id);
+    while let Some(id) = next {
         count += 1;
-        resumed = conn.query_row("SELECT resumed FROM execution WHERE id = ?1", [id], |row| {
+        next = conn.query_row("SELECT resumed FROM execution WHERE id = ?1", [id], |row| {
             row.get(0)
         })?;
     }
@@ -139,9 +135,12 @@ pub fn query<P: rusqlite::Params>(
     filter: &str,
     params: P,
 ) -> Result<Vec<Execution>, Fail> {
-    let mut statement = conn.prepare(&format!("SELECT {COLUMNS} FROM execution WHERE {filter}"))?;
-    let rows = statement.query_map(params, row)?;
-    Ok(rows.collect::<Result<_, _>>()?)
+    super::all(
+        conn,
+        &format!("SELECT {COLUMNS} FROM execution WHERE {filter}"),
+        params,
+        row,
+    )
 }
 
 /// What an execution is started on.
@@ -161,7 +160,6 @@ pub struct Start<'a> {
     pub ticket: Option<i64>,
     /// Worker settings: agent name and its `{harness, provider, model, effort}`.
     pub agent: Option<(&'a str, &'a Value)>,
-    pub resumed: Option<i64>,
 }
 
 /// The intent: the row exists before any effect.
@@ -170,8 +168,8 @@ pub fn start(tx: &Connection, start: Start) -> Result<i64, Fail> {
     let field = |key: &str| settings.and_then(|value| value[key].as_str().map(str::to_string));
     tx.execute(
         "INSERT INTO execution (attempt, parent, kind, reason, status, base, head, ticket_revision,
-            digest, name, round, approval, agent, harness, provider, model, effort, resumed, started_at)
-         VALUES (?1, ?2, ?3, ?4, 'running', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+            digest, name, round, approval, agent, harness, provider, model, effort, started_at)
+         VALUES (?1, ?2, ?3, ?4, 'running', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         params![
             start.attempt,
             start.parent,
@@ -189,7 +187,6 @@ pub fn start(tx: &Connection, start: Start) -> Result<i64, Fail> {
             field("provider"),
             field("model"),
             field("effort"),
-            start.resumed,
             now()
         ],
     )?;

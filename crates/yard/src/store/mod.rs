@@ -5,7 +5,7 @@
 mod schema;
 
 use crate::api::Fail;
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, Row, Transaction, params};
 
 pub mod attempts;
 pub mod checks;
@@ -18,7 +18,7 @@ use std::path::Path;
 pub struct Store {
     conn: Connection,
     /// Held for the daemon's life: the single-writer proof.
-    _lock: File,
+    _lock: nix::fcntl::Flock<File>,
 }
 
 /// What an audit event names.
@@ -34,17 +34,13 @@ impl Store {
     pub fn open(dir: &Path) -> Result<Store, String> {
         std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
         let lock = File::create(dir.join("store.lock")).map_err(|error| error.to_string())?;
-        nix::fcntl::Flock::lock(
-            lock.try_clone().map_err(|error| error.to_string())?,
-            nix::fcntl::FlockArg::LockExclusiveNonblock,
-        )
-        .map(std::mem::forget)
-        .map_err(|_| {
-            format!(
-                "{} is held by another daemon",
-                dir.join("store.lock").display()
-            )
-        })?;
+        let lock = nix::fcntl::Flock::lock(lock, nix::fcntl::FlockArg::LockExclusiveNonblock)
+            .map_err(|_| {
+                format!(
+                    "{} is held by another daemon",
+                    dir.join("store.lock").display()
+                )
+            })?;
         let conn = Connection::open(dir.join("store.sqlite")).map_err(|error| error.to_string())?;
         conn.pragma_update(None, "journal_mode", "WAL")
             .map_err(|error| error.to_string())?;
@@ -118,36 +114,48 @@ pub fn audit(
     Ok(tx.last_insert_rowid())
 }
 
-/// Audit events after `seq`, oldest first, at most `limit`.
-pub fn events_since(conn: &Connection, seq: i64, limit: i64) -> Result<Vec<Value>, Fail> {
-    let mut statement = conn.prepare(
-        "SELECT seq, at, event, ticket, attempt, execution, attention, text, data
-         FROM audit WHERE seq > ?1 ORDER BY seq LIMIT ?2",
-    )?;
-    let rows = statement.query_map(params![seq, limit], |row| {
-        let data: String = row.get(8)?;
-        Ok(json!({
-            "seq": row.get::<_, i64>(0)?,
-            "at": row.get::<_, String>(1)?,
-            "event": row.get::<_, String>(2)?,
-            "ticket": row.get::<_, Option<i64>>(3)?.map(ticket_name),
-            "attempt": row.get::<_, Option<i64>>(4)?,
-            "execution": row.get::<_, Option<i64>>(5)?,
-            "attention": row.get::<_, Option<i64>>(6)?,
-            "text": row.get::<_, Option<String>>(7)?,
-            "data": serde_json::from_str::<Value>(&data).unwrap_or(Value::Null),
-        }))
-    })?;
+/// Every row of one query.
+pub fn all<T>(
+    conn: &Connection,
+    sql: &str,
+    params: impl rusqlite::Params,
+    row: impl FnMut(&Row) -> rusqlite::Result<T>,
+) -> Result<Vec<T>, Fail> {
+    let mut statement = conn.prepare(sql)?;
+    let rows = statement.query_map(params, row)?;
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
+/// Audit events after `seq`, oldest first, at most `limit`.
+pub fn events_since(conn: &Connection, seq: i64, limit: i64) -> Result<Vec<Value>, Fail> {
+    all(
+        conn,
+        "SELECT seq, at, event, ticket, attempt, execution, attention, text, data
+         FROM audit WHERE seq > ?1 ORDER BY seq LIMIT ?2",
+        params![seq, limit],
+        |row| {
+            let data: String = row.get(8)?;
+            Ok(json!({
+                "seq": row.get::<_, i64>(0)?,
+                "at": row.get::<_, String>(1)?,
+                "event": row.get::<_, String>(2)?,
+                "ticket": row.get::<_, Option<i64>>(3)?.map(ticket_name),
+                "attempt": row.get::<_, Option<i64>>(4)?,
+                "execution": row.get::<_, Option<i64>>(5)?,
+                "attention": row.get::<_, Option<i64>>(6)?,
+                "text": row.get::<_, Option<String>>(7)?,
+                "data": serde_json::from_str::<Value>(&data).unwrap_or(Value::Null),
+            }))
+        },
+    )
+}
+
 pub fn last_seq(conn: &Connection) -> Result<i64, Fail> {
-    Ok(conn
-        .query_row("SELECT COALESCE(MAX(seq), 0) FROM audit", [], |row| {
+    Ok(
+        conn.query_row("SELECT COALESCE(MAX(seq), 0) FROM audit", [], |row| {
             row.get(0)
-        })
-        .optional()?
-        .unwrap_or(0))
+        })?,
+    )
 }
 
 pub fn ticket_name(id: i64) -> String {

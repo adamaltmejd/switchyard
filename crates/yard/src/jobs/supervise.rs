@@ -332,7 +332,7 @@ pub async fn implement(
             .clone_branch(
                 &project.canonical_dir(),
                 &clone,
-                &attempt.branch,
+                &attempt.branch(),
                 &attempt.base,
             )
             .await?;
@@ -478,7 +478,7 @@ pub async fn implement(
                 &clone,
                 &format!(
                     "+refs/heads/{}:{}",
-                    attempt.branch,
+                    attempt.branch(),
                     crate::git::candidate_ref(attempt.id)
                 ),
             )

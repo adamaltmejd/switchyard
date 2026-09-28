@@ -1,4 +1,4 @@
-use super::{Target, audit, now, ticket_name};
+use super::{Target, all, audit, now, ticket_name};
 use crate::api::Fail;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::{Value, json};
@@ -10,7 +10,6 @@ pub struct Attempt {
     pub workflow: String,
     /// The implementer frozen at admission: `{name, harness, provider, model, effort}`.
     pub implementer: Value,
-    pub branch: String,
     pub base: String,
     pub head: Option<String>,
     /// The latest target handed to the attempt for a repair.
@@ -28,33 +27,30 @@ pub struct Attempt {
     pub landing_reds: i64,
 }
 
-const COLUMNS: &str =
-    "id, ticket, workflow, implementer, branch, base, head, target, state, outcome,
+const COLUMNS: &str = "id, ticket, workflow, implementer, base, head, target, state, outcome,
     lane, lane_since, work_ms, next, nudge, rounds, extra_rounds, landing_reds";
 
 fn row(row: &Row) -> rusqlite::Result<Attempt> {
     let implementer: String = row.get(3)?;
-    let next: Option<String> = row.get(13)?;
-    let lane_since: Option<String> = row.get(11)?;
+    let next: Option<String> = row.get(12)?;
     Ok(Attempt {
         id: row.get(0)?,
         ticket: row.get(1)?,
         workflow: row.get(2)?,
         implementer: serde_json::from_str(&implementer).unwrap_or(Value::Null),
-        branch: row.get(4)?,
-        base: row.get(5)?,
-        head: row.get(6)?,
-        target: row.get(7)?,
-        state: row.get(8)?,
-        outcome: row.get(9)?,
-        lane: row.get(10)?,
-        lane_since: lane_since.and_then(|value| value.parse().ok()),
-        work_ms: row.get(12)?,
+        base: row.get(4)?,
+        head: row.get(5)?,
+        target: row.get(6)?,
+        state: row.get(7)?,
+        outcome: row.get(8)?,
+        lane: row.get(9)?,
+        lane_since: row.get(10)?,
+        work_ms: row.get(11)?,
         next: next.and_then(|text| serde_json::from_str(&text).ok()),
-        nudge: row.get(14)?,
-        rounds: row.get(15)?,
-        extra_rounds: row.get(16)?,
-        landing_reds: row.get(17)?,
+        nudge: row.get(13)?,
+        rounds: row.get(14)?,
+        extra_rounds: row.get(15)?,
+        landing_reds: row.get(16)?,
     })
 }
 
@@ -65,7 +61,7 @@ impl Attempt {
             "ticket": ticket_name(self.ticket),
             "workflow": self.workflow,
             "implementer": self.implementer,
-            "branch": self.branch,
+            "branch": self.branch(),
             "base": self.base,
             "head": self.head,
             "state": self.state,
@@ -76,6 +72,11 @@ impl Attempt {
             "rounds": self.rounds,
             "landing_reds": self.landing_reds,
         })
+    }
+
+    /// The attempt's branch in its clone.
+    pub fn branch(&self) -> String {
+        format!("yard/{}/{}", ticket_name(self.ticket), self.id)
     }
 
     /// The candidate, once there is one.
@@ -115,20 +116,22 @@ pub fn latest_for(conn: &Connection, ticket: i64) -> Result<Option<Attempt>, Fai
 }
 
 pub fn live(conn: &Connection) -> Result<Vec<Attempt>, Fail> {
-    let mut statement = conn.prepare(&format!(
-        "SELECT {COLUMNS} FROM attempt WHERE state = 'live' ORDER BY id"
-    ))?;
-    let rows = statement.query_map([], row)?;
-    Ok(rows.collect::<Result<_, _>>()?)
+    all(
+        conn,
+        &format!("SELECT {COLUMNS} FROM attempt WHERE state = 'live' ORDER BY id"),
+        [],
+        row,
+    )
 }
 
 /// Ended attempts whose files are not yet removed.
 pub fn uncleaned(conn: &Connection) -> Result<Vec<Attempt>, Fail> {
-    let mut statement = conn.prepare(&format!(
-        "SELECT {COLUMNS} FROM attempt WHERE state = 'ended' AND cleaned = 0 ORDER BY id"
-    ))?;
-    let rows = statement.query_map([], row)?;
-    Ok(rows.collect::<Result<_, _>>()?)
+    all(
+        conn,
+        &format!("SELECT {COLUMNS} FROM attempt WHERE state = 'ended' AND cleaned = 0 ORDER BY id"),
+        [],
+        row,
+    )
 }
 
 /// Attempts holding a lane in this project.
@@ -148,23 +151,18 @@ pub fn insert(
     base: &str,
 ) -> Result<i64, Fail> {
     tx.execute(
-        "INSERT INTO attempt (ticket, workflow, implementer, branch, base, state, lane, lane_since, created_at)
-         VALUES (?1, ?2, ?3, '', ?4, 'live', 1, ?5, ?6)",
+        "INSERT INTO attempt (ticket, workflow, implementer, base, state, lane, lane_since, created_at)
+         VALUES (?1, ?2, ?3, ?4, 'live', 1, ?5, ?6)",
         params![
             ticket,
             workflow,
             implementer.to_string(),
             base,
-            super::now_ms().to_string(),
+            super::now_ms(),
             now()
         ],
     )?;
-    let id = tx.last_insert_rowid();
-    tx.execute(
-        "UPDATE attempt SET branch = ?2 WHERE id = ?1",
-        params![id, format!("yard/{}/{id}", ticket_name(ticket))],
-    )?;
-    Ok(id)
+    Ok(tx.last_insert_rowid())
 }
 
 pub fn set_next(tx: &Connection, attempt: i64, next: Option<&Value>) -> Result<(), Fail> {
@@ -186,7 +184,7 @@ pub fn set_lane(tx: &Connection, attempt: i64, held: bool) -> Result<(), Fail> {
     if held {
         tx.execute(
             "UPDATE attempt SET lane = 1, lane_since = ?2 WHERE id = ?1",
-            params![attempt, now.to_string()],
+            params![attempt, now],
         )?;
     } else {
         let spent = current.lane_since.map(|since| now - since).unwrap_or(0);
@@ -236,16 +234,20 @@ fn attention_row(row: &Row) -> rusqlite::Result<Attention> {
 }
 
 impl Attention {
+    /// The commands that answer the item.
+    pub fn exits(&self) -> &'static [&'static str] {
+        match (self.kind.as_str(), self.reason.as_str()) {
+            ("approval", _) => &["approve", "reject", "abandon"],
+            ("proposal", _) => &["accept", "reject"],
+            ("stopped", "timeout" | "limit") => &["nudge", "abandon"],
+            ("red", _) if self.attempt.is_none() => &["start"],
+            _ => &["start", "nudge", "abandon"],
+        }
+    }
+
     /// The item with the commands that answer it.
     pub fn to_json(&self) -> Value {
         let ticket = self.ticket.map(ticket_name);
-        let exits: Vec<&str> = match (self.kind.as_str(), self.reason.as_str()) {
-            ("approval", _) => vec!["approve", "reject", "abandon"],
-            ("proposal", _) => vec!["accept", "reject"],
-            ("stopped", "timeout" | "limit") => vec!["nudge", "abandon"],
-            ("red", _) if self.attempt.is_none() => vec!["start"],
-            _ => vec!["start", "nudge", "abandon"],
-        };
         json!({
             "attention": self.id,
             "kind": self.kind,
@@ -255,7 +257,7 @@ impl Attention {
             "execution": self.execution,
             "payload": self.payload,
             "state": self.state,
-            "exits": exits,
+            "exits": self.exits(),
         })
     }
 }
@@ -271,20 +273,24 @@ pub fn attention(conn: &Connection, id: i64) -> Result<Attention, Fail> {
 }
 
 pub fn open_attention(conn: &Connection) -> Result<Vec<Attention>, Fail> {
-    let mut statement = conn.prepare(&format!(
-        "SELECT {ATTENTION_COLUMNS} FROM attention WHERE state = 'open' ORDER BY id"
-    ))?;
-    let rows = statement.query_map([], attention_row)?;
-    Ok(rows.collect::<Result<_, _>>()?)
+    all(
+        conn,
+        &format!("SELECT {ATTENTION_COLUMNS} FROM attention WHERE state = 'open' ORDER BY id"),
+        [],
+        attention_row,
+    )
 }
 
 /// Open items on one attempt.
 pub fn open_for_attempt(conn: &Connection, attempt: i64) -> Result<Vec<Attention>, Fail> {
-    let mut statement = conn.prepare(&format!(
-        "SELECT {ATTENTION_COLUMNS} FROM attention WHERE state = 'open' AND attempt = ?1 ORDER BY id"
-    ))?;
-    let rows = statement.query_map([attempt], attention_row)?;
-    Ok(rows.collect::<Result<_, _>>()?)
+    all(
+        conn,
+        &format!(
+            "SELECT {ATTENTION_COLUMNS} FROM attention WHERE state = 'open' AND attempt = ?1 ORDER BY id"
+        ),
+        [attempt],
+        attention_row,
+    )
 }
 
 pub struct Raise<'a> {

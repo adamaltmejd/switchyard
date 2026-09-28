@@ -1,4 +1,4 @@
-use super::{Target, audit, now, ticket_name};
+use super::{Target, all, audit, now, ticket_name};
 use crate::api::Fail;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::{Value, json};
@@ -14,11 +14,9 @@ pub struct Ticket {
     pub parked: bool,
     pub revision: i64,
     pub origin: String,
-    pub started_once: bool,
 }
 
-const COLUMNS: &str =
-    "id, title, body, priority, workflow, state, parked, revision, origin, started_once";
+const COLUMNS: &str = "id, title, body, priority, workflow, state, parked, revision, origin";
 
 fn row(row: &Row) -> rusqlite::Result<Ticket> {
     Ok(Ticket {
@@ -31,7 +29,6 @@ fn row(row: &Row) -> rusqlite::Result<Ticket> {
         parked: row.get(6)?,
         revision: row.get(7)?,
         origin: row.get(8)?,
-        started_once: row.get(9)?,
     })
 }
 
@@ -62,16 +59,21 @@ pub fn get(conn: &Connection, id: i64) -> Result<Ticket, Fail> {
 }
 
 pub fn list(conn: &Connection) -> Result<Vec<Ticket>, Fail> {
-    let mut statement = conn.prepare(&format!("SELECT {COLUMNS} FROM ticket ORDER BY id"))?;
-    let rows = statement.query_map([], row)?;
-    Ok(rows.collect::<Result<_, _>>()?)
+    all(
+        conn,
+        &format!("SELECT {COLUMNS} FROM ticket ORDER BY id"),
+        [],
+        row,
+    )
 }
 
 pub fn dependencies(conn: &Connection, id: i64) -> Result<Vec<i64>, Fail> {
-    let mut statement =
-        conn.prepare("SELECT depends_on FROM dependency WHERE ticket = ?1 ORDER BY depends_on")?;
-    let rows = statement.query_map([id], |row| row.get(0))?;
-    Ok(rows.collect::<Result<_, _>>()?)
+    all(
+        conn,
+        "SELECT depends_on FROM dependency WHERE ticket = ?1 ORDER BY depends_on",
+        [id],
+        |row| row.get(0),
+    )
 }
 
 pub struct NewTicket<'a> {
@@ -143,11 +145,12 @@ pub fn would_cycle(conn: &Connection, ticket: i64, on: i64) -> Result<bool, Fail
 }
 
 /// Ready tickets in priority order: open, not parked, every dependency done,
-/// no live attempt, no open proposal blocking it, and a read-only workflow's
-/// ticket only once.
+/// no live attempt, no open proposal blocking it.
 pub fn ready(conn: &Connection) -> Result<Vec<Ticket>, Fail> {
-    let mut statement = conn.prepare(&format!(
-        "SELECT {COLUMNS} FROM ticket t
+    all(
+        conn,
+        &format!(
+            "SELECT {COLUMNS} FROM ticket t
          WHERE state = 'open' AND parked = 0
            AND NOT EXISTS (SELECT 1 FROM dependency d JOIN ticket o ON o.id = d.depends_on
                            WHERE d.ticket = t.id AND o.state != 'done')
@@ -155,7 +158,8 @@ pub fn ready(conn: &Connection) -> Result<Vec<Ticket>, Fail> {
            AND NOT EXISTS (SELECT 1 FROM attention n WHERE n.ticket = t.id AND n.kind = 'proposal'
                            AND n.state = 'open' AND n.reason = 'edit')
          ORDER BY priority, id"
-    ))?;
-    let rows = statement.query_map([], row)?;
-    Ok(rows.collect::<Result<_, _>>()?)
+        ),
+        [],
+        row,
+    )
 }

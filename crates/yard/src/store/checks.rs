@@ -100,11 +100,12 @@ pub fn for_execution(conn: &Connection, execution: i64) -> Result<Option<Check>,
 }
 
 pub fn for_attempt(conn: &Connection, attempt: i64) -> Result<Vec<Check>, Fail> {
-    let mut statement = conn.prepare(&format!(
-        "SELECT {COLUMNS} FROM \"check\" WHERE attempt = ?1 ORDER BY id"
-    ))?;
-    let rows = statement.query_map([attempt], row)?;
-    Ok(rows.collect::<Result<_, _>>()?)
+    super::all(
+        conn,
+        &format!("SELECT {COLUMNS} FROM \"check\" WHERE attempt = ?1 ORDER BY id"),
+        [attempt],
+        row,
+    )
 }
 
 pub struct Record<'a> {
@@ -158,11 +159,8 @@ pub fn record(tx: &Connection, record: Record) -> Result<i64, Fail> {
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct Finding {
     pub priority: String,
-    #[serde(default)]
     pub file: Option<String>,
-    #[serde(default)]
     pub line: Option<i64>,
-    #[serde(default)]
     pub category: Option<String>,
     pub body: String,
 }
@@ -183,19 +181,20 @@ pub fn add_finding(tx: &Connection, check: i64, finding: &Finding) -> Result<(),
 }
 
 pub fn findings(conn: &Connection, check: i64) -> Result<Vec<Finding>, Fail> {
-    let mut statement = conn.prepare(
+    super::all(
+        conn,
         "SELECT priority, file, line, category, body FROM finding WHERE \"check\" = ?1 ORDER BY priority, id",
-    )?;
-    let rows = statement.query_map([check], |row| {
-        Ok(Finding {
-            priority: format!("P{}", row.get::<_, i64>(0)?),
-            file: row.get(1)?,
-            line: row.get(2)?,
-            category: row.get(3)?,
-            body: row.get(4)?,
-        })
-    })?;
-    Ok(rows.collect::<Result<_, _>>()?)
+        [check],
+        |row| {
+            Ok(Finding {
+                priority: format!("P{}", row.get::<_, i64>(0)?),
+                file: row.get(1)?,
+                line: row.get(2)?,
+                category: row.get(3)?,
+                body: row.get(4)?,
+            })
+        },
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -242,11 +241,12 @@ pub fn approval(conn: &Connection, id: i64) -> Result<Approval, Fail> {
 
 /// Active approvals in approval order: the queue.
 pub fn queue(conn: &Connection) -> Result<Vec<Approval>, Fail> {
-    let mut statement = conn.prepare(&format!(
-        "SELECT {APPROVAL_COLUMNS} FROM approval WHERE state = 'active' ORDER BY id"
-    ))?;
-    let rows = statement.query_map([], approval_row)?;
-    Ok(rows.collect::<Result<_, _>>()?)
+    super::all(
+        conn,
+        &format!("SELECT {APPROVAL_COLUMNS} FROM approval WHERE state = 'active' ORDER BY id"),
+        [],
+        approval_row,
+    )
 }
 
 pub fn active_for(conn: &Connection, attempt: i64) -> Result<Option<Approval>, Fail> {
