@@ -104,7 +104,8 @@ without a guarantee in ARCHITECTURE.md that needs it.
 - **Where it runs.** On a host with the container runtime, never inside a
   box. It is this repository's landing-stage host gate, on yard-sthlm and
   the operator's Mac, after the boxed candidate gates `cargo fmt`, `clippy`
-  and `cargo build`. GitHub runs it only in the release workflow.
+  and `cargo build`. GitHub runs it only in the release workflow, on both
+  platforms, before publishing.
 - **Budget:** about 5 minutes per landing on yard-sthlm with a warm image
   cache, measured on the first vertical slice and revised in a dated archive
   file; a scenario is never deleted to meet it.
