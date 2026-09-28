@@ -184,7 +184,12 @@ pub async fn doctor(daemon: &Daemon, project: &Project) -> Result<Value, Fail> {
     let mut logins = Vec::new();
     if let Ok(loaded) = &loaded {
         let mut seen = std::collections::BTreeSet::new();
-        for agent in loaded.config.agents.values().filter(|agent| agent.login) {
+        for agent in loaded
+            .config
+            .agents
+            .values()
+            .filter(|agent| agent.login == Some(true))
+        {
             let Some(harness) = crate::harness::get(&agent.harness) else {
                 continue;
             };

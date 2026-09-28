@@ -54,7 +54,7 @@ impl Harness for Pi {
     }
 
     fn accepts(&self, agent: &Agent) -> Result<(), String> {
-        if agent.login {
+        if agent.login.is_some() {
             return Err("login is only for a login harness".into());
         }
         let Some(provider) = &agent.provider else {

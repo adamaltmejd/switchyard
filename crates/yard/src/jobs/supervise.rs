@@ -253,6 +253,7 @@ pub async fn run_harness(
                 Ok(Some(line)) => {
                     let _ = file.write_all(line.as_bytes()).await;
                     let _ = file.write_all(b"\n").await;
+                    let mut refused = false;
                     for event in reader.stdout(&line) {
                         match &event {
                             crate::harness::Event::Started { session_id } => {
@@ -260,7 +261,9 @@ pub async fn run_harness(
                                 project.read(|conn| executions::set_worker(conn, execution, Some(session_id), None))?;
                             }
                             crate::harness::Event::Registered(registration) => {
-                                run.registered = Some(registration.clone());
+                                let registration = complete(registration.clone(), kind);
+                                refused = matches!(registration, crate::harness::Registration::Refused(_));
+                                run.registered = Some(registration);
                             }
                             crate::harness::Event::Finished { usage: spent, .. } | crate::harness::Event::Failed { usage: spent, .. } => {
                                 usage = Some((spent.input, spent.output, spent.cost));
@@ -268,13 +271,23 @@ pub async fn run_harness(
                             }
                         }
                     }
+                    // A refused registration ends the run before its first
+                    // turn can do anything; the caller revokes the grant.
+                    if refused {
+                        break;
+                    }
                 }
                 _ => stdout_open = false,
             },
             line = stderr.next_line(), if stderr_open => match line {
                 Ok(Some(line)) => {
                     if let Some(registration) = reader.stderr(&line) {
+                        let registration = complete(registration, kind);
+                        let refused = matches!(registration, crate::harness::Registration::Refused(_));
                         run.registered = Some(registration);
+                        if refused {
+                            break;
+                        }
                     }
                 }
                 _ => stderr_open = false,
@@ -284,21 +297,35 @@ pub async fn run_harness(
             _ = tokio::time::sleep_until(deadline) => { run.timed_out = true; break; }
         }
     }
-    if !run.stopped && !run.timed_out {
+    if !run.stopped && !run.timed_out && !refused(&run.registered) {
         run.exit_code = child.wait().await.ok().map(crate::git::exit_code);
     }
     project.read(|conn| executions::set_worker(conn, execution, None, usage))?;
-    // A granted tool the fetched list lacks is a failed registration.
-    if let Some(crate::harness::Registration::Registered(tools)) = &run.registered
-        && let Some(missing) = crate::mcp::tool_names(kind)
-            .into_iter()
-            .find(|tool| !tools.contains(tool))
-    {
-        run.registered = Some(crate::harness::Registration::Refused(format!(
-            "the MCP client registered no {missing}"
-        )));
-    }
     Ok(run)
+}
+
+fn refused(registration: &Option<crate::harness::Registration>) -> bool {
+    matches!(registration, Some(crate::harness::Registration::Refused(_)))
+}
+
+/// A registration is complete only when every tool the grant names is in the
+/// fetched list. An incomplete one is refused, and gates the run.
+fn complete(
+    registration: crate::harness::Registration,
+    kind: crate::mcp::Kind,
+) -> crate::harness::Registration {
+    let crate::harness::Registration::Registered(tools) = registration else {
+        return registration;
+    };
+    match crate::mcp::tool_names(kind)
+        .into_iter()
+        .find(|tool| !tools.contains(tool))
+    {
+        Some(missing) => {
+            crate::harness::Registration::Refused(format!("the MCP client registered no {missing}"))
+        }
+        None => crate::harness::Registration::Registered(tools),
+    }
 }
 
 pub async fn implement(
@@ -449,7 +476,7 @@ pub async fn implement(
         }
     };
     // Ask git inside the box whether the clone is clean, before it comes down.
-    let listing = if run.stopped || run.timed_out {
+    let listing = if run.stopped || run.timed_out || refused(&run.registered) {
         None
     } else {
         daemon

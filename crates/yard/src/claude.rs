@@ -61,7 +61,7 @@ impl Harness for Claude {
         if agent.provider.is_some() {
             return Err("provider is not accepted; set login = true".into());
         }
-        if !agent.login {
+        if agent.login != Some(true) {
             return Err("login = true is required".into());
         }
         if let Some(effort) = &agent.effort
@@ -217,16 +217,23 @@ impl Reader for Normalizer {
         };
         match frame.get("type").and_then(Value::as_str) {
             Some("system") if frame.get("subtype").and_then(Value::as_str) == Some("init") => {
-                let mut events = Vec::new();
-                if let Some(id) = frame.get("session_id").and_then(Value::as_str)
-                    && !id.is_empty()
+                match frame
+                    .get("session_id")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty())
                 {
-                    events.push(Event::Started {
-                        session_id: id.into(),
-                    });
+                    Some(id) => vec![
+                        Event::Started {
+                            session_id: id.into(),
+                        },
+                        Event::Registered(registration(&frame)),
+                    ],
+                    // The proof names the session; without it there is no
+                    // session to record and no run to trust.
+                    None => vec![Event::Registered(Registration::Refused(
+                        "the init frame named no session".into(),
+                    ))],
                 }
-                events.push(Event::Registered(registration(&frame)));
-                events
             }
             Some("result") => vec![result(&frame)],
             _ => Vec::new(),

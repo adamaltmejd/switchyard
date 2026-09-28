@@ -128,22 +128,28 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
     // The box is gone: only now does the verdict count toward anything.
     project.tx(|tx| {
         let published = checks::for_execution(tx, execution)?;
-        let failure = match (&published, &run.registered, &run.terminal) {
-            (Some(_), _, _) => None,
-            (None, Some(crate::harness::Registration::Refused(reason)), _) => Some(reason.clone()),
-            (None, _, _) if run.timed_out => {
+        // A refused registration gates the seat's publication: even one made
+        // before the run is cut short does not count as a review.
+        let failure = match (&run.registered, &published, &run.terminal) {
+            (Some(crate::harness::Registration::Refused(reason)), _, _) => Some(reason.clone()),
+            (_, Some(_), _) => None,
+            (_, None, _) if run.timed_out => {
                 Some("the seat ran past its timeout without publishing".to_string())
             }
-            (None, _, Some(crate::harness::Event::Failed { message, .. })) => Some(message.clone()),
-            (None, _, _) => Some("the seat ended without publishing".to_string()),
+            (_, None, Some(crate::harness::Event::Failed { message, .. })) => Some(message.clone()),
+            (_, None, _) => Some("the seat ended without publishing".to_string()),
+        };
+        let outcome = match &failure {
+            Some(_) => "error",
+            None => published
+                .as_ref()
+                .map_or("error", |check| check.verdict.as_str()),
         };
         executions::end(
             tx,
             execution,
             executions::End {
-                outcome: published
-                    .as_ref()
-                    .map_or("error", |check| check.verdict.as_str()),
+                outcome,
                 detail: failure.as_deref(),
                 exit_code: run.exit_code,
                 ticket: Some(ticket.id),
