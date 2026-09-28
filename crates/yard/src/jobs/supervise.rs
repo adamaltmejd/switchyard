@@ -475,6 +475,9 @@ pub async fn implement(
             return Err(fail);
         }
     };
+    // The harness has ended; pull its execution-scoped bearer before any
+    // host-side inspection, so a refused run cannot call MCP tools meanwhile.
+    daemon.grants.revoke(project, execution);
     // Ask git inside the box whether the clone is clean, before it comes down.
     let listing = if run.stopped || run.timed_out || refused(&run.registered) {
         None
@@ -492,8 +495,12 @@ pub async fn implement(
             .filter(|out| out.code == 0)
             .map(|out| out.stdout)
     };
-    let oom = daemon.pinfold.oom_kills(&live.name).await;
-    daemon.grants.revoke(project, execution);
+    // A refused registration is already a failure; no box inspection needed.
+    let oom = if refused(&run.registered) {
+        None
+    } else {
+        daemon.pinfold.oom_kills(&live.name).await
+    };
     let _ = live.down(DOWN_TIMEOUT).await;
 
     // Take the candidate's objects by a fetch run in canonical.

@@ -61,7 +61,10 @@ impl Check {
     }
 }
 
-/// The latest check of `kind` and `name` on exactly `input`.
+/// The latest check of `kind` and `name` on exactly `input`, from an
+/// execution the harness gate accepted. A publication from an execution
+/// whose registration was refused or absent ended `error`, and does not
+/// count here, before or after a restart.
 pub fn current(
     conn: &Connection,
     kind: &str,
@@ -70,11 +73,13 @@ pub fn current(
 ) -> Result<Option<Check>, Fail> {
     Ok(conn
         .query_row(
-            &format!(
-                "SELECT {COLUMNS} FROM \"check\" WHERE kind = ?1 AND name = ?2 AND attempt = ?3
-                 AND base = ?4 AND head = ?5 AND ticket_revision = ?6 AND digest = ?7
-                 ORDER BY id DESC LIMIT 1"
-            ),
+            "SELECT c.id, c.execution, c.attempt, c.kind, c.name, c.base, c.head,
+                    c.ticket_revision, c.digest, c.verdict, c.round
+             FROM \"check\" c JOIN execution e ON e.id = c.execution
+             WHERE c.kind = ?1 AND c.name = ?2 AND c.attempt = ?3
+             AND c.base = ?4 AND c.head = ?5 AND c.ticket_revision = ?6 AND c.digest = ?7
+             AND COALESCE(e.outcome, '') != 'error'
+             ORDER BY c.id DESC LIMIT 1",
             params![
                 kind,
                 name,

@@ -539,3 +539,74 @@ curl -s -X POST http://yard.mcp/mcp \
         );
     }
 }
+
+/// A seat that publishes with no registration proof is a review error, and
+/// its check does not count: after `start`, the scheduler runs a fresh seat
+/// rather than approving on the stale publication.
+///
+/// Sabotage: drop the `e.outcome != 'error'` filter in `checks::current`;
+/// `start` sees the refused seat's pass check and raises approval with one
+/// review.
+#[test]
+fn a_publication_without_a_registration_does_not_count() {
+    let machine = Machine::new("g8-noreg", |request| {
+        if seat(&request) {
+            return act(
+                request,
+                vec![publish(
+                    json!([{ "priority": "P2", "body": "the invalid publication" }]),
+                )],
+            );
+        }
+        implementer(request)
+    });
+    // Drop the first review box's registration line: the seat registers its
+    // tools, but the daemon sees no proof. The review after `start` is a new
+    // execution, so its line is untouched.
+    machine.wrapper(
+        "pinfold",
+        r#"if [ "$1 $2" = 'box exec' ] && [ "${3%-2}" != "$3" ]; then
+  err=$(mktemp)
+  "$REAL" "$@" 2>"$err"
+  code=$?
+  sed '/^yard-mcp /d' "$err" >&2
+  rm -f "$err"
+  exit $code
+fi"#,
+    );
+    machine.start();
+    let project = Project::new(&machine, "p", &config(""));
+    let mut watch = project.watch(0);
+    project.json(&["ticket", "new", "--title", "Add feature"]);
+    let red = watch.attention();
+    assert_eq!(
+        (&red["data"]["kind"], &red["data"]["reason"]),
+        (&json!("red"), &json!("review")),
+        "{red}"
+    );
+    // The invalid publication is a durable row; its execution is an error.
+    assert_eq!(
+        project.rows("SELECT outcome FROM execution WHERE kind = 'review'"),
+        vec![json!({ "outcome": "error" })]
+    );
+
+    let stale = project.rows("SELECT id FROM \"check\" WHERE kind = 'review'")[0]["id"]
+        .as_i64()
+        .unwrap();
+    project.json(&["attempt", "start", "Y-1"]);
+    let approval = watch.find("approval", |event| {
+        event["event"] == "attention.raised" && event["data"]["kind"] == "approval"
+    });
+    // A fresh seat ran and published; the stale check is not in the approval.
+    assert_eq!(
+        project.rows("SELECT outcome FROM execution WHERE kind = 'review' ORDER BY id"),
+        vec![json!({ "outcome": "error" }), json!({ "outcome": "pass" }),]
+    );
+    let approved: Vec<i64> = approval["data"]["payload"]["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_i64)
+        .collect();
+    assert!(!approved.contains(&stale), "{approval}");
+}
