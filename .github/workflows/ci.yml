@@ -1,0 +1,58 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PINFOLD_VERSION: 0.0.9
+
+jobs:
+  e2e:
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-26.04, ubuntu-26.04-arm]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Rootless podman
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          sudo apt-get update
+          sudo apt-get install -y dbus-user-session
+          # Without a user session podman ignores --memory, and pinfold refuses every box.
+          sudo loginctl enable-linger "$(id -un)"
+          sudo systemctl start "user@$(id -u).service"
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+          systemctl --user enable --now dbus.socket
+          podman system migrate
+          echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
+
+      - name: Install pinfold
+        run: |
+          base="https://github.com/adamaltmejd/pinfold/releases/download/v${PINFOLD_VERSION}"
+          asset="pinfold-${PINFOLD_VERSION}-$(uname -m)-unknown-linux-musl"
+          curl -fsSL -o "$asset" "$base/$asset"
+          curl -fsSL -o SHA256SUMS "$base/SHA256SUMS"
+          sha256sum --ignore-missing -c SHA256SUMS
+          sudo install -m 0755 "$asset" /usr/local/bin/pinfold
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test -p e2e --locked
