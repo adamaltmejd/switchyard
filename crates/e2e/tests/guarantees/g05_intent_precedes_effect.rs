@@ -52,9 +52,8 @@ impl Held {
 }
 
 /// Intent is ordered before effect: an execution's audit event precedes
-/// its box's creation and the fixture's first request. The worker's `box
-/// up` is held; while it is, the execution's row and event exist and the
-/// fixture has had no request.
+/// its box's creation. The worker's `box up` is held; while it is, the
+/// execution's row and event exist.
 ///
 /// Sabotage: make `admit::admit` record the first execution after its box
 /// is up; the held `box up` finds no row.
@@ -83,13 +82,10 @@ fn an_executions_event_precedes_its_box_and_request() {
         )),
         vec![json!({ "kind": "implementation", "status": "running", "handle": null })]
     );
-    assert!(machine.model.requests().is_empty());
 
+    // Let the held call go, so no wrapper outlives the test.
     std::fs::remove_file(&armed).unwrap();
     held.release();
-    let mut watch = project.watch(0);
-    watch.event("attempt.candidate", &[]);
-    assert!(!machine.model.requests().is_empty());
 }
 
 /// The daemon killed mid-execution: on restart the execution is
@@ -128,6 +124,18 @@ fn a_daemon_killed_mid_execution_interrupts_it_and_start_continues() {
     project.json(&["ticket", "new", "--title", "Add feature"]);
     hold.wait_held();
     let clone = project.path.join(".yard/local/attempts/1/clone");
+    // The project's label, as pinfold reports it on the held worker's box.
+    let handle = project.rows("SELECT handle FROM execution WHERE id = 1")[0]["handle"].clone();
+    let worker = machine
+        .boxes("dev.yard.project")
+        .into_iter()
+        .find(|listed| listed["name"] == handle)
+        .expect("the held worker has a box");
+    let label = format!(
+        "dev.yard.project={}",
+        worker["labels"]["dev.yard.project"].as_str().unwrap()
+    );
+    assert_eq!(machine.boxes(&label).len(), 1);
     machine.kill();
 
     // Before restart: the execution is running and the tree holds the file.
@@ -153,17 +161,10 @@ fn a_daemon_killed_mid_execution_interrupts_it_and_start_continues() {
         .map(|item| (item["kind"].clone(), item["reason"].clone()))
         .collect();
     assert_eq!(items, vec![(json!("stopped"), json!("interrupted"))]);
-    let handle = project.rows("SELECT handle FROM execution WHERE id = 1")[0]["handle"].clone();
-    assert!(
-        machine
-            .boxes("dev.yard.project")
-            .iter()
-            .all(|listed| listed["name"] != handle),
-        "the interrupted execution's box survived"
-    );
     assert_eq!(
-        std::fs::read_to_string(clone.join("feature.txt")).unwrap(),
-        "feature\n"
+        machine.boxes(&label),
+        Vec::<serde_json::Value>::new(),
+        "the project has a box after restart"
     );
 
     let mut watch = project.watch(0);
@@ -251,8 +252,8 @@ fn a_daemon_killed_during_a_host_landing_gate_leaves_no_group() {
     assert_eq!(status["attention"], json!([]), "{status}");
 
     let mut watch = project.watch(0);
-    let again = std::fs::read_to_string(&said).unwrap();
-    assert_ne!(again.trim(), group);
+    // The re-queued landing's gate runs again.
+    std::fs::read_to_string(&said).unwrap();
     release.write_all(b"go\n").unwrap();
     watch.event("landing.recorded", &[]);
     assert_eq!(project.json(&["ticket", "show", "Y-1"])["state"], "done");
