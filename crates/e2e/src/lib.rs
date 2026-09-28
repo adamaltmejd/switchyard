@@ -67,7 +67,6 @@ pub struct Machine {
     /// Extra variables in the daemon's environment.
     pub env: Vec<(String, String)>,
     daemon: std::sync::Mutex<Option<Child>>,
-    projects: std::sync::Mutex<Vec<PathBuf>>,
 }
 
 impl Machine {
@@ -96,8 +95,8 @@ impl Machine {
             model,
             env: Vec::new(),
             daemon: std::sync::Mutex::new(None),
-            projects: std::sync::Mutex::new(Vec::new()),
         };
+        machine.wrapper("pinfold", "");
         machine.write_operator_env(&format!(
             "OPENROUTER_API_KEY={SECRET}\nYARD_ORIGIN_OPENROUTER={}\n",
             machine.model.origin()
@@ -253,16 +252,29 @@ impl Machine {
     }
 
     /// Put a wrapper for `program` first on the daemon's PATH. `script` is
-    /// the body of a POSIX shell script; `$REAL` is the real program.
+    /// the body of a POSIX shell script; `$REAL` is the real program. Every
+    /// pinfold wrapper first records the names the daemon builds, for Drop.
     pub fn wrapper(&self, program: &str, script: &str) {
         use std::os::unix::fs::PermissionsExt;
         let path = self.bin.join(program);
+        let record = if program == "pinfold" {
+            format!(
+                "if [ \"$1 $2\" = 'image build' ]; then echo \"$3\" >> '{}'; fi\n",
+                self.images().display()
+            )
+        } else {
+            String::new()
+        };
         let text = format!(
-            "#!/bin/sh\nREAL='{}'\n{script}\nexec \"$REAL\" \"$@\"\n",
+            "#!/bin/sh\nREAL='{}'\n{record}{script}\nexec \"$REAL\" \"$@\"\n",
             real(program).display()
         );
         std::fs::write(&path, text).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    fn images(&self) -> PathBuf {
+        self.root.join("images")
     }
 }
 
@@ -274,44 +286,16 @@ impl Drop for Machine {
         // unwinding must not panic.
         self.kill();
         let _ = self.pinfold(&["box", "prune"]);
-        // pinfold keeps a name's last images until it is retired: retire
-        // the names of the images this machine's boxes reported, now that
-        // none of its boxes remain.
-        let projects =
-            std::mem::take(&mut *self.projects.lock().unwrap_or_else(|e| e.into_inner()));
-        let images: Vec<String> = projects
-            .iter()
-            .filter_map(|path| store(path).ok())
-            .flat_map(|store| {
-                store
-                    .prepare("SELECT DISTINCT image_id FROM execution WHERE image_id IS NOT NULL")
-                    .and_then(|mut query| {
-                        query
-                            .query_map([], |row| row.get::<_, String>(0))?
-                            .collect::<Result<Vec<_>, _>>()
-                    })
-                    .unwrap_or_default()
-            })
+        // pinfold keeps a name's last images until it is retired. Retire
+        // the names this machine's daemon built, now that none of its boxes
+        // remain. An image id can carry other tests' names too.
+        let names: std::collections::BTreeSet<String> = std::fs::read_to_string(self.images())
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
             .collect();
-        if !images.is_empty()
-            && let Ok(out) = Command::new("podman")
-                .args([
-                    "image",
-                    "inspect",
-                    "--format",
-                    "{{index .Labels \"dev.pinfold.image\"}}",
-                ])
-                .args(&images)
-                .output()
-        {
-            let names: std::collections::BTreeSet<String> = String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .filter(|name| !name.is_empty())
-                .map(str::to_string)
-                .collect();
-            for name in names {
-                let _ = self.pinfold(&["image", "rm", &name]);
-            }
+        for name in names {
+            let _ = self.pinfold(&["image", "rm", &name]);
         }
         let _ = std::fs::remove_dir_all(&self.root);
     }
@@ -363,7 +347,6 @@ impl<'a> Project<'a> {
     pub fn new(machine: &'a Machine, name: &str, config: &str) -> Project<'a> {
         let path = machine.root.join(name);
         std::fs::create_dir_all(&path).unwrap();
-        machine.projects.lock().unwrap().push(path.clone());
         let project = Project { machine, path };
         project.git(&["init", "--quiet", "--initial-branch=main"]);
         project.write("README.md", "# fixture\n");
