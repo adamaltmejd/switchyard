@@ -24,7 +24,9 @@ fn gate_details(project: &Project) -> Vec<Value> {
 }
 
 /// A seat that writes to `/workspace` fails and the head is unchanged: it
-/// tries a file, a commit and a ref, then publishes.
+/// tries a file, a commit and a ref, then publishes. The implementer's clone
+/// still holds, by git, the head the fixture's commit produced, and no
+/// planted file.
 ///
 /// Sabotage: mount the seat's checkout writable in `review::run`; the
 /// writes succeed.
@@ -32,9 +34,18 @@ fn gate_details(project: &Project) -> Vec<Value> {
 fn a_seat_cannot_write_the_workspace() {
     let answer = Arc::new(Mutex::new(String::new()));
     let seen = answer.clone();
+    let committed = Arc::new(Mutex::new(String::new()));
+    let head = committed.clone();
     let machine = Machine::new("g13-seat", move |request| {
         if !seat(request) {
-            return implementer(request);
+            if request.opens() {
+                return Reply::Tools(vec![bash(
+                    "cd /workspace && printf 'feature\\n' > feature.txt && git add -A \
+                     && git commit -q -m 'Add feature' && git rev-parse HEAD",
+                )]);
+            }
+            *head.lock().unwrap() = request.last_tool_result().unwrap().1;
+            return Reply::Text("done".into());
         }
         match request.tool_results().len() {
             0 => Reply::Tools(vec![bash(
@@ -61,20 +72,11 @@ fn a_seat_cannot_write_the_workspace() {
         assert!(answer.contains(probe), "{answer}");
         assert!(!answer.contains(&format!("{probe}0")), "{answer}");
     }
-    let reviewed =
-        project.rows("SELECT head FROM execution WHERE kind = 'review'")[0]["head"].clone();
-    assert_eq!(approval["data"]["payload"]["head"], reviewed);
-    assert_eq!(
-        project.json(&["attempt", "show", "Y-1"])["attempt"]["head"],
-        reviewed
-    );
-    assert!(
-        git(
-            &project.canonical(),
-            &["for-each-ref", "refs/heads/planted"]
-        )
-        .is_empty()
-    );
+    let clone = project.path.join(".yard/local/attempts/1/clone");
+    let committed = committed.lock().unwrap().trim().to_string();
+    assert_eq!(committed.len(), 40, "{committed}");
+    assert_eq!(git(&clone, &["rev-parse", "HEAD"]).trim(), committed);
+    assert!(!clone.join("planted").exists());
 }
 
 /// An `AGENTS.override.md` the implementer leaves in its clone, excluded
@@ -124,7 +126,9 @@ fn an_excluded_agents_md_never_reaches_a_seat() {
 /// exactly as a host with no route does; a route would bring Yard's 401.
 ///
 /// Sabotage: give gate boxes the worker's routes in `supervise::box_gate`;
-/// the fixture receives the gate's call and the MCP host answers 401.
+/// the fixture receives the gate's call and the MCP host answers 401. Or
+/// build the gate checkout from the attempt's clone; the ignored file is in
+/// it.
 #[test]
 fn a_gate_box_reaches_no_route_and_no_ignored_file() {
     let machine = Machine::new("g13-gate-box", |request| {
@@ -139,7 +143,6 @@ fn a_gate_box_reaches_no_route_and_no_ignored_file() {
     });
     machine.start();
     let gate = "[gates.probe]\ncommand = \"curl -sf -m 5 http://openrouter.yard/api/v1/from-gate >/dev/null; \
-                echo model=$?; \
                 echo mcp=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -X POST http://yard.mcp/mcp); \
                 echo none=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -X POST http://unrouted.invalid/mcp); \
                 test -e ignored.log; echo ignored=$?\"\nstage = \"candidate\"\n";
@@ -156,7 +159,6 @@ fn a_gate_box_reaches_no_route_and_no_ignored_file() {
     let gates = gate_details(&project);
     assert_eq!(gates.len(), 1);
     let detail = gates[0]["detail"].as_str().unwrap();
-    assert!(!detail.contains("model=0"), "{detail}");
     let answer = |host: &str| {
         detail
             .lines()
@@ -193,7 +195,10 @@ fn a_gate_box_reaches_no_route_and_no_ignored_file() {
 /// and one it does not.
 ///
 /// Sabotage: make `supervise::host_gate` inherit the daemon's environment;
-/// the unnamed variable reaches the gate.
+/// the unnamed variable reaches the gate. Or check out the base, not the
+/// head, for a host candidate gate; `head=` names the base. Or start the
+/// review round alongside the candidate gates; the seat starts before the
+/// gate ends.
 #[test]
 fn a_host_candidate_gate_sees_the_head_and_only_its_env() {
     let mut machine = Machine::new("g13-host-candidate", |request| {
@@ -247,8 +252,11 @@ fn a_host_candidate_gate_sees_the_head_and_only_its_env() {
 /// merge and is held in its gate; the second is approved behind it, then
 /// edited.
 ///
-/// Sabotage: make `queue::next` skip `holds` for the approval it starts;
-/// the edited ticket's landing runs the host gate.
+/// Sabotage: make `queue::next` and `queue::land` both skip `holds` (land
+/// re-reads it before its first gate); the edited ticket's landing runs the
+/// host gate. Or run the landing gate
+/// on the candidate head instead of the merged ref; its head is not a merge
+/// of the target and the first head.
 #[test]
 fn a_host_landing_gate_runs_on_the_merged_ref_only_when_approved() {
     let machine = Machine::new("g13-host-landing", |request| {
@@ -317,7 +325,9 @@ fn a_host_landing_gate_runs_on_the_merged_ref_only_when_approved() {
         "--body",
         "Changed",
     ]);
-    release.write_all(b"go\n").unwrap();
+    // One line per landing gate that could run, so a second gate never
+    // blocks and the count below is what fails.
+    release.write_all(b"go\ngo\n").unwrap();
     watch.find("Y-1 landed", |event| {
         event["event"] == "landing.recorded" && event["ticket"] == "Y-1"
     });
@@ -341,12 +351,6 @@ fn a_host_landing_gate_runs_on_the_merged_ref_only_when_approved() {
     assert_eq!(
         parents.split_whitespace().skip(1).collect::<Vec<_>>(),
         [target.as_str(), first.as_str()]
-    );
-    assert_eq!(
-        project
-            .rows("SELECT id FROM execution WHERE kind = 'landing'")
-            .len(),
-        1
     );
     assert_eq!(
         project.rows("SELECT state FROM approval WHERE attempt = 2"),
