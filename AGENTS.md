@@ -43,7 +43,8 @@ without a guarantee in ARCHITECTURE.md that needs it.
   Fewer lines is the usual evidence, not the gate; a consolidation that adds
   an abstraction and removes nothing is rejected. A proposal born in an attempt
   is rejected unless it names the guarantee or bug it serves.
-- Before each release, a whole-tree read for yagni, duplication,
+- Before each release, the `code-cleanup` skill with `test-audit`'s sweep
+  (`.agents/skills/`): a whole-tree read for yagni, duplication,
   wrong-altitude fixes, unmeasured cost and assertion blocks under the bar,
   landed one commit per module; then the operator's spec pass over
   ARCHITECTURE.md and README.md. The pass reports the release's delete/add
