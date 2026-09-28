@@ -132,7 +132,8 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
         // before the run is cut short does not count as a review.
         let failure = match (&run.registered, &published, &run.terminal) {
             (Some(crate::harness::Registration::Refused(reason)), _, _) => Some(reason.clone()),
-            (_, Some(_), _) => None,
+            (Some(crate::harness::Registration::Registered(_)), Some(_), _) => None,
+            (None, Some(_), _) => Some("the seat published without a registration".to_string()),
             (_, None, _) if run.timed_out => {
                 Some("the seat ran past its timeout without publishing".to_string())
             }

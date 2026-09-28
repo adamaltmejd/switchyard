@@ -561,6 +561,13 @@ pub async fn implement(
             (_, Some(crate::harness::Event::Failed { message, .. })) if !run.stopped => {
                 Some(("failed", Some("harness"), message.clone()))
             }
+            // A run that finished with no registration proof at all was not
+            // gated; it fails like a refused one.
+            (None, Some(_)) if !run.stopped => Some((
+                "failed",
+                Some("mcp"),
+                "the worker registered no MCP client".to_string(),
+            )),
             (_, None) if !run.stopped => {
                 let rose = oom.is_some_and(|count| count > 0);
                 Some((
