@@ -132,13 +132,16 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
     // the outcome here is only the terminal frame and the publication.
     project.tx(|tx| {
         let published = checks::for_execution(tx, execution)?;
-        let failure = match (&published, &run.terminal) {
-            (Some(_), _) => None,
-            (None, _) if run.timed_out => {
+        let failure = match (&published, &run.registered, &run.terminal) {
+            (Some(_), _, _) => None,
+            // A refused registration ends the run before a terminal frame, so
+            // name its reason rather than the generic no-publication error.
+            (None, Some(crate::harness::Registration::Refused(reason)), _) => Some(reason.clone()),
+            (None, _, _) if run.timed_out => {
                 Some("the seat ran past its timeout without publishing".to_string())
             }
-            (None, Some(crate::harness::Event::Failed { message, .. })) => Some(message.clone()),
-            (None, _) => Some("the seat ended without publishing".to_string()),
+            (None, _, Some(crate::harness::Event::Failed { message, .. })) => Some(message.clone()),
+            (None, _, _) => Some("the seat ended without publishing".to_string()),
         };
         let outcome = match &failure {
             Some(_) => "error",
