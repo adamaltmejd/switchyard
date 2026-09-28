@@ -467,9 +467,20 @@ impl<'a> Project<'a> {
             .stderr(Stdio::inherit())
             .spawn()
             .expect("spawn yard status --watch");
+        let (send, heard) = mpsc::channel();
+        let stdout = child.stdout.take().unwrap();
+        let events = send.clone();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                if events.send(Heard::Event(line)).is_err() {
+                    break;
+                }
+            }
+        });
         Watch {
-            lines: lines(child.stdout.take().unwrap()),
             child,
+            send,
+            heard,
             seen: Vec::new(),
         }
     }
@@ -478,7 +489,9 @@ impl<'a> Project<'a> {
 /// `yard status --watch`: every event since a sequence, in order.
 pub struct Watch {
     child: Child,
-    lines: mpsc::Receiver<String>,
+    /// A FIFO's text joins the events, so one wait covers both.
+    send: mpsc::Sender<Heard>,
+    heard: mpsc::Receiver<Heard>,
     /// Every event read so far.
     pub seen: Vec<Value>,
 }
@@ -490,8 +503,9 @@ impl Watch {
         let deadline = std::time::Instant::now() + DEADLINE;
         loop {
             let left = deadline.saturating_duration_since(std::time::Instant::now());
-            let line = match self.lines.recv_timeout(left) {
-                Ok(line) => line,
+            let line = match self.heard.recv_timeout(left) {
+                Ok(Heard::Event(line)) => line,
+                Ok(Heard::Said(_)) => continue,
                 Err(_) => panic!(
                     "no event {what} within {DEADLINE:?}; seen:\n{}",
                     self.seen
@@ -533,6 +547,38 @@ impl Watch {
         })
     }
 
+    /// The text a wrapper or gate writes to the FIFO `path` once it holds a
+    /// call, reading events meanwhile. In every scenario that holds a call,
+    /// the call comes before any attention, so an attention first fails now:
+    /// the held call will never come, as when a landing fails before it.
+    #[track_caller]
+    pub fn said(&mut self, path: &Path) -> String {
+        let send = self.send.clone();
+        let fifo = path.to_owned();
+        std::thread::spawn(move || {
+            let text = std::fs::read_to_string(&fifo).unwrap_or_default();
+            let _ = send.send(Heard::Said(text));
+        });
+        let deadline = std::time::Instant::now() + DEADLINE;
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            match self.heard.recv_timeout(left) {
+                Ok(Heard::Said(text)) => return text,
+                Ok(Heard::Event(line)) => {
+                    let event: Value =
+                        serde_json::from_str(&line).expect("watch prints JSON lines");
+                    self.seen.push(event.clone());
+                    assert!(
+                        event["event"] != "attention.raised",
+                        "waiting for a call held at {}, the daemon raised: {event}",
+                        path.display()
+                    );
+                }
+                Err(_) => panic!("no call held at {} within {DEADLINE:?}", path.display()),
+            }
+        }
+    }
+
     /// Wait for an event by name, optionally matching `data` fields.
     #[track_caller]
     pub fn event(&mut self, name: &str, data: &[(&str, &str)]) -> Value {
@@ -543,6 +589,24 @@ impl Watch {
                     .all(|(key, value)| event["data"][key].as_str() == Some(value))
         })
     }
+}
+
+enum Heard {
+    Event(String),
+    Said(String),
+}
+
+/// `Watch::said` where no daemon serves a watch.
+#[track_caller]
+pub fn said(path: &Path) -> String {
+    let (send, heard) = mpsc::channel();
+    let fifo = path.to_owned();
+    std::thread::spawn(move || {
+        let _ = send.send(std::fs::read_to_string(&fifo).unwrap_or_default());
+    });
+    heard
+        .recv_timeout(DEADLINE)
+        .unwrap_or_else(|_| panic!("no call held at {} within {DEADLINE:?}", path.display()))
 }
 
 impl Drop for Watch {

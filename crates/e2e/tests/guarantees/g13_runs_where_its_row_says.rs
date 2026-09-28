@@ -336,7 +336,7 @@ fn a_host_landing_gate_runs_on_the_merged_ref_only_when_approved() {
     watch.find("Y-1 landed", |event| {
         event["event"] == "landing.recorded" && event["ticket"] == "Y-1"
     });
-    assert_eq!(std::fs::read_to_string(&said).unwrap(), "held\n");
+    assert_eq!(watch.said(&said), "held\n");
     let revision = project.json(&["ticket", "show", "Y-2"])["revision"].to_string();
     project.json(&[
         "ticket",

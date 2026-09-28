@@ -41,9 +41,13 @@ struct Held {
 }
 
 impl Held {
-    /// Block until the wrapper holds a call.
-    fn wait(&self) {
-        assert_eq!(std::fs::read_to_string(&self.said).unwrap(), "held\n");
+    /// Block until the wrapper holds a call; `watch` fails it early.
+    fn wait(&self, watch: Option<&mut Watch>) {
+        let text = match watch {
+            Some(watch) => watch.said(&self.said),
+            None => said(&self.said),
+        };
+        assert_eq!(text, "held\n");
     }
 
     fn release(&self) {
@@ -68,9 +72,10 @@ fn an_executions_event_precedes_its_box_and_request() {
     let (armed, held) = hold_pinfold(&machine, "up");
     machine.start();
     let project = Project::new(&machine, "p", &config(""));
+    let mut watch = project.watch(0);
     std::fs::write(&armed, "").unwrap();
     project.json(&["ticket", "new", "--title", "Add feature"]);
-    held.wait();
+    held.wait(Some(&mut watch));
 
     let started =
         project.rows("SELECT execution, data FROM audit WHERE event = 'execution.started'");
@@ -225,8 +230,10 @@ fn a_daemon_killed_during_a_host_landing_gate_leaves_no_group() {
             .replace("review = [\"correctness\"]", "review = \"none\"")
             .replace("approve = \"manual\"", "approve = \"auto\""),
     );
+    let mut watch = project.watch(0);
     project.json(&["ticket", "new", "--title", "Add feature"]);
-    let group = std::fs::read_to_string(&said).unwrap().trim().to_string();
+    let group = watch.said(&said).trim().to_string();
+    drop(watch);
     machine.kill();
 
     let alive = |group: &str| {
@@ -253,7 +260,7 @@ fn a_daemon_killed_during_a_host_landing_gate_leaves_no_group() {
 
     let mut watch = project.watch(0);
     // The re-queued landing's gate runs again.
-    std::fs::read_to_string(&said).unwrap();
+    watch.said(&said);
     release.write_all(b"go\n").unwrap();
     watch.event("landing.recorded", &[]);
     assert_eq!(project.json(&["ticket", "show", "Y-1"])["state"], "done");
@@ -282,7 +289,7 @@ fn no_command_is_answered_before_reconciliation() {
 
     std::fs::write(&armed, "").unwrap();
     let lines = machine.spawn();
-    pinfold.wait();
+    pinfold.wait(None);
     let refused = project.refused(&["status"]);
     assert_eq!(refused["code"], "daemon", "{refused}");
     assert_eq!(

@@ -242,7 +242,7 @@ fn a_landing_retires_when_canonical_moves_before_update_ref() {
 
     std::fs::write(&armed, "").unwrap();
     project.json(&["attempt", "approve", "Y-1", "--head", &head]);
-    assert_eq!(std::fs::read_to_string(&said).unwrap(), "held\n");
+    assert_eq!(watch.said(&said), "held\n");
     std::fs::remove_file(&armed).unwrap();
     // The operator moves canonical by hand while the landing is held.
     let canonical = project.canonical();
@@ -311,7 +311,7 @@ fn a_ticket_edit_racing_the_landing_intent_is_refused() {
 
     std::fs::write(&armed, "").unwrap();
     project.json(&["attempt", "approve", "Y-1", "--head", &head]);
-    assert_eq!(std::fs::read_to_string(&said).unwrap(), "held\n");
+    assert_eq!(watch.said(&said), "held\n");
     std::fs::remove_file(&armed).unwrap();
 
     let intent =
