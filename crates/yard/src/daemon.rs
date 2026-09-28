@@ -520,9 +520,13 @@ pub fn install() -> Result<Value, Fail> {
     service(&["systemctl", "--user", "daemon-reload"])?;
     service(&["systemctl", "--user", "enable", "--now", "yard.service"])?;
     let user = std::env::var("USER").unwrap_or_default();
-    let linger = match service(&["loginctl", "enable-linger", &user]) {
-        Ok(()) => "enabled".to_string(),
-        Err(fail) => format!("not enabled: {}; the daemon stops at logout", fail.message),
+    let linger = if loginctl_linger_enabled(&user) {
+        "enabled".to_string()
+    } else {
+        match service(&["loginctl", "enable-linger", &user]) {
+            Ok(()) => "enabled".to_string(),
+            Err(fail) => format!("not enabled: {}; the daemon stops at logout", fail.message),
+        }
     };
     Ok(json!({ "service": unit, "linger": linger }))
 }
@@ -554,6 +558,18 @@ pub fn restart() -> Result<Value, Fail> {
         service(&["systemctl", "--user", "restart", "yard.service"])?;
     }
     Ok(json!({ "restarted": true }))
+}
+
+fn loginctl_linger_enabled(user: &str) -> bool {
+    let output = std::process::Command::new("loginctl")
+        .args(["show-user", user, "-p", "Linger", "--value"])
+        .output();
+    match output {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).trim() == "yes"
+        }
+        _ => false,
+    }
 }
 
 fn service(argv: &[&str]) -> Result<(), Fail> {
