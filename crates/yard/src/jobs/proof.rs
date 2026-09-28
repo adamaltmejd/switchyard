@@ -42,6 +42,12 @@ pub fn snapshot_path(project: &Project, attempt: i64, digest: &str) -> PathBuf {
         .join(digest)
 }
 
+/// The digest of an empty proof directory. A candidate that has never had a
+/// proof is compared against it, so an empty proof is not a change.
+pub fn empty_digest() -> String {
+    hash(&[]).expect("an empty proof hashes")
+}
+
 /// Copy `live` into `root/<digest>` and return the digest. Idempotent when
 /// the copy already exists. A copy is staged and renamed into place, so a
 /// crash never leaves a partial `root/<digest>` that a later run trusts.
@@ -86,17 +92,19 @@ fn collect(
     entries: &mut Vec<Entry>,
     bytes: &mut u64,
 ) -> Result<(), String> {
-    let dir_relative = dir.strip_prefix(live).unwrap_or(dir).display().to_string();
     let reader =
         std::fs::read_dir(dir).map_err(|error| format!("read {}: {error}", dir.display()))?;
     // Bound the walk while reading: a directory with more entries than the
-    // whole budget is refused without materialising all of them.
+    // whole budget is refused without materialising all of them. The entry
+    // that crosses the bound is named relative to `live`.
     let mut children: Vec<PathBuf> = Vec::new();
     for entry in reader {
         let path = entry.map_err(|error| error.to_string())?.path();
         if entries.len() + children.len() >= PROOF_MAX_FILES {
+            let relative = path.strip_prefix(live).unwrap_or(&path);
             return Err(format!(
-                "proof directory {dir_relative:?} has more than {PROOF_MAX_FILES} entries"
+                "proof has more than {PROOF_MAX_FILES} entries at {:?}",
+                relative
             ));
         }
         children.push(path);

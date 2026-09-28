@@ -223,7 +223,7 @@ fn a_bad_proof_entry_is_refused_by_name() {
     assert!(detail(1).contains("link"), "{}", detail(1));
     assert!(detail(1).contains("symbolic link"), "{}", detail(1));
     assert!(detail(2).contains("1024"), "{}", detail(2));
-    assert!(detail(2).contains("many"), "{}", detail(2));
+    assert!(detail(2).contains("many/f"), "{}", detail(2));
 
     // No gate ran for a refused candidate; the accepted one ran its gate.
     let gates = project.rows(

@@ -461,10 +461,10 @@ pub async fn implement(
         }
     };
     // Ask git inside the box whether the clone is clean, before it comes down.
-    // A timeout never reaches the candidate; a stopped run keeps its tree, but
-    // its status still decides whether the proof is read. A failed status is
-    // an unknown clone, never a clean one.
-    let listing = if run.timed_out {
+    // A timeout never reaches the candidate. A stopped run is deferred whole:
+    // its status would be taken while the worker may still write, so it never
+    // admits a candidate and keeps its tree for the next execution.
+    let listing = if run.stopped || run.timed_out {
         None
     } else {
         daemon
@@ -675,16 +675,19 @@ pub async fn implement(
         }
         let previous = current.head.clone().unwrap_or_else(|| current.base.clone());
         let new_head = head.clone().unwrap_or_else(|| previous.clone());
-        let current_proof = current.proof.clone().unwrap_or_default();
+        let current_proof = current
+            .proof
+            .clone()
+            .unwrap_or_else(proof::empty_digest);
         let digest = match &proof_snapshot {
             Some(Ok(digest)) => digest.clone(),
             _ => current_proof.clone(),
         };
-        // A proof-only change is a candidate only once there is a candidate
-        // head; a first run with no commit is unchanged.
-        let first = current.head.is_none();
-        let advanced =
-            new_head != previous || (!first && !workflow.read_only && current_proof != digest);
+        // A stopped run never admits a candidate: the tree is kept and the
+        // next execution continues. Otherwise a changed proof is a new
+        // candidate even when the head is unchanged.
+        let advanced = !run.stopped
+            && (new_head != previous || (!workflow.read_only && current_proof != digest));
         if !advanced {
             executions::end(tx, execution, executions::End {
                 outcome: "unchanged",
