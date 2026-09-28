@@ -80,14 +80,16 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
         })
         .map_err(Fail::invalid)?;
     let image = supervise::image(daemon, project, &loaded).await?;
+    // Resolve the route, including a login's token, before any bearer is
+    // issued, so a missing credential never leaves a live grant.
+    let model = harness
+        .route(&stage, &daemon.machine)
+        .map_err(Fail::refused)?;
     let bearer = daemon.grants.issue(crate::mcp::Grant {
         project: project.clone(),
         execution,
         kind: crate::mcp::Kind::Review,
     });
-    let model = harness
-        .route(&stage, &daemon.machine)
-        .map_err(Fail::refused)?;
     let secrets = vec![
         (crate::harness::BEARER_VAR.to_string(), bearer),
         model.secret.clone(),

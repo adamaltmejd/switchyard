@@ -217,23 +217,18 @@ impl Reader for Normalizer {
         };
         match frame.get("type").and_then(Value::as_str) {
             Some("system") if frame.get("subtype").and_then(Value::as_str) == Some("init") => {
-                match frame
+                let mut events = Vec::new();
+                if let Some(id) = frame
                     .get("session_id")
                     .and_then(Value::as_str)
                     .filter(|id| !id.is_empty())
                 {
-                    Some(id) => vec![
-                        Event::Started {
-                            session_id: id.into(),
-                        },
-                        Event::Registered(registration(&frame)),
-                    ],
-                    // The proof names the session; without it there is no
-                    // session to record and no run to trust.
-                    None => vec![Event::Registered(Registration::Refused(
-                        "the init frame named no session".into(),
-                    ))],
+                    events.push(Event::Started {
+                        session_id: id.into(),
+                    });
                 }
+                events.push(Event::Registered(registration(&frame)));
+                events
             }
             Some("result") => vec![result(&frame)],
             _ => Vec::new(),
@@ -245,18 +240,26 @@ impl Reader for Normalizer {
     }
 }
 
-/// The registration proof: the Yard server connected and the tools it
-/// listed. A frame without `mcp_servers` still proves itself by the tools.
+/// The registration proof: a session id, the Yard server connected, and the
+/// tools it listed. An absent session or server list is a refusal.
 fn registration(frame: &Value) -> Registration {
-    let server = frame
-        .get("mcp_servers")
-        .and_then(Value::as_array)
-        .map(|servers| {
-            servers.iter().any(|server| {
-                server.get("name").and_then(Value::as_str) == Some(MCP_SERVER)
-                    && server.get("status").and_then(Value::as_str) == Some("connected")
-            })
-        });
+    if frame
+        .get("session_id")
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty)
+    {
+        return Registration::Refused("the init frame named no session".into());
+    }
+    let Some(servers) = frame.get("mcp_servers").and_then(Value::as_array) else {
+        return Registration::Refused("the init frame named no MCP servers".into());
+    };
+    let connected = servers.iter().any(|server| {
+        server.get("name").and_then(Value::as_str) == Some(MCP_SERVER)
+            && server.get("status").and_then(Value::as_str) == Some("connected")
+    });
+    if !connected {
+        return Registration::Refused("the Yard MCP server did not connect".into());
+    }
     let tools: Vec<String> = frame
         .get("tools")
         .and_then(Value::as_array)
@@ -266,12 +269,7 @@ fn registration(frame: &Value) -> Registration {
         .filter_map(|name| name.strip_prefix(MCP_PREFIX))
         .map(str::to_string)
         .collect();
-    match server {
-        Some(true) => Registration::Registered(tools),
-        Some(false) => Registration::Refused("the Yard MCP server did not connect".into()),
-        None if !tools.is_empty() => Registration::Registered(tools),
-        None => Registration::Refused("the Yard MCP server registered no tools".into()),
-    }
+    Registration::Registered(tools)
 }
 
 /// The `result` frame is the outcome; `subtype` success and no `is_error` is

@@ -558,15 +558,20 @@ user` keep every committed MCP config, setting and hook from loading; a
 project plugin loads only through those settings and is kept out with them,
 while `CLAUDE.md` still loads from `/workspace`. The `system`/`init` frame
 names the session id and the tools the server registered, and that is the
-registration proof; a missing or refused proof ends the run, and a review
-publication from a run that ended `error` does not count. The `result`
-frame is the outcome. The model and effort ride the argv, `--resume`
-continues a session, and the token stays a pinfold placeholder in the box.
+registration proof. The `result` frame is the outcome. The model and effort
+ride the argv, `--resume` continues a session, and the token stays a pinfold
+placeholder in the box.
 
 An execution proceeds to its first turn only once the registration proof is
-seen; whether every granted tool is present is proved by the tool list it
-fetched. The outcome is read from the terminal frame, never from the exit
-status alone. Yard never parses a transcript for a verdict.
+seen: the reader yields it only when the session id is non-empty, every
+granted tool is in the fetched list and, for a login harness, the Yard
+server is `connected`. Yard records the proof on the execution row at once;
+a missing or refused proof ends the run. A review check counts only from an
+execution row that records the proof, so a seat that never proved itself
+never counts, before or after a restart, and a seat interrupted after its
+proof keeps its publication. The outcome is read from the terminal frame,
+never from the exit status alone. Yard never parses a transcript for a
+verdict.
 
 ## Worker tools
 

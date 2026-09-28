@@ -262,6 +262,7 @@ pub async fn run_harness(
                             }
                             crate::harness::Event::Registered(registration) => {
                                 let registration = complete(registration.clone(), kind);
+                                project.read(|conn| executions::set_mcp(conn, execution, proof(&registration)))?;
                                 refused = matches!(registration, crate::harness::Registration::Refused(_));
                                 run.registered = Some(registration);
                             }
@@ -284,6 +285,7 @@ pub async fn run_harness(
                     if let Some(registration) = reader.stderr(&line) {
                         let registration = complete(registration, kind);
                         let refused = matches!(registration, crate::harness::Registration::Refused(_));
+                        project.read(|conn| executions::set_mcp(conn, execution, proof(&registration)))?;
                         run.registered = Some(registration);
                         if refused {
                             break;
@@ -306,6 +308,15 @@ pub async fn run_harness(
 
 fn refused(registration: &Option<crate::harness::Registration>) -> bool {
     matches!(registration, Some(crate::harness::Registration::Refused(_)))
+}
+
+/// The durable marker for one registration. `checks::current` counts a
+/// review only from an execution whose row says `registered`.
+fn proof(registration: &crate::harness::Registration) -> &'static str {
+    match registration {
+        crate::harness::Registration::Registered(_) => "registered",
+        crate::harness::Registration::Refused(_) => "refused",
+    }
 }
 
 /// A registration is complete only when every tool the grant names is in the
@@ -418,14 +429,16 @@ pub async fn implement(
         .map_err(Fail::invalid)?;
 
     let image = image(daemon, project, &loaded).await?;
+    // Resolve the route, including a login's token, before any bearer is
+    // issued, so a missing credential never leaves a live grant.
+    let model = harness
+        .route(&stage, &daemon.machine)
+        .map_err(Fail::refused)?;
     let bearer = daemon.grants.issue(crate::mcp::Grant {
         project: project.clone(),
         execution,
         kind: crate::mcp::Kind::Implementation,
     });
-    let model = harness
-        .route(&stage, &daemon.machine)
-        .map_err(Fail::refused)?;
     let secrets = vec![
         (crate::harness::BEARER_VAR.to_string(), bearer),
         model.secret.clone(),

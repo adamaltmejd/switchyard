@@ -277,6 +277,16 @@ pub fn set_progress(conn: &Connection, id: i64, note: &str) -> Result<(), Fail> 
     Ok(())
 }
 
+/// Observational: the harness's registration proof, recorded once its reader
+/// yields a complete one. `mcp` is `registered` or `refused`.
+pub fn set_mcp(conn: &Connection, id: i64, mcp: &str) -> Result<(), Fail> {
+    conn.execute(
+        "UPDATE execution SET mcp = ?2 WHERE id = ?1",
+        params![id, mcp],
+    )?;
+    Ok(())
+}
+
 /// How an execution ended.
 #[derive(Default)]
 pub struct End<'a> {

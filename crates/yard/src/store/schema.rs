@@ -1,7 +1,8 @@
 //! The schema, one forward migration per entry. A store whose
 //! `user_version` is past the last entry is from a newer Yard and refused.
 
-pub const MIGRATIONS: &[&str] = &[r#"
+pub const MIGRATIONS: &[&str] = &[
+    r#"
 CREATE TABLE ticket (
     id INTEGER PRIMARY KEY,
     title TEXT NOT NULL,
@@ -157,4 +158,8 @@ CREATE TABLE audit (
     text TEXT,
     data TEXT NOT NULL
 );
-"#];
+"#,
+    // The harness's registration proof, once its reader yields a complete one:
+    // `registered`, or `refused` when the reader refused it.
+    "ALTER TABLE execution ADD COLUMN mcp TEXT;",
+];
