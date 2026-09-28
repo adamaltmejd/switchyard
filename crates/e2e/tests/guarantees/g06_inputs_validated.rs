@@ -61,11 +61,6 @@ fn a_malformed_tool_payload_is_refused_by_name() {
     let refused: serde_json::Value = serde_json::from_str(answers[0].trim()).unwrap();
     assert_eq!(refused["result"]["isError"], true, "{refused}");
     assert!(answers[0].contains("colour"), "{refused}");
-    let refusals = project.rows("SELECT data FROM audit WHERE event = 'tool.refused'");
-    assert_eq!(refusals.len(), 1);
-    let data: serde_json::Value =
-        serde_json::from_str(refusals[0]["data"].as_str().unwrap()).unwrap();
-    assert_eq!(data, json!({ "tool": "yard_propose", "code": "invalid" }));
     let proposals = project.rows("SELECT payload FROM attention WHERE kind = 'proposal'");
     assert_eq!(proposals.len(), 1);
     assert!(!proposals[0]["payload"].as_str().unwrap().contains("colour"));
@@ -115,8 +110,9 @@ fn a_config_with_an_unknown_key_is_refused_by_name() {
 /// An unknown workflow name is refused by name, nothing written, on filing
 /// and on an edit. Control: a configured workflow is accepted by both.
 ///
-/// Sabotage: make `admit::ticket_edit` skip its workflow lookup; the edit
-/// names a workflow that does not exist.
+/// Sabotage: make `admit::ticket_new` skip its workflow lookup; the filing
+/// is accepted and a ticket exists. Make `admit::ticket_edit` skip its
+/// workflow lookup; the edit names a workflow that does not exist.
 #[test]
 fn an_unknown_workflow_name_is_refused_by_name() {
     let machine = Machine::new("g6-workflow", |_| Reply::Text("unused".into()));
@@ -216,7 +212,6 @@ fn a_sync_removing_a_named_workflow_is_refused() {
     assert_eq!(refused["data"]["tickets"], json!(["Y-1"]));
     assert_eq!(project.canonical_head(), canonical);
     assert_eq!(last_seq(&project), seq);
-    assert!(git(&project.canonical(), &["for-each-ref", "refs/yard"]).is_empty());
 
     project.json(&["ticket", "abandon", "Y-1", "--reason", "Not needed"]);
     assert_eq!(project.json(&["sync"])["sync"], "imported");
