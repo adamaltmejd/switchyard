@@ -72,7 +72,10 @@ Then run `yard sync` to bring it into your checkout.
   abandon without the park makes the ticket ready again, and the scheduler
   starts a new attempt at once.
 
-## Upgrades
+## Syncing and upgrades
+
+Import your own commits with `yard sync` between landings. An import moves
+the target, so a landing in flight retires and reruns every gate.
 
 A `.yard/` change takes effect for the next execution after `yard sync`. A
 new binary needs `yard daemon restart`. Each running execution comes back as

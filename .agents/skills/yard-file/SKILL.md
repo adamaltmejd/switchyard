@@ -5,11 +5,9 @@ description: File work into a Yard project. Admit or reject proposals by the pro
 
 # yard-file
 
-A ready ticket starts on the scheduler's next tick. A ticket is ready when
-it is open, not parked, and every ticket in its `--depends-on` is done. So
-when you mean to read a ticket before anything spends on it, file it
-`--parked`, then `yard ticket unpark` it. Parking it after filing is a race
-you lose.
+Filing is the decision to spend: a ready ticket starts on the scheduler's
+next tick. Write the body before you file. `--parked` is only for work that
+must wait on something other than a ticket (`--depends-on` covers those).
 
 ## Admission
 
@@ -22,8 +20,8 @@ When you reject, record the condition that would re-admit the work:
 `yard proposal reject ID --text "re-file if X happens"`.
 
 Proposals:
-- **Accepting creates the ticket as written, and it starts if ready.** If
-  it should wait, reject it and file it yourself `--parked`.
+- **Accepting a proposal starts work, like filing.** Accept only what you
+  would file as written; otherwise reject it and file your own.
 - **An edit proposal pauses its attempt.** Decide it now.
 - **Decide other proposals once their attempt has settled.** The next
   repair often covers them.
