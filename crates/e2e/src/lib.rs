@@ -67,6 +67,7 @@ pub struct Machine {
     /// Extra variables in the daemon's environment.
     pub env: Vec<(String, String)>,
     daemon: std::sync::Mutex<Option<Child>>,
+    projects: std::sync::Mutex<Vec<PathBuf>>,
 }
 
 impl Machine {
@@ -95,6 +96,7 @@ impl Machine {
             model,
             env: Vec::new(),
             daemon: std::sync::Mutex::new(None),
+            projects: std::sync::Mutex::new(Vec::new()),
         };
         machine.write_operator_env(&format!(
             "OPENROUTER_API_KEY={SECRET}\nYARD_ORIGIN_OPENROUTER={}\n",
@@ -278,6 +280,38 @@ impl Drop for Machine {
         // unwinding must not panic.
         self.kill();
         let _ = self.pinfold(&["box", "prune"]);
+        // pinfold keeps a name's last images forever and has no verb to
+        // remove them, and each id a box ran costs a full uid-mapped copy
+        // of the image (pinfold#63): remove the ids this machine's boxes
+        // reported, now that none of its boxes remain.
+        let projects =
+            std::mem::take(&mut *self.projects.lock().unwrap_or_else(|e| e.into_inner()));
+        let images: Vec<String> = projects
+            .iter()
+            .filter_map(|path| {
+                rusqlite::Connection::open_with_flags(
+                    path.join(".yard/local/store.sqlite"),
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                )
+                .ok()
+            })
+            .flat_map(|store| {
+                store
+                    .prepare("SELECT DISTINCT image_id FROM execution WHERE image_id IS NOT NULL")
+                    .and_then(|mut query| {
+                        query
+                            .query_map([], |row| row.get::<_, String>(0))?
+                            .collect::<Result<Vec<_>, _>>()
+                    })
+                    .unwrap_or_default()
+            })
+            .collect();
+        if !images.is_empty() {
+            let _ = Command::new("podman")
+                .args(["rmi", "--force", "--ignore"])
+                .args(&images)
+                .output();
+        }
         let _ = std::fs::remove_dir_all(&self.root);
     }
 }
@@ -328,6 +362,7 @@ impl<'a> Project<'a> {
     pub fn new(machine: &'a Machine, name: &str, config: &str) -> Project<'a> {
         let path = machine.root.join(name);
         std::fs::create_dir_all(&path).unwrap();
+        machine.projects.lock().unwrap().push(path.clone());
         let project = Project { machine, path };
         project.git(&["init", "--quiet", "--initial-branch=main"]);
         project.write("README.md", "# fixture\n");
