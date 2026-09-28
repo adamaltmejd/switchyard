@@ -103,7 +103,6 @@ fn tools(kind: Kind) -> Vec<Value> {
         "inputSchema": {
             "type": "object",
             "properties": {
-                "summary": { "type": "string", "maxLength": 8000 },
                 "findings": {
                     "type": "array",
                     "maxItems": 200,
@@ -217,7 +216,7 @@ async fn call(daemon: &Arc<Daemon>, grant: &Grant, params: &Value) -> Value {
             "yard_context" => crate::jobs::supervise::context(daemon, grant).await,
             "yard_progress" => progress(grant, &arguments),
             "yard_propose" => crate::jobs::propose(grant, &arguments),
-            "yard_publish_review" => crate::jobs::review::publish(daemon, grant, &arguments),
+            "yard_publish_review" => crate::jobs::review::publish(grant, &arguments),
             _ => unreachable!("granted tools are the four above"),
         }
     };

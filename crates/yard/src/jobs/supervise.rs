@@ -16,7 +16,7 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 const UP_TIMEOUT: Duration = Duration::from_secs(600);
-const DOWN_TIMEOUT: Duration = Duration::from_secs(60);
+pub const DOWN_TIMEOUT: Duration = Duration::from_secs(60);
 const BUILD_TIMEOUT: Duration = Duration::from_secs(3600);
 const LOG_TAIL: usize = 8000;
 
@@ -88,6 +88,31 @@ pub async fn image(daemon: &Daemon, project: &Project, loaded: &Loaded) -> Resul
         .expect("images lock")
         .insert(project.key.clone(), (loaded.head.clone(), built.clone()));
     Ok(built)
+}
+
+/// Bring a worker's box up and record its handle. A box that does not come
+/// up revokes the execution's grant.
+pub async fn up_worker(
+    daemon: &Daemon,
+    project: &Project,
+    execution: i64,
+    spec: &BoxSpec,
+    secrets: &[(String, String)],
+) -> Result<crate::r#box::LiveBox, Fail> {
+    let live = match daemon.pinfold.up(spec, secrets, UP_TIMEOUT).await {
+        Ok(live) => live,
+        Err(error) => {
+            daemon.grants.revoke(execution);
+            return Err(Fail::new(
+                "box",
+                format!("the box did not come up: {error}"),
+            ));
+        }
+    };
+    project.read(|conn| {
+        executions::set_handle(conn, execution, &live.name, live.image_id.as_deref())
+    })?;
+    Ok(live)
 }
 
 /// A worker box: the harness, the model route and the MCP route.
@@ -404,19 +429,7 @@ pub async fn implement(
             egress: &loaded.config.egress,
         },
     );
-    let live = match daemon.pinfold.up(&spec, &secrets, UP_TIMEOUT).await {
-        Ok(live) => live,
-        Err(error) => {
-            daemon.grants.revoke(execution);
-            return Err(Fail::new(
-                "box",
-                format!("the box did not come up: {error}"),
-            ));
-        }
-    };
-    project.read(|conn| {
-        executions::set_handle(conn, execution, &live.name, live.image_id.as_deref())
-    })?;
+    let live = up_worker(daemon, project, execution, &spec, &secrets).await?;
 
     let deadline = {
         let spent = attempt.work_ms

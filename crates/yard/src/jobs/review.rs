@@ -88,23 +88,7 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
             egress: &[],
         },
     );
-    let live = match daemon
-        .pinfold
-        .up(&spec, &secrets, Duration::from_secs(600))
-        .await
-    {
-        Ok(live) => live,
-        Err(error) => {
-            daemon.grants.revoke(execution);
-            return Err(Fail::new(
-                "box",
-                format!("the review box did not come up: {error}"),
-            ));
-        }
-    };
-    project.read(|conn| {
-        executions::set_handle(conn, execution, &live.name, live.image_id.as_deref())
-    })?;
+    let live = supervise::up_worker(daemon, project, execution, &spec, &secrets).await?;
     let timeout = Duration::from_secs(loaded.config.review.timeout_minutes * 60);
     let run = supervise::run_pi(
         daemon,
@@ -119,7 +103,7 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
     )
     .await;
     daemon.grants.revoke(execution);
-    let _ = live.down(Duration::from_secs(60)).await;
+    let _ = live.down(supervise::DOWN_TIMEOUT).await;
     let _ = std::fs::remove_dir_all(&dir);
     let run = run?;
 
@@ -139,10 +123,9 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
             tx,
             execution,
             executions::End {
-                outcome: match (&published, &failure) {
-                    (Some(check), _) => check.verdict.as_str(),
-                    (None, _) => "error",
-                },
+                outcome: published
+                    .as_ref()
+                    .map_or("error", |check| check.verdict.as_str()),
                 detail: failure.as_deref(),
                 exit_code: run.exit_code,
                 ticket: Some(ticket.id),
@@ -169,13 +152,8 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
 
 /// `yard_publish_review`: findings, the seat's check and its event in one
 /// transaction. Once per execution.
-pub fn publish(
-    daemon: &Arc<Daemon>,
-    grant: &crate::mcp::Grant,
-    arguments: &Value,
-) -> Result<Value, Fail> {
-    let _ = daemon;
-    let object = crate::mcp::strict(arguments, &["summary", "findings"])?;
+pub fn publish(grant: &crate::mcp::Grant, arguments: &Value) -> Result<Value, Fail> {
+    let object = crate::mcp::strict(arguments, &["findings"])?;
     let findings: Vec<checks::Finding> = match object.get("findings") {
         Some(Value::Array(items)) => {
             let mut findings = Vec::new();
@@ -198,12 +176,6 @@ pub fn publish(
         }
         _ => return Err(Fail::invalid("findings is a list")),
     };
-    if object
-        .get("summary")
-        .is_some_and(|summary| !summary.is_string())
-    {
-        return Err(Fail::invalid("summary is a string"));
-    }
     let project = &grant.project;
     let loaded = project
         .loaded
@@ -218,6 +190,11 @@ pub fn publish(
         }
         let row = executions::get(tx, grant.execution)?;
         let attempt = attempts::get(tx, row.attempt)?;
+        let image: Option<String> = tx.query_row(
+            "SELECT image_id FROM execution WHERE id = ?1",
+            [grant.execution],
+            |row| row.get(0),
+        )?;
         let blocked = findings.iter().any(|finding| {
             crate::config::priority(&finding.priority).is_some_and(|priority| priority <= blocking)
         });
@@ -235,7 +212,7 @@ pub fn publish(
                     digest: row.digest.clone().unwrap_or_default(),
                 },
                 verdict: if blocked { "fail" } else { "pass" },
-                image_id: None,
+                image_id: image.as_deref(),
                 round: row.round,
                 ticket: attempt.ticket,
             },

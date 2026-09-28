@@ -207,9 +207,6 @@ pub async fn land(
                         project,
                         &loaded,
                         execution,
-                        &attempt,
-                        &ticket,
-                        &approval,
                         &target,
                         "conflict",
                         &format!(
@@ -275,11 +272,8 @@ pub async fn land(
                     gate.name,
                     result.detail.unwrap_or_default()
                 );
-                return returned(
-                    daemon, project, &loaded, execution, &attempt, &ticket, &approval, &target,
-                    "red", &detail,
-                )
-                .await;
+                return returned(daemon, project, &loaded, execution, &target, "red", &detail)
+                    .await;
             }
             _ => {
                 let detail = format!(
@@ -467,19 +461,21 @@ fn withdraw(
 
 /// A red or conflicting landing is the candidate's: one repair with the
 /// target made available, and a second consecutive red raises `red`.
-#[allow(clippy::too_many_arguments)]
 async fn returned(
     daemon: &Daemon,
     project: &Project,
     loaded: &Loaded,
     execution: i64,
-    attempt: &attempts::Attempt,
-    ticket: &tickets::Ticket,
-    approval: &checks::Approval,
     target: &str,
     outcome: &str,
     detail: &str,
 ) -> Result<(), Fail> {
+    let (attempt, approval) = project.read(|conn| {
+        let row = executions::get(conn, execution)?;
+        let approval = checks::approval(conn, row.approval.expect("a landing binds an approval"))?;
+        Ok((attempts::get(conn, row.attempt)?, approval))
+    })?;
+    let ticket = attempt.ticket;
     let input = project.attempt_dir(attempt.id).join("input");
     std::fs::create_dir_all(&input).map_err(|error| error.to_string())?;
     let bundle = input.join("target.bundle");
@@ -507,11 +503,11 @@ async fn returned(
             executions::End {
                 outcome,
                 detail: Some(detail),
-                ticket: Some(ticket.id),
+                ticket: Some(ticket),
                 ..Default::default()
             },
         )?;
-        checks::set_approval_state(tx, approval, "retired", ticket.id, Some(outcome))?;
+        checks::set_approval_state(tx, &approval, "retired", ticket, Some(outcome))?;
         let reds = if outcome == "red" {
             attempt.landing_reds + 1
         } else {
@@ -527,7 +523,7 @@ async fn returned(
                 attempts::Raise {
                     kind: "red",
                     reason: "landing",
-                    ticket: Some(ticket.id),
+                    ticket: Some(ticket),
                     attempt: Some(attempt.id),
                     execution: Some(execution),
                     payload: json!({ "detail": detail, "target": target }),
