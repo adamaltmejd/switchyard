@@ -45,6 +45,11 @@ pub fn yard() -> &'static Path {
     })
 }
 
+/// One pinfold state dir for every test, as on a host. pinfold's daily
+/// maintenance pass stamps it, so the pass runs once rather than in every
+/// test's first `box list` (about 10 s each on yard-sthlm).
+const PINFOLD_STATE: &str = "/tmp/yard-e2e-state";
+
 /// The real `program`, found on the test's own PATH.
 pub fn real(program: &str) -> PathBuf {
     let path = std::env::var_os("PATH").unwrap_or_default();
@@ -82,7 +87,13 @@ impl Machine {
         let bin = root.join("bin");
         // One pinfold cache for every test, so the pinned harness is fetched once.
         let cache = PathBuf::from("/tmp/yard-e2e-cache");
-        for dir in [&state, &config.join("yard"), &bin, &cache] {
+        for dir in [
+            &state,
+            &config.join("yard"),
+            &bin,
+            &cache,
+            Path::new(PINFOLD_STATE),
+        ] {
             std::fs::create_dir_all(dir).unwrap();
         }
         let model = FakeModel::start(script);
@@ -233,7 +244,7 @@ impl Machine {
     /// `pinfold` with this machine's state.
     pub fn pinfold(&self, args: &[&str]) -> Output {
         Command::new("pinfold")
-            .env("XDG_STATE_HOME", &self.state)
+            .env("XDG_STATE_HOME", PINFOLD_STATE)
             .env("XDG_CONFIG_HOME", &self.config)
             .env("XDG_CACHE_HOME", &self.cache)
             .args(args)
@@ -253,13 +264,15 @@ impl Machine {
 
     /// Put a wrapper for `program` first on the daemon's PATH. `script` is
     /// the body of a POSIX shell script; `$REAL` is the real program. Every
-    /// pinfold wrapper first records the names the daemon builds, for Drop.
+    /// pinfold wrapper first moves pinfold to the shared state dir and
+    /// records the names the daemon builds, for Drop.
     pub fn wrapper(&self, program: &str, script: &str) {
         use std::os::unix::fs::PermissionsExt;
         let path = self.bin.join(program);
         let record = if program == "pinfold" {
             format!(
-                "if [ \"$1 $2\" = 'image build' ]; then echo \"$3\" >> '{}'; fi\n",
+                "export XDG_STATE_HOME='{PINFOLD_STATE}'\n\
+                 if [ \"$1 $2\" = 'image build' ]; then echo \"$3\" >> '{}'; fi\n",
                 self.images().display()
             )
         } else {
