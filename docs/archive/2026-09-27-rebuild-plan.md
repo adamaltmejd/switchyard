@@ -128,7 +128,10 @@ route that real harnesses talk to.
 3. **The thin path.** The first executable milestone is G7 plus G3's
    landing-crash scenario: register a project, file a ticket, a real Pi
    worker commits against the fake model, a gate runs, approve, land, kill
-   the daemon after `update-ref` and recover, clean. That path settles the
+   the daemon after `update-ref` and recover, clean. The milestone is met
+   only when the crash is held by the git wrapper and the test proves,
+   before restart, that canonical is the merged head, the intent is
+   unresolved and no landing is recorded. That path settles the
    store, process, git, box, identity and recovery boundaries together, and
    measures the budget. Orchestrator work, with subagents.
 4. **Green, outward from the path, one guarantee per ticket where
@@ -150,10 +153,16 @@ route that real harnesses talk to.
    old `yard sync` so the checkout holds canonical's target head, and
    compare the two heads by hand. Stop the old daemon and move `.yard/local`
    to an archive directory outside every project and build context. Start
-   the new daemon, `yard init` the project, `yard sync` from the checkout,
-   and verify the new canonical's target equals the archived one's. Keep the
-   archived state, the old runtime, its config and its service unit until
-   rollback is no longer wanted; rollback is moving the directory back. Rename the repositories.
+   the new daemon and `yard init` the project; translate the old
+   `.yard/config.toml` into the new scaffold by hand, commit it on the
+   archived target, and `yard sync`. Verify the new canonical's target has
+   the archived target as its parent and differs from it only in `.yard`
+   and `.dockerignore`. Keep the archived state, the old runtime, its
+   service unit and the old config commit until rollback is no longer
+   wanted. Rollback: stop the new daemon and set its `.yard/local` aside,
+   consume its canonical into the checkout with the new `yard sync`, revert
+   the config commit there, move the archived directory back, and let the
+   old `yard sync` import the result. Rename the repositories.
 7. **Release.** `cargo build --release` per target, ad-hoc `codesign` on
    the Mac as today, one workflow that tests, builds and publishes.
 
@@ -298,6 +307,58 @@ pinfold 0.0.6. Taken:
 - The daemon serves nothing until reconciliation has committed.
 - Minor: the host-gate machine mutex was cut, no failure named it; OOM is
   `failed` with cause `oom`; a nudge is refused on a landing's item.
+
+## The third design review, 2026-09-28
+
+GPT-6-Pro reviewed the three files after e24cfb2. Taken:
+
+- Check identity was contradictory: every check bound both digests, so a
+  gate-only sync superseded reviews the spec meant to keep. Gates and
+  reviews now bind their own input; approval binds both.
+- `approve` and `protected_paths` are in no digest, so a sync that
+  protects a path left an automatic approval standing. A landing re-reads
+  its approval against current policy before its first gate and at intent;
+  a withdrawn approval raises `approval` and reruns nothing.
+- The restart table read "canonical is the old head" as "nothing landed",
+  but an `update-ref` child could outlive the daemon, and a child spawned
+  before its handle was recorded was unaccounted for. Host children now
+  inherit a per-execution `flock` descriptor; restart reads an effect only
+  once it can take that lock, and otherwise keeps the intent and raises
+  `red`. Git children are never killed.
+- Reviewers read the attempt's clone, so an ignored `AGENTS.md` (through
+  `.git/info/exclude`, invisible to `git status`) reached them outside the
+  candidate. Reviewers now read a fresh read-only checkout, as gates do.
+  Publication counts on commit, but nothing after it starts until the
+  seat's box is gone.
+- A repair could name a target its clone lacked, and a merge of a target
+  carrying an operator `.yard` change was refused under the old base. The
+  target arrives as a bundle in the attempt's files; the base moves to the
+  target once it is an ancestor of the head.
+- Observing a ref is not holding a point, so G3's crash test could pass
+  having tested a completed landing. Crash points are now held by a git
+  wrapper on the daemon's `PATH`, and the state is proved before restart;
+  the thin path's acceptance says so.
+- The Dockerfile is fixed at `.yard/Dockerfile`; the claim now says the
+  rest of the build context is landed code.
+- "The clone's configuration is never read" was stronger than a local
+  fetch gives. Probing it found more: the daemon's host-side `git status`
+  in a clone runs a clean filter the worker writes in `.git/config`
+  (reproduced with git 2.47.3 and every `-c` override in the spec; the
+  old Yard's supervisor does exactly this). The daemon now runs no git in
+  a clone; the clean check runs inside the implementer's box.
+- Workflow freezing was stated two ways; it freezes the name and the
+  implementer, and a sync that removes a workflow an open ticket names is
+  refused.
+- The total-work clock counted every wait, including approval. It now
+  counts while the attempt holds a lane, and expiry never touches an
+  approval, the queue or a landing.
+- The cutover now translates and commits the config and has a real
+  rollback; `operator.env` resolves through `XDG_CONFIG_HOME`.
+
+Declined: one configured-timeout scenario against a stalled model. The
+operator ruled out tests that wait out a clock; timeouts are in minutes, so
+the cheapest one costs a fifth of the budget; the clock bounds spend, not
+safety.
 
 ## Effort
 

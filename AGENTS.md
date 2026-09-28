@@ -92,9 +92,14 @@ without a guarantee in ARCHITECTURE.md that needs it.
   host, reached through a pinfold route; the script decides what the "model" commits,
   proposes, publishes or refuses. No public endpoint is called.
 - **Crashes are deterministic.** A crash test kills the daemon at a point
-  the outside can prove it reached: a row the store shows, a box pinfold
-  lists, a ref canonical holds. Where no such point exists the scenario is
-  not written; the binary grows no barrier for it.
+  that holds until it is killed: a row the store shows while a box the
+  fixture is holding runs, or a git call the daemon is making. Git is found
+  on the daemon's `PATH`, so a wrapper there can run the real command and
+  then kill the daemon, or kill it first and hold the command until the
+  test releases it. Seeing a row or a ref is not holding a point. Before
+  restarting, the test proves from outside the state it meant to reach. Where
+  no such point exists the scenario is not written; the binary grows no
+  barrier for it.
 - **Where it runs.** On a host with the container runtime, never inside a
   box. It is this repository's landing-stage host gate, on yard-sthlm and
   the operator's Mac, after the boxed candidate gates `cargo fmt`, `clippy`
