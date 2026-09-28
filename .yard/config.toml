@@ -1,0 +1,74 @@
+# Switchyard project configuration. Changes land only through `yard sync`.
+max_lanes = 1
+approve = "manual"
+
+[target]
+ref = "main"
+protected_paths = ["AGENTS.md", "CLAUDE.md", ".agents/", ".pi/", "docs/ARCHITECTURE.md"]
+
+[isolation]
+# A candidate that adds a crate fetches it through here.
+egress = ["index.crates.io", "static.crates.io"]
+
+[agents.implementer]
+harness = "pi"
+provider = "opencode-go"
+model = "deepseek-v4.1-flash"
+effort = "high"
+
+[agents.reviewer]
+harness = "pi"
+provider = "openrouter"
+model = "openai/gpt-6-sol"
+effort = "high"
+
+[workflows.default]
+implementer = "implementer"
+review = ["correctness"]
+access = "write"
+instructions = """
+Before you commit, run the checks in AGENTS.md: `cargo fmt --check` and
+`cargo clippy --all-targets --locked -- -D warnings`. Do not run the e2e
+suite (`cargo test -p e2e`): it needs the host's container runtime, and it
+runs as a landing gate after approval. Commit your work; leave the clone
+clean."""
+
+[workflows.plan]
+access = "read-only"
+review = "none"
+
+[gates.fmt]
+command = "cargo fmt --check"
+stage = "candidate"
+timeout_minutes = 5
+
+[gates.clippy]
+command = "cargo clippy --all-targets --locked -- -D warnings"
+stage = "candidate"
+timeout_minutes = 20
+
+[gates.build]
+command = "cargo build --locked"
+stage = "candidate"
+timeout_minutes = 20
+
+# End to end only, on the host: it needs the container runtime and pinfold.
+[gates.e2e]
+command = "cargo test -p e2e --locked"
+runs_in = "host"
+env = ["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"]
+timeout_minutes = 30
+
+[review]
+max_rounds = 3
+blocking = "P1"
+
+[review.seats.correctness]
+agent = "reviewer"
+instructions = """
+docs/ARCHITECTURE.md is the binding spec and AGENTS.md holds the working
+rules. Review the change for correctness bugs, for anything that weakens a
+control or guarantee (G1 to G15), and for breaches of AGENTS.md's rules:
+speculative abstraction, a new dependency without a reason, a design change
+without the matching ARCHITECTURE.md edit, and tests that break its test
+rules."""
