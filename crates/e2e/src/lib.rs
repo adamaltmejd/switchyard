@@ -280,10 +280,9 @@ impl Drop for Machine {
         // unwinding must not panic.
         self.kill();
         let _ = self.pinfold(&["box", "prune"]);
-        // pinfold keeps a name's last images forever and has no verb to
-        // remove them, and each id a box ran costs a full uid-mapped copy
-        // of the image (pinfold#63): remove the ids this machine's boxes
-        // reported, now that none of its boxes remain.
+        // pinfold keeps a name's last images until it is retired: retire
+        // the names of the images this machine's boxes reported, now that
+        // none of its boxes remain.
         let projects =
             std::mem::take(&mut *self.projects.lock().unwrap_or_else(|e| e.into_inner()));
         let images: Vec<String> = projects
@@ -306,11 +305,25 @@ impl Drop for Machine {
                     .unwrap_or_default()
             })
             .collect();
-        if !images.is_empty() {
-            let _ = Command::new("podman")
-                .args(["rmi", "--force", "--ignore"])
+        if !images.is_empty()
+            && let Ok(out) = Command::new("podman")
+                .args([
+                    "image",
+                    "inspect",
+                    "--format",
+                    "{{index .Labels \"dev.pinfold.image\"}}",
+                ])
                 .args(&images)
-                .output();
+                .output()
+        {
+            let names: std::collections::BTreeSet<String> = String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+                .collect();
+            for name in names {
+                let _ = self.pinfold(&["image", "rm", &name]);
+            }
         }
         let _ = std::fs::remove_dir_all(&self.root);
     }
@@ -522,6 +535,12 @@ impl Watch {
             if matches(&event) {
                 return event;
             }
+            // An execution that could not record its own end: no scenario
+            // waits past one, so fail now rather than at the deadline.
+            assert!(
+                !(event["event"] == "attention.raised" && event["data"]["reason"] == "error"),
+                "waiting for {what}, the daemon raised an error: {event}"
+            );
         }
     }
 

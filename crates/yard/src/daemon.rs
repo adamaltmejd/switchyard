@@ -39,8 +39,6 @@ pub struct Machine {
     pub box_memory: Option<String>,
     /// Every variable `operator.env` set, for connection keys and origins.
     pub vars: BTreeMap<String, String>,
-    pub uid: u32,
-    pub gid: u32,
 }
 
 impl Machine {
@@ -289,8 +287,6 @@ fn read_machine() -> Result<Machine, String> {
         max_lanes,
         box_memory: vars.get("YARD_BOX_MEMORY").cloned(),
         vars,
-        uid: nix::unistd::getuid().as_raw(),
-        gid: nix::unistd::getgid().as_raw(),
     })
 }
 

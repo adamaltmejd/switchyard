@@ -40,7 +40,6 @@ pub struct BoxSpec {
     pub harness: Option<String>,
     pub image: String,
     pub mounts: Vec<Mount>,
-    pub user: User,
     pub env: BTreeMap<String, EnvValue>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub egress: Option<Egress>,
@@ -56,12 +55,6 @@ pub struct Mount {
     pub host: PathBuf,
     pub guest: String,
     pub readonly: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct User {
-    pub uid: u32,
-    pub gid: u32,
 }
 
 /// A literal value, or `{"from": NAME}`: read from `up`'s own environment,
@@ -441,13 +434,11 @@ impl Pinfold {
         name: &str,
         containerfile: &Path,
         context: &Path,
-        labels: &[(String, String)],
         timeout: Duration,
     ) -> Result<Built, BuildError> {
         let containerfile = path_arg(containerfile)?;
         let context = path_arg(context)?;
-        let labels: Vec<String> = labels.iter().map(|(k, v)| format!("{k}={v}")).collect();
-        let mut args = vec![
+        let args = [
             "image",
             "build",
             name,
@@ -456,9 +447,6 @@ impl Pinfold {
             "--context",
             context,
         ];
-        for label in &labels {
-            args.extend(["--label", label]);
-        }
         let out = collect(self.command(&args), timeout)
             .await
             .map_err(|e| BuildError::Other(format!("pinfold image build: {e}")))?;

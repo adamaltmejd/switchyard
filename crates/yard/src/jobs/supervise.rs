@@ -3,7 +3,7 @@
 
 use super::{Loaded, load};
 use crate::api::Fail;
-use crate::r#box::{BoxSpec, Egress, EnvValue, Header, Mount, Route, User};
+use crate::r#box::{BoxSpec, Egress, EnvValue, Header, Mount, Route};
 use crate::config::RunsIn;
 use crate::daemon::{Daemon, Project};
 use crate::store::{self, attempts, checks, executions, ticket_name, tickets};
@@ -75,7 +75,6 @@ pub async fn image(daemon: &Daemon, project: &Project, loaded: &Loaded) -> Resul
             &format!("yard-{}", project.key),
             &context.join(crate::config::DOCKERFILE_PATH),
             &context,
-            &[("dev.yard.project".to_string(), project.key.clone())],
             BUILD_TIMEOUT,
         )
         .await;
@@ -161,10 +160,6 @@ pub fn worker_spec(daemon: &Daemon, project: &Project, worker: &Worker) -> BoxSp
                 readonly: true,
             },
         ],
-        user: User {
-            uid: daemon.machine.uid,
-            gid: daemon.machine.gid,
-        },
         env,
         egress: Some(Egress {
             allow: worker.egress.to_vec(),
@@ -921,10 +916,6 @@ async fn box_gate(
             guest: "/workspace".into(),
             readonly: false,
         }],
-        user: User {
-            uid: daemon.machine.uid,
-            gid: daemon.machine.gid,
-        },
         env: BTreeMap::from([
             ("HOME".to_string(), EnvValue::Value("/tmp".into())),
             (
