@@ -13,7 +13,7 @@ fn openings(machine: &Machine) -> Vec<ModelRequest> {
         .model
         .requests()
         .into_iter()
-        .filter(ModelRequest::opens)
+        .filter(|request| request.opens() && !request.has_tool("yard_publish_review"))
         .collect()
 }
 
@@ -25,8 +25,8 @@ fn reasons(project: &Project) -> Vec<Value> {
         .collect()
 }
 
-/// The first execution commits, then its next request is held; the second
-/// execution, if its prompt carries `Rename`, commits again.
+/// The first execution's second request is held and, once released, commits;
+/// the second execution, if its prompt carries `Rename`, commits again.
 fn held_worker(hold: &Latch) -> impl Fn(&ModelRequest) -> Reply + Send + Sync + 'static {
     let hold = hold.clone();
     move |request| {
@@ -37,20 +37,29 @@ fn held_worker(hold: &Latch) -> impl Fn(&ModelRequest) -> Reply + Send + Sync + 
             return Reply::Text("done".into());
         }
         match request.tool_results().len() {
-            0 => Reply::Tools(vec![commit_file("feature.txt", "feature\n", "Add feature")]),
-            _ => Reply::Hold(hold.clone(), Box::new(Reply::Text("done".into()))),
+            0 => Reply::Tools(vec![bash("echo working")]),
+            1 => Reply::Hold(
+                hold.clone(),
+                Box::new(Reply::Tools(vec![commit_file(
+                    "feature.txt",
+                    "feature\n",
+                    "Add feature",
+                )])),
+            ),
+            _ => Reply::Text("done".into()),
         }
     }
 }
 
 /// A nudge mid-execution lets the execution end on its own and reaches the
-/// next prompt: while the worker is held the execution keeps running, and
-/// once released it ends as a candidate and the next execution opens with
-/// the nudge.
+/// next prompt: the held worker commits only once released, so its
+/// execution ends as a candidate where a stop would end it unchanged, and
+/// the next execution opens with the nudge.
 ///
-/// Sabotage: make `supervise::implement` leave a nudge queued after a
-/// candidate; review none approves the first head and the nudge is never
-/// delivered.
+/// Sabotage: make `admit::attempt_nudge` notify the stop signal; the held
+/// execution ends unchanged. Or make `supervise::implement` leave a nudge
+/// queued after a candidate; review none approves the first head and the
+/// nudge is never delivered.
 #[test]
 fn a_nudge_mid_execution_reaches_the_next_prompt() {
     let hold = Latch::new();
@@ -62,23 +71,16 @@ fn a_nudge_mid_execution_reaches_the_next_prompt() {
     hold.wait_held();
 
     project.json(&["attempt", "nudge", "Y-1", "--text", "Rename it too"]);
-    assert!(hold.is_held(), "the nudge interrupted the worker");
-    assert_eq!(
-        project.rows("SELECT status FROM execution"),
-        vec![json!({ "status": "running" })]
-    );
     hold.release();
 
     let approval = watch.attention();
     assert_eq!(approval["data"]["kind"], "approval", "{approval}");
     assert_eq!(reasons(&project), [json!("first"), json!("nudge")]);
-    assert_eq!(
-        project.rows("SELECT outcome FROM execution WHERE id = 1"),
-        vec![json!({ "outcome": "candidate" })]
-    );
-    let openings = openings(&machine);
-    assert_eq!(openings.len(), 2);
-    assert!(openings[1].last_user().contains("Rename it too"));
+    let first = watch.find("the first execution ended", |event| {
+        event["event"] == "execution.ended" && event["data"]["kind"] == "implementation"
+    });
+    assert_eq!(first["data"]["outcome"], "candidate", "{first}");
+    assert!(openings(&machine)[1].last_user().contains("Rename it too"));
     let head = approval["data"]["payload"]["head"].as_str().unwrap();
     assert_eq!(
         git(
@@ -121,7 +123,7 @@ fn stop_delivers_a_nudge_sooner() {
 ///
 /// Sabotage: drop `--untracked-files=all` from the clean check; the prompt
 /// names only the directory. Or drop the `dirty` reason check in
-/// `supervise`; the second worker is sent back without end.
+/// `supervise`; the second worker is sent back a third time.
 #[test]
 fn an_untracked_file_gets_no_review_and_is_named() {
     let machine = Machine::new("g9-dirty", |request| {
@@ -165,7 +167,17 @@ fn an_untracked_file_gets_no_review_and_is_named() {
     );
 
     project.json(&["ticket", "new", "--title", "Keep notes"]);
-    let stopped = watch.attention();
+    // Stopped, or sent back a third time: fail on either rather than wait.
+    let starts = std::cell::Cell::new(0);
+    let stopped = watch.until("Y-2 stopped or a third start", |event| {
+        if event["ticket"] == "Y-2"
+            && event["event"] == "execution.started"
+            && event["data"]["kind"] == "implementation"
+        {
+            starts.set(starts.get() + 1);
+        }
+        event["event"] == "attention.raised" || starts.get() == 3
+    });
     assert_eq!(stopped["data"]["kind"], "stopped", "{stopped}");
     assert_eq!(stopped["data"]["reason"], "dirty", "{stopped}");
     assert_eq!(
@@ -179,45 +191,65 @@ fn an_untracked_file_gets_no_review_and_is_named() {
 
 /// With `max_session_executions = 2`: the second execution resumes the
 /// first, the third resumes nothing and its prompt is the brief, the fourth
-/// resumes the third, the fifth resumes nothing. Each execution stops
-/// unchanged and `start` begins the next.
+/// resumes the third, the fifth resumes nothing. The first execution
+/// commits and review blocks it; each later one stops unchanged and `start`
+/// begins the next. The third's brief carries the ticket's title and the
+/// attempt's diff, which names the committed file.
 ///
 /// Sabotage: compare `count <= max_session_executions` in
 /// `supervise::implement`; the third execution resumes the second.
 #[test]
 fn sessions_resume_up_to_max_session_executions() {
-    let machine = Machine::new("g9-sessions", |_| Reply::Text("nothing to do".into()));
+    let machine = Machine::new("g9-sessions", |request| {
+        if request.has_tool("yard_publish_review") {
+            return act(
+                request,
+                vec![publish(json!([{ "priority": "P0", "body": "blocked" }]))],
+            );
+        }
+        act(
+            request,
+            vec![bash(
+                "cd /workspace && if [ ! -f knob.txt ]; then printf 'knob\\n' > knob.txt \
+                 && git add knob.txt && git commit -q -m 'Polish'; fi; echo ok",
+            )],
+        )
+    });
     machine.start();
     let project = Project::new(
         &machine,
         "p",
-        &unreviewed("").replace(
-            "review = \"none\"\n\n[workflows.plan]",
-            "review = \"none\"\nmax_session_executions = 2\n\n[workflows.plan]",
+        &config("").replace(
+            "review = [\"correctness\"]\n",
+            "review = [\"correctness\"]\nmax_session_executions = 2\n",
         ),
     );
     let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Add feature"]);
-    for round in 0..5 {
+    project.json(&["ticket", "new", "--title", "Polish the widget"]);
+    for round in 0..4 {
         let stopped = watch.attention();
         assert_eq!(
             (&stopped["data"]["kind"], &stopped["data"]["reason"]),
             (&json!("stopped"), &json!("unchanged")),
             "{stopped}"
         );
-        if round < 4 {
+        if round < 3 {
             project.json(&["attempt", "start", "Y-1"]);
         }
     }
 
-    let resumed: Vec<Value> = project
-        .rows("SELECT resumed FROM execution WHERE kind = 'implementation' ORDER BY id")
-        .into_iter()
-        .map(|row| row["resumed"].clone())
-        .collect();
+    let rows =
+        project.rows("SELECT id, resumed FROM execution WHERE kind = 'implementation' ORDER BY id");
+    let resumed: Vec<&Value> = rows.iter().map(|row| &row["resumed"]).collect();
     assert_eq!(
         resumed,
-        [Value::Null, json!(1), Value::Null, json!(3), Value::Null]
+        [
+            &Value::Null,
+            &rows[0]["id"],
+            &Value::Null,
+            &rows[2]["id"],
+            &Value::Null
+        ]
     );
     // What each execution sent the model: a fresh session has one user
     // message, the brief.
@@ -233,6 +265,7 @@ fn sessions_resume_up_to_max_session_executions() {
         })
         .collect();
     assert_eq!(users, [1, 2, 1, 2, 1]);
-    let third = &openings(&machine)[2];
-    assert!(third.last_user().contains("You are working on ticket Y-1"));
+    let third = openings(&machine)[2].last_user();
+    assert!(third.contains("Polish the widget"), "{third}");
+    assert!(third.contains("knob.txt"), "{third}");
 }
