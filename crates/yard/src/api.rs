@@ -184,14 +184,10 @@ pub async fn call(socket: &Path, method: &str, params: Value) -> Result<Value, F
         Ok(envelope["result"].clone())
     } else {
         let error = &envelope["error"];
-        let code = match error["code"].as_str().unwrap_or("internal") {
-            "refused" => "refused",
-            "invalid" => "invalid",
-            "not_found" => "not_found",
-            "stale" => "stale",
-            "boundary" => "boundary",
-            _ => "internal",
-        };
+        let code = ["refused", "invalid", "not_found", "stale", "boundary"]
+            .into_iter()
+            .find(|code| error["code"] == *code)
+            .unwrap_or("internal");
         Err(Fail {
             code,
             message: error["message"].as_str().unwrap_or_default().to_string(),

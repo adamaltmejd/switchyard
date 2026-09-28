@@ -6,11 +6,7 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
-#[command(
-    name = "yard",
-    about = "Tickets to landed code with coding agents",
-    version
-)]
+#[command(name = "yard", about = "Tickets to landed code with coding agents")]
 pub struct Cli {
     /// The project, instead of the one the working directory is in.
     #[arg(long, global = true)]
@@ -26,7 +22,7 @@ pub struct Cli {
 enum Command {
     /// Scaffold `.yard` in this checkout and register it.
     Init,
-    /// Report pinfold, the service, the image and the credentials.
+    /// Report pinfold, the configuration, the image and the credentials.
     Doctor,
     /// Import the checkout's branch into canonical, or consume canonical into it.
     Sync,
@@ -34,7 +30,7 @@ enum Command {
     Status {
         #[arg(long)]
         watch: bool,
-        #[arg(long, default_value_t = 0)]
+        #[arg(long, default_value_t = 0, requires = "watch")]
         since: i64,
     },
     #[command(subcommand)]
@@ -65,7 +61,8 @@ enum DaemonCommand {
     Restart,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 enum ProjectCommand {
     List,
     /// Remove a project from the registry.
@@ -74,7 +71,8 @@ enum ProjectCommand {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 enum TicketCommand {
     New {
         #[arg(long)]
@@ -113,7 +111,7 @@ enum TicketCommand {
     Unpark {
         ticket: String,
     },
-    /// Add `ticket depends_on on`.
+    /// Make TICKET depend on ON.
     Depend {
         ticket: String,
         on: String,
@@ -132,9 +130,10 @@ enum TicketCommand {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 enum AttemptCommand {
-    /// Admit a ticket now, or answer its stopped or red item with `start`.
+    /// Admit a ticket now, or retry its stopped or red item.
     Start {
         ticket: String,
         #[arg(long)]
@@ -179,7 +178,8 @@ enum AttemptCommand {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 enum ProposalCommand {
     Accept {
         attention: i64,
@@ -237,131 +237,56 @@ pub fn main(cli: Cli) -> i32 {
 
 async fn dispatch(cli: Cli) -> Result<Option<Value>, Fail> {
     let socket = api::socket_path();
-    let project = |explicit: &Option<PathBuf>| -> Result<String, Fail> {
-        let start = match explicit {
-            Some(path) => path.clone(),
-            None => std::env::current_dir().map_err(|error| Fail::invalid(error.to_string()))?,
-        };
-        find_project(&start)
+    let start = match &cli.project {
+        Some(path) => path.clone(),
+        None => std::env::current_dir().map_err(|error| Fail::invalid(error.to_string()))?,
     };
-    let (method, params) = match &cli.command {
-        Command::Daemon(DaemonCommand::Status) => ("daemon.status", json!({})),
+    let (method, mut params) = match &cli.command {
+        Command::Daemon(DaemonCommand::Status) => ("daemon.status".into(), json!({})),
         Command::Daemon(DaemonCommand::Install) => return crate::daemon::install().map(Some),
         Command::Daemon(DaemonCommand::Uninstall) => return crate::daemon::uninstall().map(Some),
         Command::Daemon(DaemonCommand::Restart) => return crate::daemon::restart().map(Some),
         Command::Daemon(DaemonCommand::Run) | Command::Version => unreachable!("handled above"),
         Command::Init => {
-            let dir = match &cli.project {
-                Some(path) => path.clone(),
-                None => {
-                    std::env::current_dir().map_err(|error| Fail::invalid(error.to_string()))?
-                }
-            };
-            let dir = std::fs::canonicalize(&dir)
-                .map_err(|error| Fail::invalid(format!("{}: {error}", dir.display())))?;
-            ("init", json!({ "path": dir }))
+            let dir = std::fs::canonicalize(&start)
+                .map_err(|error| Fail::invalid(format!("{}: {error}", start.display())))?;
+            ("init".into(), json!({ "path": dir }))
         }
-        Command::Project(ProjectCommand::List) => ("project.list", json!({})),
-        Command::Project(ProjectCommand::Forget { path }) => {
-            ("project.forget", json!({ "path": path }))
+        Command::Project(command) => {
+            let (method, params) = method("project", command);
+            return api::call(&socket, &method, params).await.map(Some);
         }
         Command::Status { watch: true, since } => {
-            let project = project(&cli.project)?;
+            let project = find_project(&start)?;
             return watch(&socket, &project, *since, cli.json)
                 .await
                 .map(|()| None);
         }
-        command => {
-            let project = project(&cli.project)?;
-            let (method, mut params) = project_call(command);
-            params["project"] = json!(project);
-            (method, params)
-        }
+        Command::Doctor => ("doctor".into(), json!({})),
+        Command::Sync => ("sync".into(), json!({})),
+        Command::Status { .. } => ("status".into(), json!({})),
+        Command::Ticket(command) => method("ticket", command),
+        Command::Attempt(command) => method("attempt", command),
+        Command::Proposal(command) => method("proposal", command),
     };
-    api::call(&socket, method, params).await.map(Some)
+    if !matches!(cli.command, Command::Init | Command::Daemon(_)) {
+        params["project"] = json!(find_project(&start)?);
+    }
+    api::call(&socket, &method, params).await.map(Some)
 }
 
-fn project_call(command: &Command) -> (&'static str, Value) {
-    match command {
-        Command::Doctor => ("doctor", json!({})),
-        Command::Sync => ("sync", json!({})),
-        Command::Status { .. } => ("status", json!({})),
-        Command::Ticket(ticket) => match ticket {
-            TicketCommand::New {
-                title,
-                body,
-                priority,
-                workflow,
-                depends_on,
-                parked,
-            } => (
-                "ticket.new",
-                json!({ "title": title, "body": body, "priority": priority, "workflow": workflow,
-                        "depends_on": depends_on, "parked": parked }),
-            ),
-            TicketCommand::Show { ticket } => ("ticket.show", json!({ "ticket": ticket })),
-            TicketCommand::Edit {
-                ticket,
-                revision,
-                title,
-                body,
-                priority,
-                workflow,
-            } => (
-                "ticket.edit",
-                json!({ "ticket": ticket, "revision": revision, "title": title, "body": body,
-                        "priority": priority, "workflow": workflow }),
-            ),
-            TicketCommand::Park { ticket } => ("ticket.park", json!({ "ticket": ticket })),
-            TicketCommand::Unpark { ticket } => ("ticket.unpark", json!({ "ticket": ticket })),
-            TicketCommand::Depend { ticket, on } => {
-                ("ticket.depend", json!({ "ticket": ticket, "on": on }))
-            }
-            TicketCommand::List => ("ticket.list", json!({})),
-            TicketCommand::Done { ticket, reason } => {
-                ("ticket.done", json!({ "ticket": ticket, "reason": reason }))
-            }
-            TicketCommand::Abandon { ticket, reason } => (
-                "ticket.abandon",
-                json!({ "ticket": ticket, "reason": reason }),
-            ),
-        },
-        Command::Attempt(attempt) => match attempt {
-            AttemptCommand::Start { ticket, attention } => (
-                "attempt.start",
-                json!({ "ticket": ticket, "attention": attention }),
-            ),
-            AttemptCommand::Stop { ticket } => ("attempt.stop", json!({ "ticket": ticket })),
-            AttemptCommand::Nudge { ticket, text } => {
-                ("attempt.nudge", json!({ "ticket": ticket, "text": text }))
-            }
-            AttemptCommand::Approve { ticket, head, text } => (
-                "attempt.approve",
-                json!({ "ticket": ticket, "head": head, "text": text }),
-            ),
-            AttemptCommand::Reject { ticket, head, text } => (
-                "attempt.reject",
-                json!({ "ticket": ticket, "head": head, "text": text }),
-            ),
-            AttemptCommand::Abandon { ticket, reason } => (
-                "attempt.abandon",
-                json!({ "ticket": ticket, "reason": reason }),
-            ),
-            AttemptCommand::Show { ticket } => ("attempt.show", json!({ "ticket": ticket })),
-            AttemptCommand::Diff { ticket } => ("attempt.diff", json!({ "ticket": ticket })),
-            AttemptCommand::Tail { ticket } => ("attempt.tail", json!({ "ticket": ticket })),
-        },
-        Command::Proposal(proposal) => match proposal {
-            ProposalCommand::Accept { attention, text } => (
-                "proposal.accept",
-                json!({ "attention": attention, "text": text }),
-            ),
-            ProposalCommand::Reject { attention, text } => (
-                "proposal.reject",
-                json!({ "attention": attention, "text": text }),
-            ),
-        },
-        _ => unreachable!("machine commands are dispatched above"),
+/// A subcommand as its RPC: `group.variant`, with the variant's fields as
+/// the params.
+fn method(group: &str, command: &impl serde::Serialize) -> (String, Value) {
+    match serde_json::to_value(command).expect("a command serializes") {
+        Value::Object(variant) => {
+            let (name, params) = variant.into_iter().next().expect("one variant");
+            (format!("{group}.{name}"), params)
+        }
+        name => (
+            format!("{group}.{}", name.as_str().unwrap_or_default()),
+            json!({}),
+        ),
     }
 }
 
@@ -390,7 +315,7 @@ async fn watch(socket: &Path, project: &str, since: i64, json: bool) -> Result<(
         let result = api::call(
             socket,
             "events",
-            json!({ "project": project, "since": seq, "wait": true }),
+            json!({ "project": project, "since": seq }),
         )
         .await?;
         for event in result["events"].as_array().into_iter().flatten() {
