@@ -153,6 +153,9 @@ enum AttemptCommand {
         /// The candidate head this approval binds.
         #[arg(long)]
         head: String,
+        /// The candidate proof digest this approval binds, when it has one.
+        #[arg(long)]
+        proof: Option<String>,
         #[arg(long, default_value = "")]
         text: String,
     },
@@ -160,6 +163,9 @@ enum AttemptCommand {
         ticket: String,
         #[arg(long)]
         head: String,
+        /// The candidate proof digest this reject answers, when it has one.
+        #[arg(long)]
+        proof: Option<String>,
         #[arg(long)]
         text: String,
     },
@@ -474,6 +480,12 @@ fn exit_commands(item: &Value) -> Vec<String> {
     let ticket = item["ticket"].as_str().unwrap_or("-");
     let head = item["payload"]["head"].as_str().unwrap_or("-");
     let attention = item["attention"].as_i64().unwrap_or_default();
+    let digest = item["payload"]["proof"].as_str().unwrap_or_default();
+    let proof = if crate::jobs::proof::required(digest) {
+        format!(" --proof {digest}")
+    } else {
+        String::new()
+    };
     item["exits"]
         .as_array()
         .into_iter()
@@ -482,8 +494,10 @@ fn exit_commands(item: &Value) -> Vec<String> {
         .map(|exit| match (kind.as_str(), exit) {
             ("proposal", "accept") => format!("yard proposal accept {attention}"),
             ("proposal", "reject") => format!("yard proposal reject {attention}"),
-            (_, "approve") => format!("yard attempt approve {ticket} --head {head}"),
-            (_, "reject") => format!("yard attempt reject {ticket} --head {head} --text T"),
+            (_, "approve") => format!("yard attempt approve {ticket} --head {head}{proof}"),
+            (_, "reject") => {
+                format!("yard attempt reject {ticket} --head {head}{proof} --text T")
+            }
             (_, "start") => format!("yard attempt start {ticket}"),
             (_, "nudge") => format!("yard attempt nudge {ticket} --text T"),
             (_, "abandon") => format!("yard attempt abandon {ticket}"),

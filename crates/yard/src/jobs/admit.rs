@@ -1,7 +1,7 @@
 //! Admission, capacity and the operator's commands. Every mutation carries
 //! the smallest expected identity and a mismatch is a stale result.
 
-use super::{Loaded, load, spawn};
+use super::{Loaded, load, proof, spawn};
 use crate::api::Fail;
 use crate::daemon::{Daemon, Project};
 use crate::store::{self, attempts, checks, executions, ticket_id, ticket_name, tickets};
@@ -761,11 +761,12 @@ pub fn attempt_nudge(project: &Project, params: &Value) -> Result<Value, Fail> {
 }
 
 /// The open approval item on a ticket's live attempt, checked against the
-/// head the operator named.
+/// head and, when it has one, the proof digest the operator named.
 fn approval_item(
     tx: &rusqlite::Connection,
     id: i64,
     head: &str,
+    proof_digest: Option<&str>,
 ) -> Result<(attempts::Attempt, attempts::Attention), Fail> {
     let attempt = attempts::live_for(tx, id)?
         .ok_or_else(|| Fail::refused(format!("{} has no live attempt", ticket_name(id))))?;
@@ -780,6 +781,28 @@ fn approval_item(
             json!(item.as_ref().map(|_| current)),
         ));
     }
+    // A named proof that is not the candidate's is stale even when the
+    // candidate has no snapshot, so a delayed answer for a proof that has
+    // since been removed does not approve the empty candidate. A candidate
+    // with a real snapshot cannot be answered by head alone.
+    let current_proof = attempt.proof.clone().unwrap_or_default();
+    match proof_digest {
+        Some(named) if named != current_proof => {
+            return Err(Fail::stale(
+                format!("{} has no approval item on proof {named}", ticket_name(id)),
+                json!(named),
+                json!(current_proof),
+            ));
+        }
+        None if proof::required(&current_proof) => {
+            return Err(Fail::stale(
+                format!("{} has no approval item without its proof", ticket_name(id)),
+                json!(""),
+                json!(current_proof),
+            ));
+        }
+        _ => {}
+    }
     Ok((attempt, item.expect("checked above")))
 }
 
@@ -792,10 +815,11 @@ pub async fn attempt_approve(
     let head = params["head"]
         .as_str()
         .ok_or_else(|| Fail::invalid("approve names the head it binds"))?;
+    let proof_digest = params["proof"].as_str();
     let text = text_param(params, "text");
     let loaded = load(daemon, project).await?;
     let approval = project.tx(|tx| {
-        let (attempt, item) = approval_item(tx, id, head)?;
+        let (attempt, item) = approval_item(tx, id, head, proof_digest)?;
         let ticket = tickets::get(tx, id)?;
         let review_digest = loaded.review_digest(&attempt.workflow)?;
         if let Some((key, recorded, current)) =
@@ -842,12 +866,13 @@ pub fn attempt_reject(project: &Project, params: &Value) -> Result<Value, Fail> 
     let head = params["head"]
         .as_str()
         .ok_or_else(|| Fail::invalid("reject names the head it answers"))?;
+    let proof_digest = params["proof"].as_str();
     let text = params["text"].as_str().unwrap_or_default();
     if text.trim().is_empty() {
         return Err(Fail::invalid("a reject carries notes"));
     }
     project.tx(|tx| {
-        let (attempt, item) = approval_item(tx, id, head)?;
+        let (attempt, item) = approval_item(tx, id, head, proof_digest)?;
         refuse_during_intent(tx, id)?;
         attempts::resolve(tx, &item, "reject", Some(text))?;
         attempts::set_next(

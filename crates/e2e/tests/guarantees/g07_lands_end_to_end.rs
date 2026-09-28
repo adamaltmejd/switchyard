@@ -84,8 +84,16 @@ fn a_ticket_lands_end_to_end_and_leaves_only_rows() {
         start
     );
 
+    // The snapshot is on the host before landing, holding what the worker
+    // wrote into `/yard/proof`.
+    let proof = raised["data"]["payload"]["proof"].as_str().unwrap();
+    let snapshot = project.path.join(format!(
+        ".yard/local/attempts/1/proof-snapshots/{proof}/evidence.txt"
+    ));
+    assert_eq!(std::fs::read(&snapshot).unwrap(), b"evidence");
+
     project.json(&[
-        "attempt", "approve", "Y-1", "--head", &head, "--text", "ship it",
+        "attempt", "approve", "Y-1", "--head", &head, "--proof", proof, "--text", "ship it",
     ]);
     watch.event("landing.recorded", &[]);
     watch.until("cleanup", |event| {

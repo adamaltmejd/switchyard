@@ -71,7 +71,7 @@ Check pinfold, the configuration, the image and the credentials:
     yard ticket new --title T --body B
     yard status --watch --since SEQ
     yard attempt diff Y-n
-    yard attempt approve Y-n --head SHA
+    yard attempt approve Y-n --head SHA [--proof DIGEST]
     yard sync
 
 The rest is in the `yard-operator` skill

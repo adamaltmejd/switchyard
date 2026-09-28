@@ -48,6 +48,13 @@ pub fn empty_digest() -> String {
     hash(&[]).expect("an empty proof hashes")
 }
 
+/// Whether an operator approving or rejecting a candidate must name its
+/// proof digest. A real snapshot must be named; an empty proof, and the
+/// digest of an empty directory, take `--head` alone.
+pub fn required(digest: &str) -> bool {
+    !digest.is_empty() && digest != empty_digest()
+}
+
 /// Copy `live` into `root/<digest>` and return the digest. Idempotent when
 /// the copy already exists. A copy is staged and renamed into place, so a
 /// crash never leaves a partial `root/<digest>` that a later run trusts.
