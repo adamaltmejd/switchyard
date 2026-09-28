@@ -451,7 +451,8 @@ undoes one is refused.
 canonical's target from the checkout's branch after validating the incoming
 `.yard`; consuming fast-forwards the checkout's branch to canonical. Both
 refuse divergence and name both heads. All canonical mutations serialise on
-one queue and every ref update is compare-and-swap.
+one queue, and so does each re-read of a landing's policy with what it
+admits, so no sync falls between them. Every ref update is compare-and-swap.
 
 **Landing.** Merge the candidate onto canonical's head (a merge commit,
 or a fast-forward when it already sits there) and verify. Then, in one

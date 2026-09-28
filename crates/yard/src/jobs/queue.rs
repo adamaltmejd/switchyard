@@ -178,10 +178,12 @@ struct Current {
 
 /// Re-read the approval against current rows and the current policy, then
 /// run `then` in a transaction that sees the same rows. A lapse, or a row
-/// that changed after the read, runs nothing.
+/// that changed after the read, runs nothing. The caller holds the canonical
+/// lock, so no sync changes the policy between the read and `then`.
 async fn admit<T>(
     daemon: &Arc<Daemon>,
     project: &Arc<Project>,
+    _canonical: &tokio::sync::MutexGuard<'_, ()>,
     approval: i64,
     attempt: i64,
     then: impl FnOnce(&rusqlite::Transaction, &Current) -> Result<T, Fail>,
@@ -287,25 +289,34 @@ pub async fn land(
     };
 
     for gate in &loaded.config.gates {
-        let admitted = admit(daemon, project, approval.id, attempt.id, |tx, now| {
-            executions::start(
-                tx,
-                executions::Start {
-                    attempt: attempt.id,
-                    parent: Some(execution),
-                    kind: "gate",
-                    reason: Some("landing"),
-                    base: Some(&target),
-                    head: Some(&merged),
-                    ticket_revision: Some(now.ticket.revision),
-                    digest: Some(&now.loaded.gate_digest),
-                    name: Some(&gate.name),
-                    ticket: Some(ticket.id),
-                    ..Default::default()
-                },
-            )
-        })
+        let held = project.canonical.lock().await;
+        let admitted = admit(
+            daemon,
+            project,
+            &held,
+            approval.id,
+            attempt.id,
+            |tx, now| {
+                executions::start(
+                    tx,
+                    executions::Start {
+                        attempt: attempt.id,
+                        parent: Some(execution),
+                        kind: "gate",
+                        reason: Some("landing"),
+                        base: Some(&target),
+                        head: Some(&merged),
+                        ticket_revision: Some(now.ticket.revision),
+                        digest: Some(&now.loaded.gate_digest),
+                        name: Some(&gate.name),
+                        ticket: Some(ticket.id),
+                        ..Default::default()
+                    },
+                )
+            },
+        )
         .await?;
+        drop(held);
         let child = match admitted {
             Ok(child) => child,
             Err((now, lapse)) => {
@@ -367,17 +378,24 @@ pub async fn land(
         }
     }
 
-    let _canonical = project.canonical.lock().await;
-    let admitted = admit(daemon, project, approval.id, attempt.id, |tx, now| {
-        executions::set_intent(
-            tx,
-            execution,
-            &target,
-            &merged,
-            now.ticket.id,
-            now.attempt.id,
-        )
-    })
+    let held = project.canonical.lock().await;
+    let admitted = admit(
+        daemon,
+        project,
+        &held,
+        approval.id,
+        attempt.id,
+        |tx, now| {
+            executions::set_intent(
+                tx,
+                execution,
+                &target,
+                &merged,
+                now.ticket.id,
+                now.attempt.id,
+            )
+        },
+    )
     .await?;
     if let Err((now, lapse)) = admitted {
         return withdraw(
