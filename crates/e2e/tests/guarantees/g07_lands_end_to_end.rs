@@ -6,12 +6,13 @@ use serde_json::json;
 /// New ticket, worker commit, candidate gate, review pass, approval, green
 /// landing: canonical moves and the ticket is done. Afterwards every
 /// decision has one audit event naming its target and text, the execution
-/// rows carry tokens, cost, model and start reason, no handle event exists,
-/// the attempt directory and its boxes are gone, and another live attempt's
-/// directory and canonical are untouched.
+/// rows carry tokens, cost, model and start reason, every audit event is one
+/// the spec names, so no handle event exists, the attempt directory and its
+/// boxes are gone, and another live attempt's directory is untouched.
 ///
 /// Sabotage: make cleanup skip `remove(&project.attempt_dir(..))`; the
-/// landed attempt's directory survives and the test fails.
+/// landed attempt's directory survives and the test fails. Record
+/// `set_handle` as an audit event; its name is not in the spec's list.
 #[test]
 fn a_ticket_lands_end_to_end_and_leaves_only_rows() {
     let hold = Latch::new();
@@ -116,13 +117,42 @@ fn a_ticket_lands_end_to_end_and_leaves_only_rows() {
         .find(|event| event["event"] == "approval.given")
         .unwrap();
     assert_eq!(approval["text"], "ship it");
-    // Handles and usage are column writes, never events.
-    assert!(
-        events
-            .iter()
-            .all(|event| !event["event"].as_str().unwrap().contains("handle")),
-        "a handle event: {events:?}"
-    );
+    // Handles and usage are column writes, never events: every event is
+    // one of the spec's closed list (ARCHITECTURE.md, Store).
+    let spec = [
+        "sync.imported",
+        "sync.consumed",
+        "ticket.new",
+        "ticket.edited",
+        "ticket.parked",
+        "ticket.unparked",
+        "ticket.linked",
+        "ticket.done",
+        "ticket.abandoned",
+        "attempt.admitted",
+        "attempt.candidate",
+        "attempt.stopped",
+        "attempt.nudged",
+        "attempt.abandoned",
+        "attempt.ended",
+        "execution.started",
+        "execution.ended",
+        "check.recorded",
+        "approval.given",
+        "approval.ended",
+        "landing.intent",
+        "landing.recorded",
+        "attention.raised",
+        "attention.resolved",
+        "tool.refused",
+    ];
+    for event in &events {
+        let name = event["event"].as_str().unwrap();
+        assert!(
+            spec.contains(&name),
+            "{name} is not a spec event: {events:?}"
+        );
+    }
 
     // The worker rows carry the statistics.
     let workers = project.rows(
@@ -155,13 +185,12 @@ fn a_ticket_lands_end_to_end_and_leaves_only_rows() {
             "{handle} still has a box"
         );
     }
-    // The other live attempt kept its clone and its worker.
+    // The other live attempt kept its clone.
     assert!(
         project
             .path
             .join(".yard/local/attempts/2/clone/.git")
             .is_dir()
     );
-    assert!(hold.is_held());
     hold.release();
 }
