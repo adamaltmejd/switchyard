@@ -85,7 +85,8 @@ fn racing_starts_admit_one_attempt() {
 /// attempt frees the lane and the second's ticket is admitted.
 ///
 /// Sabotage: make `admit::free_lanes` count only the project's own lanes;
-/// the second project's start is admitted.
+/// the scheduler admits the second project's ticket, and its start is
+/// refused as live rather than `capacity`.
 #[test]
 fn machine_lanes_bound_attempts_across_projects() {
     let hold = Latch::new();

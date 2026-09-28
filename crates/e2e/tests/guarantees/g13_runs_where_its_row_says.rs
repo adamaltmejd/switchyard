@@ -120,10 +120,11 @@ fn an_excluded_agents_md_never_reaches_a_seat() {
 
 /// A gate box that calls the model or MCP route gets nothing, and an
 /// ignored file the implementer left is absent from its checkout. Control:
-/// the worker box reaches the route.
+/// the worker box reaches the model route. The MCP host answers the gate
+/// exactly as a host with no route does; a route would bring Yard's 401.
 ///
 /// Sabotage: give gate boxes the worker's routes in `supervise::box_gate`;
-/// the fixture receives the gate's call.
+/// the fixture receives the gate's call and the MCP host answers 401.
 #[test]
 fn a_gate_box_reaches_no_route_and_no_ignored_file() {
     let machine = Machine::new("g13-gate-box", |request| {
@@ -138,7 +139,9 @@ fn a_gate_box_reaches_no_route_and_no_ignored_file() {
     });
     machine.start();
     let gate = "[gates.probe]\ncommand = \"curl -sf -m 5 http://openrouter.yard/api/v1/from-gate >/dev/null; \
-                echo model=$?; curl -sf -m 5 -X POST http://yard.mcp/mcp >/dev/null; echo mcp=$?; \
+                echo model=$?; \
+                echo mcp=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -X POST http://yard.mcp/mcp); \
+                echo none=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -X POST http://unrouted.invalid/mcp); \
                 test -e ignored.log; echo ignored=$?\"\nstage = \"candidate\"\n";
     let project = Project::new(
         &machine,
@@ -154,7 +157,14 @@ fn a_gate_box_reaches_no_route_and_no_ignored_file() {
     assert_eq!(gates.len(), 1);
     let detail = gates[0]["detail"].as_str().unwrap();
     assert!(!detail.contains("model=0"), "{detail}");
-    assert!(!detail.contains("mcp=0"), "{detail}");
+    let answer = |host: &str| {
+        detail
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{host}=")))
+            .unwrap_or_else(|| panic!("no {host}= in {detail}"))
+            .to_string()
+    };
+    assert_eq!(answer("mcp"), answer("none"), "{detail}");
     assert!(detail.contains("ignored=1"), "{detail}");
     let paths: Vec<String> = machine
         .model

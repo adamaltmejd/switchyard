@@ -86,11 +86,14 @@ fn the_queue_lands_in_order_and_rejudges_a_red_merge() {
 
     let again = next_approval_of(&mut watch, "Y-2");
     project.json(&["attempt", "approve", "Y-2", "--head", &again]);
-    let red = watch.until("Y-2 red", |event| {
-        event["event"] == "attention.raised"
-            && event["ticket"] == "Y-2"
-            && event["data"]["kind"] == "red"
+    // The second red raises `red` before anything else starts on Y-2.
+    let red = watch.until("Y-2 red or a repair", |event| {
+        event["ticket"] == "Y-2"
+            && (event["event"] == "attention.raised"
+                || (event["event"] == "execution.started"
+                    && event["data"]["kind"] == "implementation"))
     });
+    assert_eq!(red["data"]["kind"], "red", "{red}");
     assert_eq!(red["data"]["reason"], "landing");
     watch.find("Y-3 landed", |event| {
         event["event"] == "landing.recorded" && event["ticket"] == "Y-3"
@@ -274,6 +277,12 @@ fn a_conflict_with_a_config_change_merges_from_the_bundle() {
     let target = project.canonical_head();
 
     project.json(&["attempt", "approve", "Y-1", "--head", &head]);
+    let repair = watch.until("Y-1's repair ended", |event| {
+        event["event"] == "execution.ended"
+            && event["ticket"] == "Y-1"
+            && event["data"]["kind"] == "implementation"
+    });
+    assert_eq!(repair["data"]["outcome"], "candidate", "{repair}");
     let repaired = next_approval_of(&mut watch, "Y-1");
     let attempt = project.json(&["attempt", "show", "Y-1"]);
     assert_eq!(attempt["attempt"]["base"], target.as_str(), "{attempt}");

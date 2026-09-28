@@ -72,8 +72,9 @@ fn a_malformed_tool_payload_is_refused_by_name() {
 }
 
 /// A TOML with an unknown key is refused by name, nothing written. The key
-/// is inside a gate, a table read by name. Control: the corrected
-/// configuration syncs.
+/// is inside a gate, a table read by name, and misspells an optional key,
+/// so only the unknown-key check stands between it and a gate with the
+/// default timeout. Control: the corrected configuration syncs.
 ///
 /// Sabotage: drop `deny_unknown_fields` from the gate's table; the sync
 /// imports the misspelt gate.
@@ -87,13 +88,16 @@ fn a_config_with_an_unknown_key_is_refused_by_name() {
 
     project.write(
         ".yard/config.toml",
-        &config("[gates.check]\ncomand = \"true\"\n"),
+        &config("[gates.check]\ncommand = \"true\"\ntimout_minutes = 5\n"),
     );
     project.git(&["commit", "--quiet", "-am", "Misspelt gate"]);
     let refused = project.refused(&["sync"]);
     assert_eq!(refused["code"], "invalid", "{refused}");
     assert!(
-        refused["message"].as_str().unwrap().contains("comand"),
+        refused["message"]
+            .as_str()
+            .unwrap()
+            .contains("timout_minutes"),
         "{refused}"
     );
     assert_eq!(project.canonical_head(), canonical);
@@ -102,7 +106,7 @@ fn a_config_with_an_unknown_key_is_refused_by_name() {
 
     project.write(
         ".yard/config.toml",
-        &config("[gates.check]\ncommand = \"true\"\n"),
+        &config("[gates.check]\ncommand = \"true\"\ntimeout_minutes = 5\n"),
     );
     project.git(&["commit", "--quiet", "-am", "Fix the gate"]);
     assert_eq!(project.json(&["sync"])["sync"], "imported");

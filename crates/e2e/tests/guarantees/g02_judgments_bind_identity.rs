@@ -370,6 +370,8 @@ fn policy_change_withdraws(test: &str, change: impl Fn(String) -> String, reason
 
     project.reconfigure(&change(base));
     release.write_all(b"go\n").unwrap();
+    let ended = watch.event("execution.ended", &[("kind", "landing")]);
+    assert_eq!(ended["data"]["outcome"], "withdrawn", "{ended}");
     let raised = approval(&mut watch);
     assert_eq!(raised["reason"], reason);
     assert_eq!(raised["payload"]["head"], head.as_str());
