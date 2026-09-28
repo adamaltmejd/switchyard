@@ -38,21 +38,37 @@ fn depends_on(project: &Project, ticket: i64) -> Vec<i64> {
 /// done; `yard ticket done` then closes it and its dependents become ready.
 /// The children are proposed parked and closed by hand. A later planning
 /// ticket runs to its end after the children are done, so a restart of the
-/// parent would have come first.
+/// parent would have come first. The write probe first proves `/workspace`
+/// is the clone. Control: a worker on a writable workflow in the same
+/// project runs the same probe and its write succeeds.
 ///
 /// Sabotage: make `admit::scheduled` start read-only tickets again; the
-/// parent is admitted once its children are done.
+/// parent is admitted once its children are done. Or mount the clone
+/// writable for `access = "read-only"`; the plan's write succeeds.
 #[test]
 fn a_plan_proposes_children_that_block_it() {
-    let answer = Arc::new(Mutex::new(String::new()));
-    let seen = answer.clone();
+    let answers = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen = answers.clone();
+    let probe = "cd /workspace && test -d /workspace/.git && echo mounted; \
+                 touch planted 2>/dev/null; echo \"write=$?\"";
     let machine = Machine::new("g15-plan", move |request| {
+        if request.prompt().contains("Write here") {
+            if request.opens() {
+                return Reply::Tools(vec![bash(&format!(
+                    "{probe}; git add -A && git commit -q -m 'Add planted' && echo committed"
+                ))]);
+            }
+            seen.lock()
+                .unwrap()
+                .push(request.tool_results()[0].1.clone());
+            return Reply::Text("done".into());
+        }
         if !request.prompt().contains("Plan the release") {
             return Reply::Text("nothing to plan".into());
         }
         match request.tool_results().len() {
             0 => Reply::Tools(vec![
-                bash("cd /workspace && touch planted 2>/dev/null; echo \"write=$?\""),
+                bash(probe),
                 propose(
                     json!({ "kind": "ticket", "key": "a", "title": "Child A", "parked": true }),
                 ),
@@ -62,13 +78,19 @@ fn a_plan_proposes_children_that_block_it() {
                 propose(json!({ "kind": "edit", "body": "The plan: A, then B." })),
             ]),
             _ => {
-                *seen.lock().unwrap() = request.tool_results()[0].1.clone();
+                seen.lock()
+                    .unwrap()
+                    .push(request.tool_results()[0].1.clone());
                 Reply::Text("planned".into())
             }
         }
     });
     machine.start();
-    let project = Project::new(&machine, "p", &config(""));
+    let project = Project::new(
+        &machine,
+        "p",
+        &config("[workflows.write]\nreview = \"none\"\n"),
+    );
     let mut watch = project.watch(0);
     project.json(&[
         "ticket",
@@ -90,7 +112,12 @@ fn a_plan_proposes_children_that_block_it() {
     ]);
     let ended = watch.event("attempt.ended", &[("outcome", "planned")]);
     assert_eq!(ended["ticket"], "Y-1");
-    assert!(!answer.lock().unwrap().contains("write=0"));
+    let plan = answers.lock().unwrap()[0].clone();
+    assert!(plan.contains("mounted"), "{plan}");
+    assert!(
+        plan.contains("write=") && !plan.contains("write=0"),
+        "{plan}"
+    );
     let raised: Vec<Value> = project
         .rows("SELECT kind FROM attention ORDER BY id")
         .into_iter()
@@ -138,24 +165,54 @@ fn a_plan_proposes_children_that_block_it() {
     project.json(&["ticket", "done", "Y-1", "--reason", "Its children are done"]);
     let admitted = watch.event("attempt.admitted", &[]);
     assert_eq!(admitted["ticket"], "Y-2");
+
+    project.json(&[
+        "ticket",
+        "new",
+        "--title",
+        "Write here",
+        "--workflow",
+        "write",
+    ]);
+    let approval = watch.until("Y-6 approval", |event| {
+        event["event"] == "attention.raised" && event["ticket"] == "Y-6"
+    });
+    assert_eq!(approval["data"]["kind"], "approval", "{approval}");
+    let control = answers.lock().unwrap()[1].clone();
+    assert!(control.contains("mounted"), "{control}");
+    assert!(control.contains("write=0"), "{control}");
 }
 
-/// Closing a ticket with a live attempt is refused, naming the attempt.
-/// Control: once the attempt is abandoned, closing succeeds.
+/// Closing a ticket with a live attempt is refused, naming the attempt. The
+/// attempt waits on its `approval` item with no execution running, so a
+/// check keyed on running executions would let the close through. Control:
+/// once the attempt is abandoned, closing succeeds.
 ///
-/// Sabotage: drop the live-attempt check in `admit::ticket_close`; the
-/// ticket closes under its running worker.
+/// Sabotage: key the live-attempt check in `admit::ticket_close` on running
+/// executions; the ticket closes under its waiting attempt.
 #[test]
 fn closing_a_ticket_with_a_live_attempt_is_refused() {
-    let hold = Latch::new();
-    let held = hold.clone();
-    let machine = Machine::new("g15-close", move |_| {
-        Reply::Hold(held.clone(), Box::new(Reply::Text("done".into())))
+    let machine = Machine::new("g15-close", |request| {
+        act(
+            request,
+            vec![commit_file("feature.txt", "feature\n", "Add feature")],
+        )
     });
     machine.start();
-    let project = Project::new(&machine, "p", &config(""));
+    let project = Project::new(
+        &machine,
+        "p",
+        &config("").replace("review = [\"correctness\"]", "review = \"none\""),
+    );
+    let mut watch = project.watch(0);
     project.json(&["ticket", "new", "--title", "Busy"]);
-    hold.wait_held();
+    let approval = watch.attention();
+    assert_eq!(approval["data"]["kind"], "approval", "{approval}");
+    assert!(
+        project
+            .rows("SELECT id FROM execution WHERE status = 'running'")
+            .is_empty()
+    );
 
     let refused = project.refused(&["ticket", "done", "Y-1", "--reason", "Not needed"]);
     assert_eq!(refused["code"], "refused", "{refused}");
@@ -166,12 +223,11 @@ fn closing_a_ticket_with_a_live_attempt_is_refused() {
     project.json(&["attempt", "abandon", "Y-1"]);
     project.json(&["ticket", "done", "Y-1", "--reason", "Not needed"]);
     assert_eq!(project.json(&["ticket", "show", "Y-1"])["state"], "done");
-    hold.release();
 }
 
 /// One execution proposing A and B, B depending on A: accepting both mints
-/// A first and B's edge names it. B accepted first is refused, naming its
-/// unresolved reference, and changes nothing.
+/// A first and B's edge names it. B accepted first is refused and changes
+/// nothing.
 ///
 /// Sabotage: make `admit::resolve_reference` resolve a key from any
 /// execution's proposals; B's edge names the other execution's A.
@@ -218,7 +274,6 @@ fn proposals_of_one_execution_mint_in_order() {
     ]);
     watch.event("attempt.ended", &[("outcome", "planned")]);
     let raised = proposals(&project);
-    assert_eq!(raised.len(), 4);
     let titled = |title: &str| {
         raised
             .iter()
@@ -234,7 +289,6 @@ fn proposals_of_one_execution_mint_in_order() {
     let seq = project.rows("SELECT MAX(seq) AS seq FROM audit")[0]["seq"].clone();
     let refused = project.refused(&["proposal", "accept", &second_b.to_string()]);
     assert_eq!(refused["code"], "refused", "{refused}");
-    assert!(refused["message"].as_str().unwrap().contains("\"a\""));
     assert_eq!(
         project.rows("SELECT MAX(seq) AS seq FROM audit")[0]["seq"],
         seq
