@@ -175,12 +175,6 @@ fn a_ticket_lands_end_to_end_and_leaves_only_rows() {
     // The landed attempt left rows only: no directory, no box, and no proof
     // snapshot; the check and approval rows carry the proof digest.
     assert!(!project.path.join(".yard/local/attempts/1").exists());
-    assert!(
-        !project
-            .path
-            .join(".yard/local/attempts/1/proof-snapshots")
-            .exists()
-    );
     let attempt_proof = project.rows("SELECT proof FROM attempt WHERE id = 1")[0]["proof"].clone();
     assert!(
         attempt_proof

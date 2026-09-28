@@ -461,7 +461,10 @@ pub async fn implement(
         }
     };
     // Ask git inside the box whether the clone is clean, before it comes down.
-    let listing = if run.stopped || run.timed_out {
+    // A timeout never reaches the candidate; a stopped run keeps its tree, but
+    // its status still decides whether the proof is read. A failed status is
+    // an unknown clone, never a clean one.
+    let listing = if run.timed_out {
         None
     } else {
         daemon
@@ -479,7 +482,9 @@ pub async fn implement(
     };
     let oom = daemon.pinfold.oom_kills(&live.name).await;
     daemon.grants.revoke(project, execution);
-    let _ = live.down(DOWN_TIMEOUT).await;
+    // The proof is only read once the box is confirmed down; a failed teardown
+    // refuses the candidate below.
+    let teardown = live.down(DOWN_TIMEOUT).await;
 
     // Take the candidate's objects by a fetch run in canonical.
     let fetched = {
@@ -531,16 +536,17 @@ pub async fn implement(
             .any(|path| path == ".yard" || path.starts_with(".yard/")),
         _ => false,
     };
-    // The proof directory is worker-written. Snapshot it only once the clone
-    // is clean and the head is not refused for `.yard`, and never follow a
-    // link. A changed proof with an unchanged head is a new candidate.
+    // The proof directory is worker-written. Snapshot it only once the box is
+    // down, the clone is known clean and the head is not refused for `.yard`,
+    // and never follow a link. A changed proof with an unchanged head is a new
+    // candidate.
     let clean = listing
         .as_deref()
-        .map(|listing| listing.trim().is_empty())
-        .unwrap_or(true);
+        .is_some_and(|listing| listing.trim().is_empty());
     let snapshots = dir.join("proof-snapshots");
-    let proof_snapshot = (fetched.is_ok() && clean && !touches_yard && !workflow.read_only)
-        .then(|| proof::snapshot(&proof_dir, &snapshots));
+    let proof_snapshot =
+        (teardown.is_ok() && fetched.is_ok() && clean && !touches_yard && !workflow.read_only)
+            .then(|| proof::snapshot(&proof_dir, &snapshots));
     project.tx(|tx| {
         let current = attempts::get(tx, attempt.id)?;
         if current.state != "live" {
@@ -592,6 +598,29 @@ pub async fn implement(
             })?;
             return stop(tx, if outcome == "timeout" { "timeout" } else { "failed" }, &detail);
         }
+        if let Err(error) = &teardown {
+            let detail = format!("the box did not come down, so the clone cannot be trusted: {error}");
+            executions::end(tx, execution, executions::End {
+                outcome: "failed",
+                detail: Some(&detail),
+                exit_cause: Some("box"),
+                exit_code: run.exit_code,
+                ticket: Some(ticket.id),
+                ..Default::default()
+            })?;
+            return stop(tx, "failed", &detail);
+        }
+        if listing.is_none() && !run.stopped {
+            let detail = "the clone's status could not be read, so the candidate is refused";
+            executions::end(tx, execution, executions::End {
+                outcome: "refused",
+                detail: Some(detail),
+                exit_code: run.exit_code,
+                ticket: Some(ticket.id),
+                ..Default::default()
+            })?;
+            return stop(tx, "failed", detail);
+        }
         if let Err(error) = &fetched {
             let detail = format!("the clone was refused: {error}");
             executions::end(tx, execution, executions::End {
@@ -606,6 +635,7 @@ pub async fn implement(
         let dirty = listing.as_deref().filter(|listing| !listing.trim().is_empty());
         if let Some(listing) = dirty
             && !workflow.read_only
+            && !run.stopped
         {
             executions::end(tx, execution, executions::End {
                 outcome: "dirty",
@@ -645,12 +675,16 @@ pub async fn implement(
         }
         let previous = current.head.clone().unwrap_or_else(|| current.base.clone());
         let new_head = head.clone().unwrap_or_else(|| previous.clone());
+        let current_proof = current.proof.clone().unwrap_or_default();
         let digest = match &proof_snapshot {
             Some(Ok(digest)) => digest.clone(),
-            _ => current.proof.clone().unwrap_or_default(),
+            _ => current_proof.clone(),
         };
-        let advanced = new_head != previous
-            || (!workflow.read_only && current.proof.as_deref() != Some(digest.as_str()));
+        // A proof-only change is a candidate only once there is a candidate
+        // head; a first run with no commit is unchanged.
+        let first = current.head.is_none();
+        let advanced =
+            new_head != previous || (!first && !workflow.read_only && current_proof != digest);
         if !advanced {
             executions::end(tx, execution, executions::End {
                 outcome: "unchanged",

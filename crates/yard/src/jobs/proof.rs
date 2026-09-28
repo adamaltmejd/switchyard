@@ -6,6 +6,7 @@
 use crate::config::hex;
 use crate::daemon::Project;
 use sha2::{Digest, Sha256};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 pub const PROOF_MAX_BYTES: u64 = 64 * 1024 * 1024;
@@ -27,7 +28,7 @@ impl Kind {
 }
 
 struct Entry {
-    relative: String,
+    relative: PathBuf,
     kind: Kind,
     length: u64,
     source: PathBuf,
@@ -42,7 +43,8 @@ pub fn snapshot_path(project: &Project, attempt: i64, digest: &str) -> PathBuf {
 }
 
 /// Copy `live` into `root/<digest>` and return the digest. Idempotent when
-/// the copy already exists.
+/// the copy already exists. A copy is staged and renamed into place, so a
+/// crash never leaves a partial `root/<digest>` that a later run trusts.
 pub fn snapshot(live: &Path, root: &Path) -> Result<String, String> {
     let mut entries = Vec::new();
     let mut bytes = 0u64;
@@ -53,15 +55,29 @@ pub fn snapshot(live: &Path, root: &Path) -> Result<String, String> {
     if destination.exists() {
         return Ok(digest);
     }
-    std::fs::create_dir_all(&destination).map_err(|error| error.to_string())?;
+    let staging = root.join(format!(".staging-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&staging).map_err(|error| error.to_string())?;
+    if let Err(error) = copy(&entries, &staging) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+    std::fs::rename(&staging, &destination).map_err(|error| {
+        let _ = std::fs::remove_dir_all(&staging);
+        error.to_string()
+    })?;
+    Ok(digest)
+}
+
+fn copy(entries: &[Entry], staging: &Path) -> Result<(), String> {
     for entry in entries.iter().filter(|entry| entry.kind == Kind::File) {
-        let target = destination.join(&entry.relative);
+        let target = staging.join(&entry.relative);
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
         std::fs::copy(&entry.source, &target).map_err(|error| error.to_string())?;
     }
-    Ok(digest)
+    Ok(())
 }
 
 fn collect(
@@ -70,18 +86,24 @@ fn collect(
     entries: &mut Vec<Entry>,
     bytes: &mut u64,
 ) -> Result<(), String> {
-    let mut children: Vec<PathBuf> = std::fs::read_dir(dir)
-        .map_err(|error| format!("read {}: {error}", dir.display()))?
-        .map(|entry| entry.map(|entry| entry.path()))
-        .collect::<Result<_, _>>()
-        .map_err(|error| error.to_string())?;
+    let dir_relative = dir.strip_prefix(live).unwrap_or(dir).display().to_string();
+    let reader =
+        std::fs::read_dir(dir).map_err(|error| format!("read {}: {error}", dir.display()))?;
+    // Bound the walk while reading: a directory with more entries than the
+    // whole budget is refused without materialising all of them.
+    let mut children: Vec<PathBuf> = Vec::new();
+    for entry in reader {
+        let path = entry.map_err(|error| error.to_string())?.path();
+        if entries.len() + children.len() >= PROOF_MAX_FILES {
+            return Err(format!(
+                "proof directory {dir_relative:?} has more than {PROOF_MAX_FILES} entries"
+            ));
+        }
+        children.push(path);
+    }
     children.sort();
     for path in children {
-        let relative = path
-            .strip_prefix(live)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .replace('\\', "/");
+        let relative = path.strip_prefix(live).unwrap_or(&path).to_path_buf();
         let metadata = std::fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
         let file_type = metadata.file_type();
         if file_type.is_dir() {
@@ -91,37 +113,28 @@ fn collect(
                 length: 0,
                 source: path.clone(),
             });
-            check_count(entries, &relative)?;
             collect(live, &path, entries, bytes)?;
         } else if file_type.is_file() {
             *bytes = bytes.saturating_add(metadata.len());
             if *bytes > PROOF_MAX_BYTES {
                 return Err(format!(
-                    "proof is larger than {PROOF_MAX_BYTES} bytes at {relative:?}"
+                    "proof is larger than {PROOF_MAX_BYTES} bytes at {:?}",
+                    relative
                 ));
             }
             entries.push(Entry {
-                relative: relative.clone(),
+                relative,
                 kind: Kind::File,
                 length: metadata.len(),
                 source: path,
             });
-            check_count(entries, &relative)?;
         } else {
             return Err(format!(
-                "proof entry {relative:?} is a {}",
+                "proof entry {:?} is a {}",
+                relative,
                 type_name(&file_type)
             ));
         }
-    }
-    Ok(())
-}
-
-fn check_count(entries: &[Entry], relative: &str) -> Result<(), String> {
-    if entries.len() > PROOF_MAX_FILES {
-        return Err(format!(
-            "proof has more than {PROOF_MAX_FILES} entries at {relative:?}"
-        ));
     }
     Ok(())
 }
@@ -148,8 +161,11 @@ fn hash(entries: &[Entry]) -> Result<String, String> {
     let mut hasher = Sha256::new();
     let mut buffer = [0u8; 64 * 1024];
     for entry in entries {
-        hasher.update((entry.relative.len() as u64).to_be_bytes());
-        hasher.update(entry.relative.as_bytes());
+        // The raw path bytes, so two names that differ only in invalid UTF-8
+        // are two identities and a snapshot path cannot collide.
+        let path = entry.relative.as_os_str().as_bytes();
+        hasher.update((path.len() as u64).to_be_bytes());
+        hasher.update(path);
         hasher.update(entry.kind.name().as_bytes());
         if entry.kind == Kind::File {
             hasher.update(entry.length.to_be_bytes());

@@ -100,7 +100,7 @@ async fn holds(
     } else if attempt.state != "live" {
         Some("the attempt ended")
     } else if attempt.candidate() != Some((approval.base.as_str(), approval.head.as_str()))
-        || attempt.proof.as_deref() != Some(approval.proof.as_str())
+        || attempt.proof.clone().unwrap_or_default() != approval.proof
     {
         Some("the candidate changed")
     } else if ticket.revision != approval.ticket_revision {

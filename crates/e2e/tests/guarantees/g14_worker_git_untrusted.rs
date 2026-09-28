@@ -173,7 +173,7 @@ fn a_bad_proof_entry_is_refused_by_name() {
         let command = if prompt.contains("Y-1") {
             "cd /workspace && printf 'feature' > feature.txt && git add -A && git commit -q -m 'Add feature' && ln -s /workspace/feature.txt /yard/proof/link && echo done"
         } else if prompt.contains("Y-2") {
-            "cd /workspace && printf 'feature' > feature.txt && git add -A && git commit -q -m 'Add feature' && i=0 && while [ $i -le 1024 ]; do : > \"$(printf '/yard/proof/f%04d' $i)\"; i=$((i+1)); done && echo done"
+            "cd /workspace && printf 'feature' > feature.txt && git add -A && git commit -q -m 'Add feature' && mkdir -p /yard/proof/many && i=0 && while [ $i -le 1024 ]; do : > \"$(printf '/yard/proof/many/f%04d' $i)\"; i=$((i+1)); done && echo done"
         } else {
             "cd /workspace && printf 'feature' > feature.txt && git add -A && git commit -q -m 'Add feature' && printf 'evidence' > /yard/proof/evidence.txt && echo done"
         };
@@ -223,13 +223,20 @@ fn a_bad_proof_entry_is_refused_by_name() {
     assert!(detail(1).contains("link"), "{}", detail(1));
     assert!(detail(1).contains("symbolic link"), "{}", detail(1));
     assert!(detail(2).contains("1024"), "{}", detail(2));
-    assert!(detail(2).contains("f1024"), "{}", detail(2));
+    assert!(detail(2).contains("many"), "{}", detail(2));
 
     // No gate ran for a refused candidate; the accepted one ran its gate.
-    let gates = project.rows("SELECT attempt.ticket AS ticket FROM execution WHERE kind = 'gate'");
+    let gates = project.rows(
+        "SELECT attempt.ticket AS ticket FROM execution
+         JOIN attempt ON attempt.id = execution.attempt
+         WHERE execution.kind = 'gate'",
+    );
     assert_eq!(gates, vec![json!({ "ticket": 3 })], "{gates:?}");
 
-    let approvals = project.rows("SELECT attempt.ticket AS ticket, proof FROM approval");
+    let approvals = project.rows(
+        "SELECT attempt.ticket AS ticket, approval.proof AS proof FROM approval
+         JOIN attempt ON attempt.id = approval.attempt",
+    );
     assert_eq!(approvals.len(), 1, "{approvals:?}");
     assert_eq!(approvals[0]["ticket"], 3);
     assert!(!approvals[0]["proof"].as_str().unwrap().is_empty());
