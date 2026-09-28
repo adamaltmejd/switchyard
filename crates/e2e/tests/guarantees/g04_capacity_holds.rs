@@ -1,7 +1,7 @@
 //! G4: Capacity holds.
 
 use e2e::*;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 /// Run `yard attempt start` for each ticket at once; each one's JSON result
 /// or error.
@@ -129,4 +129,51 @@ fn machine_lanes_bound_attempts_across_projects() {
     };
     assert_eq!(titles(&first), ["Hold"]);
     assert_eq!(titles(&second), ["Waits"]);
+}
+
+/// Two registered projects, each running its first execution, so both are
+/// execution 1 in their own stores: the first ending leaves the second's
+/// bearer working. The second's worker is held until the first has ended,
+/// then records a progress note.
+///
+/// Sabotage: make `Grants::revoke` compare only the execution id; the
+/// second's call is refused and no note is recorded.
+#[test]
+fn an_execution_ending_revokes_only_its_own_project_grant() {
+    let first_hold = Latch::new();
+    let second_hold = Latch::new();
+    let (first_held, second_held) = (first_hold.clone(), second_hold.clone());
+    let machine = Machine::new("g4-grants", move |request| {
+        if request.opens() && request.prompt().contains("First") {
+            return Reply::Hold(first_held.clone(), Box::new(Reply::Text("done".into())));
+        }
+        if request.opens() && request.prompt().contains("Second") {
+            let note = tool("yard_progress", json!({ "note": "second's note" }));
+            return Reply::Hold(second_held.clone(), Box::new(Reply::Tools(vec![note])));
+        }
+        Reply::Text("done".into())
+    });
+    machine.start();
+    let first = Project::new(&machine, "a", &config(""));
+    let second = Project::new(&machine, "b", &config(""));
+    let mut first_watch = first.watch(0);
+    let mut second_watch = second.watch(0);
+
+    first.json(&["ticket", "new", "--title", "First"]);
+    first_hold.wait_held();
+    second.json(&["ticket", "new", "--title", "Second"]);
+    second_hold.wait_held();
+    let ids = |project: &Project| project.rows("SELECT id FROM execution");
+    assert_eq!(ids(&first), ids(&second));
+
+    first_hold.release();
+    let stopped = first_watch.attention();
+    assert_eq!(stopped["data"]["kind"], "stopped", "{stopped}");
+    second_hold.release();
+    let stopped = second_watch.attention();
+    assert_eq!(stopped["data"]["kind"], "stopped", "{stopped}");
+    assert_eq!(
+        second.rows("SELECT progress FROM execution"),
+        vec![json!({ "progress": "second's note" })]
+    );
 }

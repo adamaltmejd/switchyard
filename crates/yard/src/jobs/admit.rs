@@ -690,7 +690,12 @@ pub fn attempt_stop(daemon: &Daemon, project: &Project, params: &Value) -> Resul
             ticket_name(id)
         )));
     };
-    if let Some(stop) = daemon.stops.lock().expect("stops lock").get(&running.id) {
+    if let Some(stop) = daemon
+        .stops
+        .lock()
+        .expect("stops lock")
+        .get(&(project.key.clone(), running.id))
+    {
         stop.notify_one();
     }
     project.tx(|tx| {
@@ -874,7 +879,12 @@ pub fn attempt_abandon(daemon: &Daemon, project: &Project, params: &Value) -> Re
             .collect::<Vec<_>>())
     })?;
     for execution in running {
-        if let Some(stop) = daemon.stops.lock().expect("stops lock").get(&execution) {
+        if let Some(stop) = daemon
+            .stops
+            .lock()
+            .expect("stops lock")
+            .get(&(project.key.clone(), execution))
+        {
             stop.notify_one();
         }
     }

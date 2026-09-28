@@ -102,7 +102,7 @@ pub async fn up_worker(
     let live = match daemon.pinfold.up(spec, secrets, UP_TIMEOUT).await {
         Ok(live) => live,
         Err(error) => {
-            daemon.grants.revoke(execution);
+            daemon.grants.revoke(project, execution);
             return Err(Fail::new(
                 "box",
                 format!("the box did not come up: {error}"),
@@ -257,7 +257,7 @@ pub async fn run_pi(
         .stops
         .lock()
         .expect("stops lock")
-        .insert(execution, stop.clone());
+        .insert((project.key.clone(), execution), stop.clone());
     std::fs::create_dir_all(transcript.parent().expect("transcript dir"))
         .map_err(|error| error.to_string())?;
     let mut file = tokio::fs::File::create(transcript)
@@ -440,7 +440,7 @@ pub async fn implement(
     let run = match run {
         Ok(run) => run,
         Err(fail) => {
-            daemon.grants.revoke(execution);
+            daemon.grants.revoke(project, execution);
             let _ = live.down(DOWN_TIMEOUT).await;
             return Err(fail);
         }
@@ -463,7 +463,7 @@ pub async fn implement(
             .map(|out| out.stdout)
     };
     let oom = daemon.pinfold.oom_kills(&live.name).await;
-    daemon.grants.revoke(execution);
+    daemon.grants.revoke(project, execution);
     let _ = live.down(DOWN_TIMEOUT).await;
 
     // Take the candidate's objects by a fetch run in canonical.

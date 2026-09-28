@@ -44,11 +44,12 @@ impl Grants {
         bearer
     }
 
-    pub fn revoke(&self, execution: i64) {
+    /// Execution ids are per project, so a grant is named by both.
+    pub fn revoke(&self, project: &Project, execution: i64) {
         self.bearers
             .lock()
             .expect("grants lock")
-            .retain(|_, grant| grant.execution != execution);
+            .retain(|_, grant| grant.project.key != project.key || grant.execution != execution);
     }
 
     fn get(&self, bearer: &str) -> Option<Grant> {

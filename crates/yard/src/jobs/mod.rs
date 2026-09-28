@@ -150,7 +150,11 @@ pub fn spawn(daemon: &Arc<Daemon>, project: &Arc<Project>, kind: &str, execution
                 Ok(())
             });
         }
-        daemon.stops.lock().expect("stops lock").remove(&execution);
+        daemon
+            .stops
+            .lock()
+            .expect("stops lock")
+            .remove(&(project.key.clone(), execution));
         daemon.wake.notify_one();
     });
 }

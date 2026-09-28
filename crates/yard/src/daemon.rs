@@ -24,7 +24,8 @@ pub struct Daemon {
     /// Wakes the scheduler.
     pub wake: Notify,
     /// Running executions' stop signals, by execution id.
-    pub stops: Mutex<HashMap<i64, Arc<Notify>>>,
+    /// Keyed by project key and execution id; execution ids are per project.
+    pub stops: Mutex<HashMap<(String, i64), Arc<Notify>>>,
     /// Serialises admission, so capacity is counted once per decision.
     pub admission: Mutex<()>,
     /// Image ids built per target head, by project key.
