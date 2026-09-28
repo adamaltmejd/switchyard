@@ -23,9 +23,10 @@ against the release's `SHA256SUMS`, and put it on `PATH`.
 | `aarch64-apple-darwin` | Mac |
 | `aarch64-unknown-linux-musl`, `x86_64-unknown-linux-musl` | Linux hosts |
 
-Or build it:
+Or build it and put it on `PATH`:
 
     cargo build --release --locked -p yard
+    install -m 0755 target/release/yard ~/.local/bin/yard
 
 ## Setup
 
@@ -42,7 +43,6 @@ machine's settings:
     OPENCODE_API_KEY=...
     YARD_MAX_LANES=2
     YARD_BOX_MEMORY=4g
-    YARD_ORIGIN_OPENROUTER=https://openrouter.ai
 
 `YARD_MAX_LANES` caps live attempts across the machine; `YARD_BOX_MEMORY`
 gives each box a share of memory; `YARD_ORIGIN_<NAME>` overrides a
