@@ -15,6 +15,7 @@ pub struct Execution {
     pub detail: Option<String>,
     pub base: Option<String>,
     pub head: Option<String>,
+    pub proof: Option<String>,
     pub ticket_revision: Option<i64>,
     pub digest: Option<String>,
     pub name: Option<String>,
@@ -31,7 +32,7 @@ pub struct Execution {
 }
 
 const COLUMNS: &str = "id, attempt, parent, kind, reason, status, outcome, detail, base, head,
-    ticket_revision, digest, name, round, handle, session_id, approval, intent_old, intent_merged,
+    proof, ticket_revision, digest, name, round, handle, session_id, approval, intent_old, intent_merged,
     intent_state, progress, harness_version, resumed";
 
 fn row(row: &Row) -> rusqlite::Result<Execution> {
@@ -46,19 +47,20 @@ fn row(row: &Row) -> rusqlite::Result<Execution> {
         detail: row.get(7)?,
         base: row.get(8)?,
         head: row.get(9)?,
-        ticket_revision: row.get(10)?,
-        digest: row.get(11)?,
-        name: row.get(12)?,
-        round: row.get(13)?,
-        handle: row.get(14)?,
-        session_id: row.get(15)?,
-        approval: row.get(16)?,
-        intent_old: row.get(17)?,
-        intent_merged: row.get(18)?,
-        intent_state: row.get(19)?,
-        progress: row.get(20)?,
-        harness_version: row.get(21)?,
-        resumed: row.get(22)?,
+        proof: row.get(10)?,
+        ticket_revision: row.get(11)?,
+        digest: row.get(12)?,
+        name: row.get(13)?,
+        round: row.get(14)?,
+        handle: row.get(15)?,
+        session_id: row.get(16)?,
+        approval: row.get(17)?,
+        intent_old: row.get(18)?,
+        intent_merged: row.get(19)?,
+        intent_state: row.get(20)?,
+        progress: row.get(21)?,
+        harness_version: row.get(22)?,
+        resumed: row.get(23)?,
     })
 }
 
@@ -75,6 +77,7 @@ impl Execution {
             "detail": self.detail,
             "base": self.base,
             "head": self.head,
+            "proof": self.proof,
             "name": self.name,
             "round": self.round,
             "intent": self.intent_state.as_ref().map(|state| json!({
@@ -173,6 +176,7 @@ pub struct Start<'a> {
     pub reason: Option<&'a str>,
     pub base: Option<&'a str>,
     pub head: Option<&'a str>,
+    pub proof: Option<&'a str>,
     pub ticket_revision: Option<i64>,
     pub digest: Option<&'a str>,
     pub name: Option<&'a str>,
@@ -190,9 +194,9 @@ pub fn start(tx: &Connection, start: Start) -> Result<i64, Fail> {
     let settings = start.agent.map(|(_, settings)| settings);
     let field = |key: &str| settings.and_then(|value| value[key].as_str().map(str::to_string));
     tx.execute(
-        "INSERT INTO execution (attempt, parent, kind, reason, status, base, head, ticket_revision,
+        "INSERT INTO execution (attempt, parent, kind, reason, status, base, head, proof, ticket_revision,
             digest, name, round, approval, agent, harness, harness_version, provider, model, effort, started_at)
-         VALUES (?1, ?2, ?3, ?4, 'running', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+         VALUES (?1, ?2, ?3, ?4, 'running', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
         params![
             start.attempt,
             start.parent,
@@ -200,6 +204,7 @@ pub fn start(tx: &Connection, start: Start) -> Result<i64, Fail> {
             start.reason,
             start.base,
             start.head,
+            start.proof,
             start.ticket_revision,
             start.digest,
             start.name,
@@ -226,7 +231,7 @@ pub fn start(tx: &Connection, start: Start) -> Result<i64, Fail> {
         },
         None,
         json!({ "kind": start.kind, "reason": start.reason, "name": start.name,
-                "head": start.head, "parent": start.parent }),
+                "head": start.head, "proof": start.proof, "parent": start.parent }),
     )?;
     Ok(id)
 }

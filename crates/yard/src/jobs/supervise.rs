@@ -1,7 +1,7 @@
 //! Box-backed work: the implementer execution, gates in a box or on the
 //! host, the project image, and the worker's `yard_context`.
 
-use super::{Loaded, load};
+use super::{Loaded, load, proof};
 use crate::api::Fail;
 use crate::r#box::{BoxSpec, Egress, EnvValue, Mount, Route};
 use crate::config::RunsIn;
@@ -127,6 +127,9 @@ pub struct Worker<'a> {
     pub image: &'a str,
     pub workspace: &'a Path,
     pub read_only: bool,
+    /// The worker-written live proof directory, mounted at `/yard/proof`
+    /// unless the workflow is read-only.
+    pub proof: Option<&'a Path>,
     pub harness: &'static dyn Harness,
     pub stage: Stage<'a>,
     pub model: &'a ModelRoute,
@@ -161,28 +164,38 @@ pub fn worker_spec(daemon: &Daemon, project: &Project, worker: &Worker) -> BoxSp
         Route::Service(format!("127.0.0.1:{}", daemon.mcp_port)),
     );
     routes.insert(worker.model.name.clone(), worker.model.route.clone());
+    let mut mounts = vec![
+        Mount {
+            host: worker.workspace.into(),
+            guest: "/workspace".into(),
+            readonly: worker.read_only,
+        },
+        Mount {
+            host: worker.stage.state.into(),
+            guest: crate::harness::STATE_GUEST.into(),
+            readonly: false,
+        },
+        Mount {
+            host: worker.stage.input.into(),
+            guest: crate::harness::INPUT_GUEST.into(),
+            readonly: true,
+        },
+    ];
+    if !worker.read_only
+        && let Some(proof) = worker.proof
+    {
+        mounts.push(Mount {
+            host: proof.into(),
+            guest: "/yard/proof".into(),
+            readonly: false,
+        });
+    }
     BoxSpec {
         name: box_name(project, worker.execution),
         labels: labels(project),
         harness: Some(worker.harness.name().into()),
         image: worker.image.into(),
-        mounts: vec![
-            Mount {
-                host: worker.workspace.into(),
-                guest: "/workspace".into(),
-                readonly: worker.read_only,
-            },
-            Mount {
-                host: worker.stage.state.into(),
-                guest: crate::harness::STATE_GUEST.into(),
-                readonly: false,
-            },
-            Mount {
-                host: worker.stage.input.into(),
-                guest: crate::harness::INPUT_GUEST.into(),
-                readonly: true,
-            },
-        ],
+        mounts,
         env,
         egress: Some(Egress {
             allow: worker.egress.to_vec(),
@@ -333,6 +346,12 @@ pub async fn implement(
     }
     let state = dir.join("state");
     let input = dir.join("input");
+    // The worker-written proof directory exists before the box so the mount
+    // always has a host directory. A read-only workflow gets none.
+    let proof_dir = dir.join("proof");
+    if !workflow.read_only {
+        std::fs::create_dir_all(&proof_dir).map_err(|error| error.to_string())?;
+    }
     let stage = Stage {
         state: &state,
         input: &input,
@@ -403,6 +422,7 @@ pub async fn implement(
             image: &image,
             workspace: &clone,
             read_only: workflow.read_only,
+            proof: (!workflow.read_only).then_some(proof_dir.as_path()),
             harness,
             stage,
             model: &model,
@@ -511,6 +531,16 @@ pub async fn implement(
             .any(|path| path == ".yard" || path.starts_with(".yard/")),
         _ => false,
     };
+    // The proof directory is worker-written. Snapshot it only once the clone
+    // is clean and the head is not refused for `.yard`, and never follow a
+    // link. A changed proof with an unchanged head is a new candidate.
+    let clean = listing
+        .as_deref()
+        .map(|listing| listing.trim().is_empty())
+        .unwrap_or(true);
+    let snapshots = dir.join("proof-snapshots");
+    let proof_snapshot = (fetched.is_ok() && clean && !touches_yard && !workflow.read_only)
+        .then(|| proof::snapshot(&proof_dir, &snapshots));
     project.tx(|tx| {
         let current = attempts::get(tx, attempt.id)?;
         if current.state != "live" {
@@ -591,21 +621,6 @@ pub async fn implement(
             }
             return attempts::set_next(tx, attempt.id, Some(&json!({ "reason": "dirty", "detail": listing })));
         }
-        let previous = current.head.clone().unwrap_or_else(|| current.base.clone());
-        let advanced = head.as_deref().filter(|head| *head != previous);
-        let Some(new_head) = advanced else {
-            executions::end(tx, execution, executions::End {
-                outcome: "unchanged",
-                exit_code: run.exit_code,
-                ticket: Some(ticket.id),
-                ..Default::default()
-            })?;
-            if workflow.read_only {
-                attempts::end(tx, attempt.id, "planned")?;
-                return super::audit_attempt(tx, "attempt.ended", &current, None, json!({ "outcome": "planned" })).map(|_| ());
-            }
-            return stop(tx, "unchanged", "the worker stopped without a new commit");
-        };
         if touches_yard {
             let detail = ".yard changes only through the operator's `yard sync`; the candidate touching it is refused. Take the .yard change out of your commits.";
             executions::end(tx, execution, executions::End {
@@ -617,9 +632,41 @@ pub async fn implement(
             })?;
             return attempts::set_next(tx, attempt.id, Some(&json!({ "reason": "repair", "detail": detail })));
         }
+        if let Some(Err(error)) = &proof_snapshot {
+            let detail = error.clone();
+            executions::end(tx, execution, executions::End {
+                outcome: "refused",
+                detail: Some(&detail),
+                exit_code: run.exit_code,
+                ticket: Some(ticket.id),
+                ..Default::default()
+            })?;
+            return stop(tx, "failed", &detail);
+        }
+        let previous = current.head.clone().unwrap_or_else(|| current.base.clone());
+        let new_head = head.clone().unwrap_or_else(|| previous.clone());
+        let digest = match &proof_snapshot {
+            Some(Ok(digest)) => digest.clone(),
+            _ => current.proof.clone().unwrap_or_default(),
+        };
+        let advanced = new_head != previous
+            || (!workflow.read_only && current.proof.as_deref() != Some(digest.as_str()));
+        if !advanced {
+            executions::end(tx, execution, executions::End {
+                outcome: "unchanged",
+                exit_code: run.exit_code,
+                ticket: Some(ticket.id),
+                ..Default::default()
+            })?;
+            if workflow.read_only {
+                attempts::end(tx, attempt.id, "planned")?;
+                return super::audit_attempt(tx, "attempt.ended", &current, None, json!({ "outcome": "planned" })).map(|_| ());
+            }
+            return stop(tx, "unchanged", "the worker stopped without a new commit");
+        }
         tx.execute(
-            "UPDATE attempt SET head = ?2, base = ?3 WHERE id = ?1",
-            rusqlite::params![attempt.id, new_head, base],
+            "UPDATE attempt SET head = ?2, base = ?3, proof = ?4 WHERE id = ?1",
+            rusqlite::params![attempt.id, new_head, base, digest],
         )?;
         executions::end(tx, execution, executions::End {
             outcome: "candidate",
@@ -627,7 +674,10 @@ pub async fn implement(
             ticket: Some(ticket.id),
             ..Default::default()
         })?;
-        super::audit_attempt(tx, "attempt.candidate", &current, None, json!({ "base": base, "head": new_head }))?;
+        super::audit_attempt(tx, "attempt.candidate", &current, None, json!({
+            "base": base, "head": new_head, "proof": digest,
+            "proof_path": proof::snapshot_path(project, attempt.id, &digest).display().to_string(),
+        }))?;
         // A nudge queued during the execution reaches the implementer before
         // anything judges the candidate.
         if current.nudge.is_some() {
@@ -664,7 +714,7 @@ async fn implementer_prompt(
         if workflow.read_only {
             prompt.push_str("Your workspace is read-only. Plan the work: propose child tickets and an edit of this ticket's body with yard_propose, then stop.\n\n");
         } else {
-            prompt.push_str("Work in /workspace on the current branch. Commit your work with git and leave the tree clean; uncommitted or untracked files send the work back to you. Do not change .yard/. Record progress with yard_progress. Propose follow-up tickets with yard_propose; if the ticket is too large, propose the split and stop.\n\n");
+            prompt.push_str("Work in /workspace on the current branch. Commit your work with git and leave the tree clean; uncommitted or untracked files send the work back to you. Do not change .yard/. Record progress with yard_progress. Files under /yard/proof are snapshotted with the candidate and never merged. Propose follow-up tickets with yard_propose; if the ticket is too large, propose the split and stop.\n\n");
         }
         if reason != "first"
             && let Some((base, head)) = attempt.candidate()
@@ -824,6 +874,7 @@ pub async fn gate(
                     attempt: attempt.id,
                     base: row.base.clone().unwrap_or_default(),
                     head: commit.clone(),
+                    proof: row.proof.clone().unwrap_or_default(),
                     ticket_revision: row.ticket_revision.unwrap_or_default(),
                     digest: row.digest.clone().unwrap_or_default(),
                 },

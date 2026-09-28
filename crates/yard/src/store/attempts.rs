@@ -12,6 +12,8 @@ pub struct Attempt {
     pub implementer: Value,
     pub base: String,
     pub head: Option<String>,
+    /// The digest of the candidate's proof snapshot.
+    pub proof: Option<String>,
     /// The latest target handed to the attempt for a repair.
     pub target: Option<String>,
     pub state: String,
@@ -27,12 +29,13 @@ pub struct Attempt {
     pub landing_reds: i64,
 }
 
-const COLUMNS: &str = "id, ticket, workflow, implementer, base, head, target, state, outcome,
+const COLUMNS: &str =
+    "id, ticket, workflow, implementer, base, head, proof, target, state, outcome,
     lane, lane_since, work_ms, next, nudge, rounds, extra_rounds, landing_reds";
 
 fn row(row: &Row) -> rusqlite::Result<Attempt> {
     let implementer: String = row.get(3)?;
-    let next: Option<String> = row.get(12)?;
+    let next: Option<String> = row.get(13)?;
     Ok(Attempt {
         id: row.get(0)?,
         ticket: row.get(1)?,
@@ -40,17 +43,18 @@ fn row(row: &Row) -> rusqlite::Result<Attempt> {
         implementer: serde_json::from_str(&implementer).unwrap_or(Value::Null),
         base: row.get(4)?,
         head: row.get(5)?,
-        target: row.get(6)?,
-        state: row.get(7)?,
-        outcome: row.get(8)?,
-        lane: row.get(9)?,
-        lane_since: row.get(10)?,
-        work_ms: row.get(11)?,
+        proof: row.get(6)?,
+        target: row.get(7)?,
+        state: row.get(8)?,
+        outcome: row.get(9)?,
+        lane: row.get(10)?,
+        lane_since: row.get(11)?,
+        work_ms: row.get(12)?,
         next: next.and_then(|text| serde_json::from_str(&text).ok()),
-        nudge: row.get(13)?,
-        rounds: row.get(14)?,
-        extra_rounds: row.get(15)?,
-        landing_reds: row.get(16)?,
+        nudge: row.get(14)?,
+        rounds: row.get(15)?,
+        extra_rounds: row.get(16)?,
+        landing_reds: row.get(17)?,
     })
 }
 
@@ -64,6 +68,7 @@ impl Attempt {
             "branch": self.branch(),
             "base": self.base,
             "head": self.head,
+            "proof": self.proof,
             "state": self.state,
             "outcome": self.outcome,
             "lane": self.lane,

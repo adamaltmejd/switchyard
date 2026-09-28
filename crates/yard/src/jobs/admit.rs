@@ -813,6 +813,7 @@ pub async fn attempt_approve(
             .flatten()
             .filter_map(Value::as_i64)
             .collect();
+        let proof = attempt.proof.clone().unwrap_or_default();
         let approval = checks::approve(
             tx,
             checks::Approve {
@@ -820,6 +821,7 @@ pub async fn attempt_approve(
                 ticket: id,
                 base: &attempt.base,
                 head,
+                proof: &proof,
                 ticket_revision: ticket.revision,
                 gate_digest: &loaded.gate_digest,
                 review_digest: &review_digest,
