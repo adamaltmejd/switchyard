@@ -238,7 +238,7 @@ pub fn main(cli: Cli) -> i32 {
 }
 
 /// One line to stdout. A closed pipe ends the command; the caller stops.
-fn write_line(text: &str) -> io::Result<()> {
+pub(crate) fn write_line(text: &str) -> io::Result<()> {
     let mut stdout = io::stdout().lock();
     writeln!(stdout, "{text}")?;
     stdout.flush()
@@ -447,7 +447,7 @@ fn render_status(status: &Value) -> String {
     }
 
     out.push_str(&format!(
-        "seq {}\n",
+        "seq {}",
         status["seq"].as_i64().unwrap_or_default()
     ));
     out
