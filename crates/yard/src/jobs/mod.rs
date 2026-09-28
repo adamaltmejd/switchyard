@@ -311,8 +311,21 @@ async fn advance(
     }
 
     let protected = protected_paths(daemon, project, loaded, base, head).await?;
-    if loaded.config.approve == Approve::Auto && protected.is_empty() {
-        project.tx(|tx| {
+    let payload = json!({
+        "base": base, "head": head, "revision": ticket.revision,
+        "gate_digest": loaded.gate_digest, "review_digest": review_digest,
+        "checks": passed, "protected": protected, "unreviewed": workflow.review.is_empty(),
+    });
+    project.tx(|tx| {
+        // The paths were read outside this transaction: the candidate must
+        // still be current, or an ended attempt gets an item nothing answers.
+        let now = attempts::get(tx, attempt.id)?;
+        if now.state != "live"
+            || stale_part(&payload, &now, &tickets::get(tx, ticket.id)?, loaded)?.is_some()
+        {
+            return Ok(());
+        }
+        if loaded.config.approve == Approve::Auto && protected.is_empty() {
             checks::approve(
                 tx,
                 checks::Approve {
@@ -329,16 +342,10 @@ async fn advance(
                 },
             )?;
             attempts::set_lane(tx, attempt.id, false)
-        })?;
-    } else {
-        let payload = json!({
-            "base": base, "head": head, "revision": ticket.revision,
-            "gate_digest": loaded.gate_digest, "review_digest": review_digest,
-            "checks": passed, "protected": protected, "unreviewed": workflow.review.is_empty(),
-        });
-        project.tx(|tx| raise_approval(tx, attempt, &payload))?;
-    }
-    Ok(())
+        } else {
+            raise_approval(tx, attempt, &payload).map(drop)
+        }
+    })
 }
 
 /// Ask the operator to approve the candidate `payload` names.
