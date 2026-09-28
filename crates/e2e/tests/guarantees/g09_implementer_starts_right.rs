@@ -116,10 +116,12 @@ fn stop_delivers_a_nudge_sooner() {
 
 /// A worker that leaves an untracked file gets no review and the next
 /// prompt lists the file. The file is nested in a new directory, so only a
-/// listing of every untracked file names it.
+/// listing of every untracked file names it. A second worker that leaves
+/// the file after being told is `stopped:dirty`, not sent back again.
 ///
 /// Sabotage: drop `--untracked-files=all` from the clean check; the prompt
-/// names only the directory.
+/// names only the directory. Or drop the `dirty` reason check in
+/// `supervise`; the second worker is sent back without end.
 #[test]
 fn an_untracked_file_gets_no_review_and_is_named() {
     let machine = Machine::new("g9-dirty", |request| {
@@ -127,6 +129,9 @@ fn an_untracked_file_gets_no_review_and_is_named() {
             return act(request, vec![publish(json!([]))]);
         }
         if request.opens() && request.last_user().contains("not clean") {
+            if request.prompt().contains("Keep notes") {
+                return Reply::Text("the notes stay".into());
+            }
             return Reply::Tools(vec![bash("cd /workspace && rm -r notes && echo removed")]);
         }
         act(
@@ -157,6 +162,18 @@ fn an_untracked_file_gets_no_review_and_is_named() {
         openings(&machine)[1]
             .last_user()
             .contains("notes/scratch.log")
+    );
+
+    project.json(&["ticket", "new", "--title", "Keep notes"]);
+    let stopped = watch.attention();
+    assert_eq!(stopped["data"]["kind"], "stopped", "{stopped}");
+    assert_eq!(stopped["data"]["reason"], "dirty", "{stopped}");
+    assert_eq!(
+        project.rows("SELECT reason, outcome FROM execution WHERE attempt = 2 ORDER BY id"),
+        vec![
+            json!({ "reason": "first", "outcome": "dirty" }),
+            json!({ "reason": "dirty", "outcome": "dirty" }),
+        ]
     );
 }
 

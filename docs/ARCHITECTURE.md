@@ -255,7 +255,8 @@ ticket too large proposes the split and stops.
    The attempt's inactivity and total-work clocks end it the same way. When
    the worker stops, Yard asks git inside its box whether the clone is
    clean before the box comes down: a clean committed head is a candidate;
-   a dirty clone goes back to the implementer with the listing; an unchanged head raises
+   a dirty clone goes back to the implementer once with the listing, and
+   raises `stopped:dirty` if still dirty; an unchanged head raises
    `stopped`. The next implementer execution resumes the session where the
    harness offers one. Context is the harness's business: Yard stages each
    harness's own automatic-compaction threshold with the launch and never
@@ -380,7 +381,7 @@ surface reads that declaration.
 |---|---|---|
 | `approval` | a candidate is verified and `approve` is `manual`, or it touches a protected path | approve, reject, abandon |
 | `proposal` | a worker proposes | accept, reject |
-| `stopped` | an execution ended without a candidate advancing: `unchanged`, `failed`, `interrupted`, `timeout`, `limit` | start, nudge, abandon; on `timeout` and `limit` only nudge, abandon |
+| `stopped` | an execution ended without a candidate advancing: `unchanged`, `dirty`, `failed`, `interrupted`, `timeout`, `limit` | start, nudge, abandon; on `timeout` and `limit` only nudge, abandon |
 | `red` | a gate error, a review error, a second landing red, a landing that could not run, a landing intent canonical cannot decide | start, nudge, abandon |
 
 `start` always means "try again from here". After an implementer stop it
@@ -634,7 +635,7 @@ waits one out.
 | 6 | Inputs are validated at the boundary | A malformed tool payload, a TOML with an unknown key, an unknown workflow name, a sync that removes a workflow an open ticket names: refused by name, nothing written. |
 | 7 | A ticket lands end to end and leaves only rows | New ticket, worker commit, candidate gate, review pass, approval, green landing: canonical moves and the ticket is done. Afterwards every decision has one audit event naming its target and text, the execution rows carry tokens, cost, model and start reason, no handle event exists, the attempt directory and its boxes are gone, and another live attempt's directory and canonical are untouched. |
 | 8 | Review is a publication, and bounded | A seat that exits 0 without publishing is a review error; a seat killed after publishing has published; a second publication is refused; findings below `blocking` pass; a panel of `none` reaches approval marked unreviewed; a seat that publishes a block and is then held by the fixture: no repair starts until its box is gone; a seat that always blocks gets exactly `max_rounds` rounds, then `stopped:limit`. A candidate that commits a `.pi` extension which publishes a pass: nothing loads it, and the seat's own publication is the one recorded. Control: the seat's prompt carries a rule from the project's `AGENTS.md`. A gate error's `start` reruns that gate on the same head. |
-| 9 | Each implementer execution starts from the right place | A nudge mid-execution lets the execution end on its own and reaches the next prompt; `stop` delivers it sooner. A worker that leaves an untracked file gets no review and the next prompt lists the file. With `max_session_executions = 2`: the second execution resumes the first, the third resumes nothing and its prompt is the brief, the fourth resumes the third, the fifth resumes nothing. |
+| 9 | Each implementer execution starts from the right place | A nudge mid-execution lets the execution end on its own and reaches the next prompt; `stop` delivers it sooner. A worker that leaves an untracked file gets no review and the next prompt lists the file; left again, `stopped:dirty`. With `max_session_executions = 2`: the second execution resumes the first, the third resumes nothing and its prompt is the brief, the fourth resumes the third, the fifth resumes nothing. |
 | 10 | The queue lands one at a time and re-judges what does not merge | Three approved candidates, the second red on its merged ref: the first lands, the second gets one repair and a second red raises `red`, the third lands on the moved target with its own gate run. A candidate that does not merge gets a repair naming the paths, and its next head takes gates, review and approval again. A conflict against a target that changed `.yard/config.toml`, in a clone made before it: the worker fetches the target from its bundle, merges, and the new candidate's base is the target, so it passes the `.yard` refusal and lands with the operator's configuration intact. |
 | 11 | Only the operator's sync changes `.yard` and canonical from outside | A worker commit under `.yard` comes back with the reason and no gate runs; the same change through `yard sync` is in force for the next execution. A checkout and canonical that each hold a commit the other lacks: both directions refuse naming both heads; a fast-forward passes. |
 | 12 | Boxes hold nothing secret | The key is absent from the box's environment and clone; the fixture behind the injecting route receives it. |
@@ -668,7 +669,7 @@ crates/yard/src/
   jobs/     admit.rs supervise.rs review.rs queue.rs reconcile.rs cleanup.rs
   git.rs box.rs pi.rs pi-mcp-extension.ts mcp.rs
   daemon.rs api.rs cli.rs config.rs main.rs
-crates/e2e/  src/lib.rs (harness, fake model fixture, helpers), tests/*.rs
+crates/e2e/  src/lib.rs (harness, helpers) model.rs (fake model fixture), tests/guarantees/g*.rs
 ```
 
 ## Open questions

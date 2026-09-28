@@ -619,6 +619,11 @@ pub async fn implement(
                 ticket: Some(ticket.id),
                 ..Default::default()
             })?;
+            // One return per dirty tree: a worker told once and still
+            // leaving files is stopped, not looped.
+            if executions::get(tx, execution)?.reason.as_deref() == Some("dirty") {
+                return stop(tx, "dirty", &format!("the clone is still dirty:\n{listing}"));
+            }
             return attempts::set_next(tx, attempt.id, Some(&json!({ "reason": "dirty", "detail": listing })));
         }
         let previous = current.head.clone().unwrap_or_else(|| current.base.clone());
