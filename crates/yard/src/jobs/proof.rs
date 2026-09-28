@@ -76,12 +76,21 @@ pub fn snapshot(live: &Path, root: &Path) -> Result<String, String> {
 }
 
 fn copy(entries: &[Entry], staging: &Path) -> Result<(), String> {
-    for entry in entries.iter().filter(|entry| entry.kind == Kind::File) {
+    // Every entry is materialised, directories included, so an empty directory
+    // is present and the snapshot re-hashes to its own digest.
+    for entry in entries {
         let target = staging.join(&entry.relative);
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        match entry.kind {
+            Kind::Dir => {
+                std::fs::create_dir_all(&target).map_err(|error| error.to_string())?;
+            }
+            Kind::File => {
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+                }
+                std::fs::copy(&entry.source, &target).map_err(|error| error.to_string())?;
+            }
         }
-        std::fs::copy(&entry.source, &target).map_err(|error| error.to_string())?;
     }
     Ok(())
 }
@@ -111,6 +120,15 @@ fn collect(
     }
     children.sort();
     for path in children {
+        // The run count spans the whole walk, so a sibling visited after a
+        // recursive descent is refused here, naming it.
+        if entries.len() >= PROOF_MAX_FILES {
+            let relative = path.strip_prefix(live).unwrap_or(&path);
+            return Err(format!(
+                "proof has more than {PROOF_MAX_FILES} entries at {:?}",
+                relative
+            ));
+        }
         let relative = path.strip_prefix(live).unwrap_or(&path).to_path_buf();
         let metadata = std::fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
         let file_type = metadata.file_type();
