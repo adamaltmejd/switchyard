@@ -168,6 +168,53 @@ fn lapsed(
     Ok(())
 }
 
+/// The approval, its attempt and ticket, and the policy, as they are now.
+struct Current {
+    loaded: Arc<Loaded>,
+    approval: checks::Approval,
+    attempt: attempts::Attempt,
+    ticket: tickets::Ticket,
+}
+
+/// Re-read the approval against current rows and the current policy, then
+/// run `then` in a transaction that sees the same rows. A lapse, or a row
+/// that changed after the read, runs nothing.
+async fn admit<T>(
+    daemon: &Arc<Daemon>,
+    project: &Arc<Project>,
+    approval: i64,
+    attempt: i64,
+    then: impl FnOnce(&rusqlite::Transaction, &Current) -> Result<T, Fail>,
+) -> Result<Result<T, (Current, Lapse)>, Fail> {
+    let loaded = load(daemon, project).await?;
+    let (approval, ticket, attempt) = project.read(|conn| {
+        let attempt = attempts::get(conn, attempt)?;
+        Ok((
+            checks::approval(conn, approval)?,
+            tickets::get(conn, attempt.ticket)?,
+            attempt,
+        ))
+    })?;
+    let lapse = holds(daemon, project, &loaded, &approval, &attempt, &ticket).await?;
+    let now = Current {
+        loaded,
+        approval,
+        attempt,
+        ticket,
+    };
+    let admitted = project.tx(|tx| {
+        let unchanged = checks::approval(tx, now.approval.id)?.state == now.approval.state
+            && tickets::get(tx, now.ticket.id)?.revision == now.ticket.revision
+            && attempts::get(tx, now.attempt.id)?.state == now.attempt.state;
+        match lapse {
+            Some(lapse) => Ok(Err(lapse)),
+            None if !unchanged => Ok(Err(Lapse::Superseded("the approval changed"))),
+            None => then(tx, &now).map(Ok),
+        }
+    })?;
+    Ok(admitted.map_err(|lapse| (now, lapse)))
+}
+
 pub async fn land(
     daemon: &Arc<Daemon>,
     project: &Arc<Project>,
@@ -239,12 +286,8 @@ pub async fn land(
         (target, merged)
     };
 
-    if let Some(lapse) = holds(daemon, project, &loaded, &approval, &attempt, &ticket).await? {
-        return withdraw(project, &loaded, execution, &approval, &attempt, &lapse);
-    }
-
     for gate in &loaded.config.gates {
-        let child = project.tx(|tx| {
+        let admitted = admit(daemon, project, approval.id, attempt.id, |tx, now| {
             executions::start(
                 tx,
                 executions::Start {
@@ -254,14 +297,28 @@ pub async fn land(
                     reason: Some("landing"),
                     base: Some(&target),
                     head: Some(&merged),
-                    ticket_revision: Some(ticket.revision),
-                    digest: Some(&loaded.gate_digest),
+                    ticket_revision: Some(now.ticket.revision),
+                    digest: Some(&now.loaded.gate_digest),
                     name: Some(&gate.name),
                     ticket: Some(ticket.id),
                     ..Default::default()
                 },
             )
-        })?;
+        })
+        .await?;
+        let child = match admitted {
+            Ok(child) => child,
+            Err((now, lapse)) => {
+                return withdraw(
+                    project,
+                    &now.loaded,
+                    execution,
+                    &now.approval,
+                    &now.attempt,
+                    &lapse,
+                );
+            }
+        };
         super::supervise::gate(daemon, project, child, Some(&lock)).await?;
         let result = project.read(|conn| executions::get(conn, child))?;
         match result.outcome.as_deref() {
@@ -311,33 +368,26 @@ pub async fn land(
     }
 
     let _canonical = project.canonical.lock().await;
-    // Re-read the approval against current rows and the current policy, and
-    // record the intent in a transaction that sees the same rows.
-    let loaded = load(daemon, project).await?;
-    let (approval, ticket, attempt) = project.read(|conn| {
-        let attempt = attempts::get(conn, attempt.id)?;
-        Ok((
-            checks::approval(conn, approval.id)?,
-            tickets::get(conn, attempt.ticket)?,
-            attempt,
-        ))
-    })?;
-    let lapse = holds(daemon, project, &loaded, &approval, &attempt, &ticket).await?;
-    let lapse = project.tx(|tx| {
-        let unchanged = checks::approval(tx, approval.id)?.state == approval.state
-            && tickets::get(tx, ticket.id)?.revision == ticket.revision
-            && attempts::get(tx, attempt.id)?.state == attempt.state;
-        match lapse {
-            Some(lapse) => Ok(Some(lapse)),
-            None if !unchanged => Ok(Some(Lapse::Superseded("the approval changed"))),
-            None => {
-                executions::set_intent(tx, execution, &target, &merged, ticket.id, attempt.id)?;
-                Ok(None)
-            }
-        }
-    })?;
-    if let Some(lapse) = lapse {
-        return withdraw(project, &loaded, execution, &approval, &attempt, &lapse);
+    let admitted = admit(daemon, project, approval.id, attempt.id, |tx, now| {
+        executions::set_intent(
+            tx,
+            execution,
+            &target,
+            &merged,
+            now.ticket.id,
+            now.attempt.id,
+        )
+    })
+    .await?;
+    if let Err((now, lapse)) = admitted {
+        return withdraw(
+            project,
+            &now.loaded,
+            execution,
+            &now.approval,
+            &now.attempt,
+            &lapse,
+        );
     }
     let moved = daemon
         .git

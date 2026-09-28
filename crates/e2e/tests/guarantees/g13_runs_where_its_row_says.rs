@@ -249,14 +249,14 @@ fn a_host_candidate_gate_sees_the_head_and_only_its_env() {
 
 /// A host landing gate runs on the merged ref and never for a candidate
 /// whose approval was superseded. The first ticket's landing is a real
-/// merge and is held in its gate; the second is approved behind it, then
-/// edited.
+/// merge and is held in its gate; the second is approved behind it, and
+/// edited while its own landing is held in its `git merge-tree`, after the
+/// queue has taken it and before any gate.
 ///
-/// Sabotage: make `queue::next` and `queue::land` both skip `holds` (land
-/// re-reads it before its first gate); the edited ticket's landing runs the
-/// host gate. Or run the landing gate
-/// on the candidate head instead of the merged ref; its head is not a merge
-/// of the target and the first head.
+/// Sabotage: make `queue::land` start its gates from the rows it read
+/// before merging, without `admit`; the edited ticket's landing runs the
+/// host gate. Or run the landing gate on the candidate head instead of the
+/// merged ref; its head is not a merge of the target and the first head.
 #[test]
 fn a_host_landing_gate_runs_on_the_merged_ref_only_when_approved() {
     let machine = Machine::new("g13-host-landing", |request| {
@@ -267,14 +267,19 @@ fn a_host_landing_gate_runs_on_the_merged_ref_only_when_approved() {
         };
         act(request, vec![commit_file(file, "text\n", "Add a file")])
     });
-    let hold = machine.root.join("hold");
-    assert!(
-        std::process::Command::new("mkfifo")
-            .arg(&hold)
-            .status()
-            .unwrap()
-            .success()
-    );
+    let fifo = |name: &str| {
+        let path = machine.root.join(name);
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        path
+    };
+    let hold = fifo("hold");
+    let (said, resume) = (fifo("said"), fifo("resume"));
     let mut release = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -312,9 +317,26 @@ fn a_host_landing_gate_runs_on_the_merged_ref_only_when_approved() {
     project.json(&["sync"]);
     let target = project.canonical_head();
 
+    // Only the second landing merges the second head.
+    machine.wrapper(
+        "git",
+        &format!(
+            "case \" $* \" in *' merge-tree '*'{second}'*) echo held > '{}'; read line < '{}';; esac",
+            said.display(),
+            resume.display()
+        ),
+    );
+
     project.json(&["attempt", "approve", "Y-1", "--head", &first]);
     watch.event("execution.started", &[("name", "held")]);
     project.json(&["attempt", "approve", "Y-2", "--head", &second]);
+    // One line per landing gate that could run, so a second gate never
+    // blocks and the count below is what fails.
+    release.write_all(b"go\ngo\n").unwrap();
+    watch.find("Y-1 landed", |event| {
+        event["event"] == "landing.recorded" && event["ticket"] == "Y-1"
+    });
+    assert_eq!(std::fs::read_to_string(&said).unwrap(), "held\n");
     let revision = project.json(&["ticket", "show", "Y-2"])["revision"].to_string();
     project.json(&[
         "ticket",
@@ -325,12 +347,7 @@ fn a_host_landing_gate_runs_on_the_merged_ref_only_when_approved() {
         "--body",
         "Changed",
     ]);
-    // One line per landing gate that could run, so a second gate never
-    // blocks and the count below is what fails.
-    release.write_all(b"go\ngo\n").unwrap();
-    watch.find("Y-1 landed", |event| {
-        event["event"] == "landing.recorded" && event["ticket"] == "Y-1"
-    });
+    std::fs::write(&resume, "go\n").unwrap();
     watch.until("Y-2 approval again", |event| {
         event["event"] == "attention.raised" && event["ticket"] == "Y-2"
     });
