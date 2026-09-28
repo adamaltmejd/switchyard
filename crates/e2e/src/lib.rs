@@ -10,7 +10,7 @@ pub mod model;
 
 pub use model::*;
 use serde_json::Value;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::OnceLock;
@@ -152,15 +152,9 @@ impl Machine {
             .stderr(Stdio::inherit())
             .spawn()
             .expect("spawn yard daemon run");
-        let stdout = child.stdout.take().unwrap();
-        let (send, receive) = mpsc::channel();
-        std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                let _ = send.send(line);
-            }
-        });
+        let lines = lines(child.stdout.take().unwrap());
         *self.daemon.lock().unwrap() = Some(child);
-        receive
+        lines
     }
 
     /// Wait for the daemon's `serving` line.
@@ -287,13 +281,7 @@ impl Drop for Machine {
             std::mem::take(&mut *self.projects.lock().unwrap_or_else(|e| e.into_inner()));
         let images: Vec<String> = projects
             .iter()
-            .filter_map(|path| {
-                rusqlite::Connection::open_with_flags(
-                    path.join(".yard/local/store.sqlite"),
-                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-                )
-                .ok()
-            })
+            .filter_map(|path| store(path).ok())
             .flat_map(|store| {
                 store
                     .prepare("SELECT DISTINCT image_id FROM execution WHERE image_id IS NOT NULL")
@@ -438,11 +426,7 @@ impl<'a> Project<'a> {
 
     /// The store, opened read-only.
     pub fn store(&self) -> rusqlite::Connection {
-        rusqlite::Connection::open_with_flags(
-            self.path.join(".yard/local/store.sqlite"),
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .expect("open the store read-only")
+        store(&self.path).expect("open the store read-only")
     }
 
     /// Rows of one query against the store, as JSON objects.
@@ -487,18 +471,9 @@ impl<'a> Project<'a> {
             .stderr(Stdio::inherit())
             .spawn()
             .expect("spawn yard status --watch");
-        let stdout = child.stdout.take().unwrap();
-        let (send, receive) = mpsc::channel();
-        std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                if send.send(line).is_err() {
-                    break;
-                }
-            }
-        });
         Watch {
+            lines: lines(child.stdout.take().unwrap()),
             child,
-            lines: receive,
             seen: Vec::new(),
         }
     }
@@ -628,10 +603,23 @@ pub fn publish(findings: Value) -> ToolCall {
     )
 }
 
-/// Write `text` to a file in the machine root and return its path.
-pub fn scratch(machine: &Machine, name: &str, text: &str) -> PathBuf {
-    let path = machine.root.join(name);
-    let mut file = std::fs::File::create(&path).unwrap();
-    file.write_all(text.as_bytes()).unwrap();
-    path
+/// A project's store, opened read-only.
+fn store(project: &Path) -> rusqlite::Result<rusqlite::Connection> {
+    rusqlite::Connection::open_with_flags(
+        project.join(".yard/local/store.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+}
+
+/// A child's stdout, one line per message, read on its own thread.
+fn lines(stdout: std::process::ChildStdout) -> mpsc::Receiver<String> {
+    let (send, receive) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if send.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    receive
 }

@@ -98,18 +98,13 @@ impl ModelRequest {
         self.user_texts().last().unwrap_or_default()
     }
 
-    /// The names of the offered function tools.
-    pub fn tools(&self) -> Vec<String> {
-        let tools = self.body["tools"].as_array().map_or(&[][..], Vec::as_slice);
-        tools
-            .iter()
-            .filter_map(|t| t["function"]["name"].as_str())
-            .map(str::to_owned)
-            .collect()
-    }
-
+    /// Whether the request offers the function tool `name`.
     pub fn has_tool(&self, name: &str) -> bool {
-        self.tools().iter().any(|t| t == name)
+        self.body["tools"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|t| t["function"]["name"] == name)
     }
 
     /// Whether the conversation ends with a user message: the first request
@@ -157,11 +152,6 @@ impl ModelRequest {
         self.tool_results().pop()
     }
 
-    /// Whether `needle` occurs anywhere in the serialized body.
-    pub fn contains(&self, needle: &str) -> bool {
-        self.body.to_string().contains(needle)
-    }
-
     fn messages(&self) -> &[Value] {
         self.body["messages"].as_array().map_or(&[], Vec::as_slice)
     }
@@ -190,10 +180,6 @@ pub enum Reply {
     Tools(Vec<ToolCall>),
     /// Mark the latch held, block until it is released, then send the inner reply.
     Hold(Latch, Box<Reply>),
-    /// An HTTP error status with a small JSON error body. Pi retries 429 and
-    /// 5xx itself, three times with 2, 4 and 8 s of backoff, unless its
-    /// settings turn retry off.
-    Status(u16),
 }
 
 pub struct ToolCall {
@@ -331,7 +317,6 @@ fn render(reply: Reply, request: &ModelRequest) -> Vec<u8> {
             latch.hold();
             return render(*inner, request);
         }
-        Reply::Status(code) => return respond(code, "application/json", error_body(code)),
         Reply::Text(text) => (json!({ "role": "assistant", "content": text }), "stop"),
         Reply::Tools(calls) => {
             // Ids carry the turn so they stay unique across the conversation.
