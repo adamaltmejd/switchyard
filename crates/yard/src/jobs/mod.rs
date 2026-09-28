@@ -87,11 +87,13 @@ pub async fn step(daemon: &Arc<Daemon>, project: &Arc<Project>) -> Result<(), Fa
     let Ok(loaded) = load(daemon, project).await else {
         return Ok(());
     };
-    admit::scheduled(daemon, project, &loaded)?;
+    // Live attempts reacquire a freed lane before new tickets are admitted,
+    // so a repair returning from the queue never starves behind admissions.
     let live = project.read(attempts::live)?;
     for attempt in live {
         advance(daemon, project, &loaded, &attempt).await?;
     }
+    admit::scheduled(daemon, project, &loaded)?;
     queue::next(daemon, project, &loaded).await?;
     cleanup::next(daemon, project)?;
     Ok(())
