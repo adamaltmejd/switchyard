@@ -253,11 +253,14 @@ pub async fn run_harness(
                 Ok(Some(line)) => {
                     let _ = file.write_all(line.as_bytes()).await;
                     let _ = file.write_all(b"\n").await;
-                    if let Some(event) = reader.stdout(&line) {
+                    for event in reader.stdout(&line) {
                         match &event {
                             crate::harness::Event::Started { session_id } => {
                                 run.session_id = Some(session_id.clone());
                                 project.read(|conn| executions::set_worker(conn, execution, Some(session_id), None))?;
+                            }
+                            crate::harness::Event::Registered(registration) => {
+                                run.registered = Some(registration.clone());
                             }
                             crate::harness::Event::Finished { usage: spent, .. } | crate::harness::Event::Failed { usage: spent, .. } => {
                                 usage = Some((spent.input, spent.output, spent.cost));
@@ -308,9 +311,14 @@ pub async fn implement(
     let attempt = project.read(|conn| attempts::get(conn, row.attempt))?;
     let ticket = project.read(|conn| tickets::get(conn, attempt.ticket))?;
     let workflow = loaded.config.workflow(&attempt.workflow)?.clone();
-    let provider = attempt.implementer["provider"].as_str().unwrap_or_default();
-    let connection = crate::harness::connection(provider)
-        .ok_or_else(|| Fail::invalid(format!("connection {provider:?} is unknown")))?;
+    let provider = attempt.implementer["provider"].as_str();
+    let connection = match provider {
+        Some(name) => Some(
+            crate::harness::connection(name)
+                .ok_or_else(|| Fail::invalid(format!("connection {name:?} is unknown")))?,
+        ),
+        None => None,
+    };
     let harness = crate::harness::get(attempt.implementer["harness"].as_str().unwrap_or_default())
         .ok_or_else(|| {
             Fail::invalid(format!(

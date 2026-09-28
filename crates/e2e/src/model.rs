@@ -78,13 +78,26 @@ impl ModelRequest {
     }
 
     /// The text of every system and developer message, joined by newlines.
+    /// The Anthropic API puts the system prompt in a top-level `system` field.
     pub fn system(&self) -> String {
-        let texts: Vec<String> = self
+        let mut texts: Vec<String> = self
             .messages()
             .iter()
             .filter(|m| m["role"] == "system" || m["role"] == "developer")
             .map(|m| text(&m["content"]))
             .collect();
+        if let Some(system) = self.body.get("system") {
+            texts.push(text(system));
+        }
+        texts.join("\n")
+    }
+
+    /// Everything the model was told, system prompt and messages together.
+    pub fn context(&self) -> String {
+        let mut texts = vec![self.system()];
+        for message in self.messages() {
+            texts.push(text(&message["content"]));
+        }
         texts.join("\n")
     }
 
@@ -98,19 +111,29 @@ impl ModelRequest {
         self.user_texts().last().unwrap_or_default()
     }
 
-    /// Whether the request offers the function tool `name`.
+    /// Whether the request offers the tool `name`. OpenAI names it under
+    /// `function.name`; Anthropic names it directly, and prefixes an MCP
+    /// server's tools with `mcp__<server>__`.
     pub fn has_tool(&self, name: &str) -> bool {
         self.body["tools"]
             .as_array()
             .into_iter()
             .flatten()
-            .any(|t| t["function"]["name"] == name)
+            .any(|t| {
+                let named = t["function"]["name"]
+                    .as_str()
+                    .or_else(|| t["name"].as_str())
+                    .unwrap_or("");
+                named == name || named.ends_with(&format!("__{name}"))
+            })
     }
 
-    /// Whether the conversation ends with a user message: the first request
-    /// of an execution, resumed session or not.
+    /// Whether the conversation ends with a user message that is not a tool
+    /// result: the first request of an execution, resumed session or not.
     pub fn opens(&self) -> bool {
-        self.messages().last().is_some_and(|m| m["role"] == "user")
+        self.messages()
+            .last()
+            .is_some_and(|message| message["role"] == "user" && !is_tool_result(message))
     }
 
     /// The number of assistant messages already in the conversation.
@@ -122,30 +145,51 @@ impl ModelRequest {
     }
 
     /// Every tool result as (tool name, result text), in order. The name comes
-    /// from the assistant tool call the result's `tool_call_id` answers.
+    /// from the tool call the result answers, in either wire shape.
     pub fn tool_results(&self) -> Vec<(String, String)> {
+        let names = self.tool_names();
+        let mut results = Vec::new();
+        for message in self.messages() {
+            if message["role"] == "tool" {
+                let name = message["tool_call_id"]
+                    .as_str()
+                    .and_then(|id| names.get(id).map(String::as_str))
+                    .or(message["name"].as_str())
+                    .unwrap_or_default();
+                results.push((name.to_owned(), text(&message["content"])));
+            }
+            for block in message["content"].as_array().into_iter().flatten() {
+                if block["type"] == "tool_result" {
+                    let name = block["tool_use_id"]
+                        .as_str()
+                        .and_then(|id| names.get(id).map(String::as_str))
+                        .unwrap_or_default();
+                    results.push((name.to_owned(), text(&block["content"])));
+                }
+            }
+        }
+        results
+    }
+
+    fn tool_names(&self) -> HashMap<String, String> {
         let mut names = HashMap::new();
         for message in self.messages() {
             for call in message["tool_calls"].as_array().into_iter().flatten() {
                 if let (Some(id), Some(name)) =
                     (call["id"].as_str(), call["function"]["name"].as_str())
                 {
-                    names.insert(id, name);
+                    names.insert(id.to_string(), name.to_string());
+                }
+            }
+            for block in message["content"].as_array().into_iter().flatten() {
+                if block["type"] == "tool_use"
+                    && let (Some(id), Some(name)) = (block["id"].as_str(), block["name"].as_str())
+                {
+                    names.insert(id.to_string(), name.to_string());
                 }
             }
         }
-        self.messages()
-            .iter()
-            .filter(|m| m["role"] == "tool")
-            .map(|m| {
-                let name = m["tool_call_id"]
-                    .as_str()
-                    .and_then(|id| names.get(id).copied())
-                    .or(m["name"].as_str())
-                    .unwrap_or_default();
-                (name.to_owned(), text(&m["content"]))
-            })
-            .collect()
+        names
     }
 
     pub fn last_tool_result(&self) -> Option<(String, String)> {
@@ -171,6 +215,13 @@ fn text(content: &Value) -> String {
         Value::Array(parts) => parts.iter().filter_map(|p| p["text"].as_str()).collect(),
         _ => String::new(),
     }
+}
+
+/// An Anthropic user message that carries only tool results.
+fn is_tool_result(message: &Value) -> bool {
+    message["content"].as_array().is_some_and(|blocks| {
+        !blocks.is_empty() && blocks.iter().all(|block| block["type"] == "tool_result")
+    })
 }
 
 pub enum Reply {
@@ -311,12 +362,113 @@ fn read_request(stream: &TcpStream) -> Option<ModelRequest> {
 }
 
 fn render(reply: Reply, request: &ModelRequest) -> Vec<u8> {
-    let turn = request.turn();
-    let (delta, finish) = match reply {
+    match reply {
         Reply::Hold(latch, inner) => {
             latch.hold();
-            return render(*inner, request);
+            render(*inner, request)
         }
+        Reply::Text(text) if anthropic(request) => anthropic_text(&text, request),
+        Reply::Tools(calls) if anthropic(request) => anthropic_tools(calls, request),
+        reply => openai(reply, request),
+    }
+}
+
+/// The Anthropic Messages API, streamed as SSE.
+fn anthropic(request: &ModelRequest) -> bool {
+    request.path == "/v1/messages" || request.path.starts_with("/v1/messages?")
+}
+
+fn anthropic_text(text: &str, request: &ModelRequest) -> Vec<u8> {
+    let event = |name: &str, data: Value| format!("event: {name}\ndata: {data}\n\n");
+    let body = [
+        event(
+            "message_start",
+            json!({
+                "type": "message_start",
+                "message": anthropic_message(request),
+            }),
+        ),
+        event(
+            "content_block_start",
+            json!({ "type": "content_block_start", "index": 0,
+                    "content_block": { "type": "text", "text": "" } }),
+        ),
+        event(
+            "content_block_delta",
+            json!({ "type": "content_block_delta", "index": 0,
+                    "delta": { "type": "text_delta", "text": text } }),
+        ),
+        event(
+            "content_block_stop",
+            json!({ "type": "content_block_stop", "index": 0 }),
+        ),
+        anthropic_delta("end_turn"),
+        event("message_stop", json!({ "type": "message_stop" })),
+    ]
+    .concat();
+    respond(200, "text/event-stream", body)
+}
+
+fn anthropic_tools(calls: Vec<ToolCall>, request: &ModelRequest) -> Vec<u8> {
+    let event = |name: &str, data: Value| format!("event: {name}\ndata: {data}\n\n");
+    let turn = request.turn();
+    let mut body = event(
+        "message_start",
+        json!({
+            "type": "message_start",
+            "message": anthropic_message(request),
+        }),
+    );
+    for (index, call) in calls.into_iter().enumerate() {
+        body.push_str(&event(
+            "content_block_start",
+            json!({ "type": "content_block_start", "index": index,
+                    "content_block": { "type": "tool_use", "id": format!("toolu_{turn}_{index}"),
+                                      "name": call.name, "input": {} } }),
+        ));
+        body.push_str(&event(
+            "content_block_delta",
+            json!({ "type": "content_block_delta", "index": index,
+                    "delta": { "type": "input_json_delta", "partial_json": call.arguments.to_string() } }),
+        ));
+        body.push_str(&event(
+            "content_block_stop",
+            json!({ "type": "content_block_stop", "index": index }),
+        ));
+    }
+    body.push_str(&anthropic_delta("tool_use"));
+    body.push_str(&event("message_stop", json!({ "type": "message_stop" })));
+    respond(200, "text/event-stream", body)
+}
+
+fn anthropic_message(request: &ModelRequest) -> Value {
+    json!({
+        "id": format!("msg_fake_{}", request.turn()),
+        "type": "message",
+        "role": "assistant",
+        "model": request.body["model"].as_str().unwrap_or("fake-model"),
+        "content": [],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "usage": { "input_tokens": PROMPT_TOKENS, "output_tokens": 0 },
+    })
+}
+
+fn anthropic_delta(stop_reason: &str) -> String {
+    format!(
+        "event: message_delta\ndata: {}\n\n",
+        json!({
+            "type": "message_delta",
+            "delta": { "stop_reason": stop_reason, "stop_sequence": null },
+            "usage": { "output_tokens": COMPLETION_TOKENS },
+        })
+    )
+}
+
+/// The OpenAI chat-completions API, streamed as SSE.
+fn openai(reply: Reply, request: &ModelRequest) -> Vec<u8> {
+    let turn = request.turn();
+    let (delta, finish) = match reply {
         Reply::Text(text) => (json!({ "role": "assistant", "content": text }), "stop"),
         Reply::Tools(calls) => {
             // Ids carry the turn so they stay unique across the conversation.
@@ -337,6 +489,7 @@ fn render(reply: Reply, request: &ModelRequest) -> Vec<u8> {
                 "tool_calls",
             )
         }
+        Reply::Hold(_, _) => unreachable!("the hold is released before rendering"),
     };
     let model = request.body["model"].as_str().unwrap_or("fake-model");
     let chunk = |choices: Value, usage: Value| {

@@ -179,7 +179,8 @@ pub struct Start<'a> {
     pub round: Option<i64>,
     pub approval: Option<i64>,
     pub ticket: Option<i64>,
-    /// Worker settings: agent name and its `{harness, provider, model, effort}`.
+    /// Worker settings: agent name and its `{harness, provider login, model,
+    /// effort}`.
     pub agent: Option<(&'a str, &'a Value)>,
     /// The pinfold pin of the worker's harness, recorded with the intent.
     pub harness_version: Option<&'a str>,

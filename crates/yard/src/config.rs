@@ -43,10 +43,19 @@ pub struct Target {
 #[serde(deny_unknown_fields)]
 pub struct Agent {
     pub harness: String,
-    pub provider: String,
+    /// The API-key connection; exactly one of `provider` or `login` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// A subscription login, resolved by pinfold's login route.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub login: bool,
     pub model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone)]

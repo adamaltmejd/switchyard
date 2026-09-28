@@ -23,8 +23,13 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
         .get(&seat_name)
         .ok_or_else(|| Fail::invalid(format!("seat {seat_name} is no longer configured")))?;
     let agent = &loaded.config.agents[&seat.agent];
-    let connection = crate::harness::connection(&agent.provider)
-        .ok_or_else(|| Fail::invalid(format!("connection {:?} is unknown", agent.provider)))?;
+    let connection = match &agent.provider {
+        Some(name) => Some(
+            crate::harness::connection(name)
+                .ok_or_else(|| Fail::invalid(format!("connection {name:?} is unknown")))?,
+        ),
+        None => None,
+    };
     let harness = crate::harness::get(&agent.harness)
         .ok_or_else(|| Fail::invalid(format!("harness {:?} is unknown", agent.harness)))?;
     let head = row.head.clone().unwrap_or_default();
@@ -67,7 +72,7 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
     );
     let argv = harness
         .argv(&crate::harness::Launch {
-            provider: &agent.provider,
+            provider: agent.provider.as_deref(),
             model: &agent.model,
             effort: agent.effort.as_deref(),
             resume: None,

@@ -59,7 +59,8 @@ pub fn connection(name: &str) -> Option<&'static Connection> {
 /// One harness run. `resume` is a session id a previous run reported.
 #[derive(Debug)]
 pub struct Launch<'a> {
-    pub provider: &'a str,
+    /// The provider connection for an API-key harness; `None` for a login.
+    pub provider: Option<&'a str>,
     pub model: &'a str,
     pub effort: Option<&'a str>,
     pub resume: Option<&'a str>,
@@ -73,7 +74,8 @@ pub struct Stage<'a> {
     pub state: &'a Path,
     /// The daemon-written input directory, read-only in the box.
     pub input: &'a Path,
-    pub connection: &'static Connection,
+    /// The provider connection of a `provider` agent; `None` for a login.
+    pub connection: Option<&'static Connection>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -87,9 +89,18 @@ pub struct Usage {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
-    Started { session_id: String },
-    Finished { usage: Usage },
-    Failed { message: String, usage: Usage },
+    Started {
+        session_id: String,
+    },
+    /// The harness's registration proof, when it arrives on stdout.
+    Registered(Registration),
+    Finished {
+        usage: Usage,
+    },
+    Failed {
+        message: String,
+        usage: Usage,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -101,8 +112,8 @@ pub enum Registration {
 
 /// A per-run reader over the harness's stdout and stderr.
 pub trait Reader: Send {
-    /// One stdout line, normalised. `None` for a line that decides nothing.
-    fn stdout(&mut self, line: &str) -> Option<Event>;
+    /// One stdout line, normalised. Empty for a line that decides nothing.
+    fn stdout(&mut self, line: &str) -> Vec<Event>;
     /// One stderr line, if it is the registration line.
     fn stderr(&mut self, line: &str) -> Option<Registration>;
 }
@@ -117,12 +128,24 @@ pub struct ModelRoute {
     pub secret: (String, String),
 }
 
+/// A subscription login a harness reaches through a pinfold login route.
+pub struct LoginInfo {
+    /// The login's name, as pinfold knows it.
+    pub name: &'static str,
+    /// The `operator.env` variable holding the token.
+    pub key_var: &'static str,
+}
+
 /// One harness adapter.
 pub trait Harness: Send + Sync {
     /// The config token and the pinfold artifact name.
     fn name(&self) -> &'static str;
     /// The version pinfold carries for this harness.
     fn version(&self) -> &str;
+    /// The login this harness uses, if it is a subscription-login harness.
+    fn login(&self) -> Option<LoginInfo> {
+        None
+    }
     /// Whether the adapter has a control for every key the agent sets.
     fn accepts(&self, agent: &Agent) -> Result<(), String>;
     /// Write the launch files into the attempt's state and input dirs.
@@ -139,7 +162,7 @@ pub trait Harness: Send + Sync {
 
 /// The compiled-in adapters. `name` is the config token.
 pub fn adapters() -> &'static [&'static dyn Harness] {
-    &[&crate::pi::Pi]
+    &[&crate::pi::Pi, &crate::claude::Claude]
 }
 
 pub fn get(name: &str) -> Option<&'static dyn Harness> {

@@ -179,6 +179,28 @@ pub async fn doctor(daemon: &Daemon, project: &Project) -> Result<Value, Fail> {
             })
         })
         .collect();
+    // Each configured login by name, its pin and whether its token is set.
+    // Yard never reads the token, and pinfold exposes no lapse.
+    let mut logins = Vec::new();
+    if let Ok(loaded) = &loaded {
+        let mut seen = std::collections::BTreeSet::new();
+        for agent in loaded.config.agents.values().filter(|agent| agent.login) {
+            let Some(harness) = crate::harness::get(&agent.harness) else {
+                continue;
+            };
+            let Some(login) = harness.login() else {
+                continue;
+            };
+            if !seen.insert(login.name) {
+                continue;
+            }
+            logins.push(json!({
+                "login": login.name,
+                "version": harness.version(),
+                "credential": daemon.machine.vars.contains_key(login.key_var),
+            }));
+        }
+    }
     Ok(json!({
         "pinfold": pinfold,
         "configuration": match &loaded {
@@ -187,6 +209,7 @@ pub async fn doctor(daemon: &Daemon, project: &Project) -> Result<Value, Fail> {
         },
         "image": daemon.images.lock().expect("images lock").get(&project.key).map(|(head, id)| json!({ "head": head, "id": id })),
         "connections": connections,
+        "logins": logins,
     }))
 }
 

@@ -8,7 +8,8 @@ pub struct Attempt {
     pub id: i64,
     pub ticket: i64,
     pub workflow: String,
-    /// The implementer frozen at admission: `{name, harness, provider, model, effort}`.
+    /// The implementer frozen at admission: `{name, harness, provider login,
+    /// model, effort}`.
     pub implementer: Value,
     pub base: String,
     pub head: Option<String>,
