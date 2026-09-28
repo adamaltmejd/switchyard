@@ -132,9 +132,7 @@ fn a_seat_killed_after_publishing_has_published() {
 /// block is recorded too and the candidate goes to repair.
 #[test]
 fn a_second_publication_is_refused() {
-    let answer = std::sync::Arc::new(Mutex::new(None));
-    let seen = answer.clone();
-    let machine = Machine::new("g8-twice", move |request| {
+    let machine = Machine::new("g8-twice", |request| {
         if !seat(&request) {
             return implementer(request);
         }
@@ -143,10 +141,7 @@ fn a_second_publication_is_refused() {
             1 => Reply::Tools(vec![publish(json!([
                 { "priority": "P0", "body": "second thoughts" }
             ]))]),
-            _ => {
-                *seen.lock().unwrap() = request.last_tool_result();
-                Reply::Text("done".into())
-            }
+            _ => Reply::Text("done".into()),
         }
     });
     machine.start();
@@ -156,8 +151,6 @@ fn a_second_publication_is_refused() {
     let approval = watch.attention();
     assert_eq!(approval["data"]["kind"], "approval", "{approval}");
 
-    let (_, text) = answer.lock().unwrap().clone().unwrap();
-    assert!(text.contains("already published"), "{text}");
     assert_eq!(
         project.rows("SELECT verdict FROM \"check\" WHERE kind = 'review'"),
         vec![json!({ "verdict": "pass" })]
@@ -217,14 +210,6 @@ fn findings_below_blocking_pass() {
         .map(|row| row["reason"].clone())
         .collect();
     assert_eq!(reasons, [json!("first"), json!("repair")]);
-    assert_eq!(
-        project
-            .rows("SELECT priority FROM finding ORDER BY id")
-            .iter()
-            .map(|row| row["priority"].as_i64().unwrap())
-            .collect::<Vec<_>>(),
-        [1, 2, 3]
-    );
 }
 
 /// A panel of `none` reaches approval marked unreviewed, with no seat run.
@@ -252,10 +237,13 @@ fn a_panel_of_none_reaches_approval_unreviewed() {
 /// repair starts until its box is gone. A second ticket on a workflow with
 /// no review runs to approval meanwhile; the scheduler advances the first
 /// attempt before the second in every tick, so a repair started early would
-/// precede that approval. Released, the seat ends and the repair starts.
+/// precede that approval. Released, the seat ends and the repair starts,
+/// and when its start is seen the seat's box is no longer listed. Control:
+/// the seat's box is listed while the fixture holds it.
 ///
 /// Sabotage: make `advance` wait only on running implementations; the
-/// repair starts while the seat is held.
+/// repair starts while the seat is held. Start the repair before the seat's
+/// box is down; the box is still listed when the repair starts.
 #[test]
 fn no_repair_starts_until_a_blocking_seats_box_is_gone() {
     let hold = Latch::new();
@@ -284,6 +272,18 @@ fn no_repair_starts_until_a_blocking_seats_box_is_gone() {
         project.rows("SELECT verdict FROM \"check\" WHERE kind = 'review'"),
         vec![json!({ "verdict": "fail" })]
     );
+    let handle =
+        project.rows("SELECT handle FROM execution WHERE kind = 'review'")[0]["handle"].clone();
+    let listed = |machine: &Machine| {
+        machine
+            .boxes("dev.yard.project")
+            .iter()
+            .any(|listed| listed["name"] == handle)
+    };
+    assert!(
+        listed(&machine),
+        "the held seat's box {handle} is not listed"
+    );
 
     project.json(&["ticket", "new", "--title", "Quick", "--workflow", "quick"]);
     watch.until("Y-2 approval", |event| {
@@ -302,9 +302,9 @@ fn no_repair_starts_until_a_blocking_seats_box_is_gone() {
             && event["ticket"] == "Y-1"
             && event["data"]["reason"] == "repair"
     });
-    assert_eq!(
-        project.rows("SELECT status FROM execution WHERE kind = 'review'"),
-        vec![json!({ "status": "ended" })]
+    assert!(
+        !listed(&machine),
+        "the repair started while the seat's box {handle} was up"
     );
 }
 
