@@ -16,7 +16,7 @@ env:
 jobs:
   e2e:
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -56,4 +56,7 @@ jobs:
 
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
+      # The scaffold's Dockerfile starts FROM this local image; a fresh host
+      # has none until it is built.
+      - run: pinfold build --profile default
       - run: cargo test -p e2e --locked
