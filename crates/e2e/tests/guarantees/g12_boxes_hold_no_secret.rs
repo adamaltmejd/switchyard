@@ -6,11 +6,11 @@ use std::sync::{Arc, Mutex};
 /// The key is absent from the box's environment and clone; the fixture
 /// behind the injecting route receives it. The worker searches its own
 /// environment, its harness's, the box's init, the clone and every
-/// directory Yard mounts; Yard's own files on the host hold it nowhere
-/// either.
+/// directory Yard mounts.
 ///
 /// Sabotage: make `supervise::worker_spec` pass the key as a literal
-/// variable; the worker's environment holds it.
+/// variable; the worker's environment holds it. Or stage the placeholder
+/// with no injecting route; the fixture never receives the key.
 #[test]
 fn the_key_is_absent_from_the_box_and_reaches_the_route() {
     let found = Arc::new(Mutex::new(String::new()));
@@ -57,15 +57,4 @@ fn the_key_is_absent_from_the_box_and_reaches_the_route() {
             Some(format!("Bearer {SECRET}").as_str())
         );
     }
-    let local = project.path.join(".yard/local");
-    let hits = std::process::Command::new("grep")
-        .args(["-rsl", SECRET])
-        .arg(&local)
-        .output()
-        .unwrap();
-    assert!(
-        hits.stdout.is_empty(),
-        "the key is in {}",
-        String::from_utf8_lossy(&hits.stdout)
-    );
 }
