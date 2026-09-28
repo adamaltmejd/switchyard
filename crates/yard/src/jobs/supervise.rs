@@ -751,6 +751,7 @@ pub async fn gate(
     let attempt = project.read(|conn| attempts::get(conn, row.attempt))?;
     let name = row.name.clone().unwrap_or_default();
     let commit = row.head.clone().unwrap_or_default();
+    let base = row.base.clone().unwrap_or_default();
     let dir = match row.parent {
         Some(landing) => super::queue::landing_dir(project, landing),
         None => project.attempt_dir(attempt.id),
@@ -768,10 +769,10 @@ pub async fn gate(
                 Err(error) => Err(error),
                 Ok(()) => match gate.runs_in {
                     RunsIn::Box => {
-                        box_gate(daemon, project, &loaded, execution, gate, &checkout).await
+                        box_gate(daemon, project, &loaded, execution, gate, &checkout, &base).await
                     }
                     RunsIn::Host => {
-                        host_gate(project, execution, gate, &checkout, &dir, lock).await
+                        host_gate(project, execution, gate, &checkout, &dir, lock, &base).await
                     }
                 },
             }
@@ -860,6 +861,7 @@ async fn box_gate(
     execution: i64,
     gate: &crate::config::Gate,
     checkout: &Path,
+    base: &str,
 ) -> Result<GateResult, String> {
     let image = image(daemon, project, loaded)
         .await
@@ -882,6 +884,7 @@ async fn box_gate(
                     "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into(),
                 ),
             ),
+            ("YARD_BASE".to_string(), EnvValue::Value(base.into())),
         ]),
         egress: (!loaded.config.egress.is_empty()).then(|| Egress {
             allow: loaded.config.egress.clone(),
@@ -926,9 +929,10 @@ async fn box_gate(
 }
 
 /// A host gate: a child in its own process group holding the directory's
-/// lock descriptor, with only `PATH`, `HOME` and the variables it names. Its
-/// command starts once its handle is recorded: the child waits for a line
-/// on stdin, and exits without running if the daemon dies first.
+/// lock descriptor, with only `PATH`, `HOME`, `YARD_BASE` and the variables
+/// it names. Its command starts once its handle is recorded: the child
+/// waits for a line on stdin, and exits without running if the daemon dies
+/// first.
 async fn host_gate(
     project: &Project,
     execution: i64,
@@ -936,6 +940,7 @@ async fn host_gate(
     checkout: &Path,
     dir: &Path,
     lock: Option<&Lock>,
+    base: &str,
 ) -> Result<GateResult, String> {
     let own;
     let lock = match lock {
@@ -957,6 +962,7 @@ async fn host_gate(
         .env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())
         .env("HOME", std::env::var("HOME").unwrap_or_default())
+        .env("YARD_BASE", base)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
