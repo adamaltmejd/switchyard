@@ -30,7 +30,8 @@ pub struct Daemon {
     /// Image ids built per target head, by project key.
     pub images: Mutex<HashMap<String, (String, String)>>,
     pub image_build: tokio::sync::Mutex<()>,
-    _lock: File,
+    /// Held for the daemon's life: one daemon per machine.
+    _lock: nix::fcntl::Flock<File>,
 }
 
 /// The machine's own settings, from `operator.env`.
@@ -117,12 +118,8 @@ async fn serve() -> Result<(), String> {
     let state = api::state_dir();
     std::fs::create_dir_all(&state).map_err(|error| format!("{}: {error}", state.display()))?;
     let lock = File::create(state.join("daemon.lock")).map_err(|error| error.to_string())?;
-    let held = nix::fcntl::Flock::lock(
-        lock.try_clone().map_err(|error| error.to_string())?,
-        nix::fcntl::FlockArg::LockExclusiveNonblock,
-    )
-    .map_err(|_| "another daemon is running on this machine".to_string())?;
-    std::mem::forget(held);
+    let lock = nix::fcntl::Flock::lock(lock, nix::fcntl::FlockArg::LockExclusiveNonblock)
+        .map_err(|_| "another daemon is running on this machine".to_string())?;
 
     let machine = read_machine()?;
     let path = std::env::var("PATH").unwrap_or_default();
@@ -170,15 +167,7 @@ async fn serve() -> Result<(), String> {
             );
             continue;
         }
-        let project = open_project(&root)?;
-        crate::jobs::reconcile::project(&daemon, &project)
-            .await
-            .map_err(|fail| fail.message)?;
-        daemon
-            .projects
-            .lock()
-            .expect("projects lock")
-            .insert(root, project);
+        register(&daemon, root).await.map_err(|fail| fail.message)?;
     }
 
     tokio::spawn(crate::mcp::serve(daemon.clone(), mcp_listener));
@@ -248,6 +237,18 @@ async fn scheduler(daemon: Arc<Daemon>) {
     }
 }
 
+/// Open a project, reconcile it, and serve it.
+async fn register(daemon: &Daemon, root: PathBuf) -> Result<(), Fail> {
+    let project = open_project(&root)?;
+    crate::jobs::reconcile::project(daemon, &project).await?;
+    daemon
+        .projects
+        .lock()
+        .expect("projects lock")
+        .insert(root, project);
+    Ok(())
+}
+
 fn read_machine() -> Result<Machine, String> {
     let path = api::config_dir().join("operator.env");
     let mut vars = BTreeMap::new();
@@ -277,14 +278,14 @@ fn read_machine() -> Result<Machine, String> {
             vars.insert(name.trim().to_string(), value.to_string());
         }
     }
-    let max_lanes = match vars.get("YARD_MAX_LANES") {
-        Some(value) => Some(
+    let max_lanes = vars
+        .get("YARD_MAX_LANES")
+        .map(|value| {
             value
                 .parse()
-                .map_err(|_| format!("YARD_MAX_LANES {value:?} is not a number"))?,
-        ),
-        None => None,
-    };
+                .map_err(|_| format!("YARD_MAX_LANES {value:?} is not a number"))
+        })
+        .transpose()?;
     Ok(Machine {
         max_lanes,
         box_memory: vars.get("YARD_BOX_MEMORY").cloned(),
@@ -384,14 +385,13 @@ async fn handle(daemon: &Arc<Daemon>, method: &str, params: Value) -> Result<Val
 async fn events(daemon: &Daemon, params: &Value) -> Result<Value, Fail> {
     let project = project(daemon, params)?;
     let since = params["since"].as_i64().unwrap_or(0);
-    let wait = params["wait"].as_bool().unwrap_or(false);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
     loop {
         let notified = project.events.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
         let events = project.read(|conn| crate::store::events_since(conn, since, 500))?;
-        if !events.is_empty() || !wait {
+        if !events.is_empty() {
             return Ok(json!({ "events": events }));
         }
         if tokio::time::timeout_at(deadline, notified).await.is_err() {
@@ -459,13 +459,7 @@ async fn init(daemon: &Arc<Daemon>, params: &Value) -> Result<Value, Fail> {
         .expect("projects lock")
         .contains_key(&root);
     if !known {
-        let project = open_project(&root)?;
-        crate::jobs::reconcile::project(daemon, &project).await?;
-        daemon
-            .projects
-            .lock()
-            .expect("projects lock")
-            .insert(root.clone(), project);
+        register(daemon, root.clone()).await?;
     }
     Ok(json!({ "project": root, "target": branch }))
 }
@@ -485,14 +479,28 @@ description: Drive Switchyard (yard) for this project: file tickets, answer atte
 - `.yard/` changes only through a commit in this checkout and `yard sync`.
 ";
 
+const LABEL: &str = "se.altmejd.yard";
+
+/// The launchd agent or systemd user unit file.
+fn service_file() -> PathBuf {
+    if cfg!(target_os = "macos") {
+        PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+            .join(format!("Library/LaunchAgents/{LABEL}.plist"))
+    } else {
+        api::config_dir()
+            .parent()
+            .expect("the config dir has a parent")
+            .join("systemd/user/yard.service")
+    }
+}
+
 pub fn install() -> Result<Value, Fail> {
     let exe = std::env::current_exe().map_err(|error| error.to_string())?;
     let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
-    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
     if cfg!(target_os = "macos") {
-        let plist = home.join("Library/LaunchAgents/se.altmejd.yard.plist");
+        let plist = service_file();
         let text = format!(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>se.altmejd.yard</string>\n<key>ProgramArguments</key><array><string>{}</string><string>daemon</string><string>run</string></array>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><true/>\n</dict></plist>\n",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>{LABEL}</string>\n<key>ProgramArguments</key><array><string>{}</string><string>daemon</string><string>run</string></array>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><true/>\n</dict></plist>\n",
             exe.display()
         );
         std::fs::create_dir_all(plist.parent().expect("agents dir"))
@@ -501,10 +509,7 @@ pub fn install() -> Result<Value, Fail> {
         service(&["launchctl", "load", "-w", &plist.to_string_lossy()])?;
         return Ok(json!({ "service": plist }));
     }
-    let unit = api::config_dir()
-        .parent()
-        .map(|config| config.join("systemd/user/yard.service"))
-        .unwrap_or_else(|| home.join(".config/systemd/user/yard.service"));
+    let unit = service_file();
     let text = format!(
         "[Unit]\nDescription=Switchyard daemon\n\n[Service]\nExecStart={} daemon run\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\n",
         exe.display()
@@ -522,15 +527,14 @@ pub fn install() -> Result<Value, Fail> {
 }
 
 pub fn uninstall() -> Result<Value, Fail> {
-    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
     if cfg!(target_os = "macos") {
-        let plist = home.join("Library/LaunchAgents/se.altmejd.yard.plist");
+        let plist = service_file();
         let _ = service(&["launchctl", "unload", "-w", &plist.to_string_lossy()]);
         let _ = std::fs::remove_file(&plist);
         return Ok(json!({ "removed": plist }));
     }
     let _ = service(&["systemctl", "--user", "disable", "--now", "yard.service"]);
-    let unit = home.join(".config/systemd/user/yard.service");
+    let unit = service_file();
     let _ = std::fs::remove_file(&unit);
     let _ = service(&["systemctl", "--user", "daemon-reload"]);
     Ok(json!({ "removed": unit }))
@@ -543,7 +547,7 @@ pub fn restart() -> Result<Value, Fail> {
             "launchctl",
             "kickstart",
             "-k",
-            &format!("gui/{uid}/se.altmejd.yard"),
+            &format!("gui/{uid}/{LABEL}"),
         ])?;
     } else {
         service(&["systemctl", "--user", "restart", "yard.service"])?;
