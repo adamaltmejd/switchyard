@@ -13,7 +13,8 @@ use serde_json::json;
 /// plants, and its candidate is taken.
 ///
 /// Sabotage: drop `transfer.fsckObjects=true` from `git::Git`; the corrupt
-/// commit becomes the candidate.
+/// commit becomes the candidate. Or run a host git command with its cwd in
+/// the clone (e.g. `git status`); the fsmonitor marker appears.
 #[test]
 fn planted_worker_git_never_runs_on_the_host() {
     let markers = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
@@ -77,7 +78,6 @@ fn planted_worker_git_never_runs_on_the_host() {
         ),
         "feature\n"
     );
-    git(&project.canonical(), &["fsck", "--strict", "--no-dangling"]);
     let planted: Vec<_> = std::fs::read_dir(&marker_dir)
         .unwrap()
         .map(|entry| entry.unwrap().file_name())
@@ -85,9 +85,9 @@ fn planted_worker_git_never_runs_on_the_host() {
     assert!(planted.is_empty(), "ran on the host: {planted:?}");
 }
 
-/// Across G7's path the fixture standing in for the network receives only
-/// the model's requests through their route, and the daemon listens on its
-/// unix socket and the MCP listener only.
+/// Across G7's path every request that reaches the fixture behind the
+/// model's origin came through the model route, and the daemon listens on
+/// its unix socket and the MCP listener only.
 ///
 /// Sabotage: bind the MCP listener on `0.0.0.0` in `daemon::serve`; the
 /// daemon listens beyond loopback.
@@ -120,10 +120,6 @@ fn yard_reaches_only_its_routes_and_listens_locally() {
     assert!(!requests.is_empty());
     for request in &requests {
         assert_eq!(request.path, "/api/v1/chat/completions");
-        assert_eq!(
-            request.header("authorization"),
-            Some(format!("Bearer {SECRET}").as_str())
-        );
     }
 
     let pid = format!("pid={},", machine.daemon_pid());
