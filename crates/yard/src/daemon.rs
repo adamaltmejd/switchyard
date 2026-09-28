@@ -182,9 +182,9 @@ async fn serve() -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     // Reconciliation has committed: say so once, for the service log and
     // for whoever started the daemon.
-    println!(
-        "{}",
-        json!({ "event": "serving", "socket": socket, "pid": std::process::id(), "boundary": api::boundary() })
+    let _ = crate::cli::write_line(
+        &json!({ "event": "serving", "socket": socket, "pid": std::process::id(), "boundary": api::boundary() })
+            .to_string(),
     );
     loop {
         let stream = tokio::select! {

@@ -3,6 +3,7 @@
 use crate::api::{self, Fail};
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
@@ -199,14 +200,12 @@ pub fn main(cli: Cli) -> i32 {
     }
     if let Command::Version = cli.command {
         let version = env!("CARGO_PKG_VERSION");
-        if cli.json {
-            println!(
-                "{}",
-                json!({ "version": version, "boundary": api::boundary() })
-            );
+        let text = if cli.json {
+            json!({ "version": version, "boundary": api::boundary() }).to_string()
         } else {
-            println!("yard {version}");
-        }
+            format!("yard {version}")
+        };
+        let _ = write_line(&text);
         return 0;
     }
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -214,19 +213,22 @@ pub fn main(cli: Cli) -> i32 {
         .build()
         .expect("tokio runtime");
     let json = cli.json;
-    match runtime.block_on(dispatch(cli)) {
+    match runtime.block_on(dispatch(&cli)) {
         Ok(Some(result)) => {
-            if json {
-                println!("{result}");
+            let text = if json {
+                result.to_string()
+            } else if matches!(&cli.command, Command::Status { .. }) {
+                render_status(&result)
             } else {
-                render(&result);
-            }
+                render(&result)
+            };
+            let _ = write_line(&text);
             0
         }
         Ok(None) => 0,
         Err(fail) => {
             if json {
-                println!("{}", json!({ "error": fail.to_json() }));
+                let _ = write_line(&json!({ "error": fail.to_json() }).to_string());
             } else {
                 eprintln!("yard: {}: {}", fail.code, fail.message);
             }
@@ -235,7 +237,14 @@ pub fn main(cli: Cli) -> i32 {
     }
 }
 
-async fn dispatch(cli: Cli) -> Result<Option<Value>, Fail> {
+/// One line to stdout. A closed pipe ends the command; the caller stops.
+pub(crate) fn write_line(text: &str) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, "{text}")?;
+    stdout.flush()
+}
+
+async fn dispatch(cli: &Cli) -> Result<Option<Value>, Fail> {
     let socket = api::socket_path();
     let start = match &cli.project {
         Some(path) => path.clone(),
@@ -269,7 +278,7 @@ async fn dispatch(cli: Cli) -> Result<Option<Value>, Fail> {
         Command::Attempt(command) => method("attempt", command),
         Command::Proposal(command) => method("proposal", command),
     };
-    if !matches!(cli.command, Command::Init | Command::Daemon(_)) {
+    if !matches!(&cli.command, Command::Init | Command::Daemon(_)) {
         params["project"] = json!(find_project(&start)?);
     }
     api::call(&socket, &method, params).await.map(Some)
@@ -311,6 +320,7 @@ fn find_project(start: &Path) -> Result<String, Fail> {
 /// Follow the audit stream from `since`, one line per event.
 async fn watch(socket: &Path, project: &str, since: i64, json: bool) -> Result<(), Fail> {
     let mut seq = since;
+    let width = terminal_width();
     loop {
         let result = api::call(
             socket,
@@ -320,31 +330,206 @@ async fn watch(socket: &Path, project: &str, since: i64, json: bool) -> Result<(
         .await?;
         for event in result["events"].as_array().into_iter().flatten() {
             seq = event["seq"].as_i64().unwrap_or(seq);
-            if json {
-                println!("{event}");
+            let line = if json {
+                event.to_string()
             } else {
-                println!(
-                    "{} {} {} {}",
-                    event["seq"],
-                    event["event"].as_str().unwrap_or_default(),
-                    event["ticket"].as_str().unwrap_or("-"),
-                    event["text"].as_str().unwrap_or_default()
-                );
+                watch_line(event, width)
+            };
+            if write_line(&line).is_err() {
+                return Ok(());
             }
-        }
-        use std::io::Write;
-        if std::io::stdout().flush().is_err() {
-            return Ok(());
         }
     }
 }
 
-fn render(value: &Value) {
+/// `seq event ticket`, then the first line of `text`, on one line.
+fn watch_line(event: &Value, width: usize) -> String {
+    let seq = event["seq"].as_i64().unwrap_or_default();
+    let name = event["event"].as_str().unwrap_or_default();
+    let ticket = event["ticket"].as_str().unwrap_or("-");
+    let first = event["text"]
+        .as_str()
+        .unwrap_or_default()
+        .lines()
+        .next()
+        .unwrap_or_default();
+    let line = if first.is_empty() {
+        format!("{seq} {name} {ticket}")
+    } else {
+        format!("{seq} {name} {ticket} {first}")
+    };
+    truncate(&line, width)
+}
+
+fn render(value: &Value) -> String {
     match value {
-        Value::String(text) => println!("{text}"),
-        other => println!(
-            "{}",
-            serde_json::to_string_pretty(other).unwrap_or_default()
-        ),
+        Value::String(text) => text.clone(),
+        other => serde_json::to_string_pretty(other).unwrap_or_default(),
     }
+}
+
+/// The `status` board: open, live, queued and waiting, then `seq`.
+fn render_status(status: &Value) -> String {
+    let mut out = String::new();
+
+    let tickets = array(status, "tickets");
+    if !tickets.is_empty() {
+        out.push_str("tickets\n");
+        for ticket in tickets {
+            let state = if ticket["parked"].as_bool().unwrap_or(false) {
+                "parked".to_string()
+            } else {
+                field(ticket, "state")
+            };
+            out.push_str(&format!(
+                "  {}  {}  {}  {}\n",
+                field(ticket, "ticket"),
+                field(ticket, "priority"),
+                state,
+                field(ticket, "title"),
+            ));
+        }
+    }
+
+    let attempts = array(status, "attempts");
+    let running = array(status, "running");
+    if !attempts.is_empty() {
+        out.push_str("attempts\n");
+        for attempt in attempts {
+            let id = attempt["attempt"].as_i64().unwrap_or_default();
+            let head = attempt["head"].as_str().unwrap_or("-");
+            let what: Vec<String> = running
+                .iter()
+                .filter(|execution| execution["attempt"].as_i64() == Some(id))
+                .map(describe_execution)
+                .collect();
+            let what = if what.is_empty() {
+                format!("state {}", field(attempt, "state"))
+            } else {
+                what.join("; ")
+            };
+            out.push_str(&format!(
+                "  {}  head {head}  {what}\n",
+                field(attempt, "ticket"),
+            ));
+        }
+    }
+
+    let queue = array(status, "queue");
+    if !queue.is_empty() {
+        out.push_str("queue\n");
+        for item in queue {
+            out.push_str(&format!(
+                "  head {}  approved by {}  (approval {}, attempt {})\n",
+                field(item, "head"),
+                field(item, "actor"),
+                item["approval"].as_i64().unwrap_or_default(),
+                item["attempt"].as_i64().unwrap_or_default(),
+            ));
+        }
+    }
+
+    let attention = array(status, "attention");
+    if !attention.is_empty() {
+        out.push_str("attention\n");
+        for item in attention {
+            out.push_str(&format!(
+                "  #{}  {}  {}  {}\n",
+                item["attention"].as_i64().unwrap_or_default(),
+                field(item, "kind"),
+                field(item, "reason"),
+                field(item, "ticket"),
+            ));
+            for command in exit_commands(item) {
+                out.push_str(&format!("    {command}\n"));
+            }
+        }
+    }
+
+    out.push_str(&format!(
+        "seq {}",
+        status["seq"].as_i64().unwrap_or_default()
+    ));
+    out
+}
+
+/// What a running execution is: its kind, name and reason.
+fn describe_execution(execution: &Value) -> String {
+    let mut what = field(execution, "kind");
+    if let Some(name) = execution["name"].as_str() {
+        what = format!("{what} {name}");
+    }
+    if let Some(reason) = execution["reason"].as_str() {
+        what = format!("{what} ({reason})");
+    }
+    if let Some(round) = execution["round"].as_i64() {
+        what = format!("{what} round {round}");
+    }
+    what
+}
+
+/// The exact commands an open attention item's exits name.
+fn exit_commands(item: &Value) -> Vec<String> {
+    let kind = field(item, "kind");
+    let ticket = item["ticket"].as_str().unwrap_or("-");
+    let head = item["payload"]["head"].as_str().unwrap_or("-");
+    let attention = item["attention"].as_i64().unwrap_or_default();
+    item["exits"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(|exit| match (kind.as_str(), exit) {
+            ("proposal", "accept") => format!("yard proposal accept {attention}"),
+            ("proposal", "reject") => format!("yard proposal reject {attention}"),
+            (_, "approve") => format!("yard attempt approve {ticket} --head {head}"),
+            (_, "reject") => format!("yard attempt reject {ticket} --head {head} --text T"),
+            (_, "start") => format!("yard attempt start {ticket}"),
+            (_, "nudge") => format!("yard attempt nudge {ticket} --text T"),
+            (_, "abandon") => format!("yard attempt abandon {ticket}"),
+            (_, other) => format!("yard attempt {other} {ticket}"),
+        })
+        .collect()
+}
+
+fn array<'a>(value: &'a Value, key: &str) -> &'a [Value] {
+    value[key].as_array().map(Vec::as_slice).unwrap_or_default()
+}
+
+fn field(value: &Value, key: &str) -> String {
+    match &value[key] {
+        Value::String(text) => text.clone(),
+        Value::Null => "-".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// The terminal's width in columns, or 80 when stdout is not a terminal.
+fn terminal_width() -> usize {
+    let mut size = nix::libc::winsize {
+        ws_row: 0,
+        ws_col: 0,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: TIOCGWINSZ fills the winsize pointer on success.
+    let result =
+        unsafe { nix::libc::ioctl(nix::libc::STDOUT_FILENO, nix::libc::TIOCGWINSZ, &mut size) };
+    if result == 0 && size.ws_col > 0 {
+        return size.ws_col as usize;
+    }
+    std::env::var("COLUMNS")
+        .ok()
+        .and_then(|columns| columns.parse().ok())
+        .filter(|columns| *columns > 0)
+        .unwrap_or(80)
+}
+
+fn truncate(line: &str, width: usize) -> String {
+    if line.chars().count() <= width {
+        return line.to_string();
+    }
+    let mut out: String = line.chars().take(width.saturating_sub(1)).collect();
+    out.push('…');
+    out
 }
