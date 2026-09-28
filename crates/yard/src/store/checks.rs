@@ -207,12 +207,13 @@ pub struct Approval {
     pub ticket_revision: i64,
     pub gate_digest: String,
     pub review_digest: String,
+    pub checks: Vec<i64>,
     pub actor: String,
     pub state: String,
 }
 
 const APPROVAL_COLUMNS: &str =
-    "id, attempt, base, head, ticket_revision, gate_digest, review_digest, actor, state";
+    "id, attempt, base, head, ticket_revision, gate_digest, review_digest, checks, actor, state";
 
 fn approval_row(row: &Row) -> rusqlite::Result<Approval> {
     Ok(Approval {
@@ -223,8 +224,9 @@ fn approval_row(row: &Row) -> rusqlite::Result<Approval> {
         ticket_revision: row.get(4)?,
         gate_digest: row.get(5)?,
         review_digest: row.get(6)?,
-        actor: row.get(7)?,
-        state: row.get(8)?,
+        checks: serde_json::from_str(&row.get::<_, String>(7)?).unwrap_or_default(),
+        actor: row.get(8)?,
+        state: row.get(9)?,
     })
 }
 

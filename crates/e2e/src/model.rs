@@ -112,6 +112,12 @@ impl ModelRequest {
         self.tools().iter().any(|t| t == name)
     }
 
+    /// Whether the conversation ends with a user message: the first request
+    /// of an execution, resumed session or not.
+    pub fn opens(&self) -> bool {
+        self.messages().last().is_some_and(|m| m["role"] == "user")
+    }
+
     /// The number of assistant messages already in the conversation.
     pub fn turn(&self) -> usize {
         self.messages()

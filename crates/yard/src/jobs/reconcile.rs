@@ -92,16 +92,24 @@ pub async fn project(daemon: &Daemon, project: &Project) -> Result<(), String> {
     Ok(())
 }
 
-/// Kill a recorded host group, if its leader is still the process we started.
+/// Kill a recorded host group, if its leader is still the process we
+/// started, and wait until the group is gone so its lock can be read.
 async fn kill_group(handle: &Value) {
     let (Some(pgid), Some(recorded)) = (handle["pgid"].as_u64(), handle["birth"].as_str()) else {
         return;
     };
-    if birth(pgid as u32).await.as_deref() == Some(recorded) {
-        let _ = nix::sys::signal::killpg(
-            nix::unistd::Pid::from_raw(pgid as i32),
-            nix::sys::signal::Signal::SIGKILL,
-        );
+    if birth(pgid as u32).await.as_deref() != Some(recorded) {
+        return;
+    }
+    let group = nix::unistd::Pid::from_raw(pgid as i32);
+    let _ = nix::sys::signal::killpg(group, nix::sys::signal::Signal::SIGKILL);
+    // Bounded: a group that outlives this leaves its lock held, and the
+    // lock decides.
+    for _ in 0..500 {
+        if nix::sys::signal::killpg(group, None).is_err() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
 }
 

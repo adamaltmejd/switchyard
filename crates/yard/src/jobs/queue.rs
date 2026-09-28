@@ -34,10 +34,8 @@ pub async fn next(
     for approval in project.read(checks::queue)? {
         let attempt = project.read(|conn| attempts::get(conn, approval.attempt))?;
         let ticket = project.read(|conn| tickets::get(conn, attempt.ticket))?;
-        if let Err(reason) = holds(daemon, project, loaded, &approval, &attempt, &ticket).await? {
-            project.tx(|tx| {
-                checks::set_approval_state(tx, &approval, "withdrawn", ticket.id, Some(&reason))
-            })?;
+        if let Some(lapse) = holds(daemon, project, loaded, &approval, &attempt, &ticket).await? {
+            project.tx(|tx| lapsed(tx, loaded, &approval, &attempt, &lapse))?;
             continue;
         }
         let blocked = project.read(|conn| {
@@ -70,6 +68,23 @@ pub async fn next(
     Ok(())
 }
 
+/// Why an approval no longer holds. A superseded one's checks count for
+/// nothing; one the current policy would not give keeps them.
+pub enum Lapse {
+    Superseded(&'static str),
+    /// The reason, and the protected paths the candidate touches.
+    Policy(String, Vec<String>),
+}
+
+impl Lapse {
+    fn reason(&self) -> &str {
+        match self {
+            Lapse::Superseded(reason) => reason,
+            Lapse::Policy(reason, _) => reason,
+        }
+    }
+}
+
 /// Whether an approval still holds against current rows and policy.
 async fn holds(
     daemon: &Daemon,
@@ -78,36 +93,79 @@ async fn holds(
     approval: &checks::Approval,
     attempt: &attempts::Attempt,
     ticket: &tickets::Ticket,
-) -> Result<Result<(), String>, Fail> {
-    if attempt.state != "live" {
-        return Ok(Err("the attempt ended".into()));
-    }
-    if attempt.candidate() != Some((approval.base.as_str(), approval.head.as_str())) {
-        return Ok(Err("the candidate changed".into()));
-    }
-    if ticket.revision != approval.ticket_revision {
-        return Ok(Err("the ticket changed".into()));
-    }
-    if approval.gate_digest != loaded.gate_digest {
-        return Ok(Err("the gate configuration changed".into()));
-    }
-    if approval.review_digest != loaded.review_digest(&attempt.workflow)? {
-        return Ok(Err("the review configuration changed".into()));
+) -> Result<Option<Lapse>, Fail> {
+    let superseded = if approval.state != "active" {
+        Some("the approval was withdrawn")
+    } else if attempt.state != "live" {
+        Some("the attempt ended")
+    } else if attempt.candidate() != Some((approval.base.as_str(), approval.head.as_str())) {
+        Some("the candidate changed")
+    } else if ticket.revision != approval.ticket_revision {
+        Some("the ticket changed")
+    } else if approval.gate_digest != loaded.gate_digest {
+        Some("the gate configuration changed")
+    } else if approval.review_digest != loaded.review_digest(&attempt.workflow)? {
+        Some("the review configuration changed")
+    } else {
+        None
+    };
+    if let Some(reason) = superseded {
+        return Ok(Some(Lapse::Superseded(reason)));
     }
     if approval.actor == "auto" {
-        if loaded.config.approve != Approve::Auto {
-            return Ok(Err("approve is now manual".into()));
-        }
         let protected =
             super::protected_paths(daemon, project, loaded, &approval.base, &approval.head).await?;
         if !protected.is_empty() {
-            return Ok(Err(format!(
+            let reason = format!(
                 "the candidate touches protected paths: {}",
                 protected.join(", ")
+            );
+            return Ok(Some(Lapse::Policy(reason, protected)));
+        }
+        if loaded.config.approve != Approve::Auto {
+            return Ok(Some(Lapse::Policy(
+                "approve is now manual".into(),
+                protected,
             )));
         }
     }
-    Ok(Ok(()))
+    Ok(None)
+}
+
+/// Take a lapsed approval out of the queue. One the policy would no longer
+/// give goes to the operator on the checks it already has.
+fn lapsed(
+    tx: &rusqlite::Connection,
+    loaded: &Loaded,
+    approval: &checks::Approval,
+    attempt: &attempts::Attempt,
+    lapse: &Lapse,
+) -> Result<(), Fail> {
+    let current = checks::approval(tx, approval.id)?;
+    if current.state == "active" {
+        checks::set_approval_state(
+            tx,
+            &current,
+            "withdrawn",
+            attempt.ticket,
+            Some(lapse.reason()),
+        )?;
+    }
+    if let Lapse::Policy(_, protected) = lapse {
+        let workflow = loaded.config.workflow(&attempt.workflow)?;
+        super::raise_approval(
+            tx,
+            attempt,
+            &json!({
+                "base": approval.base, "head": approval.head,
+                "revision": approval.ticket_revision,
+                "gate_digest": approval.gate_digest, "review_digest": approval.review_digest,
+                "checks": approval.checks, "protected": protected,
+                "unreviewed": workflow.review.is_empty(),
+            }),
+        )?;
+    }
+    Ok(())
 }
 
 pub async fn land(
@@ -183,11 +241,8 @@ pub async fn land(
         (target, merged)
     };
 
-    if let Err(reason) = holds(daemon, project, &loaded, &approval, &attempt, &ticket).await? {
-        return withdraw(
-            daemon, project, &loaded, execution, &approval, &ticket, &reason,
-        )
-        .await;
+    if let Some(lapse) = holds(daemon, project, &loaded, &approval, &attempt, &ticket).await? {
+        return withdraw(project, &loaded, execution, &approval, &attempt, &lapse);
     }
 
     for gate in &loaded.config.gates {
@@ -209,7 +264,7 @@ pub async fn land(
                 },
             )
         })?;
-        super::supervise::gate(daemon, project, child).await?;
+        super::supervise::gate(daemon, project, child, Some(&lock)).await?;
         let result = project.read(|conn| executions::get(conn, child))?;
         match result.outcome.as_deref() {
             Some("pass") => {}
@@ -261,33 +316,33 @@ pub async fn land(
     }
 
     let _canonical = project.canonical.lock().await;
-    // Re-read the approval and record the intent, serialised with every
-    // command that could invalidate it.
-    let policy = holds(daemon, project, &loaded, &approval, &attempt, &ticket).await?;
-    let recorded = project.tx(|tx| {
-        let current = checks::approval(tx, approval.id)?;
-        let ticket_now = tickets::get(tx, ticket.id)?;
-        let attempt_now = attempts::get(tx, attempt.id)?;
-        let reason = match &policy {
-            Err(reason) => Some(reason.clone()),
-            Ok(()) if current.state != "active" => Some("the approval was withdrawn".into()),
-            Ok(()) if ticket_now.revision != approval.ticket_revision => {
-                Some("the ticket changed".into())
-            }
-            Ok(()) if attempt_now.state != "live" => Some("the attempt ended".into()),
-            Ok(()) => None,
-        };
-        if reason.is_some() {
-            return Ok(reason);
-        }
-        executions::set_intent(tx, execution, &target, &merged, ticket.id, attempt.id)?;
-        Ok(None)
+    // Re-read the approval against current rows and the current policy, and
+    // record the intent in a transaction that sees the same rows.
+    let loaded = load(daemon, project).await?;
+    let (approval, ticket, attempt) = project.read(|conn| {
+        let attempt = attempts::get(conn, attempt.id)?;
+        Ok((
+            checks::approval(conn, approval.id)?,
+            tickets::get(conn, attempt.ticket)?,
+            attempt,
+        ))
     })?;
-    if let Some(reason) = recorded {
-        return withdraw(
-            daemon, project, &loaded, execution, &approval, &ticket, &reason,
-        )
-        .await;
+    let lapse = holds(daemon, project, &loaded, &approval, &attempt, &ticket).await?;
+    let lapse = project.tx(|tx| {
+        let unchanged = checks::approval(tx, approval.id)?.state == approval.state
+            && tickets::get(tx, ticket.id)?.revision == ticket.revision
+            && attempts::get(tx, attempt.id)?.state == attempt.state;
+        match lapse {
+            Some(lapse) => Ok(Some(lapse)),
+            None if !unchanged => Ok(Some(Lapse::Superseded("the approval changed"))),
+            None => {
+                executions::set_intent(tx, execution, &target, &merged, ticket.id, attempt.id)?;
+                Ok(None)
+            }
+        }
+    })?;
+    if let Some(lapse) = lapse {
+        return withdraw(project, &loaded, execution, &approval, &attempt, &lapse);
     }
     let moved = daemon
         .git
@@ -385,32 +440,27 @@ pub fn record_landing(tx: &rusqlite::Connection, execution: i64) -> Result<(), F
     Ok(())
 }
 
-async fn withdraw(
-    daemon: &Daemon,
+/// End a landing whose approval lapsed.
+fn withdraw(
     project: &Project,
-    _loaded: &Loaded,
+    loaded: &Loaded,
     execution: i64,
     approval: &checks::Approval,
-    ticket: &tickets::Ticket,
-    reason: &str,
+    attempt: &attempts::Attempt,
+    lapse: &Lapse,
 ) -> Result<(), Fail> {
-    let _ = daemon;
     project.tx(|tx| {
         executions::end(
             tx,
             execution,
             executions::End {
                 outcome: "withdrawn",
-                detail: Some(reason),
-                ticket: Some(ticket.id),
+                detail: Some(lapse.reason()),
+                ticket: Some(attempt.ticket),
                 ..Default::default()
             },
         )?;
-        let current = checks::approval(tx, approval.id)?;
-        if current.state == "active" {
-            checks::set_approval_state(tx, &current, "withdrawn", ticket.id, Some(reason))?;
-        }
-        Ok(())
+        lapsed(tx, loaded, approval, attempt, lapse)
     })
 }
 

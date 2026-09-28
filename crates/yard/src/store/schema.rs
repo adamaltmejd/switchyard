@@ -40,8 +40,6 @@ CREATE TABLE attempt (
     work_ms INTEGER NOT NULL DEFAULT 0,
     next TEXT,
     nudge TEXT,
-    session_execution INTEGER,
-    session_count INTEGER NOT NULL DEFAULT 0,
     rounds INTEGER NOT NULL DEFAULT 0,
     extra_rounds INTEGER NOT NULL DEFAULT 0,
     landing_reds INTEGER NOT NULL DEFAULT 0,

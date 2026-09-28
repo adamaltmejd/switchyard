@@ -109,7 +109,7 @@ pub fn spawn(daemon: &Arc<Daemon>, project: &Arc<Project>, kind: &str, execution
     tokio::spawn(async move {
         let result = match kind.as_str() {
             "implementation" => supervise::implement(&daemon, &project, execution).await,
-            "gate" => supervise::gate(&daemon, &project, execution).await,
+            "gate" => supervise::gate(&daemon, &project, execution, None).await,
             "review" => review::run(&daemon, &project, execution).await,
             "landing" => queue::land(&daemon, &project, execution).await,
             "cleanup" => cleanup::run(&daemon, &project, execution).await,
@@ -173,7 +173,7 @@ async fn advance(
     let open = project.read(|conn| attempts::open_for_attempt(conn, attempt.id))?;
     if open
         .iter()
-        .any(|item| item.kind != "proposal" || item.reason == "edit")
+        .any(|item| (item.kind != "proposal" && item.kind != "approval") || item.reason == "edit")
     {
         return Ok(());
     }
@@ -183,6 +183,14 @@ async fn advance(
         .is_some()
     {
         return Ok(());
+    }
+    // An approval item counts while everything it binds is current; a new
+    // head, ticket revision or digest supersedes it.
+    if let Some(item) = open.iter().find(|item| item.kind == "approval") {
+        if binds_current(&item.payload, attempt, &ticket, loaded)? {
+            return Ok(());
+        }
+        project.tx(|tx| attempts::resolve(tx, item, "superseded", None))?;
     }
     if !attempt.lane && !admit::take_lane(daemon, project, loaded, attempt.id)? {
         return Ok(());
@@ -324,29 +332,57 @@ async fn advance(
             )?;
             attempts::set_lane(tx, attempt.id, false)
         })?;
-    } else if !open.iter().any(|item| item.kind == "approval") {
-        project.tx(|tx| {
-            attempts::raise(
-                tx,
-                attempts::Raise {
-                    kind: "approval",
-                    reason: if protected.is_empty() {
-                        "verified"
-                    } else {
-                        "protected"
-                    },
-                    ticket: Some(ticket.id),
-                    attempt: Some(attempt.id),
-                    execution: None,
-                    payload: json!({ "base": base, "head": head, "revision": ticket.revision,
-                                     "checks": passed, "protected": protected,
-                                     "unreviewed": workflow.review.is_empty() }),
-                    text: None,
-                },
-            )
-        })?;
+    } else {
+        let payload = json!({
+            "base": base, "head": head, "revision": ticket.revision,
+            "gate_digest": loaded.gate_digest, "review_digest": review_digest,
+            "checks": passed, "protected": protected, "unreviewed": workflow.review.is_empty(),
+        });
+        project.tx(|tx| raise_approval(tx, attempt, &payload))?;
     }
     Ok(())
+}
+
+/// Ask the operator to approve the candidate `payload` names.
+pub fn raise_approval(
+    tx: &rusqlite::Connection,
+    attempt: &attempts::Attempt,
+    payload: &Value,
+) -> Result<i64, Fail> {
+    let protected = payload["protected"]
+        .as_array()
+        .is_some_and(|paths| !paths.is_empty());
+    attempts::raise(
+        tx,
+        attempts::Raise {
+            kind: "approval",
+            reason: if protected { "protected" } else { "verified" },
+            ticket: Some(attempt.ticket),
+            attempt: Some(attempt.id),
+            execution: None,
+            payload: payload.clone(),
+            text: None,
+        },
+    )
+}
+
+/// Whether an approval item's candidate, ticket revision and digests are
+/// all still current.
+pub fn binds_current(
+    payload: &Value,
+    attempt: &attempts::Attempt,
+    ticket: &tickets::Ticket,
+    loaded: &Loaded,
+) -> Result<bool, Fail> {
+    Ok(attempt.candidate()
+        == Some((
+            payload["base"].as_str().unwrap_or_default(),
+            payload["head"].as_str().unwrap_or_default(),
+        ))
+        && payload["revision"].as_i64() == Some(ticket.revision)
+        && payload["gate_digest"].as_str() == Some(loaded.gate_digest.as_str())
+        && payload["review_digest"].as_str()
+            == Some(loaded.review_digest(&attempt.workflow)?.as_str()))
 }
 
 /// The protected paths `base..head` touches.

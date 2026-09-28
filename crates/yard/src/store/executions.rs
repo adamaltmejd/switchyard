@@ -98,6 +98,33 @@ pub fn for_attempt(conn: &Connection, attempt: i64) -> Result<Vec<Execution>, Fa
     query(conn, "attempt = ?1 ORDER BY id", [attempt])
 }
 
+/// The attempt's session to resume: its latest implementation that has a
+/// session id, and how many executions have run on that session.
+pub fn session(conn: &Connection, attempt: i64) -> Result<Option<(Execution, i64)>, Fail> {
+    let Some(latest) = query(
+        conn,
+        "attempt = ?1 AND kind = 'implementation' AND session_id IS NOT NULL
+         ORDER BY id DESC LIMIT 1",
+        [attempt],
+    )?
+    .pop() else {
+        return Ok(None);
+    };
+    let mut count = 1;
+    let mut resumed = conn.query_row(
+        "SELECT resumed FROM execution WHERE id = ?1",
+        [latest.id],
+        |row| row.get::<_, Option<i64>>(0),
+    )?;
+    while let Some(id) = resumed {
+        count += 1;
+        resumed = conn.query_row("SELECT resumed FROM execution WHERE id = ?1", [id], |row| {
+            row.get(0)
+        })?;
+    }
+    Ok(Some((latest, count)))
+}
+
 /// Landings whose intent is still open.
 pub fn open_intents(conn: &Connection) -> Result<Vec<Execution>, Fail> {
     query(

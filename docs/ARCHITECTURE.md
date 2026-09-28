@@ -120,7 +120,7 @@ the machine's daemon. `.yard/` is versioned and the operator's alone: it
 changes only through `yard sync`, and a candidate whose diff touches it is
 refused at the candidate boundary and returned to the implementer with the
 reason. A worker that needs a package or a gate proposes the change.
-`.yard/local/` is ignored and holds the store and live state; losing it
+`.yard/local/` is ignored through `.yard/.gitignore` and holds the store and live state; losing it
 loses the backlog. The scaffold's `protected_paths` names the files that
 guide workers, `AGENTS.md`, `CLAUDE.md`, `.agents/` and `.pi/`, so a
 candidate changing them always needs the operator's approval, under
@@ -250,7 +250,8 @@ ticket too large proposes the split and stops.
 4. **Work.** An execution runs the implementer in a box with the clone
    mounted as the workflow's `access` says and the MCP route. A
    nudge queues one message and delivers it at the next execution boundary;
-   it never interrupts. `stop` ends the execution now and keeps the tree.
+   it never interrupts. A nudge queued while the implementer runs starts it
+   again when that execution ends, before anything judges its candidate. `stop` ends the execution now and keeps the tree.
    The attempt's inactivity and total-work clocks end it the same way. When
    the worker stops, Yard asks git inside its box whether the clone is
    clean before the box comes down: a clean committed head is a candidate;
@@ -333,7 +334,8 @@ host gate group is killed, or held by a git child, which is never killed
 and ends on its own, leaves the execution unresolved: a landing intent
 stays, the queue is refused and `red` is raised. The recorded handle is for
 killing; the lock is the proof, so a child spawned but not yet recorded is
-not missed.
+not missed. A host gate's command starts only once its handle is recorded,
+so a restart kills every group that ran a command.
 
 A worker execution records, on its row: agent, harness and version,
 provider, model, effort, the execution it resumed and its session id, start
@@ -406,6 +408,15 @@ starts and ends, checks, approvals, landings, operator commands.
 Observational updates (handles, progress, usage) are column writes with no
 event. No transaction is held across external work. Nothing replays the
 stream.
+
+The events, each naming its ticket, attempt, execution or attention target:
+`sync.imported`, `sync.consumed`; `ticket.new`, `ticket.edited`,
+`ticket.parked`, `ticket.unparked`, `ticket.linked`, `ticket.done`,
+`ticket.abandoned`; `attempt.admitted`, `attempt.candidate`,
+`attempt.stopped`, `attempt.nudged`, `attempt.abandoned`, `attempt.ended`;
+`execution.started`, `execution.ended`; `check.recorded`; `approval.given`,
+`approval.ended`; `landing.intent`, `landing.recorded`; `attention.raised`,
+`attention.resolved`; `tool.refused`.
 
 Tables: `ticket`, `dependency`, `attempt`, `execution`, `check`, `finding`,
 `approval`, `attention`, `audit`. Findings, proposals and decision text are
@@ -564,7 +575,9 @@ socket path limit. The runtime directory is left alone: pinfold's podman
 needs the host's `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS`, and the
 daemon passes both to every pinfold child. On start the daemon reconciles
 every project, the landing restart table and the box prune included, and
-serves no command until that has committed. `yard daemon install` writes and starts the
+serves no command until that has committed. `yard daemon run` then prints
+one JSON line, `{"event": "serving", "socket", "pid", "boundary"}`, to
+stdout. `yard daemon install` writes and starts the
 service: a systemd user unit on Linux, a launchd agent on macOS, both
 running `yard daemon run` from the installed binary's absolute path. On
 Linux it enables lingering so the daemon outlives the login session, and
@@ -625,7 +638,7 @@ waits one out.
 | 10 | The queue lands one at a time and re-judges what does not merge | Three approved candidates, the second red on its merged ref: the first lands, the second gets one repair and a second red raises `red`, the third lands on the moved target with its own gate run. A candidate that does not merge gets a repair naming the paths, and its next head takes gates, review and approval again. A conflict against a target that changed `.yard/config.toml`, in a clone made before it: the worker fetches the target from its bundle, merges, and the new candidate's base is the target, so it passes the `.yard` refusal and lands with the operator's configuration intact. |
 | 11 | Only the operator's sync changes `.yard` and canonical from outside | A worker commit under `.yard` comes back with the reason and no gate runs; the same change through `yard sync` is in force for the next execution. A checkout and canonical that each hold a commit the other lacks: both directions refuse naming both heads; a fast-forward passes. |
 | 12 | Boxes hold nothing secret | The key is absent from the box's environment and clone; the fixture behind the injecting route receives it. |
-| 13 | Every gate and seat runs where its row says | A seat that writes to `/workspace` fails and the head is unchanged. An `AGENTS.md` the implementer leaves in its clone, excluded through `.git/info/exclude`: the seat's prompt lacks its rule and carries the committed guidance's. A gate box that calls the model or MCP route gets nothing, and an ignored file the implementer left is absent from its checkout; control: the worker box reaches the route. A host candidate gate runs on the head before any review and sees only the variables its `env` names; a host landing gate runs on the merged ref and never for a candidate whose approval was superseded. |
+| 13 | Every gate and seat runs where its row says | A seat that writes to `/workspace` fails and the head is unchanged. An `AGENTS.override.md` the implementer leaves in its clone, excluded through `.git/info/exclude`: the seat's prompt lacks its rule and carries the committed guidance's. A gate box that calls the model or MCP route gets nothing, and an ignored file the implementer left is absent from its checkout; control: the worker box reaches the route. A host candidate gate runs on the head before any review and sees only the variables its `env` names; a host landing gate runs on the merged ref and never for a candidate whose approval was superseded. |
 | 14 | Worker git is untrusted, and Yard stays local | A worker that plants `core.fsmonitor`, a hook, a clean filter and a remote in its clone and corrupts an object: none of them runs on the host, canonical's objects are intact, the candidate is refused by name. Across G7's path the fixture standing in for the network receives only the model's requests through their route, and the daemon listens on its unix socket and the MCP listener only. |
 | 15 | Plans and proposals resolve | A ticket on `plan`: its clone refuses writes, it proposes children and a body edit, and the attempt ends with nothing raised; accepting them blocks the parent, which the scheduler does not start once they are done; `yard ticket done` then closes it and its dependents become ready. Closing a ticket with a live attempt is refused. One execution proposing A and B, B depending on A: accepting both mints A first and B's edge names it. |
 
@@ -651,9 +664,9 @@ Dependencies: `tokio`, `hyper` with `hyper-util` and `http-body-util`,
 
 ```
 crates/yard/src/
-  store/    schema.rs migrate.rs tickets.rs attempts.rs executions.rs checks.rs audit.rs
+  store/    mod.rs (open, migrate, audit) schema.rs tickets.rs attempts.rs executions.rs checks.rs
   jobs/     admit.rs supervise.rs review.rs queue.rs reconcile.rs cleanup.rs
-  git.rs box.rs pi.rs mcp.rs
+  git.rs box.rs pi.rs pi-mcp-extension.ts mcp.rs
   daemon.rs api.rs cli.rs config.rs main.rs
 crates/e2e/  src/lib.rs (harness, fake model fixture, helpers), tests/*.rs
 ```

@@ -23,8 +23,6 @@ pub struct Attempt {
     /// What the next implementer execution is for: `{reason, detail}`.
     pub next: Option<Value>,
     pub nudge: Option<String>,
-    pub session_execution: Option<i64>,
-    pub session_count: i64,
     pub rounds: i64,
     pub extra_rounds: i64,
     pub landing_reds: i64,
@@ -32,8 +30,7 @@ pub struct Attempt {
 
 const COLUMNS: &str =
     "id, ticket, workflow, implementer, branch, base, head, target, state, outcome,
-    lane, lane_since, work_ms, next, nudge, session_execution, session_count, rounds, extra_rounds,
-    landing_reds";
+    lane, lane_since, work_ms, next, nudge, rounds, extra_rounds, landing_reds";
 
 fn row(row: &Row) -> rusqlite::Result<Attempt> {
     let implementer: String = row.get(3)?;
@@ -55,11 +52,9 @@ fn row(row: &Row) -> rusqlite::Result<Attempt> {
         work_ms: row.get(12)?,
         next: next.and_then(|text| serde_json::from_str(&text).ok()),
         nudge: row.get(14)?,
-        session_execution: row.get(15)?,
-        session_count: row.get(16)?,
-        rounds: row.get(17)?,
-        extra_rounds: row.get(18)?,
-        landing_reds: row.get(19)?,
+        rounds: row.get(15)?,
+        extra_rounds: row.get(16)?,
+        landing_reds: row.get(17)?,
     })
 }
 

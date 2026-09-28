@@ -45,13 +45,13 @@ pub fn yard() -> &'static Path {
     })
 }
 
-/// The real git, found on the test's own PATH.
-pub fn real_git() -> PathBuf {
+/// The real `program`, found on the test's own PATH.
+pub fn real(program: &str) -> PathBuf {
     let path = std::env::var_os("PATH").unwrap_or_default();
     std::env::split_paths(&path)
-        .map(|dir| dir.join("git"))
+        .map(|dir| dir.join(program))
         .find(|candidate| candidate.is_file())
-        .expect("git on PATH")
+        .unwrap_or_else(|| panic!("{program} on PATH"))
 }
 
 /// A temporary machine: its own state, config and wrapper bin directory,
@@ -61,7 +61,7 @@ pub struct Machine {
     pub state: PathBuf,
     pub config: PathBuf,
     pub cache: PathBuf,
-    /// First on the daemon's `PATH`: a test puts a git wrapper here.
+    /// First on the daemon's `PATH`: a test puts a git or pinfold wrapper here.
     pub bin: PathBuf,
     pub model: FakeModel,
     /// Extra variables in the daemon's environment.
@@ -132,6 +132,12 @@ impl Machine {
 
     /// Start the daemon and wait for its `serving` line.
     pub fn start(&self) {
+        let lines = self.spawn();
+        Machine::serving(&lines);
+    }
+
+    /// Start the daemon without waiting for it to serve: its stdout lines.
+    pub fn spawn(&self) -> mpsc::Receiver<String> {
         assert!(
             self.daemon.lock().unwrap().is_none(),
             "the daemon is already running"
@@ -151,12 +157,18 @@ impl Machine {
                 let _ = send.send(line);
             }
         });
-        let line = receive
+        *self.daemon.lock().unwrap() = Some(child);
+        receive
+    }
+
+    /// Wait for the daemon's `serving` line.
+    #[track_caller]
+    pub fn serving(lines: &mpsc::Receiver<String>) {
+        let line = lines
             .recv_timeout(DEADLINE)
             .expect("the daemon never said it was serving");
         let line: Value = serde_json::from_str(&line).expect("the serving line is JSON");
         assert_eq!(line["event"], "serving", "{line}");
-        *self.daemon.lock().unwrap() = Some(child);
     }
 
     /// SIGKILL the daemon, or reap it if something already killed it.
@@ -244,14 +256,14 @@ impl Machine {
             .collect()
     }
 
-    /// Put a git wrapper first on the daemon's PATH. `script` is the body of
-    /// a POSIX shell script; `$REAL` is the real git.
-    pub fn git_wrapper(&self, script: &str) {
+    /// Put a wrapper for `program` first on the daemon's PATH. `script` is
+    /// the body of a POSIX shell script; `$REAL` is the real program.
+    pub fn wrapper(&self, program: &str, script: &str) {
         use std::os::unix::fs::PermissionsExt;
-        let path = self.bin.join("git");
+        let path = self.bin.join(program);
         let text = format!(
             "#!/bin/sh\nREAL='{}'\n{script}\nexec \"$REAL\" \"$@\"\n",
-            real_git().display()
+            real(program).display()
         );
         std::fs::write(&path, text).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -260,16 +272,11 @@ impl Machine {
 
 impl Drop for Machine {
     fn drop(&mut self) {
+        // Each box's `up` tears it down when the daemon's end of its stdin
+        // closes; prune takes any whose `up` died too. Never down by label:
+        // that reaches other tests' boxes. Best effort: a Drop during
+        // unwinding must not panic.
         self.kill();
-        // Best effort: a Drop during unwinding must not panic.
-        let out = self.pinfold(&["box", "list", "--label", "dev.yard.project"]);
-        for line in String::from_utf8_lossy(&out.stdout).lines() {
-            if let Ok(listed) = serde_json::from_str::<Value>(line)
-                && let Some(name) = listed["name"].as_str()
-            {
-                let _ = self.pinfold(&["box", "down", name]);
-            }
-        }
         let _ = self.pinfold(&["box", "prune"]);
         let _ = std::fs::remove_dir_all(&self.root);
     }
@@ -333,6 +340,15 @@ impl<'a> Project<'a> {
         project.git(&["commit", "--quiet", "-m", "yard"]);
         project.json(&["sync"]);
         project
+    }
+
+    /// The operator's configuration change: consume canonical, commit
+    /// `config` in the checkout, and sync it in.
+    pub fn reconfigure(&self, config: &str) {
+        self.json(&["sync"]);
+        self.write(".yard/config.toml", config);
+        self.git(&["commit", "--quiet", "-am", "Configure"]);
+        self.json(&["sync"]);
     }
 
     pub fn write(&self, path: &str, text: &str) {
@@ -474,6 +490,24 @@ impl Watch {
         }
     }
 
+    /// The first event already read that matches, or the next one to.
+    #[track_caller]
+    pub fn find(&mut self, what: &str, matches: impl Fn(&Value) -> bool) -> Value {
+        match self.seen.iter().find(|event| matches(event)) {
+            Some(event) => event.clone(),
+            None => self.until(what, matches),
+        }
+    }
+
+    /// The next attention item raised, whatever its kind: a scenario that
+    /// expects one kind fails fast on another.
+    #[track_caller]
+    pub fn attention(&mut self) -> Value {
+        self.until("attention raised", |event| {
+            event["event"] == "attention.raised"
+        })
+    }
+
     /// Wait for an event by name, optionally matching `data` fields.
     #[track_caller]
     pub fn event(&mut self, name: &str, data: &[(&str, &str)]) -> Value {
@@ -519,8 +553,17 @@ pub fn git(dir: &Path, args: &[&str]) -> String {
 /// The implementer's usual script: one commit, then done.
 pub fn commit_file(path: &str, text: &str, message: &str) -> ToolCall {
     bash(&format!(
-        "cd /workspace && printf '%s' '{text}' > {path} && git add -A && git commit -q -m '{message}' && echo committed"
+        "cd /workspace && mkdir -p \"$(dirname {path})\" && printf '%s' '{text}' > {path} && git add -A && git commit -q -m '{message}' && echo committed"
     ))
+}
+
+/// One execution's script: `calls` when it opens, then done.
+pub fn act(request: &ModelRequest, calls: Vec<ToolCall>) -> Reply {
+    if request.opens() {
+        Reply::Tools(calls)
+    } else {
+        Reply::Text("done".into())
+    }
 }
 
 /// A review publication with these findings.

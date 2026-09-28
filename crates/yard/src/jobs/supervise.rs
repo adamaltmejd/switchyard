@@ -362,9 +362,8 @@ pub async fn implement(
     stage_input(&input)?;
 
     // Resume the session unless it has run its executions.
-    let resume = match attempt.session_execution {
-        Some(previous) if attempt.session_count < i64::from(workflow.max_session_executions) => {
-            let previous = project.read(|conn| executions::get(conn, previous))?;
+    let resume = match project.read(|conn| executions::session(conn, attempt.id))? {
+        Some((previous, count)) if count < i64::from(workflow.max_session_executions) => {
             previous.session_id.map(|session| (previous.id, session))
         }
         _ => None,
@@ -547,12 +546,6 @@ pub async fn implement(
             .any(|path| path == ".yard" || path.starts_with(".yard/")),
         _ => false,
     };
-    let session_count = if resume.is_some() {
-        attempt.session_count + 1
-    } else {
-        1
-    };
-
     project.tx(|tx| {
         let current = attempts::get(tx, attempt.id)?;
         if current.state != "live" {
@@ -561,12 +554,6 @@ pub async fn implement(
                 ticket: Some(ticket.id),
                 ..Default::default()
             });
-        }
-        if run.session_id.is_some() {
-            tx.execute(
-                "UPDATE attempt SET session_execution = ?2, session_count = ?3 WHERE id = ?1",
-                rusqlite::params![attempt.id, execution, session_count],
-            )?;
         }
         let failure = match (&run.registered, &run.terminal) {
             (Some(crate::pi::Registration::Refused(reason)), _) => Some(("failed", Some("mcp"), reason.clone())),
@@ -585,8 +572,7 @@ pub async fn implement(
             _ => None,
         };
         let stop = |tx: &rusqlite::Connection, reason: &str, detail: &str| -> Result<(), Fail> {
-            let queued = current.nudge.is_some() || nudge_pending(tx, attempt.id)?;
-            if queued && reason != "timeout" {
+            if nudge_pending(tx, attempt.id)? && reason != "timeout" {
                 return attempts::set_next(tx, attempt.id, Some(&json!({ "reason": "nudge" })));
             }
             attempts::raise(tx, attempts::Raise {
@@ -671,7 +657,12 @@ pub async fn implement(
             ticket: Some(ticket.id),
             ..Default::default()
         })?;
-        super::audit_attempt(tx, "candidate", &current, None, json!({ "base": base, "head": new_head }))?;
+        super::audit_attempt(tx, "attempt.candidate", &current, None, json!({ "base": base, "head": new_head }))?;
+        // A nudge queued during the execution reaches the implementer before
+        // anything judges the candidate.
+        if nudge_pending(tx, attempt.id)? {
+            attempts::set_next(tx, attempt.id, Some(&json!({ "reason": "nudge" })))?;
+        }
         Ok(())
     })
 }
@@ -750,9 +741,16 @@ async fn implementer_prompt(
                 ));
             } else if let Some(target) = next["target"].as_str() {
                 prompt.push_str(&format!(
-                    "Your candidate failed to land on the target {target}. {detail}\nThe target is in the bundle {}/target.bundle: `git fetch {}/target.bundle {target}` and merge it.\n",
-                    crate::pi::INPUT_GUEST, crate::pi::INPUT_GUEST
+                    "Your candidate failed to land on the target {target}. {detail}\n"
                 ));
+                // The bundle exists only when the target is not the base.
+                if target != attempt.base {
+                    prompt.push_str(&format!(
+                        "Your clone lacks the target: `git fetch {}/target.bundle refs/heads/{}` and merge FETCH_HEAD.\n",
+                        crate::pi::INPUT_GUEST,
+                        next["branch"].as_str().unwrap_or_default()
+                    ));
+                }
             } else {
                 prompt.push_str(&format!("Repair the candidate: {detail}\n"));
             }
@@ -770,10 +768,13 @@ async fn implementer_prompt(
 }
 
 /// One gate on one commit: a candidate-stage gate, or a landing's child.
+/// Run one gate execution. A landing's child passes the landing's lock,
+/// which its host child inherits; a candidate gate takes the attempt's.
 pub async fn gate(
     daemon: &Arc<Daemon>,
     project: &Arc<Project>,
     execution: i64,
+    lock: Option<&Lock>,
 ) -> Result<(), Fail> {
     let loaded = load(daemon, project).await?;
     let row = project.read(|conn| executions::get(conn, execution))?;
@@ -800,7 +801,7 @@ pub async fn gate(
                         box_gate(daemon, project, &loaded, execution, gate, &checkout).await
                     }
                     RunsIn::Host => {
-                        host_gate(daemon, project, execution, gate, &checkout, &dir).await
+                        host_gate(project, execution, gate, &checkout, &dir, lock).await
                     }
                 },
             }
@@ -983,25 +984,38 @@ async fn box_gate(
 }
 
 /// A host gate: a child in its own process group holding the directory's
-/// lock descriptor, with only `PATH`, `HOME` and the variables it names.
+/// lock descriptor, with only `PATH`, `HOME` and the variables it names. Its
+/// command starts once its handle is recorded: the child waits for a line
+/// on stdin, and exits without running if the daemon dies first.
 async fn host_gate(
-    daemon: &Daemon,
     project: &Project,
     execution: i64,
     gate: &crate::config::Gate,
     checkout: &Path,
     dir: &Path,
+    lock: Option<&Lock>,
 ) -> Result<GateResult, String> {
-    let lock = hold_lock(dir)?;
+    let own;
+    let lock = match lock {
+        Some(lock) => lock,
+        None => {
+            own = hold_lock(dir)?;
+            &own
+        }
+    };
     let mut command = tokio::process::Command::new("sh");
     command
-        .arg("-c")
+        .args([
+            "-c",
+            "read -r _ || exit 125; exec sh -c \"$1\" < /dev/null",
+            "gate",
+        ])
         .arg(&gate.command)
         .current_dir(checkout)
         .env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())
         .env("HOME", std::env::var("HOME").unwrap_or_default())
-        .stdin(std::process::Stdio::null())
+        .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .process_group(0)
@@ -1011,22 +1025,28 @@ async fn host_gate(
             command.env(name, value);
         }
     }
-    inherit(&mut command, &lock);
-    let child = command
+    inherit(&mut command, lock);
+    let mut child = command
         .spawn()
         .map_err(|error| format!("spawn the host gate: {error}"))?;
     let pid = child.id().unwrap_or_default();
     let birth = birth(pid).await;
-    let _ = project.read(|conn| {
-        executions::set_handle(
-            conn,
-            execution,
-            &json!({ "pgid": pid, "birth": birth }).to_string(),
-            None,
-        )
-    });
+    project
+        .read(|conn| {
+            executions::set_handle(
+                conn,
+                execution,
+                &json!({ "pgid": pid, "birth": birth }).to_string(),
+                None,
+            )
+        })
+        .map_err(|fail| fail.message)?;
+    let mut stdin = child.stdin.take().expect("stdin is piped");
+    tokio::io::AsyncWriteExt::write_all(&mut stdin, b"go\n")
+        .await
+        .map_err(|error| format!("start the host gate: {error}"))?;
+    drop(stdin);
     let limit = Duration::from_secs(gate.timeout_minutes * 60);
-    let _ = daemon;
     match tokio::time::timeout(limit, child.wait_with_output()).await {
         Ok(Ok(out)) => {
             let mut output = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -1054,23 +1074,19 @@ async fn host_gate(
     }
 }
 
+pub type Lock = nix::fcntl::Flock<std::fs::File>;
+
 /// Open the directory's lock file and take `flock` on it. Every host child
 /// inherits the descriptor, so the lock is held while any child lives.
-pub fn hold_lock(dir: &Path) -> Result<std::fs::File, String> {
+pub fn hold_lock(dir: &Path) -> Result<Lock, String> {
     std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
     let file = std::fs::File::create(dir.join("lock")).map_err(|error| error.to_string())?;
-    let held = nix::fcntl::Flock::lock(
-        file.try_clone().map_err(|error| error.to_string())?,
-        nix::fcntl::FlockArg::LockExclusiveNonblock,
-    )
-    .map_err(|_| {
+    nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusiveNonblock).map_err(|_| {
         format!(
             "{} is held by a child of an earlier daemon",
             dir.join("lock").display()
         )
-    })?;
-    std::mem::forget(held);
-    Ok(file)
+    })
 }
 
 /// Whether nothing holds the directory's lock: taken proves no child can
@@ -1094,7 +1110,7 @@ pub fn lock_free(dir: &Path) -> Result<bool, String> {
     }
 }
 
-pub fn inherit(command: &mut tokio::process::Command, lock: &std::fs::File) {
+pub fn inherit(command: &mut tokio::process::Command, lock: &Lock) {
     use std::os::fd::AsRawFd;
     let fd = lock.as_raw_fd();
     // SAFETY: fcntl is async-signal-safe; it clears close-on-exec on a

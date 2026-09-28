@@ -42,11 +42,14 @@ fn unreviewed() -> String {
 fn a_landing_killed_after_update_ref_is_recorded_once_on_restart() {
     let machine = Machine::new("g3-after", worker());
     let armed = machine.root.join("armed");
-    machine.git_wrapper(&format!(
-        "if [ -e '{}' ]; then case \" $* \" in *' update-ref --no-deref refs/heads/main '*)\n\
+    machine.wrapper(
+        "git",
+        &format!(
+            "if [ -e '{}' ]; then case \" $* \" in *' update-ref --no-deref refs/heads/main '*)\n\
          \"$REAL\" \"$@\"; status=$?; kill -9 $PPID; exit $status;; esac; fi",
-        armed.display()
-    ));
+            armed.display()
+        ),
+    );
     machine.start();
     let project = Project::new(&machine, "p", &unreviewed());
     let mut watch = project.watch(0);
@@ -123,7 +126,7 @@ fn a_landing_whose_update_ref_is_held_stays_undecided_until_released() {
                 .success()
         );
     }
-    machine.git_wrapper(&format!(
+    machine.wrapper("git", &format!(
         "if [ -e '{}' ]; then case \" $* \" in *' update-ref --no-deref refs/heads/main '*)\n\
          kill -9 $PPID; read line < '{}'; \"$REAL\" \"$@\"; status=$?; echo done > '{}'; exit $status;;\n esac; fi",
         armed.display(),
@@ -179,4 +182,170 @@ fn a_landing_whose_update_ref_is_held_stays_undecided_until_released() {
         1
     );
     assert_eq!(project.canonical_head(), merged);
+}
+
+/// A git wrapper that, while `armed` exists, holds the landing's
+/// `update-ref` of the target: it says `held` on one FIFO and waits for a
+/// line on another before running the real command. The daemon lives.
+fn hold_update_ref(
+    machine: &Machine,
+) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+    let armed = machine.root.join("armed");
+    let said = machine.root.join("said");
+    let release = machine.root.join("release");
+    for fifo in [&said, &release] {
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    machine.wrapper(
+        "git",
+        &format!(
+            "if [ -e '{}' ]; then case \" $* \" in *' update-ref --no-deref refs/heads/main '*)\n\
+             echo held > '{}'; read line < '{}';; esac; fi",
+            armed.display(),
+            said.display(),
+            release.display()
+        ),
+    );
+    (armed, said, release)
+}
+
+/// Canonical moved by hand between verify and land: the landing retires and
+/// re-queues. On green, canonical is the verified ref and contains the head.
+/// The landing is held at its `update-ref`, after its gates and intent,
+/// while the operator moves canonical.
+///
+/// Sabotage: make `queue::land` record the landing when `update_ref`
+/// reports the old value did not match; the hand-made commit is lost from
+/// canonical.
+#[test]
+fn a_landing_retires_when_canonical_moves_before_update_ref() {
+    let machine = Machine::new("g3-moved", worker());
+    let (armed, said, release) = hold_update_ref(&machine);
+    machine.start();
+    let project = Project::new(
+        &machine,
+        "p",
+        &config("[gates.check]\ncommand = \"test -f feature.txt\"\n")
+            .replace("review = [\"correctness\"]", "review = \"none\""),
+    );
+    let mut watch = project.watch(0);
+    project.json(&["ticket", "new", "--title", "Add feature"]);
+    let raised = watch.attention();
+    let head = raised["data"]["payload"]["head"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    std::fs::write(&armed, "").unwrap();
+    project.json(&["attempt", "approve", "Y-1", "--head", &head]);
+    assert_eq!(std::fs::read_to_string(&said).unwrap(), "held\n");
+    std::fs::remove_file(&armed).unwrap();
+    // The operator moves canonical by hand while the landing is held.
+    let canonical = project.canonical();
+    let target = project.canonical_head();
+    let tree = git(&canonical, &["rev-parse", &format!("{target}^{{tree}}")]);
+    let moved = git(
+        &canonical,
+        &["commit-tree", tree.trim(), "-p", &target, "-m", "By hand"],
+    );
+    let moved = moved.trim();
+    git(
+        &canonical,
+        &["update-ref", "refs/heads/main", moved, &target],
+    );
+    std::fs::write(&release, "go\n").unwrap();
+
+    let landed = watch.event("landing.recorded", &[]);
+    let landings = project.rows(
+        "SELECT id, outcome, intent_old, intent_merged FROM execution WHERE kind = 'landing' ORDER BY id",
+    );
+    assert_eq!(landings.len(), 2, "{landings:?}");
+    assert_eq!(landings[0]["outcome"], "retired");
+    assert_eq!(landings[0]["intent_old"], target.as_str());
+    assert_eq!(landings[1]["outcome"], "landed");
+    assert_eq!(landings[1]["intent_old"], moved);
+    assert_eq!(landed["execution"], landings[1]["id"]);
+    // Canonical is the second landing's verified ref: its gate ran on it.
+    let merged = landings[1]["intent_merged"].as_str().unwrap();
+    assert_eq!(project.canonical_head(), merged);
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT outcome FROM execution WHERE parent = {} AND head = '{merged}'",
+            landings[1]["id"]
+        )),
+        vec![json!({ "outcome": "pass" })]
+    );
+    git(&canonical, &["merge-base", "--is-ancestor", &head, merged]);
+    git(&canonical, &["merge-base", "--is-ancestor", moved, merged]);
+    assert!(
+        project.json(&["status"])["attention"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// A ticket edit racing the landing intent is refused naming the intent.
+/// The landing is held at its `update-ref`, after the intent is recorded.
+/// Control: an edit of another ticket in the same moment is applied, and
+/// the held landing lands.
+///
+/// Sabotage: drop `refuse_during_intent` from `admit::edit`; the edit is
+/// applied under the intent.
+#[test]
+fn a_ticket_edit_racing_the_landing_intent_is_refused() {
+    let machine = Machine::new("g3-edit", worker());
+    let (armed, said, release) = hold_update_ref(&machine);
+    machine.start();
+    let project = Project::new(&machine, "p", &unreviewed());
+    let mut watch = project.watch(0);
+    project.json(&["ticket", "new", "--title", "Add feature"]);
+    let raised = watch.attention();
+    let head = raised["data"]["payload"]["head"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    project.json(&["ticket", "new", "--title", "Other", "--parked"]);
+
+    std::fs::write(&armed, "").unwrap();
+    project.json(&["attempt", "approve", "Y-1", "--head", &head]);
+    assert_eq!(std::fs::read_to_string(&said).unwrap(), "held\n");
+    std::fs::remove_file(&armed).unwrap();
+
+    let intent =
+        project.rows("SELECT id FROM execution WHERE kind = 'landing' AND intent_state = 'open'");
+    assert_eq!(intent.len(), 1);
+    let revision = project.json(&["ticket", "show", "Y-1"])["revision"].to_string();
+    let refused = project.refused(&[
+        "ticket",
+        "edit",
+        "Y-1",
+        "--revision",
+        &revision,
+        "--body",
+        "Changed",
+    ]);
+    assert_eq!(refused["code"], "refused", "{refused}");
+    assert_eq!(refused["data"]["intent"], intent[0]["id"]);
+    assert_eq!(project.json(&["ticket", "show", "Y-1"])["body"], "");
+    project.json(&[
+        "ticket",
+        "edit",
+        "Y-2",
+        "--revision",
+        "1",
+        "--body",
+        "Changed",
+    ]);
+    assert_eq!(project.json(&["ticket", "show", "Y-2"])["body"], "Changed");
+
+    std::fs::write(&release, "go\n").unwrap();
+    watch.event("landing.recorded", &[]);
+    assert_eq!(project.json(&["ticket", "show", "Y-1"])["state"], "done");
 }

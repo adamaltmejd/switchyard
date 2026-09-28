@@ -142,15 +142,17 @@ fn a_ticket_lands_end_to_end_and_leaves_only_rows() {
 
     // The landed attempt left rows only: no directory, no box.
     assert!(!project.path.join(".yard/local/attempts/1").exists());
-    let executions = project.rows("SELECT id FROM execution WHERE attempt = 1");
+    let handles = project.rows(
+        "SELECT handle FROM execution WHERE attempt = 1 AND kind IN ('implementation', 'gate', 'review')",
+    );
+    assert!(!handles.is_empty());
     let boxes = machine.boxes("dev.yard.project");
-    for execution in &executions {
-        let id = execution["id"].to_string();
+    for handle in &handles {
         assert!(
             boxes
                 .iter()
-                .all(|listed| listed["labels"]["dev.yard.execution"] != id.as_str()),
-            "execution {id} still has a box"
+                .all(|listed| listed["name"] != handle["handle"]),
+            "{handle} still has a box"
         );
     }
     // The other live attempt kept its clone and its worker.

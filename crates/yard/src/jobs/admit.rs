@@ -193,6 +193,64 @@ pub async fn doctor(daemon: &Daemon, project: &Project) -> Result<Value, Fail> {
 
 /// Import the checkout's branch into canonical, or consume canonical into
 /// the checkout. Both refuse divergence.
+/// Import the checkout's head when it descends from canonical's; `None`
+/// when it does not.
+async fn import(
+    daemon: &Daemon,
+    project: &Project,
+    branch: &str,
+    ours: Option<&str>,
+    theirs: &str,
+) -> Result<Option<Value>, Fail> {
+    let canonical = project.canonical_dir();
+    let imported = match ours {
+        None => true,
+        Some(ours) => daemon.git.is_ancestor(&canonical, ours, theirs).await?,
+    };
+    if !imported {
+        return Ok(None);
+    }
+    let loaded = super::read_config(daemon, &canonical, branch, theirs).await?;
+    let orphaned = project.read(|conn| {
+        Ok(tickets::list(conn)?
+            .into_iter()
+            .filter(|ticket| {
+                ticket.state == "open" && !loaded.config.workflows.contains_key(&ticket.workflow)
+            })
+            .map(|ticket| ticket_name(ticket.id))
+            .collect::<Vec<_>>())
+    })?;
+    if !orphaned.is_empty() {
+        return Err(Fail::refused(format!(
+            "the incoming configuration removes a workflow open tickets name: {}",
+            orphaned.join(", ")
+        ))
+        .with(json!({ "tickets": orphaned })));
+    }
+    let target = crate::git::target_ref(branch);
+    let moved = daemon
+        .git
+        .update_ref(&canonical, &target, theirs, ours, Default::default())
+        .await?;
+    if !moved {
+        return Err(Fail::refused(
+            "canonical moved during the sync; run it again",
+        ));
+    }
+    project.tx(|tx| {
+        store::audit(
+            tx,
+            "sync.imported",
+            store::Target::default(),
+            None,
+            json!({ "old": ours, "new": theirs }),
+        )
+    })?;
+    Ok(Some(
+        json!({ "sync": "imported", "old": ours, "head": theirs }),
+    ))
+}
+
 pub async fn sync(daemon: &Daemon, project: &Project) -> Result<Value, Fail> {
     let _canonical = project.canonical.lock().await;
     let canonical = project.canonical_dir();
@@ -215,67 +273,15 @@ pub async fn sync(daemon: &Daemon, project: &Project) -> Result<Value, Fail> {
             &format!("+{target}:refs/yard/import"),
         )
         .await?;
-    let imported = match &ours {
-        None => true,
-        Some(ours) => daemon.git.is_ancestor(&canonical, ours, &theirs).await?,
-    };
-    if imported {
-        let loaded = super::read_config(daemon, &canonical, &branch, &theirs).await?;
-        let orphaned = project.read(|conn| {
-            Ok(tickets::list(conn)?
-                .into_iter()
-                .filter(|ticket| {
-                    ticket.state == "open"
-                        && !loaded.config.workflows.contains_key(&ticket.workflow)
-                })
-                .map(|ticket| ticket_name(ticket.id))
-                .collect::<Vec<_>>())
-        })?;
-        if !orphaned.is_empty() {
-            daemon
-                .git
-                .delete_ref(&canonical, "refs/yard/import")
-                .await?;
-            return Err(Fail::refused(format!(
-                "the incoming configuration removes a workflow open tickets name: {}",
-                orphaned.join(", ")
-            ))
-            .with(json!({ "tickets": orphaned })));
-        }
-        let moved = daemon
-            .git
-            .update_ref(
-                &canonical,
-                &target,
-                &theirs,
-                ours.as_deref(),
-                Default::default(),
-            )
-            .await?;
-        daemon
-            .git
-            .delete_ref(&canonical, "refs/yard/import")
-            .await?;
-        if !moved {
-            return Err(Fail::refused(
-                "canonical moved during the sync; run it again",
-            ));
-        }
-        project.tx(|tx| {
-            store::audit(
-                tx,
-                "sync.imported",
-                store::Target::default(),
-                None,
-                json!({ "old": ours, "new": theirs }),
-            )
-        })?;
-        return Ok(json!({ "sync": "imported", "old": ours, "head": theirs }));
-    }
+    // Whatever the import decides, the fetched ref goes.
+    let decided = import(daemon, project, &branch, ours.as_deref(), &theirs).await;
     daemon
         .git
         .delete_ref(&canonical, "refs/yard/import")
         .await?;
+    if let Some(result) = decided? {
+        return Ok(result);
+    }
     let ours = ours.expect("a consumed canonical has a head");
     if !daemon.git.is_ancestor(&canonical, &theirs, &ours).await? {
         return Err(Fail::refused(format!(
@@ -408,8 +414,8 @@ pub async fn ticket_edit(
     project.read(|conn| Ok(tickets::get(conn, id)?.to_json()))
 }
 
-/// One ticket edit: bumps the revision, which supersedes every check that
-/// read the old one, and the approval item raised on it.
+/// One ticket edit: bumps the revision, which supersedes every check and
+/// approval item that read the old one.
 #[allow(clippy::too_many_arguments)]
 fn edit(
     tx: &rusqlite::Connection,
@@ -440,13 +446,6 @@ fn edit(
          WHERE id = ?1",
         rusqlite::params![id, title, body, priority, workflow],
     )?;
-    if let Some(attempt) = attempts::live_for(tx, id)? {
-        for item in attempts::open_for_attempt(tx, attempt.id)? {
-            if item.kind == "approval" {
-                attempts::resolve(tx, &item, "superseded", None)?;
-            }
-        }
-    }
     store::audit(
         tx,
         "ticket.edited",
@@ -540,11 +539,12 @@ pub fn ticket_close(project: &Project, params: &Value, state: &str) -> Result<Va
             )));
         }
         refuse_during_intent(tx, id)?;
-        if attempts::live_for(tx, id)?.is_some() {
+        if let Some(attempt) = attempts::live_for(tx, id)? {
             return Err(Fail::refused(format!(
                 "{} has a live attempt; abandon it first",
                 ticket_name(id)
-            )));
+            ))
+            .with(json!({ "attempt": attempt.id })));
         }
         tx.execute(
             "UPDATE ticket SET state = ?2, closed_at = ?3, close_reason = ?4 WHERE id = ?1",
@@ -829,12 +829,18 @@ pub async fn attempt_approve(
         let (attempt, item) = approval_item(tx, id, head)?;
         let ticket = tickets::get(tx, id)?;
         let review_digest = loaded.review_digest(&attempt.workflow)?;
-        if item.payload["revision"].as_i64() != Some(ticket.revision) {
-            return Err(Fail::stale(
-                "the ticket changed since the item was raised",
-                item.payload["revision"].clone(),
-                json!(ticket.revision),
-            ));
+        for (key, current) in [
+            ("revision", json!(ticket.revision)),
+            ("gate_digest", json!(loaded.gate_digest)),
+            ("review_digest", json!(review_digest)),
+        ] {
+            if item.payload[key] != current {
+                return Err(Fail::stale(
+                    format!("the item's {key} is no longer current"),
+                    item.payload[key].clone(),
+                    current,
+                ));
+            }
         }
         let checks: Vec<i64> = item.payload["checks"]
             .as_array()
