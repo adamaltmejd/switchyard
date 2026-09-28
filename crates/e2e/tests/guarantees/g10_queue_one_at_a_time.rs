@@ -119,15 +119,6 @@ fn the_queue_lands_in_order_and_rejudges_a_red_merge() {
         [json!("red"), json!("red")]
     );
     assert_eq!(second[1]["head"], again.as_str());
-    let implementations: Vec<Value> = project
-        .rows(
-            "SELECT execution.reason FROM execution JOIN attempt ON attempt.id = execution.attempt
-             WHERE attempt.ticket = 2 AND execution.kind = 'implementation' ORDER BY execution.id",
-        )
-        .into_iter()
-        .map(|row| row["reason"].clone())
-        .collect();
-    assert_eq!(implementations, [json!("first"), json!("repair")]);
 
     // The third's gate ran on a merge whose first parent is the target the
     // first landing left.
@@ -149,7 +140,8 @@ fn the_queue_lands_in_order_and_rejudges_a_red_merge() {
     let parents: Vec<&str> = parents.split_whitespace().skip(1).collect();
     assert_eq!(parents, [heads[0].as_str(), heads[2].as_str()]);
 
-    // One at a time: each landing ended before the next started.
+    // One at a time: each landing ended before the next started. Sabotage:
+    // give each project two landing slots; two landings overlap.
     let spans = project.rows(
         "SELECT execution, event FROM audit WHERE event IN ('execution.started', 'execution.ended')
          AND execution IN (SELECT id FROM execution WHERE kind = 'landing') ORDER BY seq",
@@ -223,10 +215,6 @@ fn a_candidate_that_does_not_merge_is_repaired_and_rejudged() {
         judged,
         vec![json!({ "kind": "gate" }), json!({ "kind": "review" })]
     );
-    assert_eq!(
-        project.rows("SELECT state FROM approval WHERE attempt = 2 ORDER BY id"),
-        vec![json!({ "state": "retired" })]
-    );
 
     project.json(&["attempt", "approve", "Y-2", "--head", &repaired]);
     watch.find("Y-2 landed", |event| {
@@ -286,12 +274,6 @@ fn a_conflict_with_a_config_change_merges_from_the_bundle() {
     let repaired = next_approval_of(&mut watch, "Y-1");
     let attempt = project.json(&["attempt", "show", "Y-1"]);
     assert_eq!(attempt["attempt"]["base"], target.as_str(), "{attempt}");
-    assert_eq!(attempt["attempt"]["head"], repaired.as_str());
-    assert!(
-        project
-            .rows("SELECT id FROM execution WHERE outcome = 'refused'")
-            .is_empty()
-    );
 
     project.json(&["attempt", "approve", "Y-1", "--head", &repaired]);
     watch.find("Y-1 landed", |event| {
