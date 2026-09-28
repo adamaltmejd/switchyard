@@ -128,19 +128,17 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
     let run = run?;
 
     // The box is gone: only now does the verdict count toward anything.
+    // Whether it counts is `checks::current`'s durable registration proof;
+    // the outcome here is only the terminal frame and the publication.
     project.tx(|tx| {
         let published = checks::for_execution(tx, execution)?;
-        // A refused registration gates the seat's publication: even one made
-        // before the run is cut short does not count as a review.
-        let failure = match (&run.registered, &published, &run.terminal) {
-            (Some(crate::harness::Registration::Refused(reason)), _, _) => Some(reason.clone()),
-            (Some(crate::harness::Registration::Registered(_)), Some(_), _) => None,
-            (None, Some(_), _) => Some("the seat published without a registration".to_string()),
-            (_, None, _) if run.timed_out => {
+        let failure = match (&published, &run.terminal) {
+            (Some(_), _) => None,
+            (None, _) if run.timed_out => {
                 Some("the seat ran past its timeout without publishing".to_string())
             }
-            (_, None, Some(crate::harness::Event::Failed { message, .. })) => Some(message.clone()),
-            (_, None, _) => Some("the seat ended without publishing".to_string()),
+            (None, Some(crate::harness::Event::Failed { message, .. })) => Some(message.clone()),
+            (None, _) => Some("the seat ended without publishing".to_string()),
         };
         let outcome = match &failure {
             Some(_) => "error",
