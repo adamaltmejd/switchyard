@@ -151,19 +151,24 @@ fn lapsed(
             Some(lapse.reason()),
         )?;
     }
-    if let Lapse::Policy(_, protected) = lapse {
-        let workflow = loaded.config.workflow(&attempt.workflow)?;
-        super::raise_approval(
-            tx,
-            attempt,
-            &json!({
-                "base": approval.base, "head": approval.head,
-                "revision": approval.ticket_revision,
-                "gate_digest": approval.gate_digest, "review_digest": approval.review_digest,
-                "checks": approval.checks, "protected": protected,
-                "unreviewed": workflow.review.is_empty(),
-            }),
-        )?;
+    let Lapse::Policy(_, protected) = lapse else {
+        return Ok(());
+    };
+    let workflow = loaded.config.workflow(&attempt.workflow)?;
+    let payload = json!({
+        "base": approval.base, "head": approval.head,
+        "revision": approval.ticket_revision,
+        "gate_digest": approval.gate_digest, "review_digest": approval.review_digest,
+        "checks": approval.checks, "protected": protected,
+        "unreviewed": workflow.review.is_empty(),
+    });
+    // Only for the candidate as it is now: the lapse was read before this
+    // transaction, and the attempt may have ended or moved on since.
+    let now = attempts::get(tx, attempt.id)?;
+    if now.state == "live"
+        && super::stale_part(&payload, &now, &tickets::get(tx, now.ticket)?, loaded)?.is_none()
+    {
+        super::raise_approval(tx, &now, &payload)?;
     }
     Ok(())
 }

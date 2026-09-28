@@ -324,41 +324,8 @@ fn auto_approval_raises_approval_on_a_protected_path() {
 /// Sabotage for "reruns no check": hash `approve` or `protected_paths` into
 /// the gate digest; the sync reruns the candidate gate.
 fn policy_change_withdraws(test: &str, change: impl Fn(String) -> String) {
-    let machine = Machine::new(test, |request| {
-        act(
-            request,
-            vec![commit_file("docs/notes.md", "notes\n", "Add notes")],
-        )
-    });
-    let hold = machine.root.join("hold");
-    assert!(
-        std::process::Command::new("mkfifo")
-            .arg(&hold)
-            .status()
-            .unwrap()
-            .success()
-    );
-    // Held open for writing, so each line released stays until a gate reads it.
-    let mut release = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&hold)
-        .unwrap();
-    let gates = format!(
-        "[gates.check]\ncommand = \"test -f docs/notes.md\"\nstage = \"candidate\"\n\n\
-         [gates.held]\ncommand = \"read line < {}\"\nruns_in = \"host\"\n",
-        hold.display()
-    );
-    machine.start();
-    let base = auto(unreviewed(&gates));
-    let project = Project::new(&machine, "p", &base);
-    let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Add notes"]);
-    let approved = watch.event("approval.given", &[("actor", "auto")]);
-    let head = approved["data"]["head"].as_str().unwrap().to_string();
-    watch.event("execution.started", &[("name", "held")]);
-
-    project.reconfigure(&change(base));
+    let machine = notes_machine(test);
+    let (project, mut watch, mut release, head) = held_after_policy_change(&machine, change);
     release.write_all(b"go\n").unwrap();
     let ended = watch.event("execution.ended", &[("kind", "landing")]);
     assert_eq!(ended["data"]["outcome"], "withdrawn", "{ended}");
@@ -380,6 +347,54 @@ fn policy_change_withdraws(test: &str, change: impl Fn(String) -> String) {
     release.write_all(b"go\n").unwrap();
     watch.event("landing.recorded", &[]);
     assert_eq!(project.json(&["ticket", "show", "Y-1"])["state"], "done");
+}
+
+fn notes_machine(test: &str) -> Machine {
+    Machine::new(test, |request| {
+        act(
+            request,
+            vec![commit_file("docs/notes.md", "notes\n", "Add notes")],
+        )
+    })
+}
+
+/// An automatic approval whose landing is held in its host gate, after a
+/// sync that changes policy: the project, its watch, the gate's release and
+/// the approved head.
+fn held_after_policy_change(
+    machine: &Machine,
+    change: impl Fn(String) -> String,
+) -> (Project<'_>, Watch, std::fs::File, String) {
+    let hold = machine.root.join("hold");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&hold)
+            .status()
+            .unwrap()
+            .success()
+    );
+    // Held open for writing, so each line released stays until a gate reads it.
+    let release = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&hold)
+        .unwrap();
+    let gates = format!(
+        "[gates.check]\ncommand = \"test -f docs/notes.md\"\nstage = \"candidate\"\n\n\
+         [gates.held]\ncommand = \"read line < {}\"\nruns_in = \"host\"\n",
+        hold.display()
+    );
+    machine.start();
+    let base = auto(unreviewed(&gates));
+    let project = Project::new(machine, "p", &base);
+    let mut watch = project.watch(0);
+    project.json(&["ticket", "new", "--title", "Add notes"]);
+    let approved = watch.event("approval.given", &[("actor", "auto")]);
+    let head = approved["data"]["head"].as_str().unwrap().to_string();
+    watch.event("execution.started", &[("name", "held")]);
+
+    project.reconfigure(&change(base));
+    (project, watch, release, head)
 }
 
 /// An automatic approval, then a sync that protects its path: the landing
@@ -405,6 +420,55 @@ fn a_sync_that_sets_manual_withdraws_an_auto_approval() {
     policy_change_withdraws("g2-manual", |config| {
         config.replace("approve = \"auto\"", "approve = \"manual\"")
     });
+}
+
+/// An automatic approval, a sync that sets `approve = "manual"`, and the
+/// attempt abandoned while the landing reads the candidate's protected paths
+/// at its intent: the landing withdraws, and no `approval` is raised for the
+/// ended attempt. Control: `a_sync_that_sets_manual_withdraws_an_auto_approval`.
+///
+/// Sabotage: make `queue::lapsed` raise `approval` without re-reading the
+/// attempt; an approval item stays open for an attempt that ended.
+#[test]
+fn an_attempt_abandoned_while_its_landing_rereads_policy_raises_nothing() {
+    let machine = notes_machine("g2-abandon");
+    let (project, mut watch, mut release, _) = held_after_policy_change(&machine, |config| {
+        config.replace("approve = \"auto\"", "approve = \"manual\"")
+    });
+    let fifo = |name: &str| {
+        let path = machine.root.join(name);
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        path
+    };
+    let (said, resume) = (fifo("said"), fifo("resume"));
+    let armed = machine.root.join("armed");
+    std::fs::write(&armed, "").unwrap();
+    // Armed after the sync, so the next protected-path read is the intent's.
+    machine.wrapper(
+        "git",
+        &format!(
+            "case \" $* \" in *' diff --name-only '*) if rm '{}' 2>/dev/null; then echo held > '{}'; read line < '{}'; fi;; esac",
+            armed.display(),
+            said.display(),
+            resume.display()
+        ),
+    );
+    release.write_all(b"go\n").unwrap();
+    assert_eq!(watch.said(&said), "held\n");
+    project.json(&["attempt", "abandon", "Y-1"]);
+    std::fs::write(&resume, "go\n").unwrap();
+    let ended = watch.event("execution.ended", &[("kind", "landing")]);
+    assert_eq!(ended["data"]["outcome"], "withdrawn", "{ended}");
+    assert_eq!(
+        project.rows("SELECT kind FROM attention WHERE state = 'open'"),
+        Vec::<Value>::new()
+    );
 }
 
 /// An approve naming an old candidate gets a stale result and changes no
