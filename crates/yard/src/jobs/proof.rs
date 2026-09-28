@@ -59,6 +59,17 @@ pub fn required(digest: &str) -> bool {
 /// the copy already exists. A copy is staged and renamed into place, so a
 /// crash never leaves a partial `root/<digest>` that a later run trusts.
 pub fn snapshot(live: &Path, root: &Path) -> Result<String, String> {
+    // The root is worker-reachable, so it is checked like any entry: a
+    // symlink here would redirect the whole walk.
+    let metadata = std::fs::symlink_metadata(live)
+        .map_err(|error| format!("read {}: {error}", live.display()))?;
+    if !metadata.file_type().is_dir() {
+        return Err(format!(
+            "the proof root {} is a {}",
+            live.display(),
+            type_name(&metadata.file_type())
+        ));
+    }
     let mut entries = Vec::new();
     let mut bytes = 0u64;
     collect(live, live, &mut entries, &mut bytes)?;
@@ -176,6 +187,8 @@ fn type_name(file_type: &std::fs::FileType) -> &'static str {
     use std::os::unix::fs::FileTypeExt;
     if file_type.is_symlink() {
         "symbolic link"
+    } else if file_type.is_file() {
+        "regular file"
     } else if file_type.is_fifo() {
         "fifo"
     } else if file_type.is_socket() {

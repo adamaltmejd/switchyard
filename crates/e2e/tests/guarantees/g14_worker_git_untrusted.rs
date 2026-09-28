@@ -193,8 +193,8 @@ fn a_bad_proof_entry_is_refused_by_name() {
     project.json(&["ticket", "new", "--title", "Good proof"]);
 
     let mut stopped = 0;
-    let mut approved = false;
-    while stopped < 2 || !approved {
+    let mut approval = None;
+    while stopped < 2 || approval.is_none() {
         let event = watch.until("decision", |event| {
             event["event"] == "attention.raised"
                 && (event["data"]["kind"] == "stopped" || event["data"]["kind"] == "approval")
@@ -203,7 +203,7 @@ fn a_bad_proof_entry_is_refused_by_name() {
             assert_eq!(event["data"]["reason"], "failed", "{event}");
             stopped += 1;
         } else {
-            approved = true;
+            approval = Some(event);
         }
     }
 
@@ -233,11 +233,10 @@ fn a_bad_proof_entry_is_refused_by_name() {
     );
     assert_eq!(gates, vec![json!({ "ticket": 3 })], "{gates:?}");
 
-    let approvals = project.rows(
-        "SELECT attempt.ticket AS ticket, approval.proof AS proof FROM approval
-         JOIN attempt ON attempt.id = approval.attempt",
-    );
-    assert_eq!(approvals.len(), 1, "{approvals:?}");
-    assert_eq!(approvals[0]["ticket"], 3);
-    assert!(!approvals[0]["proof"].as_str().unwrap().is_empty());
+    // The control reached approval carrying the good proof digest, so an
+    // operator's approve can bind it.
+    let approval = approval.unwrap();
+    assert_eq!(approval["ticket"], "Y-3", "{approval}");
+    let proof = approval["data"]["payload"]["proof"].as_str().unwrap();
+    assert!(!proof.is_empty(), "{approval}");
 }
