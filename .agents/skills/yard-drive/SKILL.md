@@ -1,148 +1,86 @@
 ---
 name: yard-drive
-description: Answer a Yard board. Hold the wake loop across every decision, answer attention with the exits it names, read a candidate before approving it, handle findings below the blocking level, and retire a ticket in the order that works. Load this when asked to operate, drive, watch or babysit a Yard project, or before answering a `yard status` attention item.
+description: Answer a Yard board. Keep the watch loop running, answer attention with the exits it names, read a candidate before approving it, handle findings below the blocking level, and retire a ticket in the right order. Load this before answering a `yard status` attention item or when asked to operate or watch a Yard project.
 ---
 
 # yard-drive
 
-Yard runs the work; you take the decisions between its steps. `yard-file`
-covers filing and proposals; `yard-operator` lists the commands.
+Yard runs the work. You take the decisions between its steps. For commands,
+see `yard-operator`; for filing work, see `yard-file`.
 
-## 1. The loop is wake-driven; re-arm after every decision
+## The loop
 
-`yard status --json` gives `seq`. `yard status --watch --since SEQ --json`
-prints every later event as one JSON line and keeps running. Act on the
-events that need you (`attention.raised`, `landing.recorded`,
-`attempt.ended`), and read `status --json` for what is open.
+`yard status --watch --since SEQ --json` prints every event after `SEQ`.
+After every decision you make, your next command is the watch again,
+because your decision usually causes the next event. The open attention
+items in `yard status --json` are decisions you still owe; a later watch
+never replays their events. If nothing is running and nothing is open, the
+next step is yours: file, unpark or start work, or report that the board is
+idle and give its `seq`.
 
-After every decision (approve, reject, nudge, start, accept, abandon), your
-next command is the watch. The decision is usually what produces the next
-event. In v2 an operator who stopped watching after a decision left a
-candidate waiting for approval until someone else noticed. It happened
-twice.
+## Attention
 
-Nothing running and nothing ready does not end your shift. It means the
-next event is something you do. If there is nothing to do, say so and hand
-over the `seq`. The open items in `status --json` are decisions you still
-owe. Their events have already fired, so a watch from a later `seq` never
-replays them.
+Answer each item with one of its `exits`. Nothing else.
 
-## 2. Answer attention with the exits it names
+- `start` retries from where the item stopped. It is never a fresh attempt.
+- `nudge --text` reaches the next implementer execution. It never
+  interrupts the current one. On `timeout` it renews the clock; on `limit`
+  it allows one more review round.
+- If no exit seems to fit, read the item's `reason`, `yard attempt show`,
+  and the exit's `--help`. If still unsure, leave the item open and ask. An
+  open item costs nothing; an abandoned attempt costs its whole run.
 
-Each item in `status --json` carries `kind`, `reason` and `exits`. Answer
-with one of those exits. Do not substitute a neighbouring mechanism you
-reasoned your way to. In v2, reaching for a reject where a nudge was the
-exit cost two gate runs.
+Touch Yard's state only through commands. Never edit `.yard/local`, never
+remove a clone or box by hand, never kill a process. When an outcome is
+unknown, do not act on a guess.
 
-- `start` means "try again from here". It starts the next implementer
-  execution, reruns the failed check on the same candidate, or re-queues a
-  landing. It never makes a fresh attempt.
-- `nudge --text` queues guidance for the next implementer execution and
-  never interrupts. On `timeout` it renews the total-work clock. On `limit`
-  it buys one more review round.
-- A stop you cannot see a way out of is a stop you have not finished
-  reading. Read `reason`, `yard attempt show`, and the exit's `--help`. The
-  worst v2 outcome was an operator who decided a timed-out worker had no
-  recovery and abandoned a healthy attempt. The nudge exit was printed
-  under the item the whole time. If you still see no way out, leave the item
-  open and ask. An open item costs nothing.
-- An item that is gone was answered. Find out what answered it before you
-  act again.
+## Approval
 
-Everything Yard knows is reached through a command. Never edit
-`.yard/local`, never remove a clone or a box by hand, and never kill a
-process to make a state go away. When liveness or an outcome is unknown, do
-not duplicate work, land, delete or kill. Read again, or ask.
+1. `yard attempt show Y-n`: the checks and the review's findings.
+2. `yard attempt diff Y-n`: read the change against the ticket body. It
+   should do what the ticket asks and nothing more.
+3. `yard attempt approve Y-n --head SHA`: use the head you read.
 
-## 3. Approval is a read
+What the worker says about its own work is not evidence. Neither are its
+notes or commit messages. A passing review and green gates inform the
+decision; they do not make it. A `protected` item touches guidance that
+every future worker reads, so read those hunks with care.
 
-Before `yard attempt approve Y-n --head SHA`:
+If the change is not right, run
+`yard attempt reject Y-n --head SHA --text "what to change"`. The text
+becomes the repair's prompt.
 
-1. Run `yard attempt show Y-n`. Read `base..head`, each gate's check, the
-   review's findings, and any protected paths the candidate touches.
-2. Run `yard attempt diff Y-n`. Read it against the ticket body: does it do
-   what the ticket asks, and nothing the ticket does not ask?
-3. Approve with the full head you read. Approval binds that exact
-   candidate; a new commit leaves it counting for nothing.
+The landing is done at the `landing.recorded` event, not when you approve.
+Then run `yard sync` to bring it into your checkout.
 
-These reads come from the host CLI. Nothing the worker says is a reading of
-the candidate, not its progress notes and not its commit messages. That is
-the party being judged describing its own work. A passing review is one
-reader against a threshold. A gate proves what its command asserts. Neither
-approves anything: you do, against the ticket.
+## Findings below `blocking`
 
-`protected` on an approval item means the candidate touches the guidance
-every worker reads (`AGENTS.md`, `.agents/` and the like). Read those hunks
-as a change to every future worker's instructions.
+- Land over them: this is the default.
+- Reject naming the finding, but only for integrity: a guard, an identity
+  binding, a fail-safe path, or data that cannot be rebuilt.
+- File a ticket for what clears the admission rule (`yard-file`).
 
-Approving is not landing. The landing is the `landing.recorded` event.
-After it, `yard sync` brings the landing into your checkout, and
-`git log -1` shows that it arrived. A landing that goes red becomes a repair
-on its own. A second consecutive red raises `red`.
+## Nudge, edit, retire
 
-If the read does not convince you, run
-`yard attempt reject Y-n --head SHA --text "what to change"`. The notes
-become the repair's prompt. A reject is cheap next to a revert.
+- The reviewer judges the ticket body and never sees a nudge. To change
+  what is asked, run `yard ticket edit Y-n --revision R`. This supersedes
+  every check on the old revision.
+- If the premise has moved so far that the built work is wrong, file a
+  fresh ticket instead of editing.
+- To retire a ticket: `yard ticket park`, then `yard attempt abandon
+  --reason`, then `yard ticket abandon` or `yard ticket done --reason`. An
+  abandon without the park makes the ticket ready again, and the scheduler
+  starts a new attempt at once.
 
-## 4. Findings below `blocking`
+## Upgrades
 
-A pass can carry findings below the project's `blocking` level: the reviewer
-saw them and chose not to block. There are three answers.
+A `.yard/` change takes effect for the next execution after `yard sync`. A
+new binary needs `yard daemon restart`. Each running execution comes back as
+`stopped: interrupted`; answer it with `start`.
 
-- **Land.** This is the usual one. Pre-existing debt, style, or
-  extensibility nobody asked for does not hold up a candidate that does what
-  its ticket asks.
-- **Reject with notes naming the finding.** Only for integrity findings:
-  evidence, a guard, an identity binding, a fail-safe path, or data that
-  cannot be rebuilt.
-- **File a ticket** for a remaining finding that clears the project's
-  admission rule (see `yard-file`). Findings are rows and survive cleanup,
-  but nobody reads them again unless they are filed.
+## When to ask
 
-## 5. Nudge, edit or retire
-
-- A nudge steers the implementer. The reviewer never sees it; the reviewer
-  judges against the ticket body. When what should change is what the ticket
-  asks, run `yard ticket edit Y-n --revision R`. The edit supersedes every
-  check taken on the old revision, and the next round is judged against the
-  new body.
-- An edit reaches work in flight, but it does not unbuild that work. When
-  the premise has moved so far that the built work is wrong rather than
-  unfinished, retire the attempt and file a fresh ticket naming the old one.
-  In v2 one attempt spent half its budget escaping an amendment that a fresh
-  ticket would have avoided.
-- While a landing records its intent, Yard refuses edits, rejects and
-  abandons on that ticket. Let the landing finish.
-
-To retire a ticket, go in this order:
-
-1. `yard ticket park Y-n` takes it out of automatic admission.
-2. `yard attempt abandon Y-n --reason R` ends the attempt and takes its
-   boxes down. The rows remain, and the branch stays in canonical.
-3. `yard ticket abandon Y-n --reason R`, or `yard ticket done Y-n --reason R`
-   if the work happened elsewhere.
-
-An abandon without a park returns the ticket to ready, and the scheduler
-admits a fresh attempt at once. So decide before you abandon: to discard
-only the attempt, leave the ticket unparked and a fresh attempt starts; to
-discard the ticket, park it first.
-
-## 6. Configuration and upgrades
-
-A `.yard/` change reaches the next execution once `yard sync` imports it; no
-restart is needed. A new `yard` binary needs `yard daemon restart`, which
-interrupts every running execution. Each one comes back as `stopped` with
-the reason `interrupted`, and its `start` exit continues it. So restart
-between executions where you can.
-
-## When to stop and ask
-
-Hand over, with the exact line you are looking at, when:
-
-- a refusal names something you cannot fix;
-- after reading, no exit on an item fits;
-- liveness or an outcome is unknown;
-- approving would mean approving a diff you do not understand;
-- a decision would change a guarantee, the threat model or the scope.
-
-Then watch again.
+Ask when a refusal names something you cannot fix, when no exit fits, when
+an outcome is unknown, when you do not understand a diff, or when a decision
+would change a guarantee, the threat model or the scope. Then go back to the
+watch.
