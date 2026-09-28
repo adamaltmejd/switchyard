@@ -509,6 +509,15 @@ pub fn propose(grant: &crate::mcp::Grant, arguments: &Value) -> Result<Value, Fa
     let id = grant.project.tx(|tx| {
         let execution = executions::get(tx, grant.execution)?;
         let attempt = attempts::get(tx, execution.attempt)?;
+        let mut payload = Value::Object(object.clone());
+        if kind == "edit" {
+            // Bind the revision the proposing execution read, so accepting
+            // it after the ticket moved is stale instead of overwriting (G2).
+            let revision = execution
+                .ticket_revision
+                .ok_or_else(|| Fail::invalid("the proposing execution names no ticket revision"))?;
+            payload["revision"] = json!(revision);
+        }
         attempts::raise(
             tx,
             attempts::Raise {
@@ -517,7 +526,7 @@ pub fn propose(grant: &crate::mcp::Grant, arguments: &Value) -> Result<Value, Fa
                 ticket: Some(attempt.ticket),
                 attempt: Some(attempt.id),
                 execution: Some(grant.execution),
-                payload: Value::Object(object.clone()),
+                payload,
                 text: text("reason"),
             },
         )
