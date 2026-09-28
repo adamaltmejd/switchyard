@@ -1,6 +1,6 @@
 ---
 name: yard-operator
-description: Drive Switchyard (yard) for this project: file tickets, answer attention, land work.
+description: Drive Switchyard (yard) for this project: the commands for filing tickets, answering attention and landing work. The judgment lives in two companions, yard-drive for answering the board and yard-file for filing and proposals; load the one you need.
 ---
 
 # Operating yard
@@ -10,6 +10,9 @@ Yard turns tickets into landed code. `yard status --json` shows `tickets`,
 it opens; the scheduler runs everything else. Wait with `yard status --watch
 --since SEQ`, the `seq` from the last `status --json`; it is the only
 history view.
+
+This file lists the commands. `yard-drive` says how to answer the board and
+`yard-file` how to file work and decide proposals.
 
 ## The loop
 
