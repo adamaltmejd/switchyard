@@ -21,6 +21,10 @@ The candidates checked against v3 code became tickets:
   moves or the daemon restarts.
 - **Y-16, from #100.** In a linked worktree, `init` registers a second,
   empty project.
+- **Y-18, from #122.** Gates receive `YARD_BASE`. Gate checkouts are full
+  clones, so the changed-paths file #122 asked for is not needed.
+- **Y-19, from #123 and #77.** A planning ticket for a proof directory. The
+  operator named the pinfold builder's two requests as wanted.
 
 ## Not filed
 
@@ -28,14 +32,10 @@ Each of these has the condition that would admit it.
 
 - **#73 and #98: overriding `parked`, `priority` or `workflow` on
   `proposal accept`.** When the operator hits it on v3.
-- **#122: passing `YARD_BASE` and the changed paths to gates.** When a gate
-  of this repository needs them, for example to select sabotage patches.
 - **#110: gates chosen per workflow.** It changes the gate digest and G2.
   Admit it when a project's gate cost is measured to matter.
 - **#59, #62, #71, #105 and #118: bounding `attempt tail`.** v2 transcripts
   reached 10 to 12 MB. Admit it when an operator agent is hit by it.
-- **#77 and #123: attachments and a proof directory.** Open questions rule
-  them out until a reviewer is seen to need one.
 - **#84: a brief line for a self-contradicting ticket.** It serves no
   guarantee.
 - **#115: an operator inside a VM or box.** Not a supported surface.
@@ -73,7 +73,7 @@ Each of these has the condition that would admit it.
 | 74 | covered | Park bumps no revision |
 | 75 | covered | Approval text is recorded |
 | 76 | retired | No gate artifacts |
-| 77 | not filed | Attachments |
+| 77 | Y-19 | Attachments, planned with the proof directory |
 | 78 | retired | Declined; `depends_on` sequences work |
 | 79 | covered | Configuration is read at each execution start |
 | 80 | covered | G2 |
@@ -118,8 +118,8 @@ Each of these has the condition that would admit it.
 | 119 | covered | A daemon exit reconciles as interrupted (G5) |
 | 120 | covered | `doctor` lists every connection |
 | 121 | retired | Replay is out |
-| 122 | not filed | `YARD_BASE` for gates |
-| 123 | not filed | Proof directory |
+| 122 | Y-18 | `YARD_BASE` for gates |
+| 123 | Y-19 | Proof directory |
 | 124 | retired | No `watch --sync` |
 | 125 | covered | Gates run inside the attempt's lane |
 | 126 | covered | The landing lane is outside `max_lanes` |
