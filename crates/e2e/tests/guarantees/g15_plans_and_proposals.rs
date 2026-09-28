@@ -165,6 +165,9 @@ fn a_plan_proposes_children_that_block_it() {
         project.rows(&format!("SELECT state FROM attention WHERE id = {stale}")),
         vec![json!({ "state": "open" })]
     );
+    // Reject it so no open edit proposal blocks the parent's readiness; the
+    // `admit::scheduled` sabotage below must be free to start it again.
+    project.json(&["proposal", "reject", &stale.to_string()]);
 
     assert_eq!(depends_on(&project, 1), [3, 4]);
     let parent = project.json(&["ticket", "show", "Y-1"]);
