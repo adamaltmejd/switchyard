@@ -22,9 +22,10 @@ pub struct Config {
     pub seats: BTreeMap<String, Seat>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Approve {
+    #[default]
     Manual,
     Auto,
 }
@@ -60,16 +61,18 @@ pub struct Workflow {
     pub total_work_timeout_minutes: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Stage {
     Candidate,
+    #[default]
     Landing,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RunsIn {
+    #[default]
     Box,
     Host,
 }
@@ -103,9 +106,8 @@ pub struct Seat {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Raw {
-    #[serde(default = "default_lanes")]
-    max_lanes: u32,
-    #[serde(default = "default_approve")]
+    max_lanes: Option<u32>,
+    #[serde(default)]
     approve: Approve,
     target: Target,
     #[serde(default)]
@@ -118,14 +120,6 @@ struct Raw {
     gates: toml::Table,
     #[serde(default)]
     review: RawReview,
-}
-
-fn default_lanes() -> u32 {
-    1
-}
-
-fn default_approve() -> Approve {
-    Approve::Manual
 }
 
 #[derive(Deserialize, Default)]
@@ -151,62 +145,23 @@ struct RawWorkflow {
 #[serde(deny_unknown_fields)]
 struct RawGate {
     command: String,
-    #[serde(default = "default_gate_timeout")]
-    timeout_minutes: u64,
-    #[serde(default = "default_stage")]
+    timeout_minutes: Option<u64>,
+    #[serde(default)]
     stage: Stage,
-    #[serde(default = "default_runs_in")]
+    #[serde(default)]
     runs_in: RunsIn,
     #[serde(default)]
     env: Vec<String>,
 }
 
-fn default_gate_timeout() -> u64 {
-    30
-}
-
-fn default_stage() -> Stage {
-    Stage::Landing
-}
-
-fn default_runs_in() -> RunsIn {
-    RunsIn::Box
-}
-
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct RawReview {
-    #[serde(default = "default_rounds")]
-    max_rounds: u32,
-    #[serde(default = "default_review_timeout")]
-    timeout_minutes: u64,
-    #[serde(default = "default_blocking")]
-    blocking: String,
+    max_rounds: Option<u32>,
+    timeout_minutes: Option<u64>,
+    blocking: Option<String>,
     #[serde(default)]
     seats: BTreeMap<String, Seat>,
-}
-
-impl Default for RawReview {
-    fn default() -> Self {
-        RawReview {
-            max_rounds: default_rounds(),
-            timeout_minutes: default_review_timeout(),
-            blocking: default_blocking(),
-            seats: BTreeMap::new(),
-        }
-    }
-}
-
-fn default_rounds() -> u32 {
-    3
-}
-
-fn default_review_timeout() -> u64 {
-    30
-}
-
-fn default_blocking() -> String {
-    "P1".into()
 }
 
 /// A priority token, `P0` to `P3`, as its number.
@@ -223,7 +178,8 @@ pub fn priority(token: &str) -> Option<u8> {
 impl Config {
     pub fn parse(text: &str) -> Result<Config, String> {
         let raw: Raw = toml::from_str(text).map_err(|error| error.message().to_string())?;
-        if raw.max_lanes == 0 {
+        let max_lanes = raw.max_lanes.unwrap_or(1);
+        if max_lanes == 0 {
             return Err("max_lanes must be at least 1".into());
         }
         if raw.target.branch.is_empty() || raw.target.branch.starts_with('-') {
@@ -261,8 +217,9 @@ impl Config {
             }
             seats.insert(name, seat);
         }
-        let blocking = priority(&raw.review.blocking)
-            .ok_or_else(|| format!("review.blocking {:?} is not P0 to P3", raw.review.blocking))?;
+        let blocking = raw.review.blocking.as_deref().unwrap_or("P1");
+        let blocking = priority(blocking)
+            .ok_or_else(|| format!("review.blocking {blocking:?} is not P0 to P3"))?;
         let base = raw
             .workflows
             .get("default")
@@ -350,14 +307,14 @@ impl Config {
             gates.push(Gate {
                 name,
                 command: gate.command,
-                timeout_minutes: gate.timeout_minutes,
+                timeout_minutes: gate.timeout_minutes.unwrap_or(30),
                 stage: gate.stage,
                 runs_in: gate.runs_in,
                 env: gate.env,
             });
         }
         Ok(Config {
-            max_lanes: raw.max_lanes,
+            max_lanes,
             approve: raw.approve,
             target: raw.target,
             egress: raw.isolation.egress,
@@ -365,8 +322,8 @@ impl Config {
             workflows,
             gates,
             review: Review {
-                max_rounds: raw.review.max_rounds.max(1),
-                timeout_minutes: raw.review.timeout_minutes,
+                max_rounds: raw.review.max_rounds.unwrap_or(3).max(1),
+                timeout_minutes: raw.review.timeout_minutes.unwrap_or(30),
                 blocking,
             },
             seats,
