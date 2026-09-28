@@ -7,18 +7,21 @@ fn unreviewed() -> String {
     config("").replace("review = [\"correctness\"]", "review = \"none\"")
 }
 
+const BASE_GATE: &str = "\n[gates.base]\ncommand = \"true\"\nstage = \"candidate\"\n";
 const EXTRA_GATE: &str = "\n[gates.extra]\ncommand = \"true\"\nstage = \"candidate\"\n";
 
 /// A worker commit under `.yard` comes back with the reason and no gate
-/// runs; the same change through `yard sync` is in force for the next
-/// execution. The change adds a candidate gate: refused from the worker, it
-/// runs on the candidate once the operator syncs it.
+/// runs on it: the project's candidate gate runs only on the repaired head.
+/// The same change through `yard sync` is in force for the next execution.
+/// The change adds a second candidate gate: refused from the worker, it runs
+/// on the candidate once the operator syncs it.
 ///
 /// Sabotage: make `supervise::implement` skip its `.yard` check; the
-/// worker's commit becomes the candidate.
+/// worker's commit becomes the candidate and the gate runs on it.
 #[test]
 fn a_worker_yard_change_is_refused_and_sync_carries_it() {
-    let configured = format!("{}{EXTRA_GATE}", unreviewed());
+    let gated = format!("{}{BASE_GATE}", unreviewed());
+    let configured = format!("{gated}{EXTRA_GATE}");
     let change = configured.replace('\'', "'\\''");
     let machine = Machine::new("g11-yard", move |request| {
         if request.opens() && request.last_user().contains(".yard") && request.turn() > 0 {
@@ -31,12 +34,12 @@ fn a_worker_yard_change_is_refused_and_sync_carries_it() {
             request,
             vec![bash(&format!(
                 "cd /workspace && printf '%s' '{change}' > .yard/config.toml && printf 'feature\\n' > feature.txt \
-                 && git add -A && git commit -q -m 'Add feature and a gate' && echo committed"
+                 && git add -A && git commit -q -m 'Add feature and a gate' && git rev-parse HEAD"
             ))],
         )
     });
     machine.start();
-    let project = Project::new(&machine, "p", &unreviewed());
+    let project = Project::new(&machine, "p", &gated);
     let mut watch = project.watch(0);
     project.json(&["ticket", "new", "--title", "Add feature"]);
     let first = watch.attention();
@@ -47,27 +50,48 @@ fn a_worker_yard_change_is_refused_and_sync_carries_it() {
         .to_string();
 
     assert_eq!(
-        project.rows("SELECT reason, outcome FROM execution ORDER BY id"),
+        project.rows(
+            "SELECT reason, outcome FROM execution WHERE kind = 'implementation' ORDER BY id"
+        ),
         vec![
             json!({ "reason": "first", "outcome": "refused" }),
             json!({ "reason": "repair", "outcome": "candidate" }),
         ]
     );
-    let openings: Vec<_> = machine
+    // The refused head, as git in the box printed it.
+    let refused = machine
         .model
         .requests()
-        .into_iter()
-        .filter(ModelRequest::opens)
-        .collect();
-    assert!(openings[1].last_user().contains(".yard"));
+        .iter()
+        .find_map(|request| request.tool_results().first().cloned())
+        .expect("the first execution's commit")
+        .1
+        .trim()
+        .to_string();
+    assert!(
+        refused.len() == 40 && refused.chars().all(|c| c.is_ascii_hexdigit()),
+        "{refused}"
+    );
+    assert_ne!(refused, head);
+    assert_eq!(
+        project.rows("SELECT name, head, outcome FROM execution WHERE kind = 'gate'"),
+        vec![json!({ "name": "base", "head": head, "outcome": "pass" })]
+    );
 
     project.reconfigure(&configured);
     let second = watch.attention();
     assert_eq!(second["data"]["kind"], "approval", "{second}");
     assert_eq!(second["data"]["payload"]["head"], head.as_str());
+    // One gate digest covers every gate: the new gate reruns `base` too.
     assert_eq!(
-        project.rows("SELECT name, head, outcome FROM execution WHERE kind = 'gate'"),
-        vec![json!({ "name": "extra", "head": head, "outcome": "pass" })]
+        project.rows(
+            "SELECT name, head, outcome FROM execution WHERE kind = 'gate' ORDER BY name, id"
+        ),
+        vec![
+            json!({ "name": "base", "head": head, "outcome": "pass" }),
+            json!({ "name": "base", "head": head, "outcome": "pass" }),
+            json!({ "name": "extra", "head": head, "outcome": "pass" }),
+        ]
     );
 }
 
