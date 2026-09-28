@@ -3,9 +3,10 @@
 
 use super::{Loaded, load};
 use crate::api::Fail;
-use crate::r#box::{BoxSpec, Egress, EnvValue, Header, Mount, Route};
+use crate::r#box::{BoxSpec, Egress, EnvValue, Mount, Route};
 use crate::config::RunsIn;
 use crate::daemon::{Daemon, Project};
+use crate::harness::{Harness, ModelRoute, Stage};
 use crate::store::{self, attempts, checks, executions, ticket_name, tickets};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -39,6 +40,10 @@ pub fn start_implementation(
     reason: &str,
 ) -> Result<i64, Fail> {
     let name = attempt.implementer["name"].as_str().unwrap_or("default");
+    let harness_version = attempt.implementer["harness"]
+        .as_str()
+        .and_then(crate::harness::get)
+        .map(|harness| harness.version());
     executions::start(
         tx,
         executions::Start {
@@ -50,6 +55,7 @@ pub fn start_implementation(
             ticket_revision: Some(ticket.revision),
             ticket: Some(ticket.id),
             agent: Some((name, &attempt.implementer)),
+            harness_version,
             ..Default::default()
         },
     )
@@ -121,20 +127,22 @@ pub struct Worker<'a> {
     pub image: &'a str,
     pub workspace: &'a Path,
     pub read_only: bool,
-    pub state: &'a Path,
-    pub input: &'a Path,
-    pub connection: &'static crate::pi::Connection,
+    pub harness: &'static dyn Harness,
+    pub stage: Stage<'a>,
+    pub model: &'a ModelRoute,
     pub egress: &'a [String],
 }
 
 pub fn worker_spec(daemon: &Daemon, project: &Project, worker: &Worker) -> BoxSpec {
-    let mut env: BTreeMap<String, EnvValue> = crate::pi::env(worker.connection)
+    let mut env: BTreeMap<String, EnvValue> = worker
+        .harness
+        .env(&worker.stage)
         .into_iter()
         .map(|(name, value)| (name, EnvValue::Value(value)))
         .collect();
     env.insert(
-        crate::pi::BEARER_VAR.into(),
-        EnvValue::From(crate::pi::BEARER_VAR.into()),
+        crate::harness::BEARER_VAR.into(),
+        EnvValue::From(crate::harness::BEARER_VAR.into()),
     );
     for (name, value) in [
         ("GIT_AUTHOR_NAME", "Yard worker"),
@@ -149,26 +157,14 @@ pub fn worker_spec(daemon: &Daemon, project: &Project, worker: &Worker) -> BoxSp
     }
     let mut routes = BTreeMap::new();
     routes.insert(
-        crate::pi::MCP_ROUTE.to_string(),
+        crate::harness::MCP_ROUTE.to_string(),
         Route::Service(format!("127.0.0.1:{}", daemon.mcp_port)),
     );
-    routes.insert(
-        worker.connection.route.to_string(),
-        Route::Inject {
-            to: daemon.machine.origin(worker.connection),
-            headers: BTreeMap::from([(
-                "Authorization".to_string(),
-                Header {
-                    from: worker.connection.key_var.into(),
-                    prefix: "Bearer ".into(),
-                },
-            )]),
-        },
-    );
+    routes.insert(worker.model.name.clone(), worker.model.route.clone());
     BoxSpec {
         name: box_name(project, worker.execution),
         labels: labels(project),
-        harness: Some("pi".into()),
+        harness: Some(worker.harness.name().into()),
         image: worker.image.into(),
         mounts: vec![
             Mount {
@@ -177,13 +173,13 @@ pub fn worker_spec(daemon: &Daemon, project: &Project, worker: &Worker) -> BoxSp
                 readonly: worker.read_only,
             },
             Mount {
-                host: worker.state.into(),
-                guest: crate::pi::STATE_GUEST.into(),
+                host: worker.stage.state.into(),
+                guest: crate::harness::STATE_GUEST.into(),
                 readonly: false,
             },
             Mount {
-                host: worker.input.into(),
-                guest: crate::pi::INPUT_GUEST.into(),
+                host: worker.stage.input.into(),
+                guest: crate::harness::INPUT_GUEST.into(),
                 readonly: true,
             },
         ],
@@ -200,53 +196,29 @@ pub fn labels(project: &Project) -> BTreeMap<String, String> {
     BTreeMap::from([("dev.yard.project".to_string(), project.key.clone())])
 }
 
-/// The secrets `box up` reads for a worker: its bearer and the connection's key.
-pub fn worker_secrets(
-    daemon: &Daemon,
-    connection: &crate::pi::Connection,
-    bearer: &str,
-) -> Result<Vec<(String, String)>, Fail> {
-    let key = daemon.machine.vars.get(connection.key_var).ok_or_else(|| {
-        Fail::refused(format!(
-            "operator.env holds no {} for connection {}",
-            connection.key_var, connection.name
-        ))
-    })?;
-    Ok(vec![
-        (crate::pi::BEARER_VAR.into(), bearer.into()),
-        (connection.key_var.into(), key.clone()),
-    ])
-}
-
-pub fn stage_input(input: &Path) -> Result<(), Fail> {
-    std::fs::create_dir_all(input).map_err(|error| error.to_string())?;
-    std::fs::write(input.join(crate::pi::EXTENSION_FILE), crate::pi::EXTENSION)
-        .map_err(|error| error.to_string())?;
-    Ok(())
-}
-
 /// What a worker run ended as.
 #[derive(Default)]
 pub struct Run {
-    pub terminal: Option<crate::pi::Event>,
-    pub registered: Option<crate::pi::Registration>,
+    pub terminal: Option<crate::harness::Event>,
+    pub registered: Option<crate::harness::Registration>,
     pub session_id: Option<String>,
     pub stopped: bool,
     pub timed_out: bool,
     pub exit_code: Option<i32>,
 }
 
-/// Run Pi in a live box, streaming its frames to the transcript, until it
-/// ends, the stop signal fires or a clock runs out. The caller takes the box
-/// down, which is how a run is cancelled.
+/// Run the harness in a live box, streaming its frames to the transcript,
+/// until it ends, the stop signal fires or a clock runs out. The caller
+/// takes the box down, which is how a run is cancelled.
 // Each argument is a separate input of the one run; a struct would only
 // rename them.
 #[allow(clippy::too_many_arguments)]
-pub async fn run_pi(
+pub async fn run_harness(
     daemon: &Daemon,
     project: &Project,
     execution: i64,
     kind: crate::mcp::Kind,
+    harness: &'static dyn Harness,
     argv: &[String],
     transcript: &Path,
     inactivity: Duration,
@@ -269,7 +241,7 @@ pub async fn run_pi(
         .map_err(|error| error.to_string())?;
     let mut stdout = BufReader::new(child.stdout.take().expect("piped")).lines();
     let mut stderr = BufReader::new(child.stderr.take().expect("piped")).lines();
-    let mut normalizer = crate::pi::Normalizer::default();
+    let mut reader = harness.reader();
     let mut run = Run::default();
     let mut usage = None;
     let mut stdout_open = true;
@@ -281,13 +253,13 @@ pub async fn run_pi(
                 Ok(Some(line)) => {
                     let _ = file.write_all(line.as_bytes()).await;
                     let _ = file.write_all(b"\n").await;
-                    if let Some(event) = normalizer.frame(&line) {
+                    if let Some(event) = reader.stdout(&line) {
                         match &event {
-                            crate::pi::Event::Started { session_id } => {
+                            crate::harness::Event::Started { session_id } => {
                                 run.session_id = Some(session_id.clone());
-                                project.read(|conn| executions::set_worker(conn, execution, Some(session_id), None, None))?;
+                                project.read(|conn| executions::set_worker(conn, execution, Some(session_id), None))?;
                             }
-                            crate::pi::Event::Finished { usage: spent, .. } | crate::pi::Event::Failed { usage: spent, .. } => {
+                            crate::harness::Event::Finished { usage: spent, .. } | crate::harness::Event::Failed { usage: spent, .. } => {
                                 usage = Some((spent.input, spent.output, spent.cost));
                                 run.terminal = Some(event.clone());
                             }
@@ -298,7 +270,7 @@ pub async fn run_pi(
             },
             line = stderr.next_line(), if stderr_open => match line {
                 Ok(Some(line)) => {
-                    if let Some(registration) = crate::pi::registration(&line) {
+                    if let Some(registration) = reader.stderr(&line) {
                         run.registered = Some(registration);
                     }
                 }
@@ -312,14 +284,14 @@ pub async fn run_pi(
     if !run.stopped && !run.timed_out {
         run.exit_code = child.wait().await.ok().map(crate::git::exit_code);
     }
-    project.read(|conn| executions::set_worker(conn, execution, None, None, usage))?;
+    project.read(|conn| executions::set_worker(conn, execution, None, usage))?;
     // A granted tool the fetched list lacks is a failed registration.
-    if let Some(crate::pi::Registration::Registered(tools)) = &run.registered
+    if let Some(crate::harness::Registration::Registered(tools)) = &run.registered
         && let Some(missing) = crate::mcp::tool_names(kind)
             .into_iter()
             .find(|tool| !tools.contains(tool))
     {
-        run.registered = Some(crate::pi::Registration::Refused(format!(
+        run.registered = Some(crate::harness::Registration::Refused(format!(
             "the MCP client registered no {missing}"
         )));
     }
@@ -337,8 +309,15 @@ pub async fn implement(
     let ticket = project.read(|conn| tickets::get(conn, attempt.ticket))?;
     let workflow = loaded.config.workflow(&attempt.workflow)?.clone();
     let provider = attempt.implementer["provider"].as_str().unwrap_or_default();
-    let connection = crate::pi::connection(provider)
+    let connection = crate::harness::connection(provider)
         .ok_or_else(|| Fail::invalid(format!("connection {provider:?} is unknown")))?;
+    let harness = crate::harness::get(attempt.implementer["harness"].as_str().unwrap_or_default())
+        .ok_or_else(|| {
+            Fail::invalid(format!(
+                "harness {:?} is unknown",
+                attempt.implementer["harness"]
+            ))
+        })?;
     let dir = project.attempt_dir(attempt.id);
     let clone = dir.join("clone");
     if !clone.exists() {
@@ -353,13 +332,21 @@ pub async fn implement(
             .await?;
     }
     let state = dir.join("state");
-    crate::pi::stage_state(&state, connection).map_err(|error| error.to_string())?;
     let input = dir.join("input");
-    stage_input(&input)?;
+    let stage = Stage {
+        state: &state,
+        input: &input,
+        connection,
+    };
+    harness.stage(&stage).map_err(|error| error.to_string())?;
 
-    // Resume the session unless it has run its executions.
-    let resume = match project.read(|conn| executions::session(conn, attempt.id))? {
-        Some((previous, count)) if count < i64::from(workflow.max_session_executions) => {
+    // Resume the session unless it has run its executions or the harness
+    // version changed under it.
+    let resume = match project.read(|conn| executions::session(conn, attempt.id, execution))? {
+        Some((previous, count))
+            if count < i64::from(workflow.max_session_executions)
+                && previous.harness_version.as_deref() == Some(harness.version()) =>
+        {
             previous.session_id.map(|session| (previous.id, session))
         }
         _ => None,
@@ -385,14 +372,15 @@ pub async fn implement(
         resume.is_some(),
     )
     .await?;
-    let argv = crate::pi::argv(&crate::pi::Launch {
-        provider,
-        model: attempt.implementer["model"].as_str().unwrap_or_default(),
-        effort: attempt.implementer["effort"].as_str(),
-        resume: resume.as_ref().map(|(_, session)| session.as_str()),
-        prompt: &prompt,
-    })
-    .map_err(Fail::invalid)?;
+    let argv = harness
+        .argv(&crate::harness::Launch {
+            provider,
+            model: attempt.implementer["model"].as_str().unwrap_or_default(),
+            effort: attempt.implementer["effort"].as_str(),
+            resume: resume.as_ref().map(|(_, session)| session.as_str()),
+            prompt: &prompt,
+        })
+        .map_err(Fail::invalid)?;
 
     let image = image(daemon, project, &loaded).await?;
     let bearer = daemon.grants.issue(crate::mcp::Grant {
@@ -400,7 +388,13 @@ pub async fn implement(
         execution,
         kind: crate::mcp::Kind::Implementation,
     });
-    let secrets = worker_secrets(daemon, connection, &bearer)?;
+    let model = harness
+        .route(&stage, &daemon.machine)
+        .map_err(Fail::refused)?;
+    let secrets = vec![
+        (crate::harness::BEARER_VAR.to_string(), bearer),
+        model.secret.clone(),
+    ];
     let spec = worker_spec(
         daemon,
         project,
@@ -409,9 +403,9 @@ pub async fn implement(
             image: &image,
             workspace: &clone,
             read_only: workflow.read_only,
-            state: &state,
-            input: &input,
-            connection,
+            harness,
+            stage,
+            model: &model,
             egress: &loaded.config.egress,
         },
     );
@@ -426,11 +420,12 @@ pub async fn implement(
         let total = (workflow.total_work_timeout_minutes * 60_000) as i64;
         tokio::time::Instant::now() + Duration::from_millis((total - spent).max(0) as u64)
     };
-    let run = run_pi(
+    let run = run_harness(
         daemon,
         project,
         execution,
         crate::mcp::Kind::Implementation,
+        harness,
         &argv,
         &transcript(project, attempt.id, execution),
         Duration::from_secs(workflow.inactivity_timeout_minutes * 60),
@@ -526,9 +521,9 @@ pub async fn implement(
             });
         }
         let failure = match (&run.registered, &run.terminal) {
-            (Some(crate::pi::Registration::Refused(reason)), _) => Some(("failed", Some("mcp"), reason.clone())),
+            (Some(crate::harness::Registration::Refused(reason)), _) => Some(("failed", Some("mcp"), reason.clone())),
             _ if run.timed_out => Some(("timeout", Some("timeout"), "a clock ran out".to_string())),
-            (_, Some(crate::pi::Event::Failed { message, .. })) if !run.stopped => {
+            (_, Some(crate::harness::Event::Failed { message, .. })) if !run.stopped => {
                 Some(("failed", Some("harness"), message.clone()))
             }
             (_, None) if !run.stopped => {
@@ -717,7 +712,7 @@ async fn implementer_prompt(
                 if target != attempt.base {
                     prompt.push_str(&format!(
                         "Your clone lacks the target: `git fetch {}/target.bundle refs/heads/{}` and merge FETCH_HEAD.\n",
-                        crate::pi::INPUT_GUEST,
+                        crate::harness::INPUT_GUEST,
                         next["branch"].as_str().unwrap_or_default()
                     ));
                 }

@@ -23,8 +23,10 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
         .get(&seat_name)
         .ok_or_else(|| Fail::invalid(format!("seat {seat_name} is no longer configured")))?;
     let agent = &loaded.config.agents[&seat.agent];
-    let connection = crate::pi::connection(&agent.provider)
+    let connection = crate::harness::connection(&agent.provider)
         .ok_or_else(|| Fail::invalid(format!("connection {:?} is unknown", agent.provider)))?;
+    let harness = crate::harness::get(&agent.harness)
+        .ok_or_else(|| Fail::invalid(format!("harness {:?} is unknown", agent.harness)))?;
     let head = row.head.clone().unwrap_or_default();
     let base = row.base.clone().unwrap_or_default();
 
@@ -40,8 +42,12 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
         .git
         .clone_detached(&project.canonical_dir(), &checkout, &head)
         .await?;
-    crate::pi::stage_state(&state, connection).map_err(|error| error.to_string())?;
-    supervise::stage_input(&input)?;
+    let stage = crate::harness::Stage {
+        state: &state,
+        input: &input,
+        connection,
+    };
+    harness.stage(&stage).map_err(|error| error.to_string())?;
 
     let stat = daemon
         .git
@@ -59,21 +65,28 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
         ticket.body,
         seat.instructions
     );
-    let argv = crate::pi::argv(&crate::pi::Launch {
-        provider: &agent.provider,
-        model: &agent.model,
-        effort: agent.effort.as_deref(),
-        resume: None,
-        prompt: &prompt,
-    })
-    .map_err(Fail::invalid)?;
+    let argv = harness
+        .argv(&crate::harness::Launch {
+            provider: &agent.provider,
+            model: &agent.model,
+            effort: agent.effort.as_deref(),
+            resume: None,
+            prompt: &prompt,
+        })
+        .map_err(Fail::invalid)?;
     let image = supervise::image(daemon, project, &loaded).await?;
     let bearer = daemon.grants.issue(crate::mcp::Grant {
         project: project.clone(),
         execution,
         kind: crate::mcp::Kind::Review,
     });
-    let secrets = supervise::worker_secrets(daemon, connection, &bearer)?;
+    let model = harness
+        .route(&stage, &daemon.machine)
+        .map_err(Fail::refused)?;
+    let secrets = vec![
+        (crate::harness::BEARER_VAR.to_string(), bearer),
+        model.secret.clone(),
+    ];
     let spec = supervise::worker_spec(
         daemon,
         project,
@@ -82,19 +95,20 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
             image: &image,
             workspace: &checkout,
             read_only: true,
-            state: &state,
-            input: &input,
-            connection,
+            harness,
+            stage,
+            model: &model,
             egress: &[],
         },
     );
     let live = supervise::up_worker(daemon, project, execution, &spec, &secrets).await?;
     let timeout = Duration::from_secs(loaded.config.review.timeout_minutes * 60);
-    let run = supervise::run_pi(
+    let run = supervise::run_harness(
         daemon,
         project,
         execution,
         crate::mcp::Kind::Review,
+        harness,
         &argv,
         &supervise::transcript(project, attempt.id, execution),
         timeout,
@@ -111,11 +125,11 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
         let published = checks::for_execution(tx, execution)?;
         let failure = match (&published, &run.registered, &run.terminal) {
             (Some(_), _, _) => None,
-            (None, Some(crate::pi::Registration::Refused(reason)), _) => Some(reason.clone()),
+            (None, Some(crate::harness::Registration::Refused(reason)), _) => Some(reason.clone()),
             (None, _, _) if run.timed_out => {
                 Some("the seat ran past its timeout without publishing".to_string())
             }
-            (None, _, Some(crate::pi::Event::Failed { message, .. })) => Some(message.clone()),
+            (None, _, Some(crate::harness::Event::Failed { message, .. })) => Some(message.clone()),
             (None, _, _) => Some("the seat ended without publishing".to_string()),
         };
         executions::end(

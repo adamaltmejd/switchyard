@@ -45,7 +45,7 @@ pub struct Machine {
 
 impl Machine {
     /// The origin a connection's route leads to.
-    pub fn origin(&self, connection: &crate::pi::Connection) -> String {
+    pub fn origin(&self, connection: &crate::harness::Connection) -> String {
         let var = format!(
             "YARD_ORIGIN_{}",
             connection.name.to_ascii_uppercase().replace('-', "_")
@@ -159,6 +159,11 @@ async fn serve() -> Result<(), String> {
         image_build: tokio::sync::Mutex::new(()),
         _lock: lock,
     });
+
+    match daemon.pinfold.artifacts().await {
+        Ok(pins) => crate::harness::pin(pins)?,
+        Err(error) => return Err(format!("pinfold artifacts: {error}")),
+    }
 
     for root in registry()? {
         if !root.join(crate::config::CONFIG_PATH).is_file() {

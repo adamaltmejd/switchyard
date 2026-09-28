@@ -189,23 +189,16 @@ impl Config {
             ));
         }
         for (name, agent) in &raw.agents {
-            if agent.harness != "pi" {
+            let Some(harness) = crate::harness::get(&agent.harness) else {
                 return Err(format!(
-                    "agents.{name}.harness {:?} is unknown; the one harness is pi",
-                    agent.harness
+                    "agents.{name}.harness {:?} is unknown; Yard knows {}",
+                    agent.harness,
+                    crate::harness::names().join(", ")
                 ));
-            }
-            if crate::pi::connection(&agent.provider).is_none() {
-                return Err(format!(
-                    "agents.{name}.provider {:?} names no connection",
-                    agent.provider
-                ));
-            }
-            if let Some(effort) = &agent.effort
-                && !crate::pi::EFFORTS.contains(&effort.as_str())
-            {
-                return Err(format!("agents.{name}.effort {effort:?} is unknown"));
-            }
+            };
+            harness
+                .accepts(agent)
+                .map_err(|error| format!("agents.{name}.{error}"))?;
         }
         let mut seats = BTreeMap::new();
         for (name, seat) in raw.review.seats {

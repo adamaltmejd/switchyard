@@ -75,7 +75,7 @@ _Avoid_: alert, notification, blocker
 | jobs | admission, the execution state machine, the merge queue, reconcile-on-start | daemon |
 | git | canonical, clones, candidates, landing; git shelled out under a scrubbed environment | jobs |
 | box | the pinfold process interface; specs, mounts, routes, stat | jobs |
-| pi | Pi's launch argv, frame normalisation, the staged MCP client | jobs |
+| harness | every harness's launch argv, frame normalisation, registration proof and staged MCP client | jobs |
 | mcp | the tool surface workers call | daemon |
 | daemon | one process per machine: the unix-socket API, the MCP listener, the scheduler tick | `yard` |
 | cli | argument parsing, one call per command, rendering | the operator |
@@ -332,8 +332,10 @@ so a restart kills every group that ran a command. A host gate still alive
 after a restart is killed by its verified group and the execution is
 `interrupted` like a boxed one; a landing re-queues.
 
-A worker execution records, on its row: agent, harness and version,
-provider, model, effort, the execution it resumed and its session id, start
+A worker execution records, on its row: agent, harness and its version
+(pinfold's pin, read from `pinfold artifacts` once at daemon start, which
+fails if a harness has no pin), provider,
+model, effort, the execution it resumed and its session id, start
 and end, exit cause, tokens in and out, reported cost, and the reason it was
 started (`first`, `repair`, `nudge`, `retry`, `dirty`, `restart`, `fresh`).
 A gate execution records gate name, verdict, exit code, duration and the
@@ -519,10 +521,16 @@ is gone and marks each execution that recorded one as interrupted.
 
 ## Harness
 
-Pi is the one harness. Its adapter is the launch argv that starts or
-resumes a session, the normalisation of its frames into `started`,
-`finished`, `failed`, and the launch files it needs, including
-Yard's staged MCP client extension. Extension discovery is off, and so are
+One adapter interface serves every harness: `name`, `version` (pinfold's
+pin), `accepts`, `stage`, which writes the launch files, including the
+harness's automatic-compaction config, into the attempt's harness state and
+read-only input dir, `env`, `route`, `argv` and `reader`, a per-run reader
+over stdout and stderr yielding `Started`, `Finished`, `Failed`,
+`Registered` and `Refused`. Pi is the one harness. Its launch argv starts
+or resumes a session, the normalisation of its frames yields `started`,
+`finished` and `failed`, and its launch files include Yard's staged MCP
+client extension and `agent/models.json`, which moves the provider onto its
+route. Extension discovery is off, and so are
 prompt templates and themes: the staged client is the only code that loads
 in the harness, so nothing a candidate commits runs with a worker's bearer.
 Context files (`AGENTS.md`, `CLAUDE.md`) load as Pi finds them in
@@ -533,8 +541,7 @@ leaves empty. An execution proceeds to its first turn
 only once the staged client has printed its registration line; whether every
 granted tool is present is proved by the tool list it fetched. The outcome
 is read from the terminal frame, never from the exit status alone. Yard
-never parses a transcript for a verdict. A second harness brings the adapter
-interface with it.
+never parses a transcript for a verdict.
 
 ## Worker tools
 
@@ -643,7 +650,7 @@ Dependencies: `tokio`, `hyper` with `hyper-util` and `http-body-util`,
 crates/yard/src/
   store/    mod.rs (open, migrate, audit) schema.rs tickets.rs attempts.rs executions.rs checks.rs
   jobs/     mod.rs (load, step, advance) admit.rs supervise.rs review.rs queue.rs reconcile.rs cleanup.rs
-  git.rs box.rs pi.rs pi-mcp-extension.ts mcp.rs
+  git.rs box.rs harness.rs pi.rs pi-mcp-extension.ts mcp.rs
   daemon.rs api.rs cli.rs config.rs main.rs
 crates/e2e/  src/lib.rs (harness, helpers) model.rs (fake model fixture), tests/guarantees/main.rs g*.rs
 ```
