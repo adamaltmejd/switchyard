@@ -1030,11 +1030,13 @@ pub async fn proposal_answer(
                 Some(ticket)
             }
             "edit" => {
-                let ticket = tickets::get(tx, proposer)?;
+                let revision = payload["revision"]
+                    .as_i64()
+                    .ok_or_else(|| Fail::invalid("an edit proposal names no revision"))?;
                 edit(
                     tx,
                     proposer,
-                    ticket.revision,
+                    revision,
                     field("title"),
                     field("body"),
                     None,

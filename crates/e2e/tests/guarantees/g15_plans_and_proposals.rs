@@ -44,7 +44,9 @@ fn depends_on(project: &Project, ticket: i64) -> Vec<i64> {
 ///
 /// Sabotage: make `admit::scheduled` start read-only tickets again; the
 /// parent is admitted once its children are done. Or mount the clone
-/// writable for `access = "read-only"`; the plan's write succeeds.
+/// writable for `access = "read-only"`; the plan's write succeeds. Or
+/// accept an edit proposal at the ticket's current revision; the second
+/// edit applies and overwrites the plan.
 #[test]
 fn a_plan_proposes_children_that_block_it() {
     let answers = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -76,6 +78,7 @@ fn a_plan_proposes_children_that_block_it() {
                     json!({ "kind": "ticket", "key": "b", "title": "Child B", "parked": true }),
                 ),
                 propose(json!({ "kind": "edit", "body": "The plan: A, then B." })),
+                propose(json!({ "kind": "edit", "body": "Stale: must not apply." })),
             ]),
             _ => {
                 seen.lock()
@@ -125,12 +128,47 @@ fn a_plan_proposes_children_that_block_it() {
         .collect();
     assert_eq!(
         raised,
-        [json!("proposal"), json!("proposal"), json!("proposal")]
+        [
+            json!("proposal"),
+            json!("proposal"),
+            json!("proposal"),
+            json!("proposal")
+        ]
     );
 
-    for (id, _) in proposals(&project) {
-        project.json(&["proposal", "accept", &id.to_string()]);
+    // Both edit proposals bind the revision the planning execution read.
+    // The first accepted one applies; the second is stale and changes no row.
+    let pending = proposals(&project);
+    let stale = pending
+        .iter()
+        .find(|(_, payload)| payload["body"] == "Stale: must not apply.")
+        .unwrap()
+        .0;
+    for (id, payload) in &pending {
+        if payload["kind"] == "edit" {
+            assert_eq!(payload["revision"], 1, "{payload}");
+        }
+        if *id != stale {
+            project.json(&["proposal", "accept", &id.to_string()]);
+        }
     }
+    let seq = project.rows("SELECT MAX(seq) AS seq FROM audit")[0]["seq"].clone();
+    let refused = project.refused(&["proposal", "accept", &stale.to_string()]);
+    assert_eq!(refused["code"], "stale", "{refused}");
+    assert_eq!(refused["data"]["expected"], 1);
+    assert_eq!(refused["data"]["current"], 2);
+    assert_eq!(
+        project.rows("SELECT MAX(seq) AS seq FROM audit")[0]["seq"],
+        seq
+    );
+    assert_eq!(
+        project.rows(&format!("SELECT state FROM attention WHERE id = {stale}")),
+        vec![json!({ "state": "open" })]
+    );
+    // Reject it so no open edit proposal blocks the parent's readiness; the
+    // `admit::scheduled` sabotage below must be free to start it again.
+    project.json(&["proposal", "reject", &stale.to_string()]);
+
     assert_eq!(depends_on(&project, 1), [3, 4]);
     let parent = project.json(&["ticket", "show", "Y-1"]);
     assert_eq!(parent["body"], "The plan: A, then B.");
