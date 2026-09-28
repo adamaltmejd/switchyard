@@ -185,10 +185,18 @@ machine's credentials, one per connection, and the machine's own settings:
 `YARD_BOX_MEMORY` gives each box a share of memory. Neither is a project key.
 
 **Connections.** An agent's `provider` names a connection: an upstream
-origin and the header its key rides in. Yard hands the key to `box up` as a
+origin and the header its key rides in. Yard knows two, each with its key
+variable: `openrouter` (`https://openrouter.ai/api/v1`,
+`OPENROUTER_API_KEY`) and `opencode-go` (`https://opencode.ai/zen/go/v1`,
+`OPENCODE_API_KEY`), both as `Authorization: Bearer`. `operator.env` may set
+`YARD_ORIGIN_<NAME>` (`YARD_ORIGIN_OPENROUTER`) to another origin, `http`
+for a host service such as a local gateway. Yard hands the key to `box up` as a
 `from` variable read from `operator.env`, pinfold's injecting route adds it
 on the host side, and the harness is pointed at the route with a
-placeholder. Subscription logins are not a Yard concern: they arrive as
+placeholder. Pi takes one base URL per provider, so a Pi agent's model must
+be one Pi serves over its connection's OpenAI-compatible API; a model Pi's
+catalog serves over another API (OpenRouter's `anthropic/*`) cannot run
+through the route. Subscription logins are not a Yard concern: they arrive as
 pinfold login routes (pinfold #62), which Yard names and never reads.
 
 ## Tickets
@@ -517,9 +525,12 @@ resumes a session, the normalisation of its frames into `started`,
 Yard's staged MCP client extension. Extension discovery is off, and so are
 prompt templates and themes: the staged client is the only code that loads
 in the harness, so nothing a candidate commits runs with a worker's bearer.
-Context files (`AGENTS.md`, `CLAUDE.md`) and skills load as Pi finds them in
-`/workspace`, so every worker reads the project's own rules; Pi's user level
-is the attempt's harness state, which Yard owns and leaves empty. A
+Context files (`AGENTS.md`, `CLAUDE.md`) load as Pi finds them in
+`/workspace`, so every worker reads the project's own rules. Project skills
+and `.pi/` resources stay behind Pi's project trust, which Yard never grants:
+granting it would also load a candidate's `.pi/settings.json` and system
+prompt. Pi's user level is the attempt's harness state, which Yard owns and
+leaves empty. A
 candidate that edits that guidance changes what its own reviewers read, so
 the scaffold protects it (see Projects). An execution proceeds to its first turn
 only once the staged client has printed its registration line; whether every
