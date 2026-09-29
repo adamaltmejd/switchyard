@@ -189,6 +189,8 @@ fn a_ticket_edit_leaves_the_candidate_unverified() {
     assert_eq!(
         judged(&project, &head(&second)),
         vec![
+            ("gate".to_string(), revision),
+            ("review".to_string(), revision),
             ("gate".to_string(), revision + 1),
             ("review".to_string(), revision + 1),
         ]

@@ -841,11 +841,11 @@ pub async fn implement(
                 ticket: Some(ticket.id),
                 ..Default::default()
             })?;
+            // With an edit pending the implementer runs again.
+            if edited {
+                return Ok(());
+            }
             if workflow.read_only && !run.stopped {
-                // With an edit pending the implementer runs again.
-                if edited {
-                    return Ok(());
-                }
                 attempts::end(tx, attempt.id, "planned")?;
                 return super::audit_attempt(tx, "attempt.ended", &current, None, json!({ "outcome": "planned" })).map(|_| ());
             }
