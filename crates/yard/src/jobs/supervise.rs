@@ -751,7 +751,7 @@ async fn implementer_prompt(
         if workflow.read_only {
             prompt.push_str("Your workspace is read-only. Plan the work: propose child tickets and an edit of this ticket's body with yard_propose, then stop.\n\n");
         } else {
-            prompt.push_str("Work in /workspace on the current branch. Commit your work with git and leave the tree clean; uncommitted or untracked files send the work back to you. Do not change .yard/. Record progress with yard_progress. Files under /yard/proof are snapshotted with the candidate and never merged. Propose follow-up tickets with yard_propose; if the ticket is too large, propose the split and stop.\n\n");
+            prompt.push_str("Work in /workspace on the current branch. Commit your work with git and leave the tree clean; uncommitted or untracked files send the work back to you. Do not change .yard/. Record progress with yard_progress. Files under /yard/proof are snapshotted with the candidate and are not merged. Propose follow-up tickets with yard_propose; if the ticket is too large, propose the split and stop.\n\n");
         }
         if reason != "first"
             && let Some((base, head)) = attempt.candidate()
