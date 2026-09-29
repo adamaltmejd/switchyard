@@ -378,9 +378,16 @@ fn a_host_landing_gate_runs_on_the_merged_ref_only_when_approved() {
         "Changed",
     ]);
     std::fs::write(&resume, "go\n").unwrap();
-    watch.until("Y-2 approval again", |event| {
-        event["event"] == "attention.raised" && event["ticket"] == "Y-2"
+    // The first Y-2 event that decides the outcome: approval again, or the
+    // landing going ahead on the superseded candidate.
+    let decided = watch.until("Y-2 approval again or landing", |event| {
+        event["ticket"] == "Y-2"
+            && (event["event"] == "attention.raised"
+                || event["event"] == "landing.recorded"
+                || (event["event"] == "execution.started" && event["data"]["kind"] == "gate"))
     });
+    assert_eq!(decided["event"], "attention.raised", "{decided}");
+    assert_eq!(decided["data"]["kind"], "approval", "{decided}");
 
     let gates = gate_details(&project);
     assert_eq!(gates.len(), 1, "{gates:?}");

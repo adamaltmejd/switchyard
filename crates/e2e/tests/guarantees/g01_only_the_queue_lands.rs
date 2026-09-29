@@ -13,7 +13,10 @@ use std::sync::{Arc, Mutex};
 /// Sabotage: mount the project's `.yard/local` into the worker box at its
 /// host path; the push to canonical lands the commit. Mount the daemon's
 /// state dir (the socket) into the worker box; the socket call connects.
-/// Serve daemon methods on the MCP listener; the method is found.
+/// Accept an MCP request that carries no `Mcp-Session-Id` (skip the
+/// `in_session` check in `mcp::answer`); the probe gets a JSON-RPC answer,
+/// not the 404. A daemon method arm in `mcp::answer` alone is not detected:
+/// the sessionless probe is refused before the method is read.
 #[test]
 fn a_worker_cannot_land_by_push_rpc_or_canonical() {
     let probes = Arc::new(Mutex::new(String::new()));
