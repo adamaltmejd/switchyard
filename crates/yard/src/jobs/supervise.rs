@@ -109,6 +109,13 @@ pub async fn up_worker(
         Ok(live) => live,
         Err(error) => {
             daemon.grants.revoke(project, execution);
+            // The image may be gone from the runtime; forget it so the next
+            // attempt rebuilds. Rebuilding a present image is a cache hit.
+            daemon
+                .images
+                .lock()
+                .expect("images lock")
+                .retain(|_, (_, reference)| *reference != spec.image);
             return Err(Fail::new(
                 "box",
                 format!("the box did not come up: {error}"),
