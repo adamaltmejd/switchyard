@@ -711,3 +711,128 @@ fi
         );
     }
 }
+
+/// What a candidate's build or test does with the bearer it inherits: open
+/// a session of its own, then publish a pass. Prints each HTTP status.
+const ROGUE_SESSION: &str = r#"for m in '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"rogue","version":"1"}}}' '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"yard_publish_review","arguments":{"findings":[]}}}'; do curl -s -o /dev/null -w 'status=%{http_code} ' -X POST http://yard.mcp/mcp -H 'content-type: application/json' -H "authorization: Bearer $YARD_MCP_BEARER" -d "$m"; done"#;
+
+/// The seat's own publication is the one recorded, the rogue calls were
+/// each refused with a 404, and no publication was ever refused as a second.
+fn assert_own_session_only(
+    project: &Project,
+    machine: &Machine,
+    seat: impl Fn(&ModelRequest) -> bool,
+) {
+    assert_eq!(
+        project.rows("SELECT body FROM finding"),
+        vec![json!({ "body": "the seat's own" })],
+        "the rogue publication landed first"
+    );
+    assert!(
+        project
+            .rows("SELECT seq FROM audit WHERE event = 'tool.refused'")
+            .is_empty(),
+        "the seat's own publication was refused"
+    );
+    let requests = machine.model.requests();
+    assert!(
+        requests.iter().filter(|r| seat(r)).any(|request| request
+            .tool_results()
+            .iter()
+            .any(|(_, text)| text.contains("status=404 status=404"))),
+        "the rogue calls were not both refused with 404"
+    );
+}
+
+/// A process in a Pi seat that reads the inherited bearer and posts its own
+/// `initialize` then a publication: both are refused, and the seat's own
+/// publication through its session is the one recorded.
+///
+/// Sabotage: accept a second `initialize` in `Grants::open_session`.
+#[test]
+fn a_bearer_outside_the_harness_session_is_inert_in_a_pi_seat() {
+    let machine = Machine::new("g8-session-pi", |request| {
+        if !seat(&request) {
+            return implementer(request);
+        }
+        act(
+            request,
+            vec![
+                bash(ROGUE_SESSION),
+                publish(json!([{ "priority": "P3", "body": "the seat's own" }])),
+            ],
+        )
+    });
+    machine.start();
+    let project = Project::new(&machine, "p", &config(""));
+    let mut watch = project.watch(0);
+    project.json(&["ticket", "new", "--title", "Add feature"]);
+    let approval = watch.attention();
+    assert_eq!(approval["data"]["kind"], "approval", "{approval}");
+    assert_own_session_only(&project, &machine, |request| seat(&request));
+}
+
+/// The same in a Claude seat, whose client must keep one session through a
+/// normal run.
+///
+/// Sabotage: accept a second `initialize` in `Grants::open_session`.
+#[test]
+fn a_bearer_outside_the_harness_session_is_inert_in_a_claude_seat() {
+    let machine = Machine::new("g8-session-claude", |request| {
+        if !seat(&request) {
+            if request.opens() {
+                return Reply::Tools(vec![claude_commit_file("feature.txt", "feature\n", "Add")]);
+            }
+            return Reply::Text("done".into());
+        }
+        act(
+            request,
+            vec![
+                claude_bash(ROGUE_SESSION),
+                claude_publish(json!([{ "priority": "P3", "body": "the seat's own" }])),
+            ],
+        )
+    });
+    machine.write_claude_env();
+    machine.start();
+    let project = Project::new(&machine, "p", &claude_config(""));
+    let mut watch = project.watch(0);
+    project.json(&["ticket", "new", "--title", "Add feature"]);
+    let approval = watch.attention();
+    assert_eq!(approval["data"]["kind"], "approval", "{approval}");
+    assert_own_session_only(&project, &machine, |request| seat(&request));
+}
+
+/// The same in a Codex seat.
+///
+/// Sabotage: accept a second `initialize` in `Grants::open_session`.
+#[test]
+fn a_bearer_outside_the_harness_session_is_inert_in_a_codex_seat() {
+    let mut machine = Machine::new("g8-session-codex", |request| {
+        if codex_seat(request) {
+            return act(
+                request,
+                vec![
+                    codex_shell(ROGUE_SESSION),
+                    codex_publish(
+                        request,
+                        json!([{ "priority": "P3", "body": "the seat's own" }]),
+                    ),
+                ],
+            );
+        }
+        if request.opens() {
+            return Reply::Tools(vec![codex_commit_file("feature.txt", "feature\n", "Add")]);
+        }
+        Reply::Text("done".into())
+    });
+    let account_id = "acct-e2e-codex";
+    machine.write_codex_env(&codex_jwt(account_id, 3600), account_id);
+    machine.start();
+    let project = Project::new(&machine, "p", &codex_config(""));
+    let mut watch = project.watch(0);
+    project.json(&["ticket", "new", "--title", "Add feature"]);
+    let approval = watch.attention();
+    assert_eq!(approval["data"]["kind"], "approval", "{approval}");
+    assert_own_session_only(&project, &machine, codex_seat);
+}
