@@ -164,89 +164,24 @@ fn the_queue_lands_in_order_and_rejudges_a_red_merge() {
     }
 }
 
-/// A candidate that does not merge gets a repair naming the paths, and its
-/// next head takes gates, review and approval again.
-///
-/// Sabotage: drop the conflicting paths from `queue::land`'s detail; the
-/// repair prompt does not name `shared.txt`.
-#[test]
-fn a_candidate_that_does_not_merge_is_repaired_and_rejudged() {
-    let machine = Machine::new("g10-conflict", |request| {
-        if request.has_tool("yard_publish_review") {
-            return act(request, vec![publish(json!([]))]);
-        }
-        if request.opens() && request.last_user().contains("failed to land") {
-            return Reply::Tools(vec![merge_target()]);
-        }
-        let text = if request.prompt().contains("First") {
-            "first\n"
-        } else {
-            "second\n"
-        };
-        act(
-            request,
-            vec![commit_file("shared.txt", text, "Write shared")],
-        )
-    });
-    machine.start();
-    let project = Project::new(
-        &machine,
-        "p",
-        &config("[gates.check]\ncommand = \"test -f shared.txt\"\nstage = \"candidate\"\n"),
-    );
-    let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "First"]);
-    project.json(&["ticket", "new", "--title", "Second"]);
-    let first = approval_of(&mut watch, "Y-1");
-    let second = approval_of(&mut watch, "Y-2");
-    project.json(&["attempt", "approve", "Y-1", "--head", &first]);
-    watch.find("Y-1 landed", |event| {
-        event["event"] == "landing.recorded" && event["ticket"] == "Y-1"
-    });
-    project.json(&["attempt", "approve", "Y-2", "--head", &second]);
-
-    let repaired = next_approval_of(&mut watch, "Y-2");
-    assert_ne!(repaired, second);
-    let repair_prompt = machine
-        .model
-        .requests()
-        .into_iter()
-        .find(|request| request.opens() && request.last_user().contains("failed to land"))
-        .unwrap()
-        .last_user();
-    assert!(repair_prompt.contains("shared.txt"), "{repair_prompt}");
-    let judged = project.rows(&format!(
-        "SELECT kind FROM execution WHERE head = '{repaired}' AND kind IN ('gate', 'review') ORDER BY id"
-    ));
-    assert_eq!(
-        judged,
-        vec![json!({ "kind": "gate" }), json!({ "kind": "review" })]
-    );
-
-    project.json(&["attempt", "approve", "Y-2", "--head", &repaired]);
-    watch.find("Y-2 landed", |event| {
-        event["event"] == "landing.recorded" && event["ticket"] == "Y-2"
-    });
-    assert_eq!(
-        git(
-            &project.canonical(),
-            &["show", "refs/heads/main:shared.txt"]
-        ),
-        "second\n"
-    );
-}
-
 /// A conflict against a target that changed `.yard/config.toml`, in a clone
 /// made before it: the worker fetches the target from its bundle, merges,
 /// and the new candidate's base is the target, so it passes the `.yard`
-/// refusal and lands with the operator's configuration intact.
+/// refusal and lands with the operator's configuration intact. The repair
+/// names the conflicting path and takes fresh gates, review and approval.
+/// The old approval is retired; the repair cannot land before its new
+/// approval, whose successful landing is the control for G2.
 ///
-/// Sabotage: make `supervise::implement` keep the old base when the target
-/// becomes an ancestor of the head; the merged candidate touches `.yard`
-/// and is refused.
+/// Sabotage: keep the old base after the target becomes an ancestor; the
+/// merged candidate touches `.yard` and is refused. Drop conflicting paths
+/// from `queue::land`'s detail; the prompt omits `shared.txt`. Keep the old
+/// approval active in `queue::returned`; the retirement assertion fails.
 #[test]
 fn a_conflict_with_a_config_change_merges_from_the_bundle() {
     let machine = Machine::new("g10-config", |request| {
+        if request.has_tool("yard_publish_review") {
+            return act(request, vec![publish(json!([]))]);
+        }
         if request.opens() && request.last_user().contains("failed to land") {
             return Reply::Tools(vec![merge_target()]);
         }
@@ -256,7 +191,7 @@ fn a_conflict_with_a_config_change_merges_from_the_bundle() {
         )
     });
     machine.start();
-    let base = config("").replace("review = [\"correctness\"]", "review = \"none\"");
+    let base = config("[gates.check]\ncommand = \"test -f shared.txt\"\nstage = \"candidate\"\n");
     let project = Project::new(&machine, "p", &base);
     let mut watch = project.watch(0);
     project.json(&["ticket", "new", "--title", "Write shared"]);
@@ -279,13 +214,47 @@ fn a_conflict_with_a_config_change_merges_from_the_bundle() {
     });
     assert_eq!(repair["data"]["outcome"], "candidate", "{repair}");
     let repaired = next_approval_of(&mut watch, "Y-1");
+    assert_ne!(repaired, head);
+    assert_eq!(
+        git(
+            &project.canonical(),
+            &["rev-parse", &format!("{repaired}^")]
+        )
+        .trim(),
+        head
+    );
+    let repair_prompt = machine
+        .model
+        .requests()
+        .into_iter()
+        .find(|request| request.opens() && request.last_user().contains("failed to land"))
+        .unwrap()
+        .last_user();
+    assert!(repair_prompt.contains("shared.txt"), "{repair_prompt}");
+    assert_eq!(
+        project.rows(&format!("SELECT kind FROM execution WHERE head = '{repaired}' AND kind IN ('gate', 'review') ORDER BY id")),
+        vec![json!({ "kind": "gate" }), json!({ "kind": "review" })]
+    );
+    // The old approval cannot carry to the repaired commit; the renewed
+    // approval item has not been answered and nothing has landed.
+    assert_eq!(
+        project.rows("SELECT head, state FROM approval ORDER BY id"),
+        vec![json!({ "head": head, "state": "retired" })]
+    );
+    assert_eq!(
+        project.rows("SELECT head, outcome FROM execution WHERE kind = 'landing' ORDER BY id"),
+        vec![json!({ "head": head, "outcome": "conflict" })]
+    );
+    assert_eq!(project.canonical_head(), target);
     let attempt = project.json(&["attempt", "show", "Y-1"]);
     assert_eq!(attempt["attempt"]["base"], target.as_str(), "{attempt}");
 
     project.json(&["attempt", "approve", "Y-1", "--head", &repaired]);
-    watch.find("Y-1 landed", |event| {
-        event["event"] == "landing.recorded" && event["ticket"] == "Y-1"
+    let landed = watch.until("Y-1 landing or refusal", |event| {
+        event["ticket"] == "Y-1"
+            && (event["event"] == "landing.recorded" || event["event"] == "attention.raised")
     });
+    assert_eq!(landed["event"], "landing.recorded", "{landed}");
     assert_eq!(
         git(
             &project.canonical(),
