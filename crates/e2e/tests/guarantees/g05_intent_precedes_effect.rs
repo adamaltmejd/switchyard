@@ -19,8 +19,8 @@ fn mkfifo(path: &Path) {
 /// call: it says `held` on one FIFO and waits for a line on another.
 fn hold_pinfold(machine: &Machine, verb: &str) -> (std::path::PathBuf, Held) {
     let armed = machine.root.join("armed");
-    let said = machine.root.join("said");
-    let release = machine.root.join("release");
+    let said = machine.root.join(format!("said-{verb}"));
+    let release = machine.root.join(format!("release-{verb}"));
     mkfifo(&said);
     mkfifo(&release);
     machine.wrapper(
@@ -55,47 +55,11 @@ impl Held {
     }
 }
 
-/// Intent is ordered before effect: an execution's audit event precedes
-/// its box's creation. The worker's `box up` is held; while it is, the
-/// execution's row and event exist.
-///
-/// Sabotage: make `admit::admit` record the first execution after its box
-/// is up; the held `box up` finds no row.
-#[test]
-fn an_executions_row_and_event_precede_box_creation() {
-    let machine = Machine::new("g5-intent", |request| {
-        act(
-            request,
-            vec![commit_file("feature.txt", "feature\n", "Add feature")],
-        )
-    });
-    let (armed, held) = hold_pinfold(&machine, "up");
-    machine.start();
-    let project = Project::new(&machine, "p", &config(""));
-    let mut watch = project.watch(0);
-    std::fs::write(&armed, "").unwrap();
-    project.json(&["ticket", "new", "--title", "Add feature"]);
-    held.wait(Some(&mut watch));
-
-    let started =
-        project.rows("SELECT execution, data FROM audit WHERE event = 'execution.started'");
-    assert_eq!(started.len(), 1, "{started:?}");
-    let execution = started[0]["execution"].as_i64().unwrap();
-    assert_eq!(
-        project.rows(&format!(
-            "SELECT kind, status, handle FROM execution WHERE id = {execution}"
-        )),
-        vec![json!({ "kind": "implementation", "status": "running", "handle": null })]
-    );
-
-    // Let the held call go, so no wrapper outlives the test.
-    std::fs::remove_file(&armed).unwrap();
-    held.release();
-}
-
 /// The daemon killed mid-execution: on restart the execution is
 /// `interrupted`, no second box exists, the tree is kept, and `start`
-/// continues. The worker wrote a file and is held on its next request when
+/// continues. Its row and event exist while box up is held before invocation;
+/// no command is answered while startup reconciliation is held.
+/// The worker wrote a file and is held on its next request when
 /// the daemon dies.
 ///
 /// Sabotage: make `reconcile::project` leave running implementations
@@ -120,13 +84,33 @@ fn a_daemon_killed_mid_execution_interrupts_it_and_start_continues() {
             _ => Reply::Hold(held.clone(), Box::new(Reply::Text("never".into()))),
         }
     });
+    let (armed, held_up) = hold_pinfold(&machine, "up");
     machine.start();
     let project = Project::new(
         &machine,
         "p",
         &config("").replace("review = [\"correctness\"]", "review = \"none\""),
     );
+    let mut intent_watch = project.watch(0);
+    std::fs::write(&armed, "").unwrap();
     project.json(&["ticket", "new", "--title", "Add feature"]);
+    // Before invoking box up, the row and its event are already committed.
+    // Sabotage: record the first execution only after box up returns.
+    held_up.wait(Some(&mut intent_watch));
+    let started =
+        project.rows("SELECT execution, data FROM audit WHERE event = 'execution.started'");
+    assert_eq!(started.len(), 1, "{started:?}");
+    let execution = started[0]["execution"].as_i64().unwrap();
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT kind, status, handle FROM execution WHERE id = {execution}"
+        )),
+        vec![json!({ "kind": "implementation", "status": "running", "handle": null })]
+    );
+
+    std::fs::remove_file(&armed).unwrap();
+    held_up.release();
+    drop(intent_watch);
     hold.wait_held();
     let clone = project.path.join(".yard/local/attempts/1/clone");
     // The project's label, as pinfold reports it on the held worker's box.
@@ -153,7 +137,17 @@ fn a_daemon_killed_mid_execution_interrupts_it_and_start_continues() {
         "feature\n"
     );
 
-    machine.start();
+    // No command can observe the unreconciled running turn.
+    // Sabotage: bind the daemon socket before reconciliation commits.
+    let (armed, held_list) = hold_pinfold(&machine, "list");
+    std::fs::write(&armed, "").unwrap();
+    let lines = machine.spawn();
+    held_list.wait(None);
+    let refused = project.refused(&["status"]);
+    assert_eq!(refused["code"], "daemon", "{refused}");
+    std::fs::remove_file(&armed).unwrap();
+    held_list.release();
+    Machine::serving(&lines);
     assert_eq!(
         project.rows("SELECT id, status, outcome FROM execution"),
         vec![json!({ "id": 1, "status": "ended", "outcome": "interrupted" })]
@@ -264,44 +258,4 @@ fn a_daemon_killed_during_a_host_landing_gate_leaves_no_group() {
     release.write_all(b"go\n").unwrap();
     watch.event("landing.recorded", &[]);
     assert_eq!(project.json(&["ticket", "show", "Y-1"])["state"], "done");
-}
-
-/// No command is answered before reconciliation has committed. The
-/// restart's reconciliation is held at its first pinfold call, with an
-/// interrupted execution still to reconcile: the CLI finds no daemon.
-/// Released, the first answer already shows the execution interrupted.
-///
-/// Sabotage: make `daemon::serve` bind the socket before reconciling;
-/// `status` answers while the execution still reads `running`.
-#[test]
-fn no_command_is_answered_before_reconciliation() {
-    let hold = Latch::new();
-    let held = hold.clone();
-    let machine = Machine::new("g5-serve", move |_| {
-        Reply::Hold(held.clone(), Box::new(Reply::Text("never".into())))
-    });
-    let (armed, pinfold) = hold_pinfold(&machine, "list");
-    machine.start();
-    let project = Project::new(&machine, "p", &config(""));
-    project.json(&["ticket", "new", "--title", "Hold"]);
-    hold.wait_held();
-    machine.kill();
-
-    assert_eq!(
-        project.rows("SELECT status FROM execution"),
-        vec![json!({ "status": "running" })]
-    );
-
-    std::fs::write(&armed, "").unwrap();
-    let lines = machine.spawn();
-    pinfold.wait(None);
-    let refused = project.refused(&["status"]);
-    assert_eq!(refused["code"], "daemon", "{refused}");
-
-    std::fs::remove_file(&armed).unwrap();
-    pinfold.release();
-    Machine::serving(&lines);
-    let status = project.json(&["status"]);
-    assert_eq!(status["attention"][0]["reason"], "interrupted", "{status}");
-    hold.release();
 }
