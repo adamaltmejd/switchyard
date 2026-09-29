@@ -629,7 +629,7 @@ pub async fn restart() -> Result<Value, Fail> {
         service(&["systemctl", "--user", "restart", "yard.service"])?;
     }
     let deadline = tokio::time::Instant::now() + RESTART_BOUND;
-    let mut last = "no answer".to_string();
+    let mut last;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         match tokio::time::timeout(remaining, api::call(&socket, "daemon.status", json!({}))).await
