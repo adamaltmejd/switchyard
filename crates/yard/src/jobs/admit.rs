@@ -127,6 +127,10 @@ fn admit(
 
 pub async fn status(daemon: &Daemon, project: &Project) -> Result<Value, Fail> {
     let loaded = load(daemon, project).await.ok();
+    let no_lane = match &loaded {
+        Some(loaded) => free_lanes(daemon, project, loaded)? <= 0,
+        None => false,
+    };
     let now = store::now_ms();
     project.read(|conn| {
         let tickets: Vec<Value> = tickets::list(conn)?
@@ -134,19 +138,25 @@ pub async fn status(daemon: &Daemon, project: &Project) -> Result<Value, Fail> {
             .filter(|ticket| ticket.state == "open")
             .map(|ticket| {
                 let mut value = ticket.to_json();
-                let mut waiting = Vec::new();
-                for on in tickets::dependencies(conn, ticket.id)? {
+                let edges = tickets::dependencies(conn, ticket.id)?;
+                let mut unfinished = Vec::new();
+                for &on in &edges {
                     if tickets::get(conn, on)?.state != "done" {
-                        waiting.push(ticket_name(on));
+                        unfinished.push(ticket_name(on));
                     }
                 }
-                value["depends_on"] = json!(waiting);
-                value["ready"] = json!(tickets::blocker(conn, ticket.id)?.is_none());
-                value["outcome"] = json!(
-                    attempts::latest_for(conn, ticket.id)?
-                        .filter(|attempt| attempt.state == "ended")
-                        .and_then(|attempt| attempt.outcome)
-                );
+                value["depends_on"] =
+                    json!(edges.iter().map(|on| ticket_name(*on)).collect::<Vec<_>>());
+                value["waiting_on"] = json!(unfinished);
+                // The scheduler skips a read-only workflow's ticket once it has run.
+                let skipped = loaded.as_ref().is_some_and(|loaded| {
+                    loaded
+                        .config
+                        .workflow(&ticket.workflow)
+                        .is_ok_and(|workflow| workflow.read_only)
+                }) && attempts::latest_for(conn, ticket.id)?.is_some();
+                value["no_lane"] =
+                    json!(no_lane && !skipped && tickets::blocker(conn, ticket.id)?.is_none());
                 Ok(value)
             })
             .collect::<Result<_, Fail>>()?;
@@ -154,17 +164,9 @@ pub async fn status(daemon: &Daemon, project: &Project) -> Result<Value, Fail> {
             .iter()
             .map(|attempt| {
                 let mut value = attempt.to_json();
-                let workflow = loaded
-                    .as_ref()
-                    .and_then(|loaded| loaded.config.workflow(&attempt.workflow).ok());
                 let spent =
                     attempt.work_ms + attempt.lane_since.map(|since| now - since).unwrap_or(0);
                 value["work_ms"] = json!(spent.max(0));
-                value["work_limit_ms"] =
-                    json!(workflow.map(|workflow| workflow.total_work_timeout_minutes * 60_000));
-                value["max_rounds"] = json!(loaded.as_ref().map(|loaded| i64::from(
-                    loaded.config.review.max_rounds
-                ) + attempt.extra_rounds));
                 value
             })
             .collect();
@@ -183,20 +185,11 @@ pub async fn status(daemon: &Daemon, project: &Project) -> Result<Value, Fail> {
                 )
             })
             .collect::<Result<_, Fail>>()?;
-        let started: std::collections::HashMap<i64, i64> = store::all(
-            conn,
-            "SELECT id, unixepoch(started_at) * 1000 FROM execution WHERE status = 'running'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?
-        .into_iter()
-        .collect();
         let activity = daemon.activity.lock().expect("activity lock");
         let running: Vec<Value> = executions::running(conn)?
             .iter()
             .map(|execution| {
                 let mut value = execution.to_json();
-                value["started_ms"] = json!(started.get(&execution.id));
                 value["quiet_ms"] = json!(
                     activity
                         .get(&(project.key.clone(), execution.id))
@@ -207,7 +200,6 @@ pub async fn status(daemon: &Daemon, project: &Project) -> Result<Value, Fail> {
             .collect();
         Ok(json!({
             "seq": store::last_seq(conn)?,
-            "now_ms": now,
             "tickets": tickets,
             "attempts": attempts,
             "attention": attention,
