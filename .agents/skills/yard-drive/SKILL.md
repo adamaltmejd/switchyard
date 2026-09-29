@@ -10,11 +10,12 @@ see `yard-operator`; for filing work, see `yard-file`.
 
 ## The loop
 
-`yard status --watch --since SEQ --json` prints every event after `SEQ`.
-After every decision you make, your next command is the watch again,
-because your decision usually causes the next event. The open attention
-items in `yard status --json` are decisions you still owe; a later watch
-never replays their events. If nothing is running and nothing is open, the
+`yard status --watch --json` returns as soon as an attention item is open
+and prints the open items. After every decision you make, your next command
+is the watch again; sync when woken. The open attention items in `yard
+status --json` are decisions you still owe. `yard status --history --since
+SEQ --json` follows the audit stream from `SEQ` when you need history; it is
+the only history view. If nothing is running and nothing is open, the
 next step is yours: file, unpark or start work, or report that the board is
 idle and give its `seq`.
 

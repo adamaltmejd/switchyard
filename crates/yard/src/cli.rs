@@ -27,12 +27,16 @@ enum Command {
     Doctor,
     /// Import the checkout's branch into canonical, or consume canonical into it.
     Sync,
-    /// The project's tickets, attempts and attention; `--watch` follows events.
+    /// The project's tickets, attempts and attention.
     Status {
-        #[arg(long)]
+        /// Return as soon as an attention item is open; print the open items.
+        #[arg(long, conflicts_with = "history")]
         watch: bool,
-        #[arg(long, default_value_t = 0, requires = "watch")]
-        since: i64,
+        /// Follow the audit stream from --since, one line per event.
+        #[arg(long, conflicts_with = "watch")]
+        history: bool,
+        #[arg(long, requires = "history", conflicts_with = "watch")]
+        since: Option<i64>,
     },
     #[command(subcommand)]
     Daemon(DaemonCommand),
@@ -271,11 +275,19 @@ async fn dispatch(cli: &Cli) -> Result<Option<Value>, Fail> {
             let (method, params) = method("project", command);
             return api::call(&socket, &method, params).await.map(Some);
         }
-        Command::Status { watch: true, since } => {
+        Command::Status {
+            history: true,
+            since,
+            ..
+        } => {
             let project = find_project(&start)?;
-            return watch(&socket, &project, *since, cli.json)
+            return history(&socket, &project, since.unwrap_or(0), cli.json)
                 .await
                 .map(|()| None);
+        }
+        Command::Status { watch: true, .. } => {
+            let project = find_project(&start)?;
+            return watch(&socket, &project, cli.json).await.map(|()| None);
         }
         Command::Doctor => ("doctor".into(), json!({})),
         Command::Sync => ("sync".into(), json!({})),
@@ -323,8 +335,26 @@ fn find_project(start: &Path) -> Result<String, Fail> {
     }
 }
 
+/// Return as soon as at least one attention item is open; print the open
+/// items.
+async fn watch(socket: &Path, project: &str, json: bool) -> Result<(), Fail> {
+    loop {
+        let result = api::call(socket, "attention", json!({ "project": project })).await?;
+        let items = result["attention"].as_array().cloned().unwrap_or_default();
+        if !items.is_empty() {
+            let text = if json {
+                Value::Array(items).to_string()
+            } else {
+                render_attention(&items).trim_end().to_string()
+            };
+            let _ = write_line(&text);
+            return Ok(());
+        }
+    }
+}
+
 /// Follow the audit stream from `since`, one line per event.
-async fn watch(socket: &Path, project: &str, since: i64, json: bool) -> Result<(), Fail> {
+async fn history(socket: &Path, project: &str, since: i64, json: bool) -> Result<(), Fail> {
     let mut seq = since;
     let width = terminal_width();
     loop {
@@ -438,24 +468,31 @@ fn render_status(status: &Value) -> String {
     let attention = array(status, "attention");
     if !attention.is_empty() {
         out.push_str("attention\n");
-        for item in attention {
-            out.push_str(&format!(
-                "  #{}  {}  {}  {}\n",
-                item["attention"].as_i64().unwrap_or_default(),
-                field(item, "kind"),
-                field(item, "reason"),
-                field(item, "ticket"),
-            ));
-            for command in exit_commands(item) {
-                out.push_str(&format!("    {command}\n"));
-            }
-        }
+        out.push_str(&render_attention(attention));
     }
 
     out.push_str(&format!(
         "seq {}",
         status["seq"].as_i64().unwrap_or_default()
     ));
+    out
+}
+
+/// The open attention items, as the `status` board lists them.
+fn render_attention(items: &[Value]) -> String {
+    let mut out = String::new();
+    for item in items {
+        out.push_str(&format!(
+            "  #{}  {}  {}  {}\n",
+            item["attention"].as_i64().unwrap_or_default(),
+            field(item, "kind"),
+            field(item, "reason"),
+            field(item, "ticket"),
+        ));
+        for command in exit_commands(item) {
+            out.push_str(&format!("    {command}\n"));
+        }
+    }
     out
 }
 
