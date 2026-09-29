@@ -142,7 +142,6 @@ fn a_ticket_lands_end_to_end_and_leaves_only_rows() {
         "attempt.admitted",
         "attempt.candidate",
         "attempt.stopped",
-        "attempt.nudged",
         "attempt.abandoned",
         "attempt.ended",
         "execution.started",

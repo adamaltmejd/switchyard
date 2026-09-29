@@ -144,6 +144,8 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
         let published = checks::for_execution(tx, execution)?;
         let failure = match (&published, &run.registered, &run.terminal) {
             (Some(_), _, _) => None,
+            // An edit stopped the seat: it judged nothing and is not an error.
+            (None, _, _) if run.stopped => None,
             // A refused registration ends the run before a terminal frame, so
             // name its reason rather than the generic no-publication error.
             (None, Some(crate::harness::Registration::Refused(reason)), _) => Some(reason.clone()),
@@ -155,6 +157,7 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
         };
         let outcome = match &failure {
             Some(_) => "error",
+            None if run.stopped && published.is_none() => "stopped",
             None => published
                 .as_ref()
                 .map_or("error", |check| check.verdict.as_str()),

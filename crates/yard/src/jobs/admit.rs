@@ -483,7 +483,7 @@ pub async fn ticket_edit(
             .map_err(Fail::invalid)?;
     }
     let priority = priority_param(&params["priority"])?;
-    project.tx(|tx| {
+    let stops = project.tx(|tx| {
         edit(
             tx,
             id,
@@ -494,11 +494,13 @@ pub async fn ticket_edit(
             workflow.as_deref(),
         )
     })?;
+    stop_executions(daemon, project, &stops);
     project.read(|conn| Ok(tickets::get(conn, id)?.to_json()))
 }
 
 /// One ticket edit: bumps the revision, which supersedes every check and
-/// approval item that read the old one.
+/// approval item that read the old one, and steers the ticket's live attempt:
+/// the implementer runs next. Returns the gate and review executions to stop.
 fn edit(
     tx: &rusqlite::Connection,
     id: i64,
@@ -507,7 +509,7 @@ fn edit(
     body: Option<&str>,
     priority: Option<i64>,
     workflow: Option<&str>,
-) -> Result<(), Fail> {
+) -> Result<Vec<i64>, Fail> {
     let ticket = tickets::get(tx, id)?;
     if ticket.revision != revision {
         return Err(Fail::stale(
@@ -538,7 +540,60 @@ fn edit(
         json!({ "revision": revision + 1, "title": title, "body_bytes": body.map(str::len),
                 "priority": priority, "workflow": workflow }),
     )?;
-    Ok(())
+    steer(tx, id)
+}
+
+/// Make the live attempt run its implementer next. An implementer already
+/// running finishes first and sees the edit when it ends.
+fn steer(tx: &rusqlite::Connection, id: i64) -> Result<Vec<i64>, Fail> {
+    let Some(attempt) = attempts::live_for(tx, id)? else {
+        return Ok(Vec::new());
+    };
+    let running: Vec<_> = executions::for_attempt(tx, attempt.id)?
+        .into_iter()
+        .filter(|row| row.status == "running")
+        .collect();
+    if running.iter().any(|row| row.kind == "implementation") {
+        return Ok(Vec::new());
+    }
+    if let Some(item) = attempts::open_for_attempt(tx, attempt.id)?
+        .iter()
+        .find(|item| item.kind == "stopped")
+    {
+        attempts::resolve(tx, item, "edit", None)?;
+        match item.reason.as_str() {
+            "timeout" => {
+                tx.execute(
+                    "UPDATE attempt SET work_ms = 0, lane_since = CASE WHEN lane = 1 THEN ?2 ELSE lane_since END WHERE id = ?1",
+                    rusqlite::params![attempt.id, store::now_ms()],
+                )?;
+            }
+            "limit" => {
+                tx.execute(
+                    "UPDATE attempt SET extra_rounds = extra_rounds + 1 WHERE id = ?1",
+                    [attempt.id],
+                )?;
+            }
+            _ => {}
+        }
+    }
+    if attempt.next.is_none() {
+        attempts::set_next(tx, attempt.id, Some(&json!({ "reason": "edit" })))?;
+    }
+    Ok(running
+        .iter()
+        .filter(|row| row.parent.is_none() && matches!(row.kind.as_str(), "gate" | "review"))
+        .map(|row| row.id)
+        .collect())
+}
+
+fn stop_executions(daemon: &Daemon, project: &Project, executions: &[i64]) {
+    let stops = daemon.stops.lock().expect("stops lock");
+    for execution in executions {
+        if let Some(stop) = stops.get(&(project.key.clone(), *execution)) {
+            stop.notify_one();
+        }
+    }
 }
 
 pub fn ticket_park(project: &Project, params: &Value, parked: bool) -> Result<Value, Fail> {
@@ -716,7 +771,7 @@ async fn answer_start(
 ) -> Result<Value, Fail> {
     if !item.exits().contains(&"start") {
         return Err(Fail::refused(format!(
-            "a stopped:{} item exits only by nudge or abandon",
+            "a stopped:{} item exits only by edit or abandon",
             item.reason
         )));
     }
@@ -804,51 +859,6 @@ pub fn attempt_stop(daemon: &Daemon, project: &Project, params: &Value) -> Resul
         )
     })?;
     Ok(json!({ "stopping": running.id }))
-}
-
-pub fn attempt_nudge(project: &Project, params: &Value) -> Result<Value, Fail> {
-    let id = ticket_param(params)?;
-    let text = params["text"].as_str().unwrap_or_default();
-    if text.trim().is_empty() {
-        return Err(Fail::invalid("a nudge carries text"));
-    }
-    project.tx(|tx| {
-        let attempt = attempts::live_for(tx, id)?
-            .ok_or_else(|| Fail::refused(format!("{} has no live attempt", ticket_name(id))))?;
-        let items = attempts::open_for_attempt(tx, attempt.id)?;
-        let queued = match &attempt.nudge {
-            Some(earlier) => format!("{earlier}\n\n{text}"),
-            None => text.to_string(),
-        };
-        tx.execute(
-            "UPDATE attempt SET nudge = ?2 WHERE id = ?1",
-            rusqlite::params![attempt.id, queued],
-        )?;
-        if let Some(item) = items
-            .iter()
-            .find(|item| item.kind == "stopped" || item.kind == "red")
-        {
-            attempts::resolve(tx, item, "nudge", Some(text))?;
-            match item.reason.as_str() {
-                "timeout" => {
-                    tx.execute(
-                        "UPDATE attempt SET work_ms = 0, lane_since = CASE WHEN lane = 1 THEN ?2 ELSE lane_since END WHERE id = ?1",
-                        rusqlite::params![attempt.id, store::now_ms()],
-                    )?;
-                }
-                "limit" => {
-                    tx.execute(
-                        "UPDATE attempt SET extra_rounds = extra_rounds + 1 WHERE id = ?1",
-                        [attempt.id],
-                    )?;
-                }
-                _ => {}
-            }
-            attempts::set_next(tx, attempt.id, Some(&json!({ "reason": "nudge" })))?;
-        }
-        super::audit_attempt(tx, "attempt.nudged", &attempt, Some(text), json!({}))
-    })?;
-    Ok(json!({ "nudged": ticket_name(id) }))
 }
 
 /// The open approval item on a ticket's live attempt, checked against the
@@ -996,16 +1006,7 @@ pub fn attempt_abandon(daemon: &Daemon, project: &Project, params: &Value) -> Re
             .map(|row| row.id)
             .collect::<Vec<_>>())
     })?;
-    for execution in running {
-        if let Some(stop) = daemon
-            .stops
-            .lock()
-            .expect("stops lock")
-            .get(&(project.key.clone(), execution))
-        {
-            stop.notify_one();
-        }
-    }
+    stop_executions(daemon, project, &running);
     Ok(json!({ "abandoned": ticket_name(id) }))
 }
 

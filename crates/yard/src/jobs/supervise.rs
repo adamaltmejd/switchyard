@@ -464,8 +464,8 @@ pub async fn implement(
     };
     project.read(|conn| {
         conn.execute(
-            "UPDATE attempt SET next = NULL, nudge = NULL WHERE id = ?1",
-            [attempt.id],
+            "UPDATE attempt SET next = NULL, body_read = ?2 WHERE id = ?1",
+            rusqlite::params![attempt.id, ticket.body],
         )?;
         conn.execute(
             "UPDATE execution SET resumed = ?2 WHERE id = ?1",
@@ -680,9 +680,13 @@ pub async fn implement(
             }
             _ => None,
         };
+        // An edit made while this execution ran reaches the implementer
+        // before anything judges its candidate; an expired clock still waits
+        // for the edit that renews it.
+        let edited = tickets::get(tx, ticket.id)?.revision != ticket.revision;
         let stop = |tx: &rusqlite::Connection, reason: &str, detail: &str| -> Result<(), Fail> {
-            if current.nudge.is_some() && reason != "timeout" {
-                return attempts::set_next(tx, attempt.id, Some(&json!({ "reason": "nudge" })));
+            if edited && reason != "timeout" {
+                return attempts::set_next(tx, attempt.id, Some(&json!({ "reason": "edit" })));
             }
             attempts::raise(tx, attempts::Raise {
                 kind: "stopped",
@@ -823,10 +827,8 @@ pub async fn implement(
             "base": base, "head": new_head, "proof": digest,
             "proof_path": proof::snapshot_path(project, attempt.id, &digest).display().to_string(),
         }))?;
-        // A nudge queued during the execution reaches the implementer before
-        // anything judges the candidate.
-        if current.nudge.is_some() {
-            attempts::set_next(tx, attempt.id, Some(&json!({ "reason": "nudge" })))?;
+        if edited {
+            attempts::set_next(tx, attempt.id, Some(&json!({ "reason": "edit" })))?;
         }
         Ok(())
     })
@@ -842,7 +844,6 @@ async fn implementer_prompt(
     resumed: bool,
 ) -> Result<String, Fail> {
     let next = attempt.next.clone().unwrap_or(json!({}));
-    let nudge = attempt.nudge.as_deref();
     let workflow = loaded.config.workflow(&attempt.workflow)?;
     let mut prompt = String::new();
     if !resumed {
@@ -918,13 +919,49 @@ async fn implementer_prompt(
         "restart" | "retry" if resumed => prompt.push_str("Continue the work.\n"),
         _ => {}
     }
-    if let Some(nudge) = nudge {
-        prompt.push_str(&format!("\nThe operator says:\n{nudge}\n"));
+    if resumed
+        && let Some(read) = attempt
+            .body_read
+            .as_deref()
+            .filter(|read| *read != ticket.body)
+    {
+        let diff = body_diff(daemon, project, attempt.id, read, &ticket.body).await?;
+        prompt.push_str(&format!("\nThe operator edited the ticket:\n{diff}\n"));
     }
     if prompt.trim().is_empty() {
         prompt.push_str("Continue the work.\n");
     }
     Ok(prompt)
+}
+
+/// The unified diff from the body the previous execution read to the current one.
+async fn body_diff(
+    daemon: &Daemon,
+    project: &Project,
+    attempt: i64,
+    before: &str,
+    after: &str,
+) -> Result<String, Fail> {
+    let dir = project.attempt_dir(attempt).join("edit");
+    std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    std::fs::write(dir.join("before"), before).map_err(|error| error.to_string())?;
+    std::fs::write(dir.join("after"), after).map_err(|error| error.to_string())?;
+    let out = daemon
+        .git
+        .run(
+            &dir,
+            &["diff", "--no-index", "--no-color", "--", "before", "after"],
+        )
+        .await?;
+    let _ = std::fs::remove_dir_all(&dir);
+    if out.code > 1 {
+        return Err(Fail::from(format!(
+            "git diff exited {}: {}",
+            out.code,
+            out.stderr.trim()
+        )));
+    }
+    Ok(out.stdout)
 }
 
 /// One gate on one commit: a candidate-stage gate, or a landing's child.
@@ -954,6 +991,12 @@ pub async fn gate(
         Some(landing) => super::queue::landing_dir(project, landing),
         None => project.attempt_dir(attempt.id),
     };
+    let stop = Arc::new(tokio::sync::Notify::new());
+    daemon
+        .stops
+        .lock()
+        .expect("stops lock")
+        .insert((project.key.clone(), execution), stop.clone());
     let checkout = dir.join("gates").join(execution.to_string());
     let outcome = match loaded.config.gates.iter().find(|gate| gate.name == name) {
         None => Err(format!("gate {name} is no longer configured")),
@@ -976,6 +1019,7 @@ pub async fn gate(
                             &checkout,
                             &base,
                             proof.as_deref(),
+                            &stop,
                         )
                         .await
                     }
@@ -989,6 +1033,7 @@ pub async fn gate(
                             lock,
                             &base,
                             proof.as_deref(),
+                            &stop,
                         )
                         .await
                     }
@@ -998,7 +1043,9 @@ pub async fn gate(
     };
     let _ = std::fs::remove_dir_all(&checkout);
     let log = dir.join("gates").join(format!("{execution}.log"));
+    let stopped = matches!(&outcome, Ok(result) if result.stopped);
     let (verdict, detail, code, oom) = match outcome {
+        Ok(result) if result.stopped => ("stopped", String::new(), None, None),
         Ok(result) => {
             let _ = std::fs::write(&log, &result.output);
             let tail = tail(&result.output);
@@ -1020,7 +1067,7 @@ pub async fn gate(
                 ..Default::default()
             },
         )?;
-        if row.parent.is_some() {
+        if row.parent.is_some() || stopped {
             return Ok(());
         }
         if verdict == "error" {
@@ -1052,6 +1099,8 @@ pub async fn gate(
 }
 
 pub struct GateResult {
+    /// An edit stopped the gate; nothing it produced counts.
+    pub stopped: bool,
     pub code: i32,
     pub output: String,
     pub oom: Option<u64>,
@@ -1073,6 +1122,7 @@ async fn box_gate(
     checkout: &Path,
     base: &str,
     proof: Option<&Path>,
+    stop: &tokio::sync::Notify,
 ) -> Result<GateResult, String> {
     let image = image(daemon, project, loaded)
         .await
@@ -1120,29 +1170,39 @@ async fn box_gate(
     };
     let _ = project
         .read(|conn| executions::set_handle(conn, execution, &live.name, live.image_id.as_deref()));
-    let result = daemon
-        .pinfold
-        .exec(
-            &live.name,
-            Some("/workspace"),
-            &["sh".to_string(), "-c".to_string(), gate.command.clone()],
-            Duration::from_secs(gate.timeout_minutes * 60),
-        )
-        .await;
+    let argv = ["sh".to_string(), "-c".to_string(), gate.command.clone()];
+    let exec = daemon.pinfold.exec(
+        &live.name,
+        Some("/workspace"),
+        &argv,
+        Duration::from_secs(gate.timeout_minutes * 60),
+    );
+    let result = tokio::select! {
+        result = exec => Some(result),
+        _ = stop.notified() => None,
+    };
     let oom = daemon.pinfold.oom_kills(&live.name).await;
     let _ = live.down(DOWN_TIMEOUT).await;
     match result {
-        Ok(out) => Ok(GateResult {
+        None => Ok(GateResult {
+            stopped: true,
+            code: 0,
+            output: String::new(),
+            oom,
+        }),
+        Some(Ok(out)) => Ok(GateResult {
+            stopped: false,
             code: out.code,
             output: format!("{}{}", out.stdout, out.stderr),
             oom,
         }),
-        Err(crate::r#box::ExecError::Timeout) => Ok(GateResult {
+        Some(Err(crate::r#box::ExecError::Timeout)) => Ok(GateResult {
+            stopped: false,
             code: 124,
             output: format!("the gate ran past its {} minutes", gate.timeout_minutes),
             oom,
         }),
-        Err(error) => Err(format!("the gate could not run: {error}")),
+        Some(Err(error)) => Err(format!("the gate could not run: {error}")),
     }
 }
 
@@ -1164,6 +1224,7 @@ async fn host_gate(
     lock: Option<&Lock>,
     base: &str,
     proof: Option<&Path>,
+    stop: &tokio::sync::Notify,
 ) -> Result<GateResult, String> {
     let own;
     let lock = match lock {
@@ -1230,19 +1291,31 @@ async fn host_gate(
         );
         (stdout + &stderr, child.wait().await)
     };
-    match tokio::time::timeout(limit, run).await {
+    let kill = || {
+        let _ = nix::sys::signal::killpg(
+            nix::unistd::Pid::from_raw(pid as i32),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    };
+    let timed = tokio::select! {
+        result = tokio::time::timeout(limit, run) => result,
+        _ = stop.notified() => {
+            kill();
+            return Ok(GateResult { stopped: true, code: 0, output: String::new(), oom: None });
+        }
+    };
+    match timed {
         Ok((output, Ok(status))) => Ok(GateResult {
+            stopped: false,
             code: crate::git::exit_code(status),
             output,
             oom: None,
         }),
         Ok((_, Err(error))) => Err(format!("the host gate could not run: {error}")),
         Err(_) => {
-            let _ = nix::sys::signal::killpg(
-                nix::unistd::Pid::from_raw(pid as i32),
-                nix::sys::signal::Signal::SIGKILL,
-            );
+            kill();
             Ok(GateResult {
+                stopped: false,
                 code: 124,
                 output: format!("the gate ran past its {} minutes", gate.timeout_minutes),
                 oom: None,

@@ -125,14 +125,21 @@ fn a_new_commit_leaves_the_candidate_unverified() {
     assert_eq!(second["payload"]["checks"], json!(checks));
 }
 
-/// A passed gate and review, then a ticket edit: the candidate is
-/// unverified, though its head is the same.
+/// A passed gate and review, then a ticket edit: the approval is superseded
+/// and the implementer runs again, so the new candidate is judged afresh at
+/// the new revision.
 ///
-/// Sabotage: drop `ticket_revision` from `checks::current`'s match; the
-/// approval comes back on revision 1's gate and review.
+/// Sabotage: make `admit::steer` set nothing; the approval is superseded but
+/// no implementer runs, and no second approval comes.
 #[test]
 fn a_ticket_edit_leaves_the_candidate_unverified() {
-    let machine = Machine::new("g2-edit", worker("never", bash("true")));
+    let machine = Machine::new(
+        "g2-edit",
+        worker(
+            "nothing else",
+            bash("cd /workspace && git commit -q --allow-empty -m Again && echo committed"),
+        ),
+    );
     machine.start();
     let project = Project::new(&machine, "p", &config(GATE));
     let mut watch = project.watch(0);
@@ -160,17 +167,103 @@ fn a_ticket_edit_leaves_the_candidate_unverified() {
     ]);
     let second = approval(&mut watch);
 
-    assert_eq!(head(&second), head(&first));
+    assert_ne!(head(&second), head(&first));
     assert_eq!(second["payload"]["revision"], revision + 1);
+    let superseded = project.rows(&format!(
+        "SELECT resolution FROM attention WHERE id = {}",
+        first["id"]
+    ));
+    assert_eq!(superseded[0]["resolution"], "superseded");
+    let reasons =
+        project.rows("SELECT reason FROM execution WHERE kind = 'implementation' ORDER BY id");
+    assert_eq!(reasons.last().unwrap()["reason"], "edit");
     assert_eq!(
-        judged(&project, &head(&first)),
+        judged(&project, &head(&second)),
         vec![
-            ("gate".to_string(), revision),
-            ("review".to_string(), revision),
             ("gate".to_string(), revision + 1),
             ("review".to_string(), revision + 1),
         ]
     );
+}
+
+/// A seat held mid-review, then a ticket edit: the seat stops and its box
+/// is gone before the implementer runs for the edit, and the round count
+/// is unchanged. Control: the seat's box is listed while the fixture holds
+/// it.
+///
+/// Sabotage: make `admit::steer` return no executions to stop; the seat
+/// stays held, its box stays listed and no implementer starts.
+#[test]
+fn an_edit_stops_a_held_seat_and_costs_no_round() {
+    let hold = Latch::new();
+    let held = hold.clone();
+    let machine = Machine::new("g2-held", move |request| {
+        if request.has_tool("yard_publish_review") {
+            return Reply::Hold(
+                held.clone(),
+                Box::new(Reply::Tools(vec![publish(json!([]))])),
+            );
+        }
+        if request.opens() && request.last_user().contains("The operator edited") {
+            return Reply::Tools(vec![bash(
+                "cd /workspace && git commit -q --allow-empty -m Again && echo committed",
+            )]);
+        }
+        act(
+            request,
+            vec![commit_file("feature.txt", "feature\n", "Add feature")],
+        )
+    });
+    machine.start();
+    let project = Project::new(&machine, "p", &config(""));
+    let mut watch = project.watch(0);
+    project.json(&[
+        "ticket",
+        "new",
+        "--title",
+        "Add feature",
+        "--body",
+        "Create it",
+    ]);
+    hold.wait_held();
+    let handle =
+        project.rows("SELECT handle FROM execution WHERE kind = 'review'")[0]["handle"].clone();
+    let listed = |machine: &Machine| {
+        machine
+            .boxes("dev.yard.project")
+            .iter()
+            .any(|listed| listed["name"] == handle)
+    };
+    assert!(
+        listed(&machine),
+        "the held seat's box {handle} is not listed"
+    );
+
+    let revision = project.json(&["ticket", "show", "Y-1"])["revision"].to_string();
+    project.json(&[
+        "ticket",
+        "edit",
+        "Y-1",
+        "--revision",
+        &revision,
+        "--body",
+        "Create it, twice",
+    ]);
+    watch.until("the edit's implementer", |event| {
+        event["event"] == "execution.started"
+            && event["ticket"] == "Y-1"
+            && event["data"]["reason"] == "edit"
+    });
+    assert!(!listed(&machine), "the seat's box {handle} is still up");
+    assert_eq!(
+        project.rows("SELECT outcome FROM execution WHERE kind = 'review' ORDER BY id")[0]["outcome"],
+        "stopped"
+    );
+    assert_eq!(
+        project.rows("SELECT rounds FROM attempt")[0]["rounds"],
+        json!(0)
+    );
+    hold.release();
 }
 
 /// A synced gate change reruns the gate and keeps the review.

@@ -37,7 +37,7 @@ an implementer call, one reviewer seat, one gate command, one landing, one
 cleanup. It has one identity, one external handle once it has one, and one
 terminal outcome. Box-backed executions own a box; host-backed ones
 (landing, cleanup, a host gate) have bounded host effects and are recovered
-from the effect they leave. A repair, a nudge, a retry and a
+from the effect they leave. A repair, an edit, a retry and a
 resumed session are each a new execution; statistics are per execution.
 _Avoid_: generation, call, task, run, step
 
@@ -270,10 +270,15 @@ split and stops.
    the ticket is not ready or no lane is free. On a ticket whose live
    attempt has a `stopped` or `red` item it is that item's `start`.
 4. **Work.** An execution runs the implementer in a box with the clone
-   mounted as the workflow's `access` says and the MCP route. A
-   nudge queues one message and delivers it at the next execution boundary;
-   it never interrupts. A nudge queued while the implementer runs starts it
-   again when that execution ends, before anything judges its candidate. `stop` ends the execution now and keeps the tree.
+   mounted as the workflow's `access` says and the MCP route. A ticket edit steers a live attempt and never interrupts a running implementer:
+   when that execution ends the implementer runs again, before anything
+   judges its candidate; `stop` then `start` delivers it sooner. An edit
+   while gates or review run stops them now (boxes down, checks superseded)
+   and a stopped review is not a round; while the candidate awaits approval
+   or is queued it supersedes the approval. An edit on a `stopped` item
+   resolves it. A fresh session gets the whole body; a resumed one gets the
+   body diff since the revision it last read, labelled as the operator's
+   edit; seats always get the whole body. `stop` ends the execution now and keeps the tree.
    The attempt's inactivity and total-work clocks end it the same way. When
    the worker stops, Yard asks git inside its box whether the clone is
    clean before the box comes down: a clean committed head is a candidate;
@@ -287,8 +292,8 @@ split and stops.
    the candidate's diff stat and the attempt's progress notes, and the count
    starts again. Spend is bounded by the attempt's total-work clock alone:
    it counts wall time while the attempt holds a lane, across every
-   execution and every wait, nothing automatic resets it, and only a nudge
-   renews it. Expiry ends the running execution as `timeout` and starts
+   execution and every wait, nothing automatic resets it, and only an edit
+   on a `timeout` item renews it. Expiry ends the running execution as `timeout` and starts
    nothing automatic. An approved candidate holds no lane, so expiry never
    touches an approval, the queue or a landing.
 5. **Gate.** Candidate-stage gates run on the head in a private writable
@@ -360,7 +365,7 @@ A worker execution records, on its row: agent, harness and its version
 fails if a harness has no pin), provider,
 model, effort, the execution it resumed and its session id, start
 and end, exit cause, tokens in and out, reported cost, and the reason it was
-started (`first`, `repair`, `nudge`, `retry`, `dirty`, `restart`).
+started (`first`, `repair`, `edit`, `retry`, `dirty`, `restart`).
 A gate execution records gate name, verdict, exit code, duration and the
 box's OOM count. Every operator decision
 records the exact target it acted on and the text it carried. These rows are
@@ -400,8 +405,8 @@ surface reads that declaration.
 |---|---|---|
 | `approval` | a candidate is verified and `approve` is `manual`, or it touches a protected path | approve, reject, abandon |
 | `proposal` | a worker proposes | accept, reject |
-| `stopped` | an execution ended without a candidate advancing: `unchanged`, `dirty`, `failed`, `interrupted`, `timeout`, `limit` | start, nudge, abandon; on `timeout` and `limit` only nudge, abandon |
-| `red` | a gate error, a review error, a second landing red, a landing that could not run, a landing intent canonical cannot decide, an execution that could not record its own end (`error`) | start, nudge, abandon; on a landing's item only start |
+| `stopped` | an execution ended without a candidate advancing: `unchanged`, `dirty`, `failed`, `interrupted`, `timeout`, `limit` | start, edit, abandon; on `timeout` and `limit` only edit, abandon |
+| `red` | a gate error, a review error, a second landing red, a landing that could not run, a landing intent canonical cannot decide, an execution that could not record its own end (`error`) | start, abandon; on a landing's item only start |
 
 `start` always means "try again from here". After an implementer stop it
 starts the next implementer execution. On a gate or review error it reruns
@@ -409,9 +414,9 @@ that check on the same candidate. On a landing that could not run it
 re-queues the candidate under its existing approval. On an undecided landing
 intent it reads canonical against the restart table again, typically after
 the operator has repaired canonical by hand; while canonical still decides
-nothing the item stays. On `timeout` a nudge renews the total-work clock; on
-`limit` it allows one more review round; either way its text reaches the
-next implementer execution.
+nothing the item stays. On `timeout` an edit renews the total-work clock; on
+`limit` it allows one more review round; either way the implementer runs
+next.
 
 A candidate waiting in the queue raises nothing. A landing whose target
 moved raises nothing. An item is resolved in the transaction of the command that
@@ -431,7 +436,7 @@ The events, each naming its ticket, attempt, execution or attention target:
 `sync.imported`, `sync.consumed`; `ticket.new`, `ticket.edited`,
 `ticket.parked`, `ticket.unparked`, `ticket.linked`, `ticket.done`,
 `ticket.abandoned`; `attempt.admitted`, `attempt.candidate`,
-`attempt.stopped`, `attempt.nudged`, `attempt.abandoned`, `attempt.ended`;
+`attempt.stopped`, `attempt.abandoned`, `attempt.ended`;
 `execution.started`, `execution.ended`; `check.recorded`; `approval.given`,
 `approval.ended`; `landing.intent`, `landing.recorded`; `attention.raised`,
 `attention.resolved`; `tool.refused`.
@@ -673,7 +678,7 @@ yard init | doctor | sync | status [--watch | --history [--since SEQ]] [--json]
 yard daemon run | install | uninstall | status | restart
 yard project list | forget
 yard ticket new | show | edit | park | unpark | depend | list | done | abandon
-yard attempt start | stop | nudge | approve | reject | abandon | show | diff | tail
+yard attempt start | stop | approve | reject | abandon | show | diff | tail
 yard proposal accept | reject
 yard version
 ```
@@ -697,14 +702,14 @@ G15. Each is shown by one or more end-to-end scenarios; testing policy is in
 | # | Guarantee | Shown by |
 |---|---|---|
 | 1 | Only the queue lands | A worker with its MCP bearer and its clone: `git push` fails, no RPC lands, canonical is not reachable from the box. Control: the queue lands the same candidate. |
-| 2 | Judgments bind exact identity | A passed gate and review, then a new commit and a ticket edit each leave the candidate unverified; a synced gate change reruns the gate and keeps the review, a synced seat change the reverse. A repair that changes only the proof snapshot, with an unchanged head, is a new candidate: its gate reruns and the old check does not count. An approve or reject names the head and, when the candidate has a proof snapshot, its digest; a delayed answer naming the old digest is stale and writes no row, and the new digest answers. An approval given with `--head`, then a repair commit: the approval does not carry and `approval` is raised again; under `auto` a protected path still raises it. An automatic approval, then a sync that protects its path or sets `approve = "manual"`: the landing withdraws it, raises `approval` and reruns no check; with the attempt abandoned while the landing re-reads it, nothing is raised. An approve naming an old candidate, an edit naming an old revision, and an accepted edit proposal whose ticket moved each get a stale result and change no row. |
+| 2 | Judgments bind exact identity | A passed gate and review, then a new commit and a ticket edit each leave the candidate unverified (an edit supersedes the approval and the implementer runs, its candidate judged at the new revision); an edit while a seat is held stops that seat, its box is gone before the implementer runs, and the round count is unchanged; a synced gate change reruns the gate and keeps the review, a synced seat change the reverse. A repair that changes only the proof snapshot, with an unchanged head, is a new candidate: its gate reruns and the old check does not count. An approve or reject names the head and, when the candidate has a proof snapshot, its digest; a delayed answer naming the old digest is stale and writes no row, and the new digest answers. An approval given with `--head`, then a repair commit: the approval does not carry and `approval` is raised again; under `auto` a protected path still raises it. An automatic approval, then a sync that protects its path or sets `approve = "manual"`: the landing withdraws it, raises `approval` and reruns no check; with the attempt abandoned while the landing re-reads it, nothing is raised. An approve naming an old candidate, an edit naming an old revision, and an accepted edit proposal whose ticket moved each get a stale result and change no row. |
 | 3 | Landing is compare-and-swap and proved | Canonical moved by hand between verify and land: the landing retires and re-queues. On green, canonical is the verified ref and contains the head. The daemon killed after `update-ref`, before the landing is recorded: before restart canonical is the merged head, the intent is unresolved and no landing is recorded; on restart it is recorded once, no merge runs, the ticket closes. The daemon killed while its `update-ref` is held: restart keeps the intent and raises `red`; once the command is released, `start` records the landing once. A ticket edit racing the landing intent is refused naming the intent. |
 | 4 | Capacity holds | Two `attempt start`s race for the last lane: one wins and a ticket never has two live attempts. Two registered projects: `YARD_MAX_LANES` bounds attempts across both, and each keeps its own store; an execution ending in one leaves the other's execution of the same id its bearer. A candidate returned from the queue for repair takes a freed lane before a ready ticket is admitted. |
 | 5 | Intent precedes effect, and a restart loses only the turn | Intent is ordered before effect: an execution's audit event precedes its box's creation time in `pinfold box list` and the fixture's first request. The daemon killed mid-execution: on restart the execution is `interrupted`, no second box exists, the tree is kept, and `start` continues. The daemon killed while a host landing gate runs: the gate's group is gone after restart and the landing re-queues. No command is answered before reconciliation has committed. |
 | 6 | Inputs are validated at the boundary | A malformed tool payload, a TOML with an unknown key, an unknown workflow name, a sync that removes a workflow an open ticket names: refused by name, nothing written. |
 | 7 | A ticket lands end to end and leaves only rows | New ticket, worker commit, candidate gate, review pass, approval, green landing: canonical moves and the ticket is done. The proof snapshot on the host holds what the worker wrote before landing. Afterwards every decision has one audit event naming its target and text, the execution rows carry tokens, cost, model and start reason, every event is one the Store section names, the attempt directory with its proof snapshot, boxes and proof copies are gone, the approval row and each check's execution carry the proof digest, and another live attempt's directory and canonical are untouched. A `status --watch` returns an approval already open when it starts at once, and one started with nothing open returns when the next item is raised. |
-| 8 | Review is a publication, and bounded | A seat that exits 0 without publishing is a review error; a seat killed after publishing has published; a second publication is refused; findings below `blocking` pass; a panel of `none` reaches approval marked unreviewed; a seat that publishes a block and is then held by the fixture: no repair starts until its box is gone; a seat that always blocks gets exactly `max_rounds` rounds, then `stopped:limit`. A candidate that commits a `.pi` extension which publishes a pass: nothing loads it, and the seat's own publication is the one recorded. Control: the seat's prompt carries a rule from the project's `AGENTS.md`. A candidate that commits a Claude plugin, settings hook and a `.mcp.json` server which publish a pass: nothing loads them, and the seat's own publication is the one recorded. Control: the seat's prompt carries the committed `CLAUDE.md` rule. A candidate that commits a `.codex/config.toml` naming an MCP server that publishes a pass: nothing loads it, the seat's own publication is the one recorded, and the rogue server leaves no marker. Control: the seat's context carries the committed `AGENTS.md` rule. A seat that publishes with no registration proof does not count, and a fresh seat runs. A gate error's `start` reruns that gate on the same head. |
-| 9 | Each implementer execution starts from the right place | A nudge mid-execution lets the execution end on its own and reaches the next prompt; `stop` delivers it sooner. A worker that leaves an untracked file gets no review and the next prompt lists the file; left again, `stopped:dirty`. With `max_session_executions = 2`: the second execution resumes the first, the third resumes nothing and its prompt is the brief, the fourth resumes the third, the fifth resumes nothing. |
+| 8 | Review is a publication, and bounded | A seat that exits 0 without publishing is a review error; a seat killed after publishing has published; a second publication is refused; findings below `blocking` pass; a panel of `none` reaches approval marked unreviewed; a seat that publishes a block and is then held by the fixture: no repair starts until its box is gone; a seat that always blocks gets exactly `max_rounds` rounds, then `stopped:limit`, and an edit then grants one more round. A candidate that commits a `.pi` extension which publishes a pass: nothing loads it, and the seat's own publication is the one recorded. Control: the seat's prompt carries a rule from the project's `AGENTS.md`. A candidate that commits a Claude plugin, settings hook and a `.mcp.json` server which publish a pass: nothing loads them, and the seat's own publication is the one recorded. Control: the seat's prompt carries the committed `CLAUDE.md` rule. A candidate that commits a `.codex/config.toml` naming an MCP server that publishes a pass: nothing loads it, the seat's own publication is the one recorded, and the rogue server leaves no marker. Control: the seat's context carries the committed `AGENTS.md` rule. A seat that publishes with no registration proof does not count, and a fresh seat runs. A gate error's `start` reruns that gate on the same head. |
+| 9 | Each implementer execution starts from the right place | An edit mid-execution lets the execution end on its own and reaches the next prompt as a diff, with no gate run between; `stop` delivers it sooner. A worker that leaves an untracked file gets no review and the next prompt lists the file; left again, `stopped:dirty`. With `max_session_executions = 2`: the second execution resumes the first, the third resumes nothing and its prompt is the brief, the fourth resumes the third, the fifth resumes nothing. |
 | 10 | The queue lands one at a time and re-judges what does not merge | Three approved candidates, the second red on its merged ref: the first lands, the second gets one repair and a second red raises `red`, the third lands on the moved target with its own gate run. A candidate that does not merge gets a repair naming the paths, and its next head takes gates, review and approval again. A conflict against a target that changed `.yard/config.toml`, in a clone made before it: the worker fetches the target from its bundle, merges, and the new candidate's base is the target, so it passes the `.yard` refusal and lands with the operator's configuration intact. |
 | 11 | Only the operator's sync changes `.yard` and canonical from outside | A worker commit under `.yard` comes back with the reason and no gate runs; the same change through `yard sync` is in force for the next execution. A checkout and canonical that each hold a commit the other lacks: both directions refuse naming both heads; a fast-forward passes. |
 | 12 | Boxes hold nothing secret | The key is absent from the box's environment and clone; the fixture behind the injecting route receives it. The claude token is absent from the box's environment, files and clone; the fixture behind the login route receives it as `Authorization: Bearer`. The codex host login is absent from the box's environment, files and clone; the fixture behind the login route receives it as `Authorization: Bearer` with `ChatGPT-Account-ID`. |

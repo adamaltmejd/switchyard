@@ -17,6 +17,19 @@ fn openings(machine: &Machine) -> Vec<ModelRequest> {
         .collect()
 }
 
+fn edit_body(project: &Project, body: &str) {
+    let revision = project.json(&["ticket", "show", "Y-1"])["revision"].to_string();
+    project.json(&[
+        "ticket",
+        "edit",
+        "Y-1",
+        "--revision",
+        &revision,
+        "--body",
+        body,
+    ]);
+}
+
 fn reasons(project: &Project) -> Vec<Value> {
     project
         .rows("SELECT reason FROM execution WHERE kind = 'implementation' ORDER BY id")
@@ -51,53 +64,67 @@ fn held_worker(hold: &Latch) -> impl Fn(&ModelRequest) -> Reply + Send + Sync + 
     }
 }
 
-/// A nudge mid-execution lets the execution end on its own and reaches the
-/// next prompt: the held worker commits only once released, so its
-/// execution ends as a candidate where a stop would end it unchanged, and
-/// the next execution opens with the nudge.
+/// An edit mid-execution lets the execution end on its own and reaches the
+/// next prompt as a diff of the body: the held worker commits only once
+/// released, so its execution ends as a candidate where a stop would end it
+/// unchanged. No gate or seat runs on that candidate before the next
+/// execution, which opens with the edit's diff and is labelled as the
+/// operator's.
 ///
-/// Sabotage: make `admit::attempt_nudge` notify the stop signal; the held
-/// execution ends unchanged. Or make `supervise::implement` leave a nudge
-/// queued after a candidate; review none approves the first head and the
-/// nudge is never delivered.
+/// Sabotage: make `admit::steer` notify the stop signal of a running
+/// implementer; the held execution ends unchanged. Or make
+/// `supervise::implement` ignore the edit after a candidate; the first head
+/// reaches approval and the edit is never delivered.
 #[test]
-fn a_nudge_mid_execution_reaches_the_next_prompt() {
+fn an_edit_mid_execution_reaches_the_next_prompt() {
     let hold = Latch::new();
-    let machine = Machine::new("g9-nudge", held_worker(&hold));
+    let machine = Machine::new("g9-edit", held_worker(&hold));
     machine.start();
-    let project = Project::new(&machine, "p", &unreviewed(""));
+    let gate = "[gates.check]\ncommand = \"true\"\nstage = \"candidate\"\n";
+    let project = Project::new(&machine, "p", &unreviewed(gate));
     let mut watch = project.watch(0);
     project.json(&["ticket", "new", "--title", "Add feature"]);
     hold.wait_held();
 
-    project.json(&["attempt", "nudge", "Y-1", "--text", "Rename it too"]);
+    edit_body(&project, "Rename it too");
     hold.release();
 
     let approval = watch.attention();
     assert_eq!(approval["data"]["kind"], "approval", "{approval}");
-    assert_eq!(reasons(&project), [json!("first"), json!("nudge")]);
+    assert_eq!(reasons(&project), [json!("first"), json!("edit")]);
     let first = watch.find("the first execution ended", |event| {
         event["event"] == "execution.ended" && event["data"]["kind"] == "implementation"
     });
     assert_eq!(first["data"]["outcome"], "candidate", "{first}");
-    assert!(openings(&machine)[1].last_user().contains("Rename it too"));
+    let second = openings(&machine)[1].last_user();
+    assert!(
+        second.contains("The operator edited the ticket"),
+        "{second}"
+    );
+    assert!(second.contains("+Rename it too"), "{second}");
     let head = approval["data"]["payload"]["head"].as_str().unwrap();
     assert_eq!(
         git(
             &project.canonical(),
             &["show", &format!("{head}:renamed.txt")]
         ),
-        "renamed\n"
+        "renamed
+"
+    );
+    // No gate ran on the first candidate: every gate ran on the second head.
+    assert_eq!(
+        project.rows("SELECT DISTINCT head FROM execution WHERE kind = 'gate'"),
+        vec![json!({ "head": head })]
     );
 }
 
-/// `stop` delivers a queued nudge sooner: the worker is still held when the
-/// execution ends, and the next execution opens with the nudge.
+/// `stop` delivers an edit sooner: the worker is still held when the
+/// execution ends, and the next execution opens with the edit's diff.
 ///
 /// Sabotage: make `admit::attempt_stop` skip notifying the execution; it
 /// runs on and nothing reaches the next prompt.
 #[test]
-fn stop_delivers_a_nudge_sooner() {
+fn stop_delivers_an_edit_sooner() {
     let hold = Latch::new();
     let machine = Machine::new("g9-stop", held_worker(&hold));
     machine.start();
@@ -106,13 +133,13 @@ fn stop_delivers_a_nudge_sooner() {
     project.json(&["ticket", "new", "--title", "Add feature"]);
     hold.wait_held();
 
-    project.json(&["attempt", "nudge", "Y-1", "--text", "Rename it now"]);
+    edit_body(&project, "Rename it now");
     project.json(&["attempt", "stop", "Y-1"]);
     let approval = watch.attention();
     assert_eq!(approval["data"]["kind"], "approval", "{approval}");
     assert!(hold.is_held(), "the worker's request was answered");
-    assert_eq!(reasons(&project), [json!("first"), json!("nudge")]);
-    assert!(openings(&machine)[1].last_user().contains("Rename it now"));
+    assert_eq!(reasons(&project), [json!("first"), json!("edit")]);
+    assert!(openings(&machine)[1].last_user().contains("+Rename it now"));
     hold.release();
 }
 

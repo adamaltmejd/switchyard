@@ -37,10 +37,10 @@ item's exit names.
   notes back as a repair.
 - `proposal` — `yard proposal accept ID` or `yard proposal reject ID`,
   where `ID` is the attention id.
-- `stopped` — `yard attempt start Y-n`, `yard attempt nudge Y-n --text T`,
-  or abandon. On `timeout` and `limit` only nudge and abandon; a nudge's
-  text reaches the next execution.
-- `red` — the same three, except a landing's item (no `attempt`) exits only
+- `stopped` — `yard attempt start Y-n`, `yard ticket edit Y-n`, or abandon.
+  On `timeout` and `limit` only edit and abandon; the edit reaches the next
+  execution as a diff.
+- `red` — `start` or abandon, except a landing's item (no `attempt`) exits only
   `yard attempt start Y-n`.
 
 ## Judging and syncing

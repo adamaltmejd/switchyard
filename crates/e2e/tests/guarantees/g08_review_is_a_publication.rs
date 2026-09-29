@@ -174,7 +174,10 @@ fn findings_below_blocking_pass() {
     let seats = AtomicUsize::new(0);
     let machine = Machine::new("g8-blocking", move |request| {
         if !seat(&request) {
-            if request.opens() && request.last_user().contains("Review blocked") {
+            if request.opens()
+                && (request.last_user().contains("Review blocked")
+                    || request.last_user().contains("The operator edited"))
+            {
                 return Reply::Tools(vec![repair()]);
             }
             return implementer(request);
@@ -309,10 +312,12 @@ fn no_repair_starts_until_a_blocking_seats_box_is_gone() {
 }
 
 /// A seat that always blocks gets exactly `max_rounds` rounds, then
-/// `stopped:limit`.
+/// `stopped:limit`. An edit then grants one more round: a third review runs
+/// and blocks, and `stopped:limit` is raised again.
 ///
 /// Sabotage: compare `rounds > limit` in `review::blocked`; a third round
-/// runs.
+/// runs before the edit. Drop the `extra_rounds` bump in `admit::steer`; the
+/// edit's implementer runs but no third review follows.
 #[test]
 fn a_seat_that_always_blocks_gets_max_rounds() {
     let machine = Machine::new("g8-limit", |request| {
@@ -322,7 +327,10 @@ fn a_seat_that_always_blocks_gets_max_rounds() {
                 vec![publish(json!([{ "priority": "P0", "body": "never" }]))],
             );
         }
-        if request.opens() && request.last_user().contains("Review blocked") {
+        let prompt = request.last_user();
+        if request.opens()
+            && (prompt.contains("Review blocked") || prompt.contains("The operator edited"))
+        {
             return Reply::Tools(vec![repair()]);
         }
         implementer(request)
@@ -343,6 +351,24 @@ fn a_seat_that_always_blocks_gets_max_rounds() {
     );
     assert_eq!(kinds(&project, "review").len(), 2);
     assert_eq!(kinds(&project, "implementation").len(), 2);
+    let revision = project.json(&["ticket", "show", "Y-1"])["revision"].to_string();
+    project.json(&[
+        "ticket",
+        "edit",
+        "Y-1",
+        "--revision",
+        &revision,
+        "--body",
+        "Add the feature, differently",
+    ]);
+    let again = watch.attention();
+    assert_eq!(
+        (&again["data"]["kind"], &again["data"]["reason"]),
+        (&json!("stopped"), &json!("limit")),
+        "{again}"
+    );
+    assert_eq!(kinds(&project, "review").len(), 3);
+    assert_eq!(kinds(&project, "implementation").len(), 3);
 }
 
 /// A candidate that commits a `.pi` extension which publishes a pass:

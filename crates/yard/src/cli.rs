@@ -147,11 +147,6 @@ enum AttemptCommand {
     Stop {
         ticket: String,
     },
-    Nudge {
-        ticket: String,
-        #[arg(long)]
-        text: String,
-    },
     Approve {
         ticket: String,
         /// The candidate head this approval binds.

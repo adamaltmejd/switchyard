@@ -183,4 +183,10 @@ ALTER TABLE "check" DROP COLUMN digest;
 ALTER TABLE "check" DROP COLUMN image_id;
 ALTER TABLE "check" DROP COLUMN round;
 "#,
+    // A ticket edit steers a live attempt: nudges go, and the attempt keeps the
+    // body its implementer last read so a resumed session gets the diff.
+    r#"
+ALTER TABLE attempt DROP COLUMN nudge;
+ALTER TABLE attempt ADD COLUMN body_read TEXT;
+"#,
 ];

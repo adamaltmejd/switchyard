@@ -24,9 +24,9 @@ idle and give its `seq`.
 Answer each item with one of its `exits`. Nothing else.
 
 - `start` retries from where the item stopped. It is never a fresh attempt.
-- `nudge --text` reaches the next implementer execution. It never
-  interrupts the current one. On `timeout` it renews the clock; on `limit`
-  it allows one more review round.
+- `edit` (`yard ticket edit`) resolves a `stopped` item and runs the
+  implementer next. On `timeout` it renews the clock; on `limit` it allows
+  one more review round.
 - If no exit seems to fit, read the item's `reason`, `yard attempt show`,
   and the exit's `--help`. If still unsure, leave the item open and ask. An
   open item costs nothing; an abandoned attempt costs its whole run.
@@ -63,11 +63,12 @@ Then run `yard sync` to bring it into your checkout.
   binding, a fail-safe path, or data that cannot be rebuilt.
 - File a ticket for what clears the admission rule (`yard-file`).
 
-## Nudge, edit, retire
+## Edit, retire
 
-- The reviewer judges the ticket body and never sees a nudge. To change
-  what is asked, run `yard ticket edit Y-n --revision R`. This supersedes
-  every check on the old revision.
+- The ticket body is the one text the implementer and reviewer read. To
+  change what is asked mid-attempt, run `yard ticket edit Y-n --revision R`.
+  A running implementer finishes first; `stop` then `start` delivers it
+  sooner. Gates and review stop now, and an approval is superseded.
 - If the premise has moved so far that the built work is wrong, file a
   fresh ticket instead of editing.
 - To retire a ticket: `yard ticket park`, then `yard attempt abandon
