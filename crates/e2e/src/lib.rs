@@ -10,7 +10,7 @@ pub mod model;
 
 pub use model::*;
 use serde_json::Value;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::OnceLock;
@@ -463,18 +463,24 @@ impl<'a> Project<'a> {
         rows.map(Result::unwrap).collect()
     }
 
-    /// Follow the audit stream from `since`.
+    /// Follow the audit stream from `since` with `status --history`.
     pub fn watch(&self, since: i64) -> Watch {
         let mut child = self
             .machine
             .command()
             .current_dir(&self.path)
-            .args(["status", "--watch", "--since", &since.to_string(), "--json"])
+            .args([
+                "status",
+                "--history",
+                "--since",
+                &since.to_string(),
+                "--json",
+            ])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
-            .expect("spawn yard status --watch");
+            .expect("spawn yard status --history");
         let (send, heard) = mpsc::channel();
         let stdout = child.stdout.take().unwrap();
         let events = send.clone();
@@ -494,7 +500,7 @@ impl<'a> Project<'a> {
     }
 }
 
-/// `yard status --watch`: every event since a sequence, in order.
+/// `yard status --history`: every event since a sequence, in order.
 pub struct Watch {
     child: Child,
     /// A FIFO's text joins the events, so one wait covers both.
@@ -602,6 +608,41 @@ impl Watch {
 enum Heard {
     Event(String),
     Said(String),
+}
+
+/// Spawn `yard status --watch --json`, which exits once an item is open.
+pub fn watch_attention(project: &Project<'_>) -> Child {
+    project
+        .machine
+        .command()
+        .current_dir(&project.path)
+        .args(["status", "--watch", "--json"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("spawn yard status --watch")
+}
+
+/// Wait for a `status --watch` child to exit and parse the items it printed.
+#[track_caller]
+pub fn attention_items(mut child: Child) -> Vec<Value> {
+    let stdout = child.stdout.take().expect("piped stdout");
+    let (send, heard) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = BufReader::new(stdout).read_to_string(&mut text);
+        let _ = send.send(text);
+    });
+    let text = heard.recv_timeout(DEADLINE).unwrap_or_else(|_| {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("yard status --watch did not exit within {DEADLINE:?}");
+    });
+    let status = child.wait().expect("wait for yard status --watch");
+    assert!(status.success(), "yard status --watch failed");
+    let items: Value = serde_json::from_str(&text).expect("status --watch prints JSON");
+    items.as_array().cloned().unwrap_or_default()
 }
 
 /// `Watch::said` where no daemon serves a watch.

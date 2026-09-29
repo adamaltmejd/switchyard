@@ -86,7 +86,7 @@ without a guarantee in ARCHITECTURE.md that needs it.
      identity it names. A timeout is not a pass.
   3. Names its sabotage: the change to the binary that makes it fail, in
      the test's comment.
-- **Deterministic.** No sleeps: wait on `status --watch --since`. No
+- **Deterministic.** No sleeps: wait on `status --history --since`. No
   retries: a flaky test is a bug to fix or delete. No test waits out a
   timeout or a clock; timeouts are configuration, not guarantees. The
   workers are real Pi in real boxes against a scripted fake model on the

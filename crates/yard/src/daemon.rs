@@ -64,7 +64,7 @@ pub struct Project {
     pub store: Mutex<Store>,
     /// Every canonical mutation serialises here.
     pub canonical: tokio::sync::Mutex<()>,
-    /// Wakes `status --watch` readers after a write.
+    /// Wakes `status --history` and `status --watch` readers after a write.
     pub events: Notify,
     /// The configuration at the target head it was read from.
     pub loaded: Mutex<Option<Arc<crate::jobs::Loaded>>>,
@@ -380,6 +380,7 @@ async fn handle(daemon: &Arc<Daemon>, method: &str, params: Value) -> Result<Val
             Ok(json!({ "forgotten": path }))
         }
         "events" => events(daemon, &params).await,
+        "attention" => attention(daemon, &params).await,
         _ => {
             let result = crate::jobs::command(daemon, method, params).await;
             daemon.wake.notify_one();
@@ -402,6 +403,28 @@ async fn events(daemon: &Daemon, params: &Value) -> Result<Value, Fail> {
         }
         if tokio::time::timeout_at(deadline, notified).await.is_err() {
             return Ok(json!({ "events": [] }));
+        }
+    }
+}
+
+/// The open attention items, waiting until at least one exists.
+async fn attention(daemon: &Daemon, params: &Value) -> Result<Value, Fail> {
+    let project = project(daemon, params)?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
+    loop {
+        let notified = project.events.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        let items = project.read(crate::store::attempts::open_attention)?;
+        if !items.is_empty() {
+            let items: Vec<Value> = items
+                .iter()
+                .map(crate::store::attempts::Attention::to_json)
+                .collect();
+            return Ok(json!({ "attention": items }));
+        }
+        if tokio::time::timeout_at(deadline, notified).await.is_err() {
+            return Ok(json!({ "attention": [] }));
         }
     }
 }

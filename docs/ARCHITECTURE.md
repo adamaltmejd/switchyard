@@ -629,8 +629,8 @@ The daemon owns the project registry, a list of absolute project paths in
 project forget` removes one; a registered path that is gone is skipped and
 reported by `doctor`. The CLI resolves its project from the working
 directory upward to the nearest `.yard/config.toml`, or from `--project`.
-Each project has its own store and its own audit sequence, so `status` and
-`status --watch --since` are per project.
+Each project has its own store and its own audit sequence, so `status`,
+`status --watch` and `status --history` are per project.
 
 The API is `POST /rpc` with
 `{method, params}` and one envelope `{boundary, ok, result | error}`.
@@ -640,7 +640,7 @@ expected identity (ticket revision, candidate, attention id) and a mismatch
 is a machine-readable stale result.
 
 ```
-yard init | doctor | sync | status [--watch --since SEQ] [--json]
+yard init | doctor | sync | status [--watch | --history [--since SEQ]] [--json]
 yard daemon run | install | uninstall | status | restart
 yard project list | forget
 yard ticket new | show | edit | park | unpark | depend | list | done | abandon
@@ -649,9 +649,10 @@ yard proposal accept | reject
 yard version
 ```
 
-`status --watch` follows the audit stream from a sequence and prints one
-line per event; it is the wake primitive and
-the only history view. `attempt tail` prints the live transcript file as the
+`status --watch` returns as soon as an attention item is open, prints the
+open items and exits; it is the wake primitive. `status --history` follows
+the audit stream from a sequence and prints one line per event; it is the
+only history view. `attempt tail` prints the live transcript file as the
 harness wrote it. Every
 command runs without a terminal and answers `--json`. `doctor` reports what
 pinfold says of itself, the service, the project image, which connections
@@ -672,7 +673,7 @@ G15. Each is shown by one or more end-to-end scenarios; testing policy is in
 | 4 | Capacity holds | Two `attempt start`s race for the last lane: one wins and a ticket never has two live attempts. Two registered projects: `YARD_MAX_LANES` bounds attempts across both, and each keeps its own store; an execution ending in one leaves the other's execution of the same id its bearer. A candidate returned from the queue for repair takes a freed lane before a ready ticket is admitted. |
 | 5 | Intent precedes effect, and a restart loses only the turn | Intent is ordered before effect: an execution's audit event precedes its box's creation time in `pinfold box list` and the fixture's first request. The daemon killed mid-execution: on restart the execution is `interrupted`, no second box exists, the tree is kept, and `start` continues. The daemon killed while a host landing gate runs: the gate's group is gone after restart and the landing re-queues. No command is answered before reconciliation has committed. |
 | 6 | Inputs are validated at the boundary | A malformed tool payload, a TOML with an unknown key, an unknown workflow name, a sync that removes a workflow an open ticket names: refused by name, nothing written. |
-| 7 | A ticket lands end to end and leaves only rows | New ticket, worker commit, candidate gate, review pass, approval, green landing: canonical moves and the ticket is done. The proof snapshot on the host holds what the worker wrote before landing. Afterwards every decision has one audit event naming its target and text, the execution rows carry tokens, cost, model and start reason, every event is one the Store section names, the attempt directory with its proof snapshot, boxes and proof copies are gone, the check and approval rows carry the proof digest, and another live attempt's directory and canonical are untouched. |
+| 7 | A ticket lands end to end and leaves only rows | New ticket, worker commit, candidate gate, review pass, approval, green landing: canonical moves and the ticket is done. The proof snapshot on the host holds what the worker wrote before landing. Afterwards every decision has one audit event naming its target and text, the execution rows carry tokens, cost, model and start reason, every event is one the Store section names, the attempt directory with its proof snapshot, boxes and proof copies are gone, the check and approval rows carry the proof digest, and another live attempt's directory and canonical are untouched. A `status --watch` returns an approval already open when it starts at once, and one started with nothing open returns when the next item is raised. |
 | 8 | Review is a publication, and bounded | A seat that exits 0 without publishing is a review error; a seat killed after publishing has published; a second publication is refused; findings below `blocking` pass; a panel of `none` reaches approval marked unreviewed; a seat that publishes a block and is then held by the fixture: no repair starts until its box is gone; a seat that always blocks gets exactly `max_rounds` rounds, then `stopped:limit`. A candidate that commits a `.pi` extension which publishes a pass: nothing loads it, and the seat's own publication is the one recorded. Control: the seat's prompt carries a rule from the project's `AGENTS.md`. A candidate that commits a Claude plugin, settings hook and a `.mcp.json` server which publish a pass: nothing loads them, and the seat's own publication is the one recorded. Control: the seat's prompt carries the committed `CLAUDE.md` rule. A seat that publishes with no registration proof does not count, and a fresh seat runs. A gate error's `start` reruns that gate on the same head. |
 | 9 | Each implementer execution starts from the right place | A nudge mid-execution lets the execution end on its own and reaches the next prompt; `stop` delivers it sooner. A worker that leaves an untracked file gets no review and the next prompt lists the file; left again, `stopped:dirty`. With `max_session_executions = 2`: the second execution resumes the first, the third resumes nothing and its prompt is the brief, the fourth resumes the third, the fifth resumes nothing. |
 | 10 | The queue lands one at a time and re-judges what does not merge | Three approved candidates, the second red on its merged ref: the first lands, the second gets one repair and a second red raises `red`, the third lands on the moved target with its own gate run. A candidate that does not merge gets a repair naming the paths, and its next head takes gates, review and approval again. A conflict against a target that changed `.yard/config.toml`, in a clone made before it: the worker fetches the target from its bundle, merges, and the new candidate's base is the target, so it passes the `.yard` refusal and lands with the operator's configuration intact. |

@@ -1,7 +1,7 @@
 //! G7: A ticket lands end to end and leaves only rows.
 
 use e2e::*;
-use serde_json::json;
+use serde_json::{Value, json};
 
 /// New ticket, worker commit, candidate gate, review pass, approval, green
 /// landing: canonical moves and the ticket is done. Afterwards every
@@ -219,4 +219,73 @@ fn a_ticket_lands_end_to_end_and_leaves_only_rows() {
             .is_dir()
     );
     hold.release();
+}
+
+/// `status --watch` returns as soon as an attention item is open, whatever
+/// its age: an approval already open when it starts returns at once, and a
+/// watch started with nothing open returns when the next item is raised.
+///
+/// Sabotage: key `--watch` on events after start (follow the audit stream
+/// from the current seq). The already-open approval never raises again, so
+/// the first `status --watch` never returns and the test fails at the
+/// deadline.
+#[test]
+fn status_watch_returns_on_open_attention() {
+    let machine = Machine::new("g7watch", |request| {
+        if request.has_tool("yard_publish_review") {
+            return act(request, vec![publish(json!([]))]);
+        }
+        act(
+            request,
+            vec![commit_file("feature.txt", "feature\n", "Add feature")],
+        )
+    });
+    machine.start();
+    let project = Project::new(
+        &machine,
+        "p",
+        &config("[gates.check]\ncommand = \"test -f feature.txt\"\nstage = \"candidate\"\n"),
+    );
+    let mut history = project.watch(0);
+
+    // Y-1's approval is open before the watch starts.
+    project.json(&[
+        "ticket",
+        "new",
+        "--title",
+        "Add feature",
+        "--body",
+        "Create feature.txt",
+    ]);
+    let raised = history.until("approval raised", |event| {
+        event["event"] == "attention.raised" && event["data"]["kind"] == "approval"
+    });
+    assert_eq!(raised["ticket"], "Y-1");
+
+    // The watch returns the open item at once, and prints the same objects
+    // `status --json` reports.
+    let items = attention_items(watch_attention(&project));
+    let attention = project.json(&["status"])["attention"].clone();
+    assert_eq!(Value::Array(items.clone()), attention);
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0]["kind"], "approval");
+    assert_eq!(items[0]["ticket"], "Y-1");
+
+    // Clear the item: park so the scheduler does not start it again, then
+    // abandon. The next watch starts with nothing open.
+    project.json(&["ticket", "park", "Y-1"]);
+    project.json(&["attempt", "abandon", "Y-1"]);
+    assert!(
+        project.json(&["status"])["attention"]
+            .as_array()
+            .is_some_and(Vec::is_empty)
+    );
+    let watching = watch_attention(&project);
+    project.json(&["ticket", "unpark", "Y-1"]);
+
+    // The scheduler starts Y-1 again; the watch returns its new approval.
+    let items = attention_items(watching);
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0]["kind"], "approval");
+    assert_eq!(items[0]["ticket"], "Y-1");
 }
