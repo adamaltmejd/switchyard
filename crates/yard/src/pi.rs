@@ -50,10 +50,6 @@ impl Harness for Pi {
         "pi"
     }
 
-    fn version(&self) -> &str {
-        crate::harness::pinned(self.name()).unwrap_or("unknown")
-    }
-
     fn accepts(&self, agent: &Agent) -> Result<(), String> {
         if agent.login.is_some() {
             return Err("login is only for a login harness".into());

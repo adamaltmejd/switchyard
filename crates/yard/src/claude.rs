@@ -46,10 +46,6 @@ impl Harness for Claude {
         "claude"
     }
 
-    fn version(&self) -> &str {
-        crate::harness::pinned(self.name()).unwrap_or("unknown")
-    }
-
     fn login(&self) -> Option<LoginInfo> {
         Some(LoginInfo {
             name: LOGIN,

@@ -150,7 +150,9 @@ pub trait Harness: Send + Sync {
     /// The config token and the pinfold artifact name.
     fn name(&self) -> &'static str;
     /// The version pinfold carries for this harness.
-    fn version(&self) -> &str;
+    fn version(&self) -> &str {
+        pinned(self.name()).unwrap_or("unknown")
+    }
     /// The login this harness uses, if it is a subscription-login harness.
     fn login(&self) -> Option<LoginInfo> {
         None
