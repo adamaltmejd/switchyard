@@ -611,20 +611,90 @@ pub fn uninstall() -> Result<Value, Fail> {
     Ok(json!({ "removed": unit }))
 }
 
-pub fn restart() -> Result<Value, Fail> {
-    if cfg!(target_os = "macos") {
+pub async fn restart() -> Result<Value, Fail> {
+    let socket = api::socket_path();
+    let deadline = tokio::time::Instant::now() + RESTART_BOUND;
+    let before = tokio::time::timeout(
+        Duration::from_secs(5),
+        api::call(&socket, "daemon.status", json!({})),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .map(|status| status["pid"].clone());
+    let argv: Vec<String> = if cfg!(target_os = "macos") {
         let uid = nix::unistd::getuid();
-        service(&[
-            "launchctl",
-            "kickstart",
-            "-k",
-            &format!("gui/{uid}/{LABEL}"),
-        ])?;
+        ["launchctl", "kickstart", "-k"]
+            .map(String::from)
+            .into_iter()
+            .chain([format!("gui/{uid}/{LABEL}")])
+            .collect()
     } else {
-        service(&["systemctl", "--user", "restart", "yard.service"])?;
+        ["systemctl", "--user", "restart", "yard.service"]
+            .map(String::from)
+            .into_iter()
+            .collect()
+    };
+    let timed_out = |what: String, socket: &Path, status: Value| {
+        Fail::new(
+            "daemon",
+            format!(
+                "{what} within {}s; socket {}; the service manager says {status}",
+                RESTART_BOUND.as_secs(),
+                socket.display()
+            ),
+        )
+    };
+    let mut command = tokio::process::Command::new(&argv[0]);
+    command.args(&argv[1..]).kill_on_drop(true);
+    let exited = tokio::time::timeout_at(deadline, command.status()).await;
+    let status = match exited {
+        Ok(status) => status.map_err(|error| Fail::refused(format!("{}: {error}", argv[0])))?,
+        Err(_) => {
+            return Err(timed_out(
+                format!("`{}` did not exit and was killed", argv.join(" ")),
+                &socket,
+                service_status().await,
+            ));
+        }
+    };
+    if !status.success() {
+        return Err(Fail::refused(format!("{} exited {status}", argv.join(" "))));
     }
-    Ok(json!({ "restarted": true }))
+    let mut last;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(remaining, api::call(&socket, "daemon.status", json!({}))).await
+        {
+            Ok(Ok(status)) if Some(&status["pid"]) != before.as_ref() => {
+                return Ok(json!({
+                    "restarted": true,
+                    "pid": status["pid"],
+                    "boundary": status["boundary"],
+                }));
+            }
+            Ok(Ok(status)) => {
+                last = format!(
+                    "the daemon before the restart, pid {}, still answers",
+                    status["pid"]
+                )
+            }
+            Ok(Err(fail)) => last = fail.message,
+            Err(_) => last = "the daemon accepted and did not reply".to_string(),
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(timed_out(
+                format!("no new daemon answered ({last})"),
+                &socket,
+                service_status().await,
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
+
+/// The start reconciles before it serves, so the bound covers reconciliation.
+const RESTART_BOUND: Duration = Duration::from_secs(120);
 
 /// What the service manager says of the daemon's unit or agent.
 pub async fn service_status() -> Value {
