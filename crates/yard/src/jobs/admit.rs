@@ -556,11 +556,19 @@ fn steer(tx: &rusqlite::Connection, id: i64) -> Result<Vec<i64>, Fail> {
     if running.iter().any(|row| row.kind == "implementation") {
         return Ok(Vec::new());
     }
-    if let Some(item) = attempts::open_for_attempt(tx, attempt.id)?
-        .iter()
-        .find(|item| item.kind == "stopped")
-    {
-        attempts::resolve(tx, item, "edit", None)?;
+    if let Some(approval) = checks::active_for(tx, attempt.id)? {
+        checks::set_approval_state(tx, &approval, "withdrawn", id, Some("edited"))?;
+    }
+    for item in attempts::open_for_attempt(tx, attempt.id)? {
+        let resolution = match item.kind.as_str() {
+            "approval" => "superseded",
+            "stopped" | "red" => "edit",
+            _ => continue,
+        };
+        attempts::resolve(tx, &item, resolution, None)?;
+        if item.kind != "stopped" {
+            continue;
+        }
         match item.reason.as_str() {
             "timeout" => attempts::renew_clock(tx, attempt.id)?,
             "limit" => {

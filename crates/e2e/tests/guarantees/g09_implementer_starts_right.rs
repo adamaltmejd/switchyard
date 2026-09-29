@@ -119,10 +119,12 @@ fn an_edit_mid_execution_reaches_the_next_prompt() {
 }
 
 /// `stop` delivers an edit sooner: the worker is still held when the
-/// execution ends, and the next execution opens with the edit's diff.
+/// execution ends, `stop` still raises `stopped` and starts nothing, and
+/// that item's `start` runs the implementer with the edit's diff.
 ///
 /// Sabotage: make `admit::attempt_stop` skip notifying the execution; it
-/// runs on and nothing reaches the next prompt.
+/// runs on and no `stopped` is raised. Let `supervise` schedule the edit
+/// instead of raising `stopped` for a stopped run; no `stopped` item comes.
 #[test]
 fn stop_delivers_an_edit_sooner() {
     let hold = Latch::new();
@@ -135,10 +137,14 @@ fn stop_delivers_an_edit_sooner() {
 
     edit_body(&project, "Rename it now");
     project.json(&["attempt", "stop", "Y-1"]);
+    let stopped = watch.attention();
+    assert_eq!(stopped["data"]["kind"], "stopped", "{stopped}");
+    assert!(hold.is_held(), "the worker's request was answered");
+    assert_eq!(reasons(&project), [json!("first")]);
+    project.json(&["attempt", "start", "Y-1"]);
     let approval = watch.attention();
     assert_eq!(approval["data"]["kind"], "approval", "{approval}");
-    assert!(hold.is_held(), "the worker's request was answered");
-    assert_eq!(reasons(&project), [json!("first"), json!("edit")]);
+    assert_eq!(reasons(&project), [json!("first"), json!("restart")]);
     assert!(openings(&machine)[1].last_user().contains("+Rename it now"));
     hold.release();
 }

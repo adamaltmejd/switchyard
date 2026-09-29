@@ -67,7 +67,7 @@ Then run `yard sync` to bring it into your checkout.
 
 - The ticket body is the one text the implementer and reviewer read. To
   change what is asked mid-attempt, run `yard ticket edit Y-n --revision R`.
-  A running implementer finishes first; `stop` then `start` delivers it
+  A running implementer finishes first; `stop`, then the `stopped` item's `start`, delivers it
   sooner. Gates and review stop now, and an approval is superseded.
 - If the premise has moved so far that the built work is wrong, file a
   fresh ticket instead of editing.

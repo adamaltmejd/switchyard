@@ -272,11 +272,12 @@ split and stops.
 4. **Work.** An execution runs the implementer in a box with the clone
    mounted as the workflow's `access` says and the MCP route. A ticket edit steers a live attempt and never interrupts a running implementer:
    when that execution ends the implementer runs again, before anything
-   judges its candidate; `stop` then `start` delivers it sooner. An edit
+   judges its candidate; `stop` then the `stopped` item's `start` delivers it sooner. An edit
    while gates or review run stops them now (boxes down, checks superseded)
    and a stopped review is not a round; while the candidate awaits approval
-   or is queued it supersedes the approval. An edit on a `stopped` item
-   resolves it. A fresh session gets the whole body; a resumed one gets the
+   or is queued it withdraws the approval in the edit's own transaction. An
+   edit resolves every open `stopped` and `red` item of the attempt; no
+   pending retry survives it. A fresh session gets the whole body; a resumed one gets the
    body diff since the revision it last read, labelled as the operator's
    edit; seats always get the whole body. `stop` ends the execution now and keeps the tree.
    The attempt's inactivity and total-work clocks end it the same way. When
@@ -406,7 +407,7 @@ surface reads that declaration.
 | `approval` | a candidate is verified and `approve` is `manual`, or it touches a protected path | approve, reject, abandon |
 | `proposal` | a worker proposes | accept, reject |
 | `stopped` | an execution ended without a candidate advancing: `unchanged`, `dirty`, `failed`, `interrupted`, `timeout`, `limit` | start, edit, abandon; on `timeout` and `limit` only edit, abandon |
-| `red` | a gate error, a review error, a second landing red, a landing that could not run, a landing intent canonical cannot decide, an execution that could not record its own end (`error`) | start, abandon; on a landing's item only start |
+| `red` | a gate error, a review error, a second landing red, a landing that could not run, a landing intent canonical cannot decide, an execution that could not record its own end (`error`) | start, edit, abandon; on a landing's item only start |
 
 `start` always means "try again from here". After an implementer stop it
 starts the next implementer execution. On a gate or review error it reruns

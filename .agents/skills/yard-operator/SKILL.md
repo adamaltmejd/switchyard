@@ -40,7 +40,7 @@ item's exit names.
 - `stopped` — `yard attempt start Y-n`, `yard ticket edit Y-n`, or abandon.
   On `timeout` and `limit` only edit and abandon; the edit reaches the next
   execution as a diff.
-- `red` — `start` or abandon, except a landing's item (no `attempt`) exits only
+- `red` — `start`, `yard ticket edit Y-n` or abandon, except a landing's item (no `attempt`) exits only
   `yard attempt start Y-n`.
 
 ## Judging and syncing

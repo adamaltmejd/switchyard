@@ -257,6 +257,7 @@ impl Attention {
             ("stopped", "timeout" | "limit") => &["edit", "abandon"],
             ("stopped", _) => &["start", "edit", "abandon"],
             ("red", _) if self.attempt.is_none() => &["start"],
+            ("red", _) => &["start", "edit", "abandon"],
             _ => &["start", "abandon"],
         }
     }

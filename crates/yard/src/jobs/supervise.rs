@@ -687,7 +687,7 @@ pub async fn implement(
         // before anything judges its candidate; an expired clock still raises `stopped:timeout`.
         let edited = tickets::get(tx, ticket.id)?.revision != ticket.revision;
         let stop = |tx: &rusqlite::Connection, reason: &str, detail: &str| -> Result<(), Fail> {
-            if edited && reason != "timeout" {
+            if edited && !run.stopped && reason != "timeout" {
                 return attempts::set_next(tx, attempt.id, Some(&json!({ "reason": "edit" })));
             }
             attempts::raise(tx, attempts::Raise {
