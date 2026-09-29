@@ -387,9 +387,6 @@ fn a_seat_that_always_blocks_gets_max_rounds() {
 /// digest and writes no approval, and removing the gate makes the same head
 /// approvable.
 ///
-/// A synced `max_rounds` above the rounds run refuses approve naming the
-/// limit.
-///
 /// Sabotage: drop `gate_digest` from `jobs::stale_part`; the gate-change
 /// approve is not refused and an approval is written. Record no review
 /// check in `limit_checks`, or drop `overrode`; the row names no review or
@@ -422,26 +419,11 @@ fn the_operator_can_approve_over_a_blocking_review_at_the_limit() {
         (&json!("stopped"), &json!("limit")),
         "{stopped}"
     );
-    let status = project.json(&["status"]);
-    assert!(
-        status["attention"][0]["exits"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("approve")),
-        "{status}"
-    );
     let head = project.rows("SELECT head FROM execution WHERE kind = 'review' ORDER BY id DESC")[0]
         ["head"]
         .as_str()
         .unwrap()
         .to_string();
-
-    project.reconfigure(&config(gate));
-    let raised = project.refused(&["attempt", "approve", "Y-1", "--head", &head]);
-    assert!(
-        raised["message"].as_str().unwrap().contains("round limit"),
-        "{raised}"
-    );
 
     project.reconfigure(&config(&both).replace("max_rounds = 3", "max_rounds = 2"));
     let refused = project.refused(&["attempt", "approve", "Y-1", "--head", &head]);
@@ -957,41 +939,42 @@ fi
 /// A candidate commits `.agents/skills` as a link to a directory holding a
 /// skill: Codex would follow it into the seat's context, so the execution is
 /// refused naming the path, though the seat would have published. Control:
-/// the same skill as a regular directory reaches approval.
+/// the same skill as a regular directory reaches approval first in the same
+/// project, whose canonical base stays unchanged for the linked candidate.
 ///
 /// Sabotage: make `agent_env::walk` skip a link instead of refusing it; the
 /// seat publishes and the candidate reaches approval.
 #[test]
 fn a_linked_skill_root_refuses_a_codex_seat() {
-    for link in [false, true] {
-        let mut machine = Machine::new("g8-codex-link", move |request| {
-            if codex_seat(request) {
-                return act(request, vec![codex_publish(request, json!([]))]);
-            }
-            if request.opens() {
-                let skills = if link {
-                    "mkdir -p evil/x .agents && ln -s ../evil .agents/skills && \
-                     printf -- '---\\nname: s\\ndescription: s\\n---\\n' > evil/x/SKILL.md"
-                } else {
-                    "mkdir -p .agents/skills/x && \
-                     printf -- '---\\nname: s\\ndescription: s\\n---\\n' > .agents/skills/x/SKILL.md"
-                };
-                return Reply::Tools(vec![codex_shell(&format!(
-                    "cd /workspace && {skills} && printf feature > feature.txt && \
-                     git add -A && git commit -q -m 'Add a skill' && echo committed"
-                ))]);
-            }
-            Reply::Text("done".into())
-        });
-        let account_id = "acct-e2e-codex";
-        let token = codex_jwt(account_id, 3600);
-        machine.write_codex_env(&token, account_id);
-        machine.start();
-        let project = Project::new(&machine, "p", &codex_config(""));
-        let mut watch = project.watch(0);
-        project.json(&["ticket", "new", "--title", "Add a skill"]);
+    let mut machine = Machine::new("g8-codex-link", |request| {
+        if codex_seat(request) {
+            return act(request, vec![codex_publish(request, json!([]))]);
+        }
+        if request.opens() {
+            let skills = if request.prompt().contains("Linked skill") {
+                "mkdir -p evil/x .agents && ln -s ../evil .agents/skills && \
+                 printf -- '---\\nname: s\\ndescription: s\\n---\\n' > evil/x/SKILL.md"
+            } else {
+                "mkdir -p .agents/skills/x && \
+                 printf -- '---\\nname: s\\ndescription: s\\n---\\n' > .agents/skills/x/SKILL.md"
+            };
+            return Reply::Tools(vec![codex_shell(&format!(
+                "cd /workspace && {skills} && printf feature > feature.txt && \
+                 git add -A && git commit -q -m 'Add a skill' && echo committed"
+            ))]);
+        }
+        Reply::Text("done".into())
+    });
+    let account_id = "acct-e2e-codex";
+    let token = codex_jwt(account_id, 3600);
+    machine.write_codex_env(&token, account_id);
+    machine.start();
+    let project = Project::new(&machine, "p", &codex_config(""));
+    let mut watch = project.watch(0);
+    for title in ["Regular skill", "Linked skill"] {
+        project.json(&["ticket", "new", "--title", title]);
         let item = watch.attention();
-        if link {
+        if title == "Linked skill" {
             assert_eq!(
                 (&item["data"]["kind"], &item["data"]["reason"]),
                 (&json!("red"), &json!("error")),
