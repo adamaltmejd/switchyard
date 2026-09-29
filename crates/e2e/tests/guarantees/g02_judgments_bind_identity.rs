@@ -176,6 +176,12 @@ fn a_ticket_edit_leaves_the_candidate_unverified() {
         first["id"]
     ));
     assert_eq!(superseded[0]["resolution"], "superseded");
+    for id in first["payload"]["checks"].as_array().unwrap() {
+        assert!(
+            !second["payload"]["checks"].as_array().unwrap().contains(id),
+            "the new approval carries check {id} from the old revision"
+        );
+    }
     let reasons =
         project.rows("SELECT reason FROM execution WHERE kind = 'implementation' ORDER BY id");
     assert_eq!(reasons.last().unwrap()["reason"], "edit");

@@ -1076,6 +1076,11 @@ pub async fn gate(
         Err(error) => ("error", error, None, None),
     };
     project.tx(|tx| {
+        // An edit that landed while the gate ran superseded its check: no
+        // decision, red or check comes of it.
+        let moved = row.parent.is_none()
+            && row.ticket_revision != Some(tickets::get(tx, attempt.ticket)?.revision);
+        let verdict = if moved { "stopped" } else { verdict };
         executions::end(
             tx,
             execution,
@@ -1088,7 +1093,7 @@ pub async fn gate(
                 ..Default::default()
             },
         )?;
-        if row.parent.is_some() || stopped {
+        if row.parent.is_some() || stopped || moved {
             return Ok(());
         }
         if verdict == "error" {

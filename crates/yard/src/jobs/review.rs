@@ -142,10 +142,12 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
     // the outcome here is only the terminal frame and the publication.
     project.tx(|tx| {
         let published = checks::for_execution(tx, execution)?;
+        // An edit that landed while the seat ran superseded it: no error, no round.
+        let moved = row.ticket_revision != Some(tickets::get(tx, ticket.id)?.revision);
         let failure = match (&published, &run.registered, &run.terminal) {
             (Some(_), _, _) => None,
             // An edit stopped the seat: it judged nothing and is not an error.
-            (None, _, _) if run.stopped => None,
+            (None, _, _) if run.stopped || moved => None,
             // A refused registration ends the run before a terminal frame, so
             // name its reason rather than the generic no-publication error.
             (None, Some(crate::harness::Registration::Refused(reason)), _) => Some(reason.clone()),
@@ -157,7 +159,7 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
         };
         let outcome = match &failure {
             Some(_) => "error",
-            None if run.stopped && published.is_none() => "stopped",
+            None if (run.stopped || moved) && published.is_none() => "stopped",
             None => published
                 .as_ref()
                 .map_or("error", |check| check.verdict.as_str()),
@@ -268,6 +270,14 @@ pub fn blocked(
     let rounds = attempt.rounds + 1;
     let limit = i64::from(loaded.config.review.max_rounds) + attempt.extra_rounds;
     project.tx(|tx| {
+        // Write only what the read saw: an edit since then owns the next step.
+        let current = attempts::get(tx, attempt.id)?;
+        if tickets::get(tx, ticket.id)?.revision != ticket.revision
+            || current.next.is_some()
+            || current.rounds != attempt.rounds
+        {
+            return Ok(());
+        }
         tx.execute(
             "UPDATE attempt SET rounds = ?2 WHERE id = ?1",
             rusqlite::params![attempt.id, rounds],
