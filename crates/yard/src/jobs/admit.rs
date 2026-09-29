@@ -125,16 +125,48 @@ fn admit(
     super::supervise::start_implementation(tx, &row, ticket, "first")
 }
 
-pub fn status(project: &Project) -> Result<Value, Fail> {
+pub async fn status(daemon: &Daemon, project: &Project) -> Result<Value, Fail> {
+    let loaded = load(daemon, project).await.ok();
+    let now = store::now_ms();
     project.read(|conn| {
         let tickets: Vec<Value> = tickets::list(conn)?
             .iter()
             .filter(|ticket| ticket.state == "open")
-            .map(tickets::Ticket::to_json)
-            .collect();
+            .map(|ticket| {
+                let mut value = ticket.to_json();
+                let mut waiting = Vec::new();
+                for on in tickets::dependencies(conn, ticket.id)? {
+                    if tickets::get(conn, on)?.state != "done" {
+                        waiting.push(ticket_name(on));
+                    }
+                }
+                value["depends_on"] = json!(waiting);
+                value["ready"] = json!(tickets::blocker(conn, ticket.id)?.is_none());
+                value["outcome"] = json!(
+                    attempts::latest_for(conn, ticket.id)?
+                        .filter(|attempt| attempt.state == "ended")
+                        .and_then(|attempt| attempt.outcome)
+                );
+                Ok(value)
+            })
+            .collect::<Result<_, Fail>>()?;
         let attempts: Vec<Value> = attempts::live(conn)?
             .iter()
-            .map(attempts::Attempt::to_json)
+            .map(|attempt| {
+                let mut value = attempt.to_json();
+                let workflow = loaded
+                    .as_ref()
+                    .and_then(|loaded| loaded.config.workflow(&attempt.workflow).ok());
+                let spent =
+                    attempt.work_ms + attempt.lane_since.map(|since| now - since).unwrap_or(0);
+                value["work_ms"] = json!(spent.max(0));
+                value["work_limit_ms"] =
+                    json!(workflow.map(|workflow| workflow.total_work_timeout_minutes * 60_000));
+                value["max_rounds"] = json!(loaded.as_ref().map(|loaded| i64::from(
+                    loaded.config.review.max_rounds
+                ) + attempt.extra_rounds));
+                value
+            })
             .collect();
         let attention: Vec<Value> = attempts::open_attention(conn)?
             .iter()
@@ -143,16 +175,39 @@ pub fn status(project: &Project) -> Result<Value, Fail> {
         let queue: Vec<Value> = checks::queue(conn)?
             .iter()
             .map(|approval| {
-                json!({ "approval": approval.id, "attempt": approval.attempt,
-                                    "head": approval.head, "actor": approval.actor })
+                let ticket = attempts::get(conn, approval.attempt)?.ticket;
+                Ok(
+                    json!({ "approval": approval.id, "attempt": approval.attempt,
+                           "ticket": ticket_name(ticket),
+                           "head": approval.head, "actor": approval.actor }),
+                )
             })
-            .collect();
+            .collect::<Result<_, Fail>>()?;
+        let started: std::collections::HashMap<i64, i64> = store::all(
+            conn,
+            "SELECT id, unixepoch(started_at) * 1000 FROM execution WHERE status = 'running'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?
+        .into_iter()
+        .collect();
+        let activity = daemon.activity.lock().expect("activity lock");
         let running: Vec<Value> = executions::running(conn)?
             .iter()
-            .map(executions::Execution::to_json)
+            .map(|execution| {
+                let mut value = execution.to_json();
+                value["started_ms"] = json!(started.get(&execution.id));
+                value["quiet_ms"] = json!(
+                    activity
+                        .get(&(project.key.clone(), execution.id))
+                        .map(|last| last.elapsed().as_millis() as u64)
+                );
+                value
+            })
             .collect();
         Ok(json!({
             "seq": store::last_seq(conn)?,
+            "now_ms": now,
             "tickets": tickets,
             "attempts": attempts,
             "attention": attention,

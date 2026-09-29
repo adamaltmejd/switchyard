@@ -258,7 +258,13 @@ pub async fn run_harness(
     let mut usage = None;
     let mut stdout_open = true;
     let mut stderr_open = true;
+    let activity_key = (project.key.clone(), execution);
     while stdout_open || stderr_open {
+        daemon
+            .activity
+            .lock()
+            .expect("activity lock")
+            .insert(activity_key.clone(), std::time::Instant::now());
         let idle = tokio::time::sleep(inactivity);
         tokio::select! {
             line = stdout.next_line(), if stdout_open => match line {
@@ -327,6 +333,11 @@ pub async fn run_harness(
             _ = tokio::time::sleep_until(deadline) => { run.timed_out = true; break; }
         }
     }
+    daemon
+        .activity
+        .lock()
+        .expect("activity lock")
+        .remove(&activity_key);
     if !run.stopped && !run.timed_out && !refused(&run.registered) {
         run.exit_code = child.wait().await.ok().map(crate::git::exit_code);
     }

@@ -404,65 +404,42 @@ fn render(value: &Value) -> String {
     }
 }
 
-/// The `status` board: open, live, queued and waiting, then `seq`.
+/// The `status` board: one line per open ticket saying what it is doing now,
+/// then the attention items and `seq`.
 fn render_status(status: &Value) -> String {
-    let mut out = String::new();
-
-    let tickets = array(status, "tickets");
-    if !tickets.is_empty() {
-        out.push_str("tickets\n");
-        for ticket in tickets {
-            let state = if ticket["parked"].as_bool().unwrap_or(false) {
-                "parked".to_string()
-            } else {
-                field(ticket, "state")
-            };
-            out.push_str(&format!(
-                "  {}  {}  {}  {}\n",
-                field(ticket, "ticket"),
-                field(ticket, "priority"),
-                state,
-                field(ticket, "title"),
-            ));
-        }
-    }
-
     let attempts = array(status, "attempts");
-    let running = array(status, "running");
-    if !attempts.is_empty() {
-        out.push_str("attempts\n");
-        for attempt in attempts {
-            let id = attempt["attempt"].as_i64().unwrap_or_default();
-            let head = attempt["head"].as_str().unwrap_or("-");
-            let what: Vec<String> = running
-                .iter()
-                .filter(|execution| execution["attempt"].as_i64() == Some(id))
-                .map(describe_execution)
-                .collect();
-            let what = if what.is_empty() {
-                format!("state {}", field(attempt, "state"))
-            } else {
-                what.join("; ")
-            };
-            out.push_str(&format!(
-                "  {}  head {head}  {what}\n",
-                field(attempt, "ticket"),
-            ));
-        }
-    }
+    let mut tickets: Vec<&Value> = array(status, "tickets").iter().collect();
+    let live = |ticket: &Value| {
+        attempts
+            .iter()
+            .any(|attempt| attempt["ticket"] == ticket["ticket"])
+    };
+    tickets.sort_by_key(|ticket| !live(ticket));
 
-    let queue = array(status, "queue");
-    if !queue.is_empty() {
-        out.push_str("queue\n");
-        for item in queue {
-            out.push_str(&format!(
-                "  head {}  approved by {}  (approval {}, attempt {})\n",
-                field(item, "head"),
-                field(item, "actor"),
-                item["approval"].as_i64().unwrap_or_default(),
-                item["attempt"].as_i64().unwrap_or_default(),
-            ));
-        }
+    let lines: Vec<(String, String, String, String)> = tickets
+        .iter()
+        .map(|ticket| {
+            let name = field(ticket, "ticket");
+            let attempt = attempts
+                .iter()
+                .find(|attempt| attempt["ticket"] == ticket["ticket"]);
+            let (phase, clocks) = match attempt {
+                Some(attempt) => attempt_line(status, attempt),
+                None => (idle_reason(ticket), String::new()),
+            };
+            (name, field(ticket, "priority"), phase, clocks)
+        })
+        .collect();
+    let width = lines
+        .iter()
+        .map(|line| line.2.chars().count())
+        .max()
+        .unwrap_or(0);
+    let mut out = String::new();
+    for (name, priority, phase, clocks) in lines {
+        let line = format!("{name:<5} {priority}  {phase:<width$}  {clocks}");
+        out.push_str(line.trim_end());
+        out.push('\n');
     }
 
     let attention = array(status, "attention");
@@ -476,6 +453,136 @@ fn render_status(status: &Value) -> String {
         status["seq"].as_i64().unwrap_or_default()
     ));
     out
+}
+
+/// Why an open ticket with no live attempt is not running.
+fn idle_reason(ticket: &Value) -> String {
+    let mut parts = Vec::new();
+    if let Some(outcome) = ticket["outcome"].as_str() {
+        parts.push(outcome.to_string());
+    }
+    let waiting: Vec<&str> = ticket["depends_on"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    if ticket["parked"].as_bool().unwrap_or(false) {
+        parts.push("parked".into());
+    } else if !waiting.is_empty() {
+        parts.push(format!("waiting on {}", waiting.join(", ")));
+    } else if ticket["ready"].as_bool().unwrap_or(false) {
+        parts.push("no free lane".into());
+    } else {
+        parts.push("waiting on a proposal".into());
+    }
+    parts.join("; ")
+}
+
+/// What a live attempt is doing now, and its clocks.
+fn attempt_line(status: &Value, attempt: &Value) -> (String, String) {
+    let id = attempt["attempt"].as_i64();
+    let now = status["now_ms"].as_i64().unwrap_or_default();
+    let queue = array(status, "queue");
+    // The newest running execution is the innermost: a landing's gate over
+    // the landing.
+    let mine: Vec<&Value> = array(status, "running")
+        .iter()
+        .filter(|execution| execution["attempt"].as_i64() == id)
+        .collect();
+    let newest = mine
+        .iter()
+        .max_by_key(|execution| execution["execution"].as_i64());
+    let item = array(status, "attention")
+        .iter()
+        .find(|item| item["attempt"].as_i64() == id);
+    let position = queue.iter().position(|item| item["attempt"].as_i64() == id);
+
+    let (phase, step) = if let Some(execution) = newest {
+        let name = field(execution, "name");
+        let phase = match execution["kind"].as_str().unwrap_or_default() {
+            "implementation" if execution["reason"].as_str() == Some("repair") => "repair".into(),
+            "implementation" => "implementing".to_string(),
+            "gate" if mine.iter().any(|other| other["kind"] == "landing") => {
+                format!("landing: gate {name}")
+            }
+            "gate" => format!("gates: {name}"),
+            "review" => {
+                let round = execution["round"].as_i64().unwrap_or_default();
+                match attempt["max_rounds"].as_i64() {
+                    Some(max) => format!("review {name}, round {round} of {max}"),
+                    None => format!("review {name}, round {round}"),
+                }
+            }
+            "landing" => "landing".to_string(),
+            other => other.to_string(),
+        };
+        (phase, Some(*execution))
+    } else if let Some(item) = item {
+        let phase = match item["kind"].as_str().unwrap_or_default() {
+            "approval" => "awaiting approval".to_string(),
+            kind => format!("{kind}: {}", field(item, "reason")),
+        };
+        (phase, None)
+    } else if let Some(position) = position {
+        let phase = match position
+            .checked_sub(1)
+            .map(|before| field(&queue[before], "ticket"))
+        {
+            Some(ahead) => format!(
+                "approved, {} in queue behind {ahead}",
+                ordinal(position + 1)
+            ),
+            None => "approved, next in queue".to_string(),
+        };
+        (phase, None)
+    } else if attempt["lane"].as_bool() == Some(false) {
+        ("waiting for a lane".to_string(), None)
+    } else {
+        ("between steps".to_string(), None)
+    };
+
+    let mut clocks = Vec::new();
+    if let Some(execution) = step {
+        if let Some(started) = execution["started_ms"].as_i64() {
+            clocks.push(duration(now - started));
+        }
+        if let Some(quiet) = execution["quiet_ms"].as_i64() {
+            clocks.push(format!("quiet {}", duration(quiet)));
+        }
+    }
+    if let Some(spent) = attempt["work_ms"]
+        .as_i64()
+        .filter(|_| attempt["lane"].as_bool() == Some(true))
+    {
+        let mut total = format!("total {}", duration(spent));
+        if let Some(limit) = attempt["work_limit_ms"].as_i64() {
+            total.push_str(&format!(" of {}", duration(limit)));
+        }
+        clocks.push(total);
+    }
+    (phase, clocks.join("   "))
+}
+
+fn ordinal(n: usize) -> String {
+    let suffix = match (n % 10, n % 100) {
+        (_, 11..=13) => "th",
+        (1, _) => "st",
+        (2, _) => "nd",
+        (3, _) => "rd",
+        _ => "th",
+    };
+    format!("{n}{suffix}")
+}
+
+/// A span as its two largest whole units: `40s`, `6m`, `1h05m`.
+fn duration(ms: i64) -> String {
+    let secs = (ms / 1000).max(0);
+    match secs {
+        0..=59 => format!("{secs}s"),
+        60..=3599 => format!("{}m", secs / 60),
+        _ => format!("{}h{:02}m", secs / 3600, secs % 3600 / 60),
+    }
 }
 
 /// The open attention items, as the `status` board lists them.
@@ -501,21 +608,6 @@ fn render_attention(items: &[Value]) -> String {
         }
     }
     out
-}
-
-/// What a running execution is: its kind, name and reason.
-fn describe_execution(execution: &Value) -> String {
-    let mut what = field(execution, "kind");
-    if let Some(name) = execution["name"].as_str() {
-        what = format!("{what} {name}");
-    }
-    if let Some(reason) = execution["reason"].as_str() {
-        what = format!("{what} ({reason})");
-    }
-    if let Some(round) = execution["round"].as_i64() {
-        what = format!("{what} round {round}");
-    }
-    what
 }
 
 /// What an approval's exits bind and a person cannot retype: the candidate
