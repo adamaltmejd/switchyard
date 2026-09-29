@@ -695,7 +695,8 @@ service: a systemd user unit on Linux, a launchd agent on macOS, both
 running `yard daemon run` from the installed binary's absolute path. On
 Linux it enables lingering so the daemon outlives the login session, and
 says so where it cannot. `yard daemon uninstall` stops and removes it;
-`yard daemon restart` goes through the service manager.
+`yard daemon restart` goes through the service manager and returns once the
+new daemon answers, with its `pid` and `boundary`.
 
 The daemon owns the project registry, a list of absolute project paths in
 `$XDG_STATE_HOME/yard/projects`. `yard init` registers a project and `yard

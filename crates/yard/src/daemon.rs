@@ -611,7 +611,7 @@ pub fn uninstall() -> Result<Value, Fail> {
     Ok(json!({ "removed": unit }))
 }
 
-pub fn restart() -> Result<Value, Fail> {
+pub async fn restart() -> Result<Value, Fail> {
     if cfg!(target_os = "macos") {
         let uid = nix::unistd::getuid();
         service(&[
@@ -623,8 +623,37 @@ pub fn restart() -> Result<Value, Fail> {
     } else {
         service(&["systemctl", "--user", "restart", "yard.service"])?;
     }
-    Ok(json!({ "restarted": true }))
+    let socket = api::socket_path();
+    let deadline = tokio::time::Instant::now() + RESTART_BOUND;
+    loop {
+        let last = match api::call(&socket, "daemon.status", json!({})).await {
+            Ok(status) => {
+                return Ok(json!({
+                    "restarted": true,
+                    "pid": status["pid"],
+                    "boundary": status["boundary"],
+                }));
+            }
+            Err(fail) => fail,
+        };
+        if tokio::time::Instant::now() >= deadline {
+            return Err(Fail::new(
+                "daemon",
+                format!(
+                    "no daemon answered at {} within {}s: {}; the service manager says {}",
+                    socket.display(),
+                    RESTART_BOUND.as_secs(),
+                    last.message,
+                    service_status().await
+                ),
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
+
+/// The start reconciles before it serves, so the bound covers reconciliation.
+const RESTART_BOUND: Duration = Duration::from_secs(120);
 
 /// What the service manager says of the daemon's unit or agent.
 pub async fn service_status() -> Value {
