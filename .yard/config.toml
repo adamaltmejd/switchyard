@@ -16,6 +16,12 @@ login = true
 model = "claude-sonnet-5-5"
 effort = "medium"
 
+[agents.deepseek]
+harness = "pi"
+provider = "opencode-go"
+model = "deepseek-v4.1-flash"
+effort = "high"
+
 [agents.reviewer]
 harness = "codex"
 login = true
@@ -24,6 +30,17 @@ effort = "high"
 
 [workflows.default]
 implementer = "implementer"
+review = ["correctness"]
+access = "write"
+instructions = """
+Before you commit, run the checks in AGENTS.md: `cargo fmt --check` and
+`cargo clippy --all-targets --locked -- -D warnings`. Do not run the e2e
+suite (`cargo test -p e2e`): it needs the host's container runtime, and it
+runs as a landing gate after approval. Commit your work; leave the clone
+clean."""
+
+[workflows.deepseek]
+implementer = "deepseek"
 review = ["correctness"]
 access = "write"
 instructions = """
