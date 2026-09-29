@@ -826,8 +826,14 @@ pub async fn implement(
         // A stopped run never admits a candidate: the tree is kept and the
         // next execution continues. Otherwise a changed proof is a new
         // candidate even when the head is unchanged.
+        // An edit run that leaves the existing candidate as it is sends it to
+        // judgment at the new revision.
+        let rejudge = row.reason.as_deref() == Some("edit")
+            && current.head.is_some()
+            && !workflow.read_only
+            && !edited;
         let advanced = !run.stopped
-            && (new_head != previous || (!workflow.read_only && current_proof != digest));
+            && (new_head != previous || (!workflow.read_only && current_proof != digest) || rejudge);
         if !advanced {
             executions::end(tx, execution, executions::End {
                 outcome: "unchanged",
@@ -835,11 +841,11 @@ pub async fn implement(
                 ticket: Some(ticket.id),
                 ..Default::default()
             })?;
+            // With an edit pending the implementer runs again.
+            if edited && !run.stopped {
+                return Ok(());
+            }
             if workflow.read_only && !run.stopped {
-                // With an edit pending the implementer runs again.
-                if edited {
-                    return Ok(());
-                }
                 attempts::end(tx, attempt.id, "planned")?;
                 return super::audit_attempt(tx, "attempt.ended", &current, None, json!({ "outcome": "planned" })).map(|_| ());
             }
