@@ -431,12 +431,7 @@ fn render_status(status: &Value) -> String {
                 Some(attempt) => attempt_line(status, attempt),
                 None => (idle_reason(ticket), String::new()),
             };
-            let edges = names(&ticket["depends_on"]);
-            let edges = if edges.is_empty() {
-                String::new()
-            } else {
-                format!("[depends on: {}]", edges.join(", "))
-            };
+            let edges = depends_on(ticket);
             (
                 field(ticket, "ticket"),
                 field(ticket, "priority"),
@@ -473,9 +468,10 @@ fn render_status(status: &Value) -> String {
         for item in queue {
             let head: String = field(item, "head").chars().take(7).collect();
             let line = format!(
-                "  {:<5} {head}  {}",
+                "  {:<5} {head}  {}  {}",
                 field(item, "ticket"),
-                landing_phase(status, item["attempt"].as_i64()).unwrap_or_default()
+                landing_phase(status, item["attempt"].as_i64()).unwrap_or_default(),
+                depends_on(item),
             );
             out.push_str(line.trim_end());
             out.push('\n');
@@ -502,6 +498,16 @@ fn names(value: &Value) -> Vec<&str> {
         .flatten()
         .filter_map(Value::as_str)
         .collect()
+}
+
+/// A ticket's dependency edges, all of them, as the board prints them.
+fn depends_on(ticket: &Value) -> String {
+    let edges = names(&ticket["depends_on"]);
+    if edges.is_empty() {
+        String::new()
+    } else {
+        format!("[depends on: {}]", edges.join(", "))
+    }
 }
 
 /// The running executions of one attempt.

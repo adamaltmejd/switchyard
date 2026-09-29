@@ -67,6 +67,20 @@ pub fn take_lane(
     Ok(true)
 }
 
+/// Whether the scheduler would admit a ready ticket given a free lane: its
+/// workflow exists, and a read-only workflow runs once, then only by
+/// `yard attempt start`.
+fn admissible(
+    conn: &rusqlite::Connection,
+    loaded: &Loaded,
+    ticket: &tickets::Ticket,
+) -> Result<bool, Fail> {
+    let Ok(workflow) = loaded.config.workflow(&ticket.workflow) else {
+        return Ok(false);
+    };
+    Ok(!(workflow.read_only && attempts::latest_for(conn, ticket.id)?.is_some()))
+}
+
 /// The scheduler's admissions: ready tickets in priority order.
 pub fn scheduled(
     daemon: &Arc<Daemon>,
@@ -81,14 +95,7 @@ pub fn scheduled(
             if free <= 0 {
                 break;
             }
-            let Ok(workflow) = loaded.config.workflow(&ticket.workflow) else {
-                continue;
-            };
-            if workflow.read_only
-                && project
-                    .read(|conn| attempts::latest_for(conn, ticket.id))?
-                    .is_some()
-            {
+            if !project.read(|conn| admissible(conn, loaded, &ticket))? {
                 continue;
             }
             admitted.push(project.tx(|tx| admit(tx, loaded, &ticket))?);
@@ -148,15 +155,13 @@ pub async fn status(daemon: &Daemon, project: &Project) -> Result<Value, Fail> {
                 value["depends_on"] =
                     json!(edges.iter().map(|on| ticket_name(*on)).collect::<Vec<_>>());
                 value["waiting_on"] = json!(unfinished);
-                // The scheduler skips a read-only workflow's ticket once it has run.
-                let skipped = loaded.as_ref().is_some_and(|loaded| {
-                    loaded
-                        .config
-                        .workflow(&ticket.workflow)
-                        .is_ok_and(|workflow| workflow.read_only)
-                }) && attempts::latest_for(conn, ticket.id)?.is_some();
-                value["no_lane"] =
-                    json!(no_lane && !skipped && tickets::blocker(conn, ticket.id)?.is_none());
+                let no_lane = match &loaded {
+                    Some(loaded) if no_lane && tickets::blocker(conn, ticket.id)?.is_none() => {
+                        admissible(conn, loaded, ticket)?
+                    }
+                    _ => false,
+                };
+                value["no_lane"] = json!(no_lane);
                 Ok(value)
             })
             .collect::<Result<_, Fail>>()?;
@@ -178,9 +183,14 @@ pub async fn status(daemon: &Daemon, project: &Project) -> Result<Value, Fail> {
             .iter()
             .map(|approval| {
                 let ticket = attempts::get(conn, approval.attempt)?.ticket;
+                let edges: Vec<String> = tickets::dependencies(conn, ticket)?
+                    .into_iter()
+                    .map(ticket_name)
+                    .collect();
                 Ok(
                     json!({ "approval": approval.id, "attempt": approval.attempt,
                            "ticket": ticket_name(ticket),
+                           "depends_on": edges,
                            "head": approval.head, "actor": approval.actor }),
                 )
             })
