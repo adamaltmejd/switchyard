@@ -932,6 +932,16 @@ pub async fn attempt_approve(
     let approval = project.tx(|tx| {
         let (attempt, item) = approval_item(tx, id, head, proof_digest)?;
         let ticket = tickets::get(tx, id)?;
+        if attempts::edit_pending(tx, attempt.id)? {
+            return Err(Fail::stale(
+                format!(
+                    "{} has an edit the implementer has not read",
+                    ticket_name(id)
+                ),
+                json!(ticket.revision),
+                json!("pending"),
+            ));
+        }
         let review_digest = loaded.review_digest(&attempt.workflow)?;
         if let Some((key, recorded, current)) =
             super::stale_part(&item.payload, &attempt, &ticket, &loaded)?
