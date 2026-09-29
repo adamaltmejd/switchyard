@@ -634,13 +634,17 @@ enum Heard {
     Said(String),
 }
 
-/// Spawn `yard status --watch --json`, which exits once an item is open.
-pub fn watch_attention(project: &Project<'_>) -> Child {
-    project
-        .machine
-        .command()
+/// Spawn `yard status --watch --json`, with `--since` when given. It exits
+/// once an item is open.
+pub fn watch_attention(project: &Project<'_>, since: Option<i64>) -> Child {
+    let mut command = project.machine.command();
+    command
         .current_dir(&project.path)
-        .args(["status", "--watch", "--json"])
+        .args(["status", "--watch", "--json"]);
+    if let Some(since) = since {
+        command.arg("--since").arg(since.to_string());
+    }
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -648,9 +652,10 @@ pub fn watch_attention(project: &Project<'_>) -> Child {
         .expect("spawn yard status --watch")
 }
 
-/// Wait for a `status --watch` child to exit and parse the items it printed.
+/// Wait for a `status --watch` child to exit and parse what it printed:
+/// `{"seq", "attention"}`.
 #[track_caller]
-pub fn attention_items(mut child: Child) -> Vec<Value> {
+pub fn watch_answer(mut child: Child) -> Value {
     let stdout = child.stdout.take().expect("piped stdout");
     let (send, heard) = mpsc::channel();
     std::thread::spawn(move || {
@@ -665,8 +670,16 @@ pub fn attention_items(mut child: Child) -> Vec<Value> {
     });
     let status = child.wait().expect("wait for yard status --watch");
     assert!(status.success(), "yard status --watch failed");
-    let items: Value = serde_json::from_str(&text).expect("status --watch prints JSON");
-    items.as_array().cloned().unwrap_or_default()
+    serde_json::from_str(&text).expect("status --watch prints JSON")
+}
+
+/// The open items a `status --watch` child printed.
+#[track_caller]
+pub fn attention_items(child: Child) -> Vec<Value> {
+    watch_answer(child)["attention"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// `Watch::said` where no daemon serves a watch.

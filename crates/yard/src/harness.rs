@@ -4,6 +4,7 @@
 //! route, frame normalisation and registration proof. Pi, Claude and Codex
 //! are the harnesses.
 
+use crate::agent_env::AgentEnv;
 use crate::r#box::Route;
 use crate::config::Agent;
 use crate::daemon::Machine;
@@ -66,9 +67,8 @@ pub struct Launch<'a> {
     pub effort: Option<&'a str>,
     pub resume: Option<&'a str>,
     pub prompt: &'a str,
-    /// Project guidance a harness's CLI does not load from the workspace, to
-    /// append to its system prompt. `None` for a harness that loads it itself.
-    pub guidance: Option<&'a str>,
+    /// The project's agent environment, as staged.
+    pub env: &'a AgentEnv,
 }
 
 /// Where a launch writes its files and the connection it uses.
@@ -80,6 +80,9 @@ pub struct Stage<'a> {
     pub input: &'a Path,
     /// The provider connection of a `provider` agent; `None` for a login.
     pub connection: Option<&'static Connection>,
+    /// The project's agent environment from the base, staged at the harness's
+    /// user level.
+    pub env: &'a AgentEnv,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -154,12 +157,6 @@ pub trait Harness: Send + Sync {
     }
     /// Whether the adapter has a control for every key the agent sets.
     fn accepts(&self, agent: &Agent) -> Result<(), String>;
-    /// The project guidance a harness needs passed explicitly because its CLI
-    /// loads none from the workspace. `workspace` is the host path the box
-    /// mounts at `/workspace`; a harness that loads it itself returns `None`.
-    fn guidance(&self, _workspace: &Path) -> Result<Option<String>, String> {
-        Ok(None)
-    }
     /// Whether the harness proves registration by its required MCP server
     /// connecting, without listing the server's tools. The daemon records
     /// the tools it granted with that connection. Codex marks Yard's server

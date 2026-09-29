@@ -8,7 +8,8 @@ description: Drive Switchyard (yard) for this project: the commands for filing t
 Yard turns tickets into landed code. `yard status --json` shows `tickets`,
 `attempts`, `attention`, `queue`, `running` and `seq`. Answer attention as
 it opens; the scheduler runs everything else. `yard status --watch` returns
-as soon as an item is open and prints it. `yard status --history --since
+as soon as an item is open and prints it; `--watch --since SEQ` waits for an
+item raised after SEQ. `yard status --history --since
 SEQ` follows the audit stream; it is the only history view.
 
 This file lists the commands. `yard-drive` says how to answer the board and

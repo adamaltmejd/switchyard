@@ -3,6 +3,7 @@
 //!
 //! Measured against Pi 0.87.1 as pinfold carries it.
 
+use crate::agent_env::AgentEnv;
 use crate::config::Agent;
 use crate::daemon::Machine;
 use crate::harness::{
@@ -73,6 +74,7 @@ impl Harness for Pi {
 
     fn stage(&self, st: &Stage) -> std::io::Result<()> {
         stage_state(st.state, connection(st))?;
+        stage_environment(st)?;
         std::fs::create_dir_all(st.input)?;
         std::fs::write(st.input.join(EXTENSION_FILE), EXTENSION)
     }
@@ -123,8 +125,9 @@ fn connection(st: &Stage) -> &'static Connection {
 /// The full argv, run with `/workspace` as its cwd and stdin on /dev/null:
 /// the pinned build does not exit while its stdin is open.
 ///
-/// Discovery of extensions, prompt templates and themes is off, so the staged
-/// client is the only code that loads. Context files and skills stay on.
+/// Discovery of extensions, skills, context files, prompt templates and themes
+/// is off; the staged client and the base's extensions and skills are passed
+/// by path, and the base's guidance rides the system prompt.
 fn argv(launch: &Launch) -> Result<Vec<String>, String> {
     let Some(provider) = launch.provider else {
         return Err("provider is required".into());
@@ -143,6 +146,8 @@ fn argv(launch: &Launch) -> Result<Vec<String>, String> {
         "--session-dir",
         SESSIONS_GUEST,
         "--no-extensions",
+        "--no-skills",
+        "--no-context-files",
         "--no-prompt-templates",
         "--no-themes",
         "--offline",
@@ -155,6 +160,18 @@ fn argv(launch: &Launch) -> Result<Vec<String>, String> {
     ]
     .map(String::from)
     .into();
+    for entry in extensions(launch.env) {
+        argv.extend(["-e".into(), format!("{AGENT_GUEST}/extensions/{entry}")]);
+    }
+    // `--skill` on a directory loads every skill below it, discovery or not.
+    for (root, name) in SKILL_ROOTS {
+        if launch.env.has(root) {
+            argv.extend(["--skill".into(), format!("{AGENT_GUEST}/skills/{name}")]);
+        }
+    }
+    if let Some(guidance) = launch.env.guidance() {
+        argv.extend(["--append-system-prompt".into(), guidance]);
+    }
     if let Some(effort) = launch.effort {
         argv.extend(["--thinking".into(), effort.into()]);
     }
@@ -165,6 +182,42 @@ fn argv(launch: &Launch) -> Result<Vec<String>, String> {
     // After `--`, so a prompt that looks like an option is still the prompt.
     argv.extend(["--".into(), launch.prompt.into()]);
     Ok(argv)
+}
+
+const EXTENSIONS_BASE: &str = ".pi/extensions/";
+/// The base's skill roots Pi loads, each staged under its own directory.
+const SKILL_ROOTS: [(&str, &str); 2] = [(".pi/skills/", "pi"), (".agents/skills/", "agents")];
+
+/// The extensions Pi would discover in the base's `.pi/extensions/`: each
+/// direct `.ts` or `.js` file, and each directory's `index.ts` or `index.js`.
+/// Pi refuses a directory without an entry, so none is passed.
+fn extensions(env: &AgentEnv) -> Vec<String> {
+    let has = |path: &str| env.get(&format!("{EXTENSIONS_BASE}{path}")).is_some();
+    let mut entries: Vec<String> = env
+        .under(EXTENSIONS_BASE)
+        .map(|(rest, _)| rest)
+        .filter(|rest| match rest.split_once('/') {
+            // A directory with both entries loads its `index.ts`, as Pi does.
+            Some((dir, "index.js")) => !has(&format!("{dir}/index.ts")),
+            Some((_, file)) => file == "index.ts",
+            None => rest.ends_with(".ts") || rest.ends_with(".js"),
+        })
+        .map(String::from)
+        .collect();
+    entries.sort();
+    entries
+}
+
+/// Stage the base's extensions and skills into the agent dir, a fresh copy
+/// each execution.
+fn stage_environment(st: &Stage) -> std::io::Result<()> {
+    st.env
+        .stage_dir(st.state, "agent/extensions", &[EXTENSIONS_BASE])?;
+    for (root, name) in SKILL_ROOTS {
+        st.env
+            .stage_dir(st.state, &format!("agent/skills/{name}"), &[root])?;
+    }
+    Ok(())
 }
 
 fn check_model(model: &str) -> Result<(), String> {

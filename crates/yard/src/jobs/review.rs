@@ -55,10 +55,15 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
         .git
         .clone_detached(&project.canonical_dir(), &checkout, &head)
         .await?;
+    let env =
+        crate::agent_env::AgentEnv::load(&daemon.git, &project.canonical_dir(), &base, &checkout)
+            .await
+            .map_err(Fail::refused)?;
     let stage = crate::harness::Stage {
         state: &state,
         input: &input,
         connection,
+        env: &env,
     };
     harness.stage(&stage).map_err(|error| error.to_string())?;
 
@@ -79,7 +84,6 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
         ticket.body,
         seat.instructions
     );
-    let guidance = harness.guidance(&checkout).map_err(Fail::refused)?;
     let argv = harness
         .argv(&crate::harness::Launch {
             provider: agent.provider.as_deref(),
@@ -87,7 +91,7 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
             effort: agent.effort.as_deref(),
             resume: None,
             prompt: &prompt,
-            guidance: guidance.as_deref(),
+            env: &env,
         })
         .map_err(Fail::invalid)?;
     let image = supervise::image(daemon, project, &loaded).await?;
@@ -142,6 +146,17 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
     // Whether it counts is `checks::current`'s durable registration proof;
     // the outcome here is only the terminal frame and the publication.
     project.tx(|tx| {
+        if attempts::get(tx, attempt.id)?.state != "live" {
+            return executions::end(
+                tx,
+                execution,
+                executions::End {
+                    outcome: "abandoned",
+                    ticket: Some(ticket.id),
+                    ..Default::default()
+                },
+            );
+        }
         let published = checks::for_execution(tx, execution)?;
         // An edit that landed while the seat ran superseded it: no error, no round.
         let moved = match row.ticket_revision {
@@ -237,6 +252,9 @@ pub fn publish(grant: &crate::mcp::Grant, arguments: &Value) -> Result<Value, Fa
         }
         let row = executions::get(tx, grant.execution)?;
         let attempt = attempts::get(tx, row.attempt)?;
+        if attempt.state != "live" {
+            return Err(Fail::refused("the attempt has ended"));
+        }
         if let Some(read) = row.ticket_revision
             && attempts::superseded_by_edit(tx, attempt.id, attempt.ticket, read)?
         {

@@ -361,6 +361,19 @@ pub async fn land(
         let result = project.read(|conn| executions::get(conn, child))?;
         match result.outcome.as_deref() {
             Some("pass") => {}
+            Some("abandoned") => {
+                return project.tx(|tx| {
+                    executions::end(
+                        tx,
+                        execution,
+                        executions::End {
+                            outcome: "withdrawn",
+                            ticket: Some(ticket.id),
+                            ..Default::default()
+                        },
+                    )
+                });
+            }
             Some("fail") => {
                 let detail = format!(
                     "The gate {} failed on the merged ref {merged}:\n{}",
