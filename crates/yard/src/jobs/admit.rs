@@ -202,7 +202,7 @@ pub async fn doctor(daemon: &Daemon, project: &Project) -> Result<Value, Fail> {
             logins.push(json!({
                 "login": login.name,
                 "version": harness.version(),
-                "credential": daemon.machine.vars.contains_key(login.key_var),
+                "credential": login.key_var.map(|key| daemon.machine.vars.contains_key(key)),
             }));
         }
     }

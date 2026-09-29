@@ -91,11 +91,14 @@ pub enum Route {
         to: String,
         headers: BTreeMap<String, Header>,
     },
-    /// Resolves the `login`'s token from `from` on the host side and dials
-    /// its origin, or `to` when set. The box sees a placeholder.
+    /// Resolves the `login`'s token on the host side and dials its origin,
+    /// or `to` when set. The box sees a placeholder. `from` names the
+    /// `box up` variable a caller-supplied token rides; a host login, as
+    /// Codex's, carries none.
     Login {
         login: String,
-        from: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         to: Option<String>,
     },

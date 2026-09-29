@@ -133,6 +133,9 @@ async fn serve() -> Result<(), String> {
         "XDG_CACHE_HOME",
         "XDG_RUNTIME_DIR",
         "DBUS_SESSION_BUS_ADDRESS",
+        // Pinfold's codex login helper reads the host's Codex login from
+        // `box up`'s environment. Nothing else of Codex's is forwarded.
+        "CODEX_HOME",
     ] {
         if let Ok(value) = std::env::var(var) {
             pinfold_env.push((var.to_string(), value));

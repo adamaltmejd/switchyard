@@ -7,7 +7,7 @@ use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::{Bytes, Incoming};
 use hyper::{Request, Response, StatusCode};
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 const BODY_MAX: usize = 1024 * 1024;
@@ -30,6 +30,10 @@ pub enum Kind {
 #[derive(Default)]
 pub struct Grants {
     bearers: Mutex<HashMap<String, Grant>>,
+    /// `(project key, execution)` whose grant a harness has listed tools for.
+    /// A required MCP server's connection is the registration proof, and this
+    /// is the daemon's own positive signal that the harness reached it.
+    connected: Mutex<HashSet<(String, i64)>>,
 }
 
 impl Grants {
@@ -50,6 +54,28 @@ impl Grants {
             .lock()
             .expect("grants lock")
             .retain(|_, grant| grant.project.key != project.key || grant.execution != execution);
+        self.connected
+            .lock()
+            .expect("grants lock")
+            .remove(&(project.key.clone(), execution));
+    }
+
+    /// Whether the harness fetched this execution's tools from the server.
+    pub fn connected(&self, project: &Project, execution: i64) -> bool {
+        self.connected
+            .lock()
+            .expect("grants lock")
+            .contains(&(project.key.clone(), execution))
+    }
+
+    /// The harness reached the server. Called in the same task that answers
+    /// `initialize`, before the harness's first frame, so a harness that
+    /// connected has already left the mark.
+    fn mark_connected(&self, project: &Project, execution: i64) {
+        self.connected
+            .lock()
+            .expect("grants lock")
+            .insert((project.key.clone(), execution));
     }
 
     fn get(&self, bearer: &str) -> Option<Grant> {
@@ -194,12 +220,25 @@ async fn answer(daemon: &Arc<Daemon>, request: Request<Incoming>) -> Response<Fu
     let method = message["method"].as_str().unwrap_or_default();
     let result = match (method, &id) {
         ("notifications/initialized", None) => return reply(StatusCode::ACCEPTED, None),
-        ("initialize", Some(_)) => Ok(json!({
-            "protocolVersion": message["params"]["protocolVersion"].as_str().unwrap_or("2025-06-18"),
-            "capabilities": { "tools": {} },
-            "serverInfo": { "name": "yard", "version": env!("CARGO_PKG_VERSION") },
-        })),
-        ("tools/list", Some(_)) => Ok(json!({ "tools": tools(grant.kind) })),
+        ("initialize", Some(_)) => {
+            // The handshake is the connection; a harness reaches it before
+            // its first frame, and `thread.started` may come before the
+            // tools are listed.
+            daemon
+                .grants
+                .mark_connected(&grant.project, grant.execution);
+            Ok(json!({
+                "protocolVersion": message["params"]["protocolVersion"].as_str().unwrap_or("2025-06-18"),
+                "capabilities": { "tools": {} },
+                "serverInfo": { "name": "yard", "version": env!("CARGO_PKG_VERSION") },
+            }))
+        }
+        ("tools/list", Some(_)) => {
+            daemon
+                .grants
+                .mark_connected(&grant.project, grant.execution);
+            Ok(json!({ "tools": tools(grant.kind) }))
+        }
         ("tools/call", Some(_)) => Ok(call(daemon, &grant, &message["params"]).await),
         _ => Err(json!({ "code": -32601, "message": format!("method {method:?} is not served") })),
     };

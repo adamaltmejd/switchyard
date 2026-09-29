@@ -134,6 +134,30 @@ impl Machine {
         ));
     }
 
+    /// The host's Codex login: a `CODEX_HOME` holding a future-dated
+    /// `auth.json`, as pinfold's own login-route test uses, and the fixture
+    /// behind the route. `CODEX_HOME` is the daemon's own environment, which
+    /// it forwards to `box up` for pinfold's host helper; the route origin is
+    /// a machine setting.
+    pub fn write_codex_env(&mut self, token: &str, account_id: &str) {
+        let home = self.root.join("codex-home");
+        std::fs::create_dir_all(&home).unwrap();
+        let auth = serde_json::json!({
+            "OPENAI_API_KEY": null,
+            "tokens": {
+                "id_token": token,
+                "access_token": token,
+                "refresh_token": "refresh-e2e",
+                "account_id": account_id,
+            },
+            "last_refresh": "2026-09-29T00:00:00Z",
+        });
+        std::fs::write(home.join("auth.json"), auth.to_string()).unwrap();
+        self.write_operator_env(&format!("YARD_ORIGIN_CODEX={}\n", self.model.origin()));
+        self.env
+            .push(("CODEX_HOME".into(), home.display().to_string()));
+    }
+
     fn command(&self) -> Command {
         let mut command = Command::new(yard());
         let path = std::env::var_os("PATH").unwrap_or_default();
@@ -775,6 +799,149 @@ pub fn act(request: &ModelRequest, calls: Vec<ToolCall>) -> Reply {
     } else {
         Reply::Text("done".into())
     }
+}
+
+/// A configuration naming one Codex login agent on the fake model.
+pub fn codex_config(extra: &str) -> String {
+    format!(
+        r#"max_lanes = 2
+approve = "manual"
+
+[target]
+ref = "main"
+protected_paths = ["AGENTS.md", "CLAUDE.md", ".agents/", ".pi/"]
+
+[agents.worker]
+harness = "codex"
+login = true
+model = "gpt-5-codex"
+
+[workflows.default]
+implementer = "worker"
+review = ["correctness"]
+
+[workflows.plan]
+access = "read-only"
+review = "none"
+
+[review]
+max_rounds = 3
+blocking = "P1"
+
+[review.seats.correctness]
+agent = "worker"
+instructions = "Review for correctness."
+{extra}"#
+    )
+}
+
+/// Codex's shell tool, whose input field is `cmd`.
+pub fn codex_shell(command: &str) -> ToolCall {
+    tool("exec_command", serde_json::json!({ "cmd": command }))
+}
+
+/// Write `files` and commit them in one Codex shell call.
+pub fn codex_files(files: &[(&str, &str)], message: &str) -> ToolCall {
+    let mut command = String::from("cd /workspace");
+    for (path, text) in files {
+        command.push_str(&format!(
+            " && mkdir -p \"$(dirname {path})\" && printf '%s' {} > {path}",
+            shell_quote(text)
+        ));
+    }
+    command.push_str(&format!(
+        " && git add -A && git commit -q -m {} && echo committed",
+        shell_quote(message)
+    ));
+    codex_shell(&command)
+}
+
+/// One file, one commit, through Codex's shell tool.
+pub fn codex_commit_file(path: &str, text: &str, message: &str) -> ToolCall {
+    codex_files(&[(path, text)], message)
+}
+
+/// Yard's publish tool as Codex's Responses request advertises it: a tool
+/// inside the `mcp__yard` namespace, or at the top level. Returns the
+/// namespace when there is one and the bare tool name.
+fn codex_publish_tool(request: &ModelRequest) -> Option<(Option<String>, String)> {
+    for tool in request.body["tools"].as_array().into_iter().flatten() {
+        if let Some(name) = tool["name"].as_str()
+            && name.ends_with("yard_publish_review")
+        {
+            return Some((None, name.to_string()));
+        }
+        for inner in tool["tools"].as_array().into_iter().flatten() {
+            if let (Some(namespace), Some(name)) = (tool["name"].as_str(), inner["name"].as_str())
+                && name.ends_with("yard_publish_review")
+            {
+                return Some((Some(namespace.to_string()), name.to_string()));
+            }
+        }
+    }
+    None
+}
+
+/// Whether the request is a Codex review seat: Yard's publish tool is
+/// offered inside the namespace Codex wraps an MCP server's tools in.
+pub fn codex_seat(request: &ModelRequest) -> bool {
+    codex_publish_tool(request).is_some()
+}
+
+/// A review publication through the tool Codex advertises for Yard's MCP
+/// server, carrying the namespace Codex wraps it in.
+pub fn codex_publish(request: &ModelRequest, findings: Value) -> ToolCall {
+    let (namespace, name) =
+        codex_publish_tool(request).unwrap_or((None, "yard_publish_review".to_string()));
+    ToolCall {
+        name,
+        namespace,
+        arguments: serde_json::json!({ "findings": findings }),
+    }
+}
+
+/// A JWT pinfold's codex login route accepts: `exp` in the future and an
+/// `https://api.openai.com/auth` claim holding `chatgpt_account_id`.
+pub fn codex_jwt(account_id: &str, exp_in_seconds: u64) -> String {
+    let exp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + exp_in_seconds;
+    let header = serde_json::json!({ "alg": "none", "typ": "JWT" });
+    let payload = serde_json::json!({
+        "exp": exp,
+        "https://api.openai.com/auth": { "chatgpt_account_id": account_id },
+    });
+    format!(
+        "{}.{}.{}",
+        base64url(header.to_string().as_bytes()),
+        base64url(payload.to_string().as_bytes()),
+        base64url(b"signature")
+    )
+}
+
+/// base64url without padding, as a JWT uses.
+fn base64url(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        out.push(ALPHABET[(n >> 18) as usize & 63] as char);
+        out.push(ALPHABET[(n >> 12) as usize & 63] as char);
+        if chunk.len() > 1 {
+            out.push(ALPHABET[(n >> 6) as usize & 63] as char);
+        }
+        if chunk.len() > 2 {
+            out.push(ALPHABET[n as usize & 63] as char);
+        }
+    }
+    out
 }
 
 /// A review publication with these findings.

@@ -131,3 +131,88 @@ fn the_claude_token_is_absent_from_the_box_and_reaches_the_route() {
         );
     }
 }
+
+/// The host's Codex login is absent from the box's environment, files and
+/// clone; the fixture behind pinfold's codex login route receives it as
+/// `Authorization: Bearer` plus `ChatGPT-Account-ID`. The same search runs
+/// through Codex's shell tool; Codex appends text to a tool result, so the
+/// probe prints markers and the test parses only between them.
+///
+/// Sabotage: set the token in the box env in `codex::env`; the search finds
+/// it. Or drop the login route's `to`; the fixture is never reached and the
+/// run fails.
+#[test]
+fn the_codex_login_is_absent_from_the_box_and_reaches_the_route() {
+    let found = Arc::new(Mutex::new(String::new()));
+    let seen = found.clone();
+    let account_id = "acct-e2e-codex";
+    let token = codex_jwt(account_id, 3600);
+    // Split in two, so the command, the transcript and the session that
+    // record it never hold the token whole.
+    let (head, tail) = token.split_at(8);
+    let key = format!("'{head}''{tail}'");
+    let search = format!(
+        "echo PROBE-BEGIN; \
+         for f in /proc/self/environ /proc/$PPID/environ /proc/1/environ; do \
+           tr '\\0' '\\n' < $f | grep -c {key}; done; \
+         grep -rsl {key} /workspace /yard /tmp | wc -l; \
+         echo PROBE-END"
+    );
+    let mut machine = Machine::new("g12-codex", move |request| {
+        match request.tool_results().len() {
+            0 => Reply::Tools(vec![codex_shell(&search)]),
+            1 => {
+                *seen.lock().unwrap() = request.last_tool_result().unwrap().1;
+                Reply::Tools(vec![codex_commit_file(
+                    "feature.txt",
+                    "feature\n",
+                    "Add feature",
+                )])
+            }
+            _ => Reply::Text("done".into()),
+        }
+    });
+    machine.write_codex_env(&token, account_id);
+    machine.start();
+    let project = Project::new(
+        &machine,
+        "p",
+        &codex_config("").replace("review = [\"correctness\"]", "review = \"none\""),
+    );
+    let mut watch = project.watch(0);
+    project.json(&["ticket", "new", "--title", "Add feature"]);
+    watch.until("approval", |event| {
+        event["event"] == "attention.raised" && event["data"]["kind"] == "approval"
+    });
+
+    let counts: Vec<String> = found
+        .lock()
+        .unwrap()
+        .lines()
+        .skip_while(|line| !line.contains("PROBE-BEGIN"))
+        .skip(1)
+        .take_while(|line| !line.contains("PROBE-END"))
+        .map(|line| line.trim().to_string())
+        .collect();
+    assert_eq!(
+        counts,
+        ["0", "0", "0", "0"],
+        "the login was found in the box"
+    );
+    let requests = machine.model.requests();
+    let responses: Vec<_> = requests
+        .iter()
+        .filter(|request| request.path.starts_with("/backend-api/codex"))
+        .collect();
+    assert!(
+        !responses.is_empty(),
+        "the codex login route was never called"
+    );
+    for request in responses {
+        assert_eq!(
+            request.header("authorization"),
+            Some(format!("Bearer {token}").as_str())
+        );
+        assert_eq!(request.header("chatgpt-account-id"), Some(account_id));
+    }
+}
