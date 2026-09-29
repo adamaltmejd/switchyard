@@ -33,8 +33,14 @@ fn text_param(params: &Value, key: &str) -> Option<String> {
 }
 
 /// Free lanes for one more attempt in `project`, counting the machine too.
-fn free_lanes(daemon: &Daemon, project: &Project, loaded: &Loaded) -> Result<i64, Fail> {
-    let own = project.read(attempts::lanes_held)?;
+/// `conn` is `project`'s store, already held by the caller.
+fn free_lanes(
+    daemon: &Daemon,
+    project: &Project,
+    conn: &rusqlite::Connection,
+    loaded: &Loaded,
+) -> Result<i64, Fail> {
+    let own = attempts::lanes_held(conn)?;
     let mut free = i64::from(loaded.config.max_lanes) - own;
     if let Some(machine) = daemon.machine.max_lanes {
         let projects: Vec<_> = daemon
@@ -44,8 +50,8 @@ fn free_lanes(daemon: &Daemon, project: &Project, loaded: &Loaded) -> Result<i64
             .values()
             .cloned()
             .collect();
-        let mut held = 0;
-        for other in projects {
+        let mut held = own;
+        for other in projects.iter().filter(|other| other.key != project.key) {
             held += other.read(attempts::lanes_held)?;
         }
         free = free.min(i64::from(machine) - held);
@@ -53,52 +59,22 @@ fn free_lanes(daemon: &Daemon, project: &Project, loaded: &Loaded) -> Result<i64
     Ok(free)
 }
 
-/// Lanes a ready ticket may take: free lanes less those owed to live attempts
-/// waiting to reacquire one, in this project and, under a machine cap, in
-/// every other (by its cached configuration).
-fn spare_lanes(daemon: &Daemon, project: &Project, loaded: &Loaded) -> Result<i64, Fail> {
-    // Attempts owed a lane that their own project could give them. Without a
-    // cached configuration a project cannot classify them: count every
-    // lane-less live attempt, so it errs toward protecting repairs.
-    let waiting = |other: &Project, loaded: Option<&Loaded>| -> Result<i64, Fail> {
-        let mut count = 0;
-        for attempt in other.read(attempts::live)? {
-            if attempt.lane {
-                continue;
-            }
-            count += match loaded {
-                Some(loaded) => i64::from(super::runnable(other, loaded, &attempt)?.is_some()),
-                None => 1,
-            };
+/// Lanes a ready ticket may take: free lanes less those owed to live
+/// attempts of this project waiting to reacquire one, on one connection so
+/// both are one reading.
+fn spare_lanes(
+    daemon: &Daemon,
+    project: &Project,
+    conn: &rusqlite::Connection,
+    loaded: &Loaded,
+) -> Result<i64, Fail> {
+    let mut waiting = 0;
+    for attempt in attempts::live(conn)? {
+        if !attempt.lane && super::runnable(conn, loaded, &attempt)?.is_some() {
+            waiting += 1;
         }
-        if let Some(loaded) = loaded {
-            let room = i64::from(loaded.config.max_lanes) - other.read(attempts::lanes_held)?;
-            count = count.min(room.max(0));
-        }
-        Ok(count)
-    };
-    let own = waiting(project, Some(loaded))?;
-    let mut spare = free_lanes(daemon, project, loaded)? - own;
-    if let Some(machine) = daemon.machine.max_lanes {
-        let projects: Vec<_> = daemon
-            .projects
-            .lock()
-            .expect("projects lock")
-            .values()
-            .cloned()
-            .collect();
-        let mut owed = own;
-        let mut held = 0;
-        for other in &projects {
-            held += other.read(attempts::lanes_held)?;
-            if other.key != project.key {
-                let cached = other.loaded.lock().expect("loaded lock").clone();
-                owed += waiting(other, cached.as_deref())?;
-            }
-        }
-        spare = spare.min(i64::from(machine) - held - owed);
     }
-    Ok(spare)
+    Ok(free_lanes(daemon, project, conn, loaded)? - waiting)
 }
 
 /// Take a lane for an attempt returning from the queue or from waiting.
@@ -109,7 +85,7 @@ pub fn take_lane(
     attempt: i64,
 ) -> Result<bool, Fail> {
     let _admission = daemon.admission.lock().expect("admission lock");
-    if free_lanes(daemon, project, loaded)? <= 0 {
+    if project.read(|conn| free_lanes(daemon, project, conn, loaded))? <= 0 {
         return Ok(false);
     }
     project.tx(|tx| attempts::set_lane(tx, attempt, true))?;
@@ -138,19 +114,21 @@ pub fn scheduled(
 ) -> Result<(), Fail> {
     let admitted = {
         let _admission = daemon.admission.lock().expect("admission lock");
-        let mut admitted = Vec::new();
-        let mut free = spare_lanes(daemon, project, loaded)?;
-        for ticket in project.read(tickets::ready)? {
-            if free <= 0 {
-                break;
+        project.tx(|tx| {
+            let mut admitted = Vec::new();
+            let mut free = spare_lanes(daemon, project, tx, loaded)?;
+            for ticket in tickets::ready(tx)? {
+                if free <= 0 {
+                    break;
+                }
+                if !admissible(tx, loaded, &ticket)? {
+                    continue;
+                }
+                admitted.push(admit(tx, loaded, &ticket)?);
+                free -= 1;
             }
-            if !project.read(|conn| admissible(conn, loaded, &ticket))? {
-                continue;
-            }
-            admitted.push(project.tx(|tx| admit(tx, loaded, &ticket))?);
-            free -= 1;
-        }
-        admitted
+            Ok(admitted)
+        })?
     };
     for execution in admitted {
         spawn(daemon, project, "implementation", execution);
@@ -184,7 +162,7 @@ fn admit(
 pub async fn status(daemon: &Daemon, project: &Project) -> Result<Value, Fail> {
     let loaded = load(daemon, project).await.ok();
     let no_lane = match &loaded {
-        Some(loaded) => free_lanes(daemon, project, loaded)? <= 0,
+        Some(loaded) => project.read(|conn| free_lanes(daemon, project, conn, loaded))? <= 0,
         None => false,
     };
     let now = store::now_ms();
@@ -800,19 +778,20 @@ pub async fn attempt_start(
     }
     let execution = {
         let _admission = daemon.admission.lock().expect("admission lock");
-        let ready = project.read(tickets::ready)?;
-        let Some(ticket) = ready.into_iter().find(|ticket| ticket.id == id) else {
-            let blocker = project.read(|conn| tickets::blocker(conn, id))?;
-            return Err(Fail::refused(format!(
-                "{} is not ready: {}",
-                ticket_name(id),
-                blocker.unwrap_or_default()
-            )));
-        };
-        if spare_lanes(daemon, project, &loaded)? <= 0 {
-            return Err(Fail::refused("no lane is free").with(json!({ "reason": "capacity" })));
-        }
-        project.tx(|tx| admit(tx, &loaded, &ticket))?
+        project.tx(|tx| {
+            let Some(ticket) = tickets::ready(tx)?.into_iter().find(|t| t.id == id) else {
+                let blocker = tickets::blocker(tx, id)?;
+                return Err(Fail::refused(format!(
+                    "{} is not ready: {}",
+                    ticket_name(id),
+                    blocker.unwrap_or_default()
+                )));
+            };
+            if spare_lanes(daemon, project, tx, &loaded)? <= 0 {
+                return Err(Fail::refused("no lane is free").with(json!({ "reason": "capacity" })));
+            }
+            admit(tx, &loaded, &ticket)
+        })?
     };
     spawn(daemon, project, "implementation", execution);
     project.read(|conn| {

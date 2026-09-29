@@ -183,28 +183,25 @@ pub fn spawn(daemon: &Arc<Daemon>, project: &Arc<Project>, kind: &str, execution
 /// Whether a live attempt could start its next execution once it holds a
 /// lane. `Some` if so, carrying the stale approval item it must supersede.
 fn runnable(
-    project: &Project,
+    conn: &rusqlite::Connection,
     loaded: &Loaded,
     attempt: &attempts::Attempt,
 ) -> Result<Option<Option<attempts::Attention>>, Fail> {
-    let executions = project.read(|conn| executions::for_attempt(conn, attempt.id))?;
+    let executions = executions::for_attempt(conn, attempt.id)?;
     if executions.iter().any(|row| row.status == "running") {
         return Ok(None);
     }
-    let open = project.read(|conn| attempts::open_for_attempt(conn, attempt.id))?;
+    let open = attempts::open_for_attempt(conn, attempt.id)?;
     // A pending edit outranks an edit proposal made from the pre-edit text.
-    let edited = project.read(|conn| attempts::edit_pending(conn, attempt.id))?;
+    let edited = attempts::edit_pending(conn, attempt.id)?;
     if open.iter().any(|item| {
         (item.kind != "proposal" && item.kind != "approval")
             || (item.reason == "edit" && !(edited && item.kind == "proposal"))
     }) {
         return Ok(None);
     }
-    let ticket = project.read(|conn| tickets::get(conn, attempt.ticket))?;
-    if project
-        .read(|conn| checks::active_for(conn, attempt.id))?
-        .is_some()
-    {
+    let ticket = tickets::get(conn, attempt.ticket)?;
+    if checks::active_for(conn, attempt.id)?.is_some() {
         return Ok(None);
     }
     // An approval item counts while everything it binds is current; a new
@@ -222,7 +219,7 @@ async fn advance(
     loaded: &Loaded,
     attempt: &attempts::Attempt,
 ) -> Result<(), Fail> {
-    let Some(superseded) = runnable(project, loaded, attempt)? else {
+    let Some(superseded) = project.read(|conn| runnable(conn, loaded, attempt))? else {
         return Ok(());
     };
     if let Some(item) = superseded {
