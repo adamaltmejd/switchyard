@@ -92,6 +92,13 @@ pub fn scheduled(
         let _admission = daemon.admission.lock().expect("admission lock");
         let mut admitted = Vec::new();
         let mut free = free_lanes(daemon, project, loaded)?;
+        // A live attempt waiting to reacquire a lane outranks a new ticket,
+        // however the lane freed relative to the tick's advance pass.
+        for attempt in project.read(attempts::live)? {
+            if !attempt.lane && super::runnable(project, loaded, &attempt)?.is_some() {
+                free -= 1;
+            }
+        }
         for ticket in project.read(tickets::ready)? {
             if free <= 0 {
                 break;
