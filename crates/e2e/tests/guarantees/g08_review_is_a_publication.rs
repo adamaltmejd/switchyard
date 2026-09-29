@@ -199,7 +199,7 @@ fn findings_below_blocking_pass() {
     assert_eq!(approval["data"]["kind"], "approval", "{approval}");
 
     assert_eq!(
-        project.rows("SELECT verdict, round FROM \"check\" WHERE kind = 'review' ORDER BY id"),
+        project.rows("SELECT c.verdict AS verdict, e.round AS round FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE c.kind = 'review' ORDER BY c.id"),
         vec![
             json!({ "verdict": "fail", "round": 1 }),
             json!({ "verdict": "pass", "round": 2 }),

@@ -190,7 +190,8 @@ fn a_ticket_lands_end_to_end_and_leaves_only_rows() {
             .is_some_and(|proof| !proof.is_empty()),
         "{attempt_proof:?}"
     );
-    let check_proofs = project.rows("SELECT proof FROM \"check\"");
+    let check_proofs = project
+        .rows("SELECT e.proof AS proof FROM \"check\" c JOIN execution e ON e.id = c.execution");
     assert!(!check_proofs.is_empty(), "no checks");
     assert!(
         check_proofs.iter().all(|row| row["proof"] == attempt_proof),
