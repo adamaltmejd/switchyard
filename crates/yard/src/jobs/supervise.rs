@@ -421,7 +421,16 @@ pub async fn implement(
     let loaded = load(daemon, project).await?;
     let row = project.read(|conn| executions::get(conn, execution))?;
     let attempt = project.read(|conn| attempts::get(conn, row.attempt))?;
-    let ticket = project.read(|conn| tickets::get(conn, attempt.ticket))?;
+    // An edit between the start transaction and here is carried by this prompt,
+    // so the row is moved to the revision the prompt reads, in one transaction.
+    let ticket = project.tx(|tx| {
+        let ticket = tickets::get(tx, attempt.ticket)?;
+        tx.execute(
+            "UPDATE execution SET ticket_revision = ?2 WHERE id = ?1",
+            rusqlite::params![execution, ticket.revision],
+        )?;
+        Ok(ticket)
+    })?;
     let workflow = loaded.config.workflow(&attempt.workflow)?.clone();
     let provider = attempt.implementer["provider"].as_str();
     let connection = match provider {
@@ -813,7 +822,11 @@ pub async fn implement(
                 ticket: Some(ticket.id),
                 ..Default::default()
             })?;
-            if workflow.read_only && !edited {
+            if workflow.read_only {
+                // With an edit pending the implementer runs again.
+                if edited {
+                    return Ok(());
+                }
                 attempts::end(tx, attempt.id, "planned")?;
                 return super::audit_attempt(tx, "attempt.ended", &current, None, json!({ "outcome": "planned" })).map(|_| ());
             }
