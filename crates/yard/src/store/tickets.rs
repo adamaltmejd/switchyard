@@ -86,7 +86,7 @@ pub struct NewTicket<'a> {
     pub origin: &'a str,
 }
 
-pub fn create(tx: &Connection, new: &NewTicket, text: Option<&str>) -> Result<i64, Fail> {
+pub fn create(tx: &Connection, new: &NewTicket) -> Result<i64, Fail> {
     if new.title.trim().is_empty() {
         return Err(Fail::invalid("a ticket needs a title"));
     }
@@ -118,7 +118,7 @@ pub fn create(tx: &Connection, new: &NewTicket, text: Option<&str>) -> Result<i6
             ticket: Some(id),
             ..Target::default()
         },
-        text,
+        None,
         json!({ "title": new.title, "workflow": new.workflow, "origin": new.origin,
                 "depends_on": new.depends_on.iter().map(|id| ticket_name(*id)).collect::<Vec<_>>(),
                 "body_bytes": new.body.len(), "parked": new.parked }),

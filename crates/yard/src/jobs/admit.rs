@@ -414,7 +414,6 @@ pub async fn ticket_new(daemon: &Daemon, project: &Project, params: &Value) -> R
                 parked: params["parked"].as_bool().unwrap_or(false),
                 origin: "operator",
             },
-            None,
         )
     })?;
     project.read(|conn| Ok(tickets::get(conn, id)?.to_json()))
@@ -1217,7 +1216,6 @@ pub async fn proposal_answer(
                         parked: payload["parked"].as_bool().unwrap_or(false),
                         origin: "proposal",
                     },
-                    None,
                 )?;
                 let planning = item
                     .attempt
