@@ -440,6 +440,30 @@ pub fn exit_code(status: std::process::ExitStatus) -> i32 {
         .unwrap_or_else(|| 128 + status.signal().unwrap_or(0))
 }
 
+/// The main checkout when `dir` is a linked worktree, else `None`.
+pub fn main_checkout(dir: &Path) -> Option<PathBuf> {
+    let output = std::process::Command::new("git")
+        .args([
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-dir",
+            "--git-common-dir",
+        ])
+        .current_dir(dir)
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH")?)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .ok()?;
+    let text = String::from_utf8(output.stdout).ok()?;
+    let mut lines = text.lines();
+    let (git_dir, common) = (lines.next()?, lines.next()?);
+    if git_dir == common {
+        return None;
+    }
+    Path::new(common).parent().map(Path::to_path_buf)
+}
+
 pub fn target_ref(branch: &str) -> String {
     format!("refs/heads/{branch}")
 }

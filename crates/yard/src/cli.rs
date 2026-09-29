@@ -280,13 +280,13 @@ async fn dispatch(cli: &Cli) -> Result<Option<Value>, Fail> {
             since,
             ..
         } => {
-            let project = find_project(&start)?;
+            let project = resolve_project(&socket, &start).await?;
             return history(&socket, &project, since.unwrap_or(0), cli.json)
                 .await
                 .map(|()| None);
         }
         Command::Status { watch: true, .. } => {
-            let project = find_project(&start)?;
+            let project = resolve_project(&socket, &start).await?;
             return watch(&socket, &project, cli.json).await.map(|()| None);
         }
         Command::Doctor => ("doctor".into(), json!({})),
@@ -297,7 +297,7 @@ async fn dispatch(cli: &Cli) -> Result<Option<Value>, Fail> {
         Command::Proposal(command) => method("proposal", command),
     };
     if !matches!(&cli.command, Command::Init | Command::Daemon(_)) {
-        params["project"] = json!(find_project(&start)?);
+        params["project"] = json!(resolve_project(&socket, &start).await?);
     }
     api::call(&socket, &method, params).await.map(Some)
 }
@@ -315,6 +315,24 @@ fn method(group: &str, command: &impl serde::Serialize) -> (String, Value) {
             json!({}),
         ),
     }
+}
+
+/// `find_project`, except that a linked worktree resolves to its main
+/// checkout when that is a registered project.
+async fn resolve_project(socket: &Path, start: &Path) -> Result<String, Fail> {
+    let found = find_project(start)?;
+    if let Some(main) = crate::git::main_checkout(Path::new(&found)) {
+        let listed = api::call(socket, "project.list", json!({})).await?;
+        let registered = listed.as_array().is_some_and(|roots| {
+            roots
+                .iter()
+                .any(|root| root.as_str().map(Path::new) == Some(main.as_path()))
+        });
+        if registered {
+            return Ok(main.to_string_lossy().into_owned());
+        }
+    }
+    Ok(found)
 }
 
 /// The nearest directory at or above `start` holding `.yard/config.toml`.
