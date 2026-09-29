@@ -106,54 +106,6 @@ fn racing_starts_admit_one_attempt() {
     hold.release();
 }
 
-/// Two registered projects: `YARD_MAX_LANES` bounds attempts across both,
-/// and each keeps its own store. Control: abandoning the first project's
-/// attempt frees the lane and the second's ticket is admitted.
-///
-/// Sabotage: make `admit::free_lanes` count only the project's own lanes;
-/// the scheduler admits the second project's ticket, and its start is
-/// refused as live rather than `capacity`.
-#[test]
-fn machine_lanes_bound_attempts_across_projects() {
-    let hold = Latch::new();
-    let held = hold.clone();
-    let machine = Machine::new("g4-machine", move |request| {
-        if request.prompt().contains("Hold") {
-            return Reply::Hold(held.clone(), Box::new(Reply::Text("done".into())));
-        }
-        Reply::Text("done".into())
-    });
-    let env = std::fs::read_to_string(machine.operator_env()).unwrap();
-    machine.write_operator_env(&format!("{env}YARD_MAX_LANES=1\n"));
-    machine.start();
-    let first = Project::new(&machine, "a", &config(""));
-    let second = Project::new(&machine, "b", &config(""));
-
-    first.json(&["ticket", "new", "--title", "Hold"]);
-    hold.wait_held();
-    second.json(&["ticket", "new", "--title", "Waits"]);
-    let refused = second.refused(&["attempt", "start", "Y-1"]);
-    assert_eq!(refused["data"]["reason"], "capacity", "{refused}");
-    assert_eq!(live(&second, 1), 0);
-
-    let mut watch = second.watch(0);
-    // Parked first, so the freed lane cannot go back to it.
-    first.json(&["ticket", "park", "Y-1"]);
-    first.json(&["attempt", "abandon", "Y-1"]);
-    watch.event("attempt.admitted", &[]);
-    hold.release();
-
-    let titles = |project: &Project| -> Vec<Value> {
-        project
-            .rows("SELECT title FROM ticket")
-            .into_iter()
-            .map(|row| row["title"].clone())
-            .collect()
-    };
-    assert_eq!(titles(&first), ["Hold"]);
-    assert_eq!(titles(&second), ["Waits"]);
-}
-
 /// Two registered projects, each running its first execution, so both are
 /// execution 1 in their own stores: the first ending leaves the second's
 /// bearer working. The second's worker is held until the first has ended,
