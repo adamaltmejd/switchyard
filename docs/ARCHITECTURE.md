@@ -591,7 +591,8 @@ Codex runs as a login too: pinfold's config carries the model provider and
 route, and the launch stages the required `yard` HTTP MCP server, whose
 bearer comes from the env, and its automatic-compaction setting as config
 overrides, so a worker's own files cannot replace the provider. Codex reads
-`AGENTS.md` from `/workspace` itself. Its `exec --json` stream starts a
+`AGENTS.md` from `/workspace` itself and no committed project config, MCP
+server, hook or profile. Its `exec --json` stream starts a
 thread with `thread.started`, which names the session and proves the
 required server connected; `turn.completed` is the outcome and `turn.failed`
 or `error` names the failure. `resume <thread>` continues a session, `-s
@@ -602,9 +603,9 @@ An execution proceeds to its first turn only once the registration proof is
 seen: the reader yields it only when the session id is non-empty, every
 granted tool is in the fetched list and, for a login harness, the Yard
 server is `connected`. A harness whose MCP server is `required` lists no
-tools; its proof is the daemon's own record that the harness completed the
-server's handshake, on which the granted tools are exactly the ones served.
-Yard records the proof on the
+tools; it records the tools the server serves, and the terminal turn checks
+that the harness reached the server, since neither the harness's stdout nor
+Yard's listener orders the other. Yard records the proof on the
 execution row at once;
 a refused proof ends the run. A review check counts only from an execution
 row that records the proof, so a seat that never proved itself never counts,

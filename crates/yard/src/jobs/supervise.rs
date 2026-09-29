@@ -274,13 +274,29 @@ pub async fn run_harness(
                                 project.read(|conn| executions::set_worker(conn, execution, Some(session_id), None))?;
                             }
                             crate::harness::Event::Registered(registration) => {
-                                let registration = complete(daemon, project, execution, harness, registration.clone(), kind);
+                                let registration = complete(harness, registration.clone(), kind);
                                 project.read(|conn| executions::set_mcp(conn, execution, proof(&registration)))?;
                                 refused = matches!(registration, crate::harness::Registration::Refused(_));
                                 run.registered = Some(registration);
                             }
                             crate::harness::Event::Finished { usage: spent, .. } | crate::harness::Event::Failed { usage: spent, .. } => {
                                 usage = Some((spent.input, spent.output, spent.cost));
+                                // A required-server harness reaches Yard's MCP server
+                                // over TCP while its frames come over the box's stdout
+                                // pipe; neither channel orders the other. The terminal
+                                // turn is the last point to see the handshake, and a
+                                // run without one is ungated and fails.
+                                if harness.registration_is_connection()
+                                    && matches!(run.registered, Some(crate::harness::Registration::Registered(_)))
+                                    && !daemon.grants.connected(project, execution)
+                                {
+                                    let registration = crate::harness::Registration::Refused(
+                                        "the Yard MCP server was never contacted".into(),
+                                    );
+                                    project.read(|conn| executions::set_mcp(conn, execution, proof(&registration)))?;
+                                    run.registered = Some(registration);
+                                    refused = true;
+                                }
                                 run.terminal = Some(event.clone());
                             }
                         }
@@ -296,7 +312,7 @@ pub async fn run_harness(
             line = stderr.next_line(), if stderr_open => match line {
                 Ok(Some(line)) => {
                     if let Some(registration) = reader.stderr(&line) {
-                        let registration = complete(daemon, project, execution, harness, registration, kind);
+                        let registration = complete(harness, registration, kind);
                         let refused = matches!(registration, crate::harness::Registration::Refused(_));
                         project.read(|conn| executions::set_mcp(conn, execution, proof(&registration)))?;
                         run.registered = Some(registration);
@@ -334,13 +350,10 @@ fn proof(registration: &crate::harness::Registration) -> &'static str {
 
 /// A registration is complete only when every tool the grant names is in the
 /// fetched list. An incomplete one is refused, and gates the run. A harness
-/// whose required MCP server is the whole proof has not listed its tools:
-/// its proof is the daemon's own record that the harness fetched them, and
-/// the tools recorded are the ones the server served.
+/// whose required MCP server is the whole proof has not listed its tools: it
+/// records the tools the server serves, and the terminal turn checks that it
+/// reached the server at all.
 fn complete(
-    daemon: &Daemon,
-    project: &Project,
-    execution: i64,
     harness: &'static dyn Harness,
     registration: crate::harness::Registration,
     kind: crate::mcp::Kind,
@@ -348,12 +361,7 @@ fn complete(
     let crate::harness::Registration::Registered(tools) = registration else {
         return registration;
     };
-    let tools = if harness.registration_is_connection() {
-        if !daemon.grants.connected(project, execution) {
-            return crate::harness::Registration::Refused(
-                "the Yard MCP server was never contacted".into(),
-            );
-        }
+    let tools = if tools.is_empty() && harness.registration_is_connection() {
         crate::mcp::tool_names(kind)
     } else {
         tools

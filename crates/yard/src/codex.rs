@@ -281,14 +281,15 @@ fn refusal(line: &str) -> Option<Registration> {
     Some(Registration::Refused(message(&value)))
 }
 
-/// Codex's usage: prompt tokens, cache reads included, and completion tokens
-/// with the reasoning tokens. It reports no cost.
+/// Codex's usage. The Responses API's `input_tokens` and `output_tokens` are
+/// already totals: `cached_input_tokens` and `reasoning_output_tokens` are
+/// their subsets, so adding them would double-count. Cost is not reported.
 fn usage(frame: &Value) -> Usage {
     let usage = &frame["usage"];
     let count = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
     Usage {
-        input: count("input_tokens") + count("cached_input_tokens"),
-        output: count("output_tokens") + count("reasoning_output_tokens"),
+        input: count("input_tokens"),
+        output: count("output_tokens"),
         cost: 0.0,
     }
 }
