@@ -711,3 +711,34 @@ fi
         );
     }
 }
+
+/// A seat held by the fixture while its attempt is abandoned, then released
+/// to end without publishing: its execution ends `abandoned` and no item is
+/// open. Control: `a_seat_that_exits_without_publishing_is_a_review_error`.
+///
+/// Sabotage: remove the liveness re-read in `review::run`'s end path; the
+/// seat ends `error` and a `red` item is open.
+#[test]
+fn a_seat_ended_by_an_abandon_is_abandoned() {
+    let hold = Latch::new();
+    let held = hold.clone();
+    let machine = Machine::new("g8-abandon", move |request| {
+        if !seat(&request) {
+            return implementer(request);
+        }
+        Reply::Hold(held.clone(), Box::new(Reply::Text("done".into())))
+    });
+    machine.start();
+    let project = Project::new(&machine, "p", &config(""));
+    let mut watch = project.watch(0);
+    project.json(&["ticket", "new", "--title", "Add feature"]);
+    hold.wait_held();
+    project.json(&["attempt", "abandon", "Y-1"]);
+    hold.release();
+    let ended = watch.event("execution.ended", &[("kind", "review")]);
+    assert_eq!(ended["data"]["outcome"], "abandoned", "{ended}");
+    assert_eq!(
+        project.rows("SELECT kind FROM attention WHERE state = 'open'"),
+        Vec::<Value>::new()
+    );
+}

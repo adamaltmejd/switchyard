@@ -1008,6 +1008,17 @@ pub async fn gate(
         Err(error) => ("error", error, None, None),
     };
     project.tx(|tx| {
+        if attempts::get(tx, attempt.id)?.state != "live" {
+            return executions::end(
+                tx,
+                execution,
+                executions::End {
+                    outcome: "abandoned",
+                    ticket: Some(attempt.ticket),
+                    ..Default::default()
+                },
+            );
+        }
         executions::end(
             tx,
             execution,

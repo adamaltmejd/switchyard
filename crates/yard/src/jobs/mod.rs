@@ -125,16 +125,18 @@ pub fn spawn(daemon: &Arc<Daemon>, project: &Arc<Project>, kind: &str, execution
             let _ = project.tx(|tx| {
                 let row = executions::get(tx, execution)?;
                 if row.status == "running" {
+                    let ended = !matches!(row.kind.as_str(), "cleanup" | "landing")
+                        && attempts::get(tx, row.attempt)?.state != "live";
                     executions::end(
                         tx,
                         execution,
                         executions::End {
-                            outcome: "error",
+                            outcome: if ended { "abandoned" } else { "error" },
                             detail: Some(&fail.message),
                             ..Default::default()
                         },
                     )?;
-                    if row.kind != "cleanup" {
+                    if row.kind != "cleanup" && !ended {
                         let attempt = attempts::get(tx, row.attempt)?;
                         attempts::raise(
                             tx,
