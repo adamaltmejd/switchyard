@@ -260,7 +260,7 @@ impl Pinfold {
             drop(stdin);
             let _ = tokio::time::timeout(TEARDOWN_GRACE, child.wait()).await;
             let detail = match tokio::time::timeout(Duration::from_secs(1), stderr).await {
-                Ok(Ok(text)) => text,
+                Ok(Ok((text, _))) => text,
                 _ => String::new(),
             };
             return Err(error("eof", detail));
