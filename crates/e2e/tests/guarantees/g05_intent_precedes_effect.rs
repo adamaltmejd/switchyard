@@ -62,7 +62,7 @@ impl Held {
 /// Sabotage: make `admit::admit` record the first execution after its box
 /// is up; the held `box up` finds no row.
 #[test]
-fn an_executions_event_precedes_its_box_and_request() {
+fn an_executions_row_and_event_precede_box_creation() {
     let machine = Machine::new("g5-intent", |request| {
         act(
             request,
@@ -287,15 +287,16 @@ fn no_command_is_answered_before_reconciliation() {
     hold.wait_held();
     machine.kill();
 
+    assert_eq!(
+        project.rows("SELECT status FROM execution"),
+        vec![json!({ "status": "running" })]
+    );
+
     std::fs::write(&armed, "").unwrap();
     let lines = machine.spawn();
     pinfold.wait(None);
     let refused = project.refused(&["status"]);
     assert_eq!(refused["code"], "daemon", "{refused}");
-    assert_eq!(
-        project.rows("SELECT status FROM execution"),
-        vec![json!({ "status": "running" })]
-    );
 
     std::fs::remove_file(&armed).unwrap();
     pinfold.release();
