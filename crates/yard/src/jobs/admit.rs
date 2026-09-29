@@ -572,9 +572,7 @@ fn steer(tx: &rusqlite::Connection, id: i64) -> Result<Vec<i64>, Fail> {
             _ => {}
         }
     }
-    if attempt.next.is_none() {
-        attempts::set_next(tx, attempt.id, Some(&json!({ "reason": "edit" })))?;
-    }
+    attempts::set_next(tx, attempt.id, Some(&json!({ "reason": "edit" })))?;
     Ok(running
         .iter()
         .filter(|row| row.parent.is_none() && matches!(row.kind.as_str(), "gate" | "review"))

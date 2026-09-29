@@ -684,13 +684,10 @@ pub async fn implement(
             _ => None,
         };
         // An edit made while this execution ran reaches the implementer
-        // before anything judges its candidate; an expired clock is renewed by it.
+        // before anything judges its candidate; an expired clock still raises `stopped:timeout`.
         let edited = tickets::get(tx, ticket.id)?.revision != ticket.revision;
         let stop = |tx: &rusqlite::Connection, reason: &str, detail: &str| -> Result<(), Fail> {
-            if edited {
-                if reason == "timeout" {
-                    attempts::renew_clock(tx, attempt.id)?;
-                }
+            if edited && reason != "timeout" {
                 return attempts::set_next(tx, attempt.id, Some(&json!({ "reason": "edit" })));
             }
             attempts::raise(tx, attempts::Raise {
@@ -846,9 +843,10 @@ fn notify_if_edited(project: &Project, execution: i64, stop: &tokio::sync::Notif
         .read(|conn| {
             let row = executions::get(conn, execution)?;
             let ticket = tickets::get(conn, attempts::get(conn, row.attempt)?.ticket)?;
-            Ok(row
-                .ticket_revision
-                .is_some_and(|revision| revision != ticket.revision))
+            Ok(row.parent.is_none()
+                && row
+                    .ticket_revision
+                    .is_some_and(|revision| revision != ticket.revision))
         })
         .unwrap_or(false);
     if moved {
