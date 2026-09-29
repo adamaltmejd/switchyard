@@ -54,8 +54,14 @@ impl Harness for Pi {
     }
 
     fn accepts(&self, agent: &Agent) -> Result<(), String> {
-        if crate::harness::connection(&agent.provider).is_none() {
-            return Err(format!("provider {:?} names no connection", agent.provider));
+        if agent.login.is_some() {
+            return Err("login is only for a login harness".into());
+        }
+        let Some(provider) = &agent.provider else {
+            return Err("provider is required".into());
+        };
+        if crate::harness::connection(provider).is_none() {
+            return Err(format!("provider {provider:?} names no connection"));
         }
         if let Some(effort) = &agent.effort
             && !EFFORTS.contains(&effort.as_str())
@@ -66,17 +72,17 @@ impl Harness for Pi {
     }
 
     fn stage(&self, st: &Stage) -> std::io::Result<()> {
-        stage_state(st.state, st.connection)?;
+        stage_state(st.state, connection(st))?;
         std::fs::create_dir_all(st.input)?;
         std::fs::write(st.input.join(EXTENSION_FILE), EXTENSION)
     }
 
     fn env(&self, st: &Stage) -> Vec<(String, String)> {
-        env(st.connection)
+        env(connection(st))
     }
 
     fn route(&self, st: &Stage, machine: &Machine) -> Result<ModelRoute, String> {
-        let connection = st.connection;
+        let connection = connection(st);
         let key = machine.vars.get(connection.key_var).ok_or_else(|| {
             format!(
                 "operator.env holds no {} for connection {}",
@@ -108,14 +114,23 @@ impl Harness for Pi {
     }
 }
 
+/// The provider connection of a provider harness. Configuration refuses a
+/// provider harness with no connection, so this holds for every launch.
+fn connection(st: &Stage) -> &'static Connection {
+    st.connection.expect("a provider harness has a connection")
+}
+
 /// The full argv, run with `/workspace` as its cwd and stdin on /dev/null:
 /// the pinned build does not exit while its stdin is open.
 ///
 /// Discovery of extensions, prompt templates and themes is off, so the staged
 /// client is the only code that loads. Context files and skills stay on.
 fn argv(launch: &Launch) -> Result<Vec<String>, String> {
-    let Some(connection) = crate::harness::connection(launch.provider) else {
-        return Err(format!("unknown connection {:?}", launch.provider));
+    let Some(provider) = launch.provider else {
+        return Err("provider is required".into());
+    };
+    let Some(connection) = crate::harness::connection(provider) else {
+        return Err(format!("unknown connection {provider:?}"));
     };
     check_model(launch.model)?;
     check_prompt(launch.prompt)?;
@@ -300,21 +315,23 @@ pub struct Normalizer {
 }
 
 impl Reader for Normalizer {
-    fn stdout(&mut self, line: &str) -> Option<Event> {
-        let frame = serde_json::from_str::<Value>(line.trim_end_matches('\r')).ok()?;
+    fn stdout(&mut self, line: &str) -> Vec<Event> {
+        let Some(frame) = serde_json::from_str::<Value>(line.trim_end_matches('\r')).ok() else {
+            return Vec::new();
+        };
         match frame.get("type").and_then(Value::as_str) {
             Some("session") => match frame.get("id").and_then(Value::as_str) {
-                Some(id) if !id.is_empty() => Some(Event::Started {
+                Some(id) if !id.is_empty() => vec![Event::Started {
                     session_id: id.into(),
-                }),
-                _ => None,
+                }],
+                _ => Vec::new(),
             },
             Some("message_end") => {
                 self.message_end(&frame["message"]);
-                None
+                Vec::new()
             }
-            Some("agent_settled") => Some(self.settled()),
-            _ => None,
+            Some("agent_settled") => vec![self.settled()],
+            _ => Vec::new(),
         }
     }
 

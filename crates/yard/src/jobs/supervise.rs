@@ -265,11 +265,18 @@ pub async fn run_harness(
                 Ok(Some(line)) => {
                     let _ = file.write_all(line.as_bytes()).await;
                     let _ = file.write_all(b"\n").await;
-                    if let Some(event) = reader.stdout(&line) {
+                    let mut refused = false;
+                    for event in reader.stdout(&line) {
                         match &event {
                             crate::harness::Event::Started { session_id } => {
                                 run.session_id = Some(session_id.clone());
                                 project.read(|conn| executions::set_worker(conn, execution, Some(session_id), None))?;
+                            }
+                            crate::harness::Event::Registered(registration) => {
+                                let registration = complete(registration.clone(), kind);
+                                project.read(|conn| executions::set_mcp(conn, execution, proof(&registration)))?;
+                                refused = matches!(registration, crate::harness::Registration::Refused(_));
+                                run.registered = Some(registration);
                             }
                             crate::harness::Event::Finished { usage: spent, .. } | crate::harness::Event::Failed { usage: spent, .. } => {
                                 usage = Some((spent.input, spent.output, spent.cost));
@@ -277,13 +284,24 @@ pub async fn run_harness(
                             }
                         }
                     }
+                    // A refused registration ends the run before its first
+                    // turn can do anything; the caller revokes the grant.
+                    if refused {
+                        break;
+                    }
                 }
                 _ => stdout_open = false,
             },
             line = stderr.next_line(), if stderr_open => match line {
                 Ok(Some(line)) => {
                     if let Some(registration) = reader.stderr(&line) {
+                        let registration = complete(registration, kind);
+                        let refused = matches!(registration, crate::harness::Registration::Refused(_));
+                        project.read(|conn| executions::set_mcp(conn, execution, proof(&registration)))?;
                         run.registered = Some(registration);
+                        if refused {
+                            break;
+                        }
                     }
                 }
                 _ => stderr_open = false,
@@ -293,21 +311,44 @@ pub async fn run_harness(
             _ = tokio::time::sleep_until(deadline) => { run.timed_out = true; break; }
         }
     }
-    if !run.stopped && !run.timed_out {
+    if !run.stopped && !run.timed_out && !refused(&run.registered) {
         run.exit_code = child.wait().await.ok().map(crate::git::exit_code);
     }
     project.read(|conn| executions::set_worker(conn, execution, None, usage))?;
-    // A granted tool the fetched list lacks is a failed registration.
-    if let Some(crate::harness::Registration::Registered(tools)) = &run.registered
-        && let Some(missing) = crate::mcp::tool_names(kind)
-            .into_iter()
-            .find(|tool| !tools.contains(tool))
-    {
-        run.registered = Some(crate::harness::Registration::Refused(format!(
-            "the MCP client registered no {missing}"
-        )));
-    }
     Ok(run)
+}
+
+fn refused(registration: &Option<crate::harness::Registration>) -> bool {
+    matches!(registration, Some(crate::harness::Registration::Refused(_)))
+}
+
+/// The durable marker for one registration. `checks::current` counts a
+/// review only from an execution whose row says `registered`.
+fn proof(registration: &crate::harness::Registration) -> &'static str {
+    match registration {
+        crate::harness::Registration::Registered(_) => "registered",
+        crate::harness::Registration::Refused(_) => "refused",
+    }
+}
+
+/// A registration is complete only when every tool the grant names is in the
+/// fetched list. An incomplete one is refused, and gates the run.
+fn complete(
+    registration: crate::harness::Registration,
+    kind: crate::mcp::Kind,
+) -> crate::harness::Registration {
+    let crate::harness::Registration::Registered(tools) = registration else {
+        return registration;
+    };
+    match crate::mcp::tool_names(kind)
+        .into_iter()
+        .find(|tool| !tools.contains(tool))
+    {
+        Some(missing) => {
+            crate::harness::Registration::Refused(format!("the MCP client registered no {missing}"))
+        }
+        None => crate::harness::Registration::Registered(tools),
+    }
 }
 
 pub async fn implement(
@@ -320,9 +361,14 @@ pub async fn implement(
     let attempt = project.read(|conn| attempts::get(conn, row.attempt))?;
     let ticket = project.read(|conn| tickets::get(conn, attempt.ticket))?;
     let workflow = loaded.config.workflow(&attempt.workflow)?.clone();
-    let provider = attempt.implementer["provider"].as_str().unwrap_or_default();
-    let connection = crate::harness::connection(provider)
-        .ok_or_else(|| Fail::invalid(format!("connection {provider:?} is unknown")))?;
+    let provider = attempt.implementer["provider"].as_str();
+    let connection = match provider {
+        Some(name) => Some(
+            crate::harness::connection(name)
+                .ok_or_else(|| Fail::invalid(format!("connection {name:?} is unknown")))?,
+        ),
+        None => None,
+    };
     let harness = crate::harness::get(attempt.implementer["harness"].as_str().unwrap_or_default())
         .ok_or_else(|| {
             Fail::invalid(format!(
@@ -390,6 +436,7 @@ pub async fn implement(
         resume.is_some(),
     )
     .await?;
+    let guidance = harness.guidance(&clone).map_err(Fail::refused)?;
     let argv = harness
         .argv(&crate::harness::Launch {
             provider,
@@ -397,18 +444,21 @@ pub async fn implement(
             effort: attempt.implementer["effort"].as_str(),
             resume: resume.as_ref().map(|(_, session)| session.as_str()),
             prompt: &prompt,
+            guidance: guidance.as_deref(),
         })
         .map_err(Fail::invalid)?;
 
     let image = image(daemon, project, &loaded).await?;
+    // Resolve the route, including a login's token, before any bearer is
+    // issued, so a missing credential never leaves a live grant.
+    let model = harness
+        .route(&stage, &daemon.machine)
+        .map_err(Fail::refused)?;
     let bearer = daemon.grants.issue(crate::mcp::Grant {
         project: project.clone(),
         execution,
         kind: crate::mcp::Kind::Implementation,
     });
-    let model = harness
-        .route(&stage, &daemon.machine)
-        .map_err(Fail::refused)?;
     let secrets = vec![
         (crate::harness::BEARER_VAR.to_string(), bearer),
         model.secret.clone(),
@@ -459,11 +509,14 @@ pub async fn implement(
             return Err(fail);
         }
     };
+    // The harness has ended; pull its execution-scoped bearer before any
+    // host-side inspection, so a refused run cannot call MCP tools meanwhile.
+    daemon.grants.revoke(project, execution);
     // Ask git inside the box whether the clone is clean, before it comes down.
     // A timeout never reaches the candidate. A stopped run is deferred whole:
     // its status would be taken while the worker may still write, so it never
     // admits a candidate and keeps its tree for the next execution.
-    let listing = if run.stopped || run.timed_out {
+    let listing = if run.stopped || run.timed_out || refused(&run.registered) {
         None
     } else {
         daemon
@@ -479,8 +532,12 @@ pub async fn implement(
             .filter(|out| out.code == 0)
             .map(|out| out.stdout)
     };
-    let oom = daemon.pinfold.oom_kills(&live.name).await;
-    daemon.grants.revoke(project, execution);
+    // A refused registration is already a failure; no box inspection needed.
+    let oom = if refused(&run.registered) {
+        None
+    } else {
+        daemon.pinfold.oom_kills(&live.name).await
+    };
     // The proof is only read once the box is confirmed down; a failed teardown
     // refuses the candidate below.
     let teardown = live.down(DOWN_TIMEOUT).await;
@@ -561,6 +618,13 @@ pub async fn implement(
             (_, Some(crate::harness::Event::Failed { message, .. })) if !run.stopped => {
                 Some(("failed", Some("harness"), message.clone()))
             }
+            // A run that finished with no registration proof at all was not
+            // gated; it fails like a refused one.
+            (None, Some(_)) if !run.stopped => Some((
+                "failed",
+                Some("mcp"),
+                "the worker registered no MCP client".to_string(),
+            )),
             (_, None) if !run.stopped => {
                 let rose = oom.is_some_and(|count| count > 0);
                 Some((

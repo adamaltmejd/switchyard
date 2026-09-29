@@ -167,4 +167,7 @@ ALTER TABLE execution ADD COLUMN proof TEXT;
 ALTER TABLE "check" ADD COLUMN proof TEXT NOT NULL DEFAULT '';
 ALTER TABLE approval ADD COLUMN proof TEXT NOT NULL DEFAULT '';
 "#,
+    // The harness's registration proof, once its reader yields a complete one:
+    // `registered`, or `refused` when the reader refused it.
+    "ALTER TABLE execution ADD COLUMN mcp TEXT;",
 ];

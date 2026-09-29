@@ -126,6 +126,14 @@ impl Machine {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
 
+    /// The operator's Claude token, and the fixture behind its login route.
+    pub fn write_claude_env(&self) {
+        self.write_operator_env(&format!(
+            "CLAUDE_CODE_OAUTH_TOKEN={SECRET}\nYARD_ORIGIN_CLAUDE={}\n",
+            self.model.origin()
+        ));
+    }
+
     fn command(&self) -> Command {
         let mut command = Command::new(yard());
         let path = std::env::var_os("PATH").unwrap_or_default();
@@ -644,6 +652,79 @@ pub fn commit_file(path: &str, text: &str, message: &str) -> ToolCall {
     bash(&format!(
         "cd /workspace && mkdir -p \"$(dirname {path})\" && printf '%s' '{text}' > {path} && git add -A && git commit -q -m '{message}' && echo committed"
     ))
+}
+
+/// Single-quote `text` for a POSIX shell.
+pub fn shell_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+/// Claude's `Bash` tool, whose input field is `command`.
+pub fn claude_bash(command: &str) -> ToolCall {
+    tool("Bash", serde_json::json!({ "command": command }))
+}
+
+/// Write `files` and commit them in one Claude Bash call.
+pub fn claude_files(files: &[(&str, &str)], message: &str) -> ToolCall {
+    let mut command = String::from("cd /workspace");
+    for (path, text) in files {
+        command.push_str(&format!(
+            " && mkdir -p \"$(dirname {path})\" && printf '%s' {} > {path}",
+            shell_quote(text)
+        ));
+    }
+    command.push_str(&format!(
+        " && git add -A && git commit -q -m {} && echo committed",
+        shell_quote(message)
+    ));
+    claude_bash(&command)
+}
+
+/// One file, one commit, through Claude's `Bash` tool.
+pub fn claude_commit_file(path: &str, text: &str, message: &str) -> ToolCall {
+    claude_files(&[(path, text)], message)
+}
+
+/// A review publication through Claude's MCP tool name.
+pub fn claude_publish(findings: Value) -> ToolCall {
+    tool(
+        "mcp__yard__yard_publish_review",
+        serde_json::json!({ "findings": findings }),
+    )
+}
+
+/// A configuration naming one Claude login agent on the fake model.
+pub fn claude_config(extra: &str) -> String {
+    format!(
+        r#"max_lanes = 2
+approve = "manual"
+
+[target]
+ref = "main"
+protected_paths = ["AGENTS.md", "CLAUDE.md", ".agents/", ".pi/"]
+
+[agents.worker]
+harness = "claude"
+login = true
+model = "claude-sonnet-4-5"
+
+[workflows.default]
+implementer = "worker"
+review = ["correctness"]
+
+[workflows.plan]
+access = "read-only"
+review = "none"
+
+[review]
+max_rounds = 3
+blocking = "P1"
+
+[review.seats.correctness]
+agent = "worker"
+instructions = "Review for correctness."
+{extra}"#
+    )
 }
 
 /// One execution's script: `calls` when it opens, then done.
