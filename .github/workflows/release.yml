@@ -113,4 +113,4 @@ jobs:
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" --notes-from-tag dist/yard-* dist/SHA256SUMS
+        run: gh release create "$GITHUB_REF_NAME" --title "yard ${{ needs.version.outputs.version }}" --notes-from-tag dist/yard-* dist/SHA256SUMS
