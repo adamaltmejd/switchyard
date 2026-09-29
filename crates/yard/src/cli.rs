@@ -482,15 +482,22 @@ fn render_status(status: &Value) -> String {
 fn render_attention(items: &[Value]) -> String {
     let mut out = String::new();
     for item in items {
+        let exits: Vec<&str> = item["exits"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect();
         out.push_str(&format!(
-            "  #{}  {}  {}  {}\n",
+            "  #{}  {}  {}  {}  {}\n",
             item["attention"].as_i64().unwrap_or_default(),
             field(item, "kind"),
             field(item, "reason"),
             field(item, "ticket"),
+            exits.join(" | "),
         ));
-        for command in exit_commands(item) {
-            out.push_str(&format!("    {command}\n"));
+        if let Some(bindings) = exit_bindings(item) {
+            out.push_str(&format!("       {bindings}\n"));
         }
     }
     out
@@ -511,36 +518,20 @@ fn describe_execution(execution: &Value) -> String {
     what
 }
 
-/// The exact commands an open attention item's exits name.
-fn exit_commands(item: &Value) -> Vec<String> {
-    let kind = field(item, "kind");
-    let ticket = item["ticket"].as_str().unwrap_or("-");
+/// What an approval's exits bind and a person cannot retype: the candidate
+/// head, and its proof digest when one must be named. Other items bind
+/// nothing, so they render as one line.
+fn exit_bindings(item: &Value) -> Option<String> {
+    if item["kind"].as_str() != Some("approval") {
+        return None;
+    }
     let head = item["payload"]["head"].as_str().unwrap_or("-");
-    let attention = item["attention"].as_i64().unwrap_or_default();
     let digest = item["payload"]["proof"].as_str().unwrap_or_default();
-    let proof = if crate::jobs::proof::required(digest) {
-        format!(" --proof {digest}")
-    } else {
-        String::new()
-    };
-    item["exits"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(|exit| match (kind.as_str(), exit) {
-            ("proposal", "accept") => format!("yard proposal accept {attention}"),
-            ("proposal", "reject") => format!("yard proposal reject {attention}"),
-            (_, "approve") => format!("yard attempt approve {ticket} --head {head}{proof}"),
-            (_, "reject") => {
-                format!("yard attempt reject {ticket} --head {head}{proof} --text T")
-            }
-            (_, "start") => format!("yard attempt start {ticket}"),
-            (_, "nudge") => format!("yard attempt nudge {ticket} --text T"),
-            (_, "abandon") => format!("yard attempt abandon {ticket}"),
-            (_, other) => format!("yard attempt {other} {ticket}"),
-        })
-        .collect()
+    let mut line = format!("--head {head}");
+    if crate::jobs::proof::required(digest) {
+        line.push_str(&format!(" --proof {digest}"));
+    }
+    Some(line)
 }
 
 fn array<'a>(value: &'a Value, key: &str) -> &'a [Value] {
