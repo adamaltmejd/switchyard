@@ -9,6 +9,8 @@ use crate::harness::{
     Event, Harness, Launch, LoginInfo, ModelRoute, Reader, Registration, Stage, Usage,
 };
 use serde_json::{Value, json};
+use std::io::Read;
+use std::path::Path;
 
 const CLAUDE: &str = "/opt/pinfold/claude/claude";
 const HOME_GUEST: &str = "/yard/state/home";
@@ -37,6 +39,14 @@ const MODEL_MAX_BYTES: usize = 256;
 /// Yard's effort ladder is Claude's `--effort` word for word. An unknown
 /// level is refused at load.
 pub const EFFORTS: [&str; 4] = ["low", "medium", "high", "max"];
+
+/// The workspace guidance files Claude does not load under
+/// `--setting-sources user`, in order, and the per-file bound. A link or a
+/// non-regular file is never read.
+const GUIDANCE_FILES: [&str; 2] = ["AGENTS.md", "CLAUDE.md"];
+const GUIDANCE_MAX: usize = 64 * 1024;
+/// The largest value one argv entry can carry, matching the prompt bound.
+const ARG_MAX_BYTES: usize = 128 * 1024 - 1;
 
 /// The one login harness.
 pub struct Claude;
@@ -70,6 +80,31 @@ impl Harness for Claude {
             return Err(format!("effort {effort:?} is unknown"));
         }
         Ok(())
+    }
+
+    /// `--setting-sources user` also stops Claude's own project-memory
+    /// loading, so Yard reads the checkout's guidance on the host and appends
+    /// it to the system prompt. The box's writable clone is the implementer's;
+    /// a seat's is a fresh checkout of the head.
+    fn guidance(&self, workspace: &Path) -> Result<Option<String>, String> {
+        let mut parts = Vec::new();
+        for name in GUIDANCE_FILES {
+            if let Some(text) = read_guidance(&workspace.join(name))? {
+                parts.push(text);
+            }
+        }
+        if parts.is_empty() {
+            return Ok(None);
+        }
+        let mut text = parts.join("\n\n");
+        if text.len() > ARG_MAX_BYTES {
+            let mut end = ARG_MAX_BYTES;
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            text.truncate(end);
+        }
+        Ok(Some(text))
     }
 
     fn stage(&self, st: &Stage) -> std::io::Result<()> {
@@ -135,11 +170,32 @@ fn settings() -> Value {
     json!({ "autoCompactEnabled": true })
 }
 
+/// One bounded guidance file. `Ok(None)` when it is absent or not a regular
+/// file, so a workspace link is never followed on the host.
+fn read_guidance(path: &Path) -> Result<Option<String>, String> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("{}: {error}", path.display())),
+    };
+    if !meta.is_file() {
+        return Ok(None);
+    }
+    let file = std::fs::File::open(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let mut text = String::new();
+    file.take(GUIDANCE_MAX as u64)
+        .read_to_string(&mut text)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    Ok(Some(text))
+}
+
 /// The full argv, run with `/workspace` as its cwd and stdin on /dev/null.
 ///
 /// `--strict-mcp-config` and `--setting-sources user` keep every committed
-/// MCP config, setting, hook and plugin from loading; the project's memory
-/// files (`CLAUDE.md`) still load from `/workspace`.
+/// MCP config, setting, hook and plugin from loading. The project's guidance
+/// files still reach the model because the caller appends them to the system
+/// prompt; Claude's own project-memory loading is off with the setting
+/// sources.
 fn argv(launch: &Launch) -> Result<Vec<String>, String> {
     check_model(launch.model)?;
     check_prompt(launch.prompt)?;
@@ -164,6 +220,11 @@ fn argv(launch: &Launch) -> Result<Vec<String>, String> {
     ]
     .map(String::from)
     .into();
+    if let Some(guidance) = launch.guidance
+        && !guidance.is_empty()
+    {
+        argv.extend(["--append-system-prompt".into(), guidance.into()]);
+    }
     if let Some(effort) = launch.effort {
         argv.extend(["--effort".into(), effort.into()]);
     }

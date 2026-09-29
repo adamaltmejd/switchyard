@@ -65,6 +65,9 @@ pub struct Launch<'a> {
     pub effort: Option<&'a str>,
     pub resume: Option<&'a str>,
     pub prompt: &'a str,
+    /// Project guidance a harness's CLI does not load from the workspace, to
+    /// append to its system prompt. `None` for a harness that loads it itself.
+    pub guidance: Option<&'a str>,
 }
 
 /// Where a launch writes its files and the connection it uses.
@@ -148,6 +151,12 @@ pub trait Harness: Send + Sync {
     }
     /// Whether the adapter has a control for every key the agent sets.
     fn accepts(&self, agent: &Agent) -> Result<(), String>;
+    /// The project guidance a harness needs passed explicitly because its CLI
+    /// loads none from the workspace. `workspace` is the host path the box
+    /// mounts at `/workspace`; a harness that loads it itself returns `None`.
+    fn guidance(&self, _workspace: &Path) -> Result<Option<String>, String> {
+        Ok(None)
+    }
     /// Write the launch files into the attempt's state and input dirs.
     fn stage(&self, st: &Stage) -> std::io::Result<()>;
     /// The literal box env. The caller adds the MCP bearer.

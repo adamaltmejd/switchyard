@@ -561,8 +561,13 @@ Claude runs as a login: its launch files hold a `--mcp-config` naming only
 the `yard` HTTP server, whose bearer comes from the env, and its
 automatic-compaction setting. `--strict-mcp-config` and `--setting-sources
 user` keep every committed MCP config, setting and hook from loading; a
-project plugin loads only through those settings and is kept out with them,
-while `CLAUDE.md` still loads from `/workspace`. The `system`/`init` frame
+project plugin loads only through those settings and is kept out with them.
+`--setting-sources user` also stops Claude loading the project's own memory,
+so Yard reads the checkout's root `AGENTS.md` and `CLAUDE.md` on the host,
+follows no link, refuses a non-regular file and bounds each to 64 KiB, and
+appends them to Claude's system prompt. A seat reads them from its fresh
+checkout of the head; the implementer reads them from its clone. The
+`system`/`init` frame
 names the session id and the tools the server registered, and that is the
 registration proof. The `result` frame is the outcome. The model and effort
 ride the argv, `--resume` continues a session, and the token stays a pinfold

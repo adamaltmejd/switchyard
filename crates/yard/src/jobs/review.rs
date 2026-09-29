@@ -70,6 +70,7 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
         ticket.body,
         seat.instructions
     );
+    let guidance = harness.guidance(&checkout).map_err(Fail::refused)?;
     let argv = harness
         .argv(&crate::harness::Launch {
             provider: agent.provider.as_deref(),
@@ -77,6 +78,7 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
             effort: agent.effort.as_deref(),
             resume: None,
             prompt: &prompt,
+            guidance: guidance.as_deref(),
         })
         .map_err(Fail::invalid)?;
     let image = supervise::image(daemon, project, &loaded).await?;

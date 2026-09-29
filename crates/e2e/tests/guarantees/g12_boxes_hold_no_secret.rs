@@ -73,9 +73,11 @@ fn the_claude_token_is_absent_from_the_box_and_reaches_the_route() {
     let (head, tail) = SECRET.split_at(8);
     let key = format!("'{head}''{tail}'");
     let search = format!(
-        "for f in /proc/self/environ /proc/$PPID/environ /proc/1/environ; do \
+        "echo PROBE-BEGIN; \
+         for f in /proc/self/environ /proc/$PPID/environ /proc/1/environ; do \
            tr '\\0' '\\n' < $f | grep -c {key}; done; \
-         grep -rsl {key} /workspace /yard /tmp | wc -l"
+         grep -rsl {key} /workspace /yard /tmp | wc -l; \
+         echo PROBE-END"
     );
     let machine = Machine::new("g12-claude", move |request| {
         match request.tool_results().len() {
@@ -106,6 +108,9 @@ fn the_claude_token_is_absent_from_the_box_and_reaches_the_route() {
         .lock()
         .unwrap()
         .lines()
+        .skip_while(|line| !line.contains("PROBE-BEGIN"))
+        .skip(1)
+        .take_while(|line| !line.contains("PROBE-END"))
         .map(|line| line.trim().to_string())
         .collect();
     assert_eq!(

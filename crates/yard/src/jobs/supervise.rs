@@ -418,6 +418,7 @@ pub async fn implement(
         resume.is_some(),
     )
     .await?;
+    let guidance = harness.guidance(&clone).map_err(Fail::refused)?;
     let argv = harness
         .argv(&crate::harness::Launch {
             provider,
@@ -425,6 +426,7 @@ pub async fn implement(
             effort: attempt.implementer["effort"].as_str(),
             resume: resume.as_ref().map(|(_, session)| session.as_str()),
             prompt: &prompt,
+            guidance: guidance.as_deref(),
         })
         .map_err(Fail::invalid)?;
 
