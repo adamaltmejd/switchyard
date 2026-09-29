@@ -272,7 +272,16 @@ async fn advance(
                         .detail
                         .unwrap_or_default();
                     let next = json!({ "reason": "repair", "gate": gate.name, "detail": detail });
-                    project.tx(|tx| attempts::set_next(tx, attempt.id, Some(&next)))?;
+                    // Write only what the read saw: an edit since then owns the next step.
+                    project.tx(|tx| {
+                        let current = attempts::get(tx, attempt.id)?;
+                        if tickets::get(tx, ticket.id)?.revision != ticket.revision
+                            || current.next.is_some()
+                        {
+                            return Ok(());
+                        }
+                        attempts::set_next(tx, attempt.id, Some(&next))
+                    })?;
                 }
                 return Ok(());
             }

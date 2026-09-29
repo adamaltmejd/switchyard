@@ -246,6 +246,7 @@ pub async fn run_harness(
     transcript: &Path,
     inactivity: Duration,
     deadline: tokio::time::Instant,
+    body_read: Option<(i64, &str)>,
 ) -> Result<Run, Fail> {
     let stop = Arc::new(tokio::sync::Notify::new());
     daemon
@@ -265,6 +266,16 @@ pub async fn run_harness(
         .pinfold
         .exec_streaming(&box_name(project, execution), Some("/workspace"), argv)
         .map_err(|error| error.to_string())?;
+    // The worker has the prompt from here; only now has it read the body.
+    if let Some((attempt, body)) = body_read {
+        project.read(|conn| {
+            conn.execute(
+                "UPDATE attempt SET body_read = ?2 WHERE id = ?1",
+                rusqlite::params![attempt, body],
+            )?;
+            Ok(())
+        })?;
+    }
     let mut stdout = BufReader::new(child.stdout.take().expect("piped")).lines();
     let mut stderr = BufReader::new(child.stderr.take().expect("piped")).lines();
     let mut reader = harness.reader();
@@ -524,19 +535,6 @@ pub async fn implement(
         },
     );
     let live = up_worker(daemon, project, execution, &spec, &secrets).await?;
-    // The worker receives the prompt from here; only now has it read the body.
-    if let Err(fail) = project.read(|conn| {
-        conn.execute(
-            "UPDATE attempt SET body_read = ?2 WHERE id = ?1",
-            rusqlite::params![attempt.id, ticket.body],
-        )?;
-        Ok(())
-    }) {
-        daemon.grants.revoke(project, execution);
-        let _ = live.down(DOWN_TIMEOUT).await;
-        return Err(fail);
-    }
-
     let deadline = {
         let spent = attempt.work_ms
             + attempt
@@ -556,6 +554,7 @@ pub async fn implement(
         &transcript(project, attempt.id, execution),
         Duration::from_secs(workflow.inactivity_timeout_minutes * 60),
         deadline,
+        Some((attempt.id, ticket.body.as_str())),
     )
     .await;
     let run = match run {
