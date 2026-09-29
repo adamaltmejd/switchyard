@@ -179,14 +179,20 @@ pub async fn doctor(daemon: &Daemon, project: &Project) -> Result<Value, Fail> {
             })
         })
         .collect();
+    let missing: Vec<String> = crate::daemon::missing_projects(daemon)?
+        .into_iter()
+        .map(|root| root.to_string_lossy().into_owned())
+        .collect();
     Ok(json!({
         "pinfold": pinfold,
+        "service": crate::daemon::service_status().await,
         "configuration": match &loaded {
             Ok(loaded) => json!({ "target": loaded.branch, "head": loaded.head }),
             Err(fail) => json!({ "error": fail.message }),
         },
         "image": daemon.images.lock().expect("images lock").get(&project.key).map(|(head, id)| json!({ "head": head, "id": id })),
         "connections": connections,
+        "missing_projects": missing,
     }))
 }
 
