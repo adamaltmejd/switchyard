@@ -589,7 +589,15 @@ pub async fn install() -> Result<Value, Fail> {
         std::fs::create_dir_all(plist.parent().expect("agents dir"))
             .map_err(|error| error.to_string())?;
         std::fs::write(&plist, text).map_err(|error| error.to_string())?;
-        let _ = service(&["launchctl", "unload", &plist.to_string_lossy()]);
+        let loaded = std::process::Command::new("launchctl")
+            .args(["list", LABEL])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        if loaded {
+            service(&["launchctl", "unload", &plist.to_string_lossy()])?;
+        }
         service(&["launchctl", "load", "-w", &plist.to_string_lossy()])?;
         json!({ "service": plist })
     } else {
