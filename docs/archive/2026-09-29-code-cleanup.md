@@ -398,3 +398,22 @@ Counts come from current source declarations, not a test listing or execution. E
 | `cargo test -p e2e --locked a_worker_cannot_land_by_push_rpc_or_canonical` | 1 |
 
 Five mutation runs, one test per run. The complete source declares 74 tests; `cargo test -p e2e --locked` selects the whole suite. No command in this section was executed here.
+
+### Host results, yard-sthlm
+
+Run on dac65ff with a warm image cache. The whole suite passed, 74 of 74,
+in 207 s with default test threads. Each patch was applied alone, run with
+its test, and reversed; the tree was clean after each.
+
+| Sabotage | Outcome | Detection |
+|---|---|---|
+| G7 check audit | failed in 9 s at the check-to-event equality | direct |
+| G7 watch `--since` | failed in 15 s, "watch --since returned on an item raised before it" | direct |
+| G13 approval reread | failed after 609 s in `watch.until("Y-2 approval again")` | deadline only |
+| G14 proof entry bound | failed after 608 s in the decision loop | deadline only |
+| G1 method table | passed | none |
+
+G13 and G14 detect their sabotage only by the deadline, which is not a
+pass but is not a reason either. G1's sessionless probe is answered 404
+before the method table, so its comment's method-table sabotage is not
+detected. The three are one ticket.
