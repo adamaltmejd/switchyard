@@ -33,6 +33,29 @@ fn live(project: &Project, ticket: i64) -> usize {
         .len()
 }
 
+fn is_approval(event: &Value, ticket: &str) -> bool {
+    event["event"] == "attention.raised"
+        && event["ticket"] == ticket
+        && event["data"]["kind"] == "approval"
+}
+
+/// The ticket's first approval item's head, whenever it was raised.
+#[track_caller]
+fn approval_of(watch: &mut Watch, ticket: &str) -> String {
+    let event = watch.find(ticket, |event| is_approval(event, ticket));
+    event["data"]["payload"]["head"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// The default workflow on one lane and no review.
+fn single_lane(extra: &str) -> String {
+    config(extra)
+        .replace("max_lanes = 2", "max_lanes = 1")
+        .replace("review = [\"correctness\"]", "review = \"none\"")
+}
+
 /// Two `attempt start`s race for the last slot: one wins and a ticket never
 /// has two live attempts. Planning tickets that ran once are started only
 /// by hand, and each later run is held. First two starts of one ticket race
@@ -176,4 +199,76 @@ fn an_execution_ending_revokes_only_its_own_project_grant() {
         second.rows("SELECT progress FROM execution"),
         vec![json!({ "progress": "second's note" })]
     );
+}
+
+/// With `max_lanes` 1, an approved candidate whose landing fails returns for
+/// repair and waits for a lane. When a second attempt holding the only lane
+/// is abandoned while a new ticket is ready, the freed lane goes to the
+/// returning repair, not to the new admission.
+///
+/// Sabotage: run `admit::scheduled` before the live attempts reacquire; the
+/// ready ticket is admitted first and the repair waits.
+#[test]
+fn a_returning_repair_takes_a_freed_lane_before_a_new_ticket() {
+    let repair = Latch::new();
+    let held = repair.clone();
+    let machine = Machine::new("g4-repair-lane", move |request| {
+        let prompt = request.prompt();
+        if request.opens()
+            && prompt.contains("Repair")
+            && request.last_user().contains("failed to land")
+        {
+            // Hold the repair so the lane stays taken while the test reads.
+            return Reply::Hold(held.clone(), Box::new(Reply::Text("done".into())));
+        }
+        if prompt.contains("Repair") {
+            return act(request, vec![commit_file("bad.txt", "bad\n", "Repair")]);
+        }
+        act(
+            request,
+            vec![commit_file("holder.txt", "holder\n", "Holder")],
+        )
+    });
+    machine.start();
+    let project = Project::new(
+        &machine,
+        "p",
+        &single_lane("[gates.land]\ncommand = \"test ! -f bad.txt\"\n"),
+    );
+    let mut watch = project.watch(0);
+    project.json(&["ticket", "new", "--title", "Repair"]);
+    let head = approval_of(&mut watch, "Y-1");
+    project.json(&["ticket", "new", "--title", "Holder"]);
+    project.json(&["attempt", "approve", "Y-1", "--head", &head]);
+
+    // The holder takes the lane as the approved candidate starts landing.
+    watch.until("Y-2 admitted", |event| {
+        event["event"] == "attempt.admitted" && event["ticket"] == "Y-2"
+    });
+    // The landing gate fails; Y-1 is returned for repair and waits.
+    watch.until("Y-1's landing red", |event| {
+        event["event"] == "execution.ended"
+            && event["ticket"] == "Y-1"
+            && event["data"]["kind"] == "landing"
+            && event["data"]["outcome"] == "red"
+    });
+    assert_eq!(live(&project, 1), 1);
+    assert_eq!(
+        project.rows("SELECT lane FROM attempt WHERE ticket = 1"),
+        vec![json!({ "lane": 0 })]
+    );
+
+    // A ready ticket now competes with the repairing attempt for the lane.
+    project.json(&["ticket", "new", "--title", "New"]);
+    project.json(&["attempt", "abandon", "Y-2"]);
+    let next = watch.until("Y-1's repair or Y-3's admission", |event| {
+        (event["event"] == "execution.started"
+            && event["ticket"] == "Y-1"
+            && event["data"]["kind"] == "implementation"
+            && event["data"]["reason"] == "repair")
+            || (event["event"] == "attempt.admitted" && event["ticket"] == "Y-3")
+    });
+    assert_eq!(next["ticket"], "Y-1", "{next}");
+    assert_eq!(live(&project, 3), 0);
+    repair.release();
 }
