@@ -135,9 +135,9 @@ pub fn spawn(daemon: &Arc<Daemon>, project: &Arc<Project>, kind: &str, execution
                         },
                     )?;
                     let attempt = attempts::get(tx, row.attempt)?;
-                    // An edit made while the implementer ran outranks its setup failure.
+                    // A gate or seat that read a pre-edit candidate records nothing.
                     let edited = row.parent.is_none()
-                        && row.kind != "landing"
+                        && matches!(row.kind.as_str(), "gate" | "review")
                         && row.ticket_revision.is_some_and(|revision| {
                             attempts::superseded_by_edit(tx, attempt.id, attempt.ticket, revision)
                                 .unwrap_or(false)
@@ -207,8 +207,13 @@ async fn advance(
     }
     if let Some(next) = &attempt.next {
         let reason = next["reason"].as_str().unwrap_or("repair").to_string();
-        let execution =
-            project.tx(|tx| supervise::start_implementation(tx, attempt, &ticket, &reason))?;
+        let execution = project.tx(|tx| supervise::start_implementation(tx, attempt, &reason))?;
+        spawn(daemon, project, "implementation", execution);
+        return Ok(());
+    }
+    // A pending edit is derived: the ticket is newer than the last implementer's read.
+    if project.read(|conn| attempts::edit_pending(conn, attempt.id))? {
+        let execution = project.tx(|tx| supervise::start_implementation(tx, attempt, "edit"))?;
         spawn(daemon, project, "implementation", execution);
         return Ok(());
     }

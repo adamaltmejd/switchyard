@@ -36,9 +36,10 @@ pub fn transcript(project: &Project, attempt: i64, execution: i64) -> PathBuf {
 pub fn start_implementation(
     tx: &rusqlite::Connection,
     attempt: &attempts::Attempt,
-    ticket: &tickets::Ticket,
     reason: &str,
 ) -> Result<i64, Fail> {
+    // The revision is read here: the row names the revision the prompt carries.
+    let ticket = tickets::get(tx, attempt.ticket)?;
     let name = attempt.implementer["name"].as_str().unwrap_or("default");
     let harness_version = attempt.implementer["harness"]
         .as_str()
@@ -691,13 +692,8 @@ pub async fn implement(
             }
             _ => None,
         };
-        // An edit made while this execution ran reaches the implementer
-        // before anything judges its candidate; an expired clock still raises `stopped:timeout`.
-        let edited = attempts::superseded_by_edit(tx, attempt.id, ticket.id, ticket.revision)?;
+        let edited = attempts::edit_pending(tx, attempt.id)?;
         let stop = |tx: &rusqlite::Connection, reason: &str, detail: &str| -> Result<(), Fail> {
-            if edited && !run.stopped && reason != "timeout" {
-                return attempts::set_next(tx, attempt.id, Some(&json!({ "reason": "edit" })));
-            }
             attempts::raise(tx, attempts::Raise {
                 kind: "stopped",
                 reason,
@@ -837,9 +833,6 @@ pub async fn implement(
             "base": base, "head": new_head, "proof": digest,
             "proof_path": proof::snapshot_path(project, attempt.id, &digest).display().to_string(),
         }))?;
-        if edited {
-            attempts::set_next(tx, attempt.id, Some(&json!({ "reason": "edit" })))?;
-        }
         Ok(())
     })
 }

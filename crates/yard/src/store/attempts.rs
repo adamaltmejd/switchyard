@@ -384,9 +384,32 @@ pub fn resolve(
     Ok(())
 }
 
-/// The one guard for every transaction that decides an attempt's next step:
-/// a decision about a candidate that read ticket revision `read` records
-/// nothing once the ticket moved past it or an edit is pending.
+/// A ticket edit is pending while the ticket's revision is newer than the one
+/// the attempt's latest implementer execution read. Derived, never stored.
+pub fn edit_pending(tx: &Connection, attempt: i64) -> Result<bool, Fail> {
+    let read: Option<i64> = tx
+        .query_row(
+            "SELECT ticket_revision FROM execution
+             WHERE attempt = ?1 AND kind = 'implementation' ORDER BY id DESC LIMIT 1",
+            [attempt],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    let Some(read) = read else {
+        return Ok(false);
+    };
+    let revision: i64 = tx.query_row(
+        "SELECT revision FROM ticket WHERE id = (SELECT ticket FROM attempt WHERE id = ?1)",
+        [attempt],
+        |row| row.get(0),
+    )?;
+    Ok(revision > read)
+}
+
+/// The one guard for every transaction that decides an attempt's next step: a
+/// decision about a candidate that read ticket revision `read` records nothing
+/// once the ticket moved past it or an edit is pending.
 pub fn superseded_by_edit(
     tx: &Connection,
     attempt: i64,
@@ -398,6 +421,5 @@ pub fn superseded_by_edit(
         [ticket],
         |row| row.get(0),
     )?;
-    let next = get(tx, attempt)?.next;
-    Ok(revision != read || next.is_some_and(|next| next["reason"] == "edit"))
+    Ok(revision != read || edit_pending(tx, attempt)?)
 }

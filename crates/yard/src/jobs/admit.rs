@@ -129,7 +129,7 @@ fn admit(
         None,
         json!({ "base": loaded.head, "workflow": ticket.workflow, "implementer": implementer }),
     )?;
-    super::supervise::start_implementation(tx, &row, ticket, "first")
+    super::supervise::start_implementation(tx, &row, "first")
 }
 
 pub async fn status(daemon: &Daemon, project: &Project) -> Result<Value, Fail> {
@@ -551,8 +551,8 @@ fn edit(
     steer(tx, id)
 }
 
-/// Make the live attempt run its implementer next. An implementer already
-/// running finishes first and sees the edit when it ends.
+/// Make the live attempt run its implementer next. The pending edit is derived
+/// from the executions, so a running implementer finishes first and nothing is stored.
 fn steer(tx: &rusqlite::Connection, id: i64) -> Result<Vec<i64>, Fail> {
     let Some(attempt) = attempts::live_for(tx, id)? else {
         return Ok(Vec::new());
@@ -562,7 +562,6 @@ fn steer(tx: &rusqlite::Connection, id: i64) -> Result<Vec<i64>, Fail> {
         .filter(|row| row.status == "running")
         .collect();
     if running.iter().any(|row| row.kind == "implementation") {
-        attempts::set_next(tx, attempt.id, Some(&json!({ "reason": "edit" })))?;
         return Ok(Vec::new());
     }
     if let Some(approval) = checks::active_for(tx, attempt.id)? {
@@ -589,7 +588,8 @@ fn steer(tx: &rusqlite::Connection, id: i64) -> Result<Vec<i64>, Fail> {
             _ => {}
         }
     }
-    attempts::set_next(tx, attempt.id, Some(&json!({ "reason": "edit" })))?;
+    // An edit replaces a pending repair or retry of the old candidate.
+    attempts::set_next(tx, attempt.id, None)?;
     Ok(running
         .iter()
         .filter(|row| row.parent.is_none() && matches!(row.kind.as_str(), "gate" | "review"))

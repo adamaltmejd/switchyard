@@ -277,10 +277,13 @@ split and stops.
    and a stopped review is not a round; while the candidate awaits approval
    or is queued it withdraws the approval in the edit's own transaction. An
    edit resolves every open `stopped` and `red` item of the attempt; no
-   pending retry survives it. Every transaction that decides the next step re-reads
-   the ticket revision and the pending edit and records nothing for a pre-edit
-   candidate. An edit pending at clock expiry loses to the timeout: `stopped:timeout`
-   is raised, the edit stays pending, and the edit on that item renews the clock.
+   pending retry survives it. A pending edit is derived, never stored: the ticket
+   is newer than the revision the latest implementer execution read, which its
+   start transaction records. Every transaction that decides the next step
+   reads it with the current revision and records nothing for a pre-edit
+   candidate; a repair or item raised meanwhile keeps it, and the next
+   implementer carries every pending change. The timeout wins over a pending
+   edit: `stopped:timeout` is raised, and the edit on that item renews the clock.
    A fresh session gets the whole body; a resumed one gets the
    body diff since the revision it last read, labelled as the operator's
    edit; seats always get the whole body. `stop` ends the execution now and keeps the tree.
