@@ -17,9 +17,9 @@ model = "deepseek-v4.1-flash"
 effort = "high"
 
 [agents.reviewer]
-harness = "pi"
-provider = "opencode-go"
-model = "muse-spark-1.3-contributor"
+harness = "codex"
+login = true
+model = "gpt-6-sol"
 effort = "high"
 
 [workflows.default]
