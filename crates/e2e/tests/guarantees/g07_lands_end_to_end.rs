@@ -127,6 +127,36 @@ fn a_ticket_lands_end_to_end_and_leaves_only_rows() {
         .find(|event| event["event"] == "approval.given")
         .unwrap();
     assert_eq!(approval["text"], "ship it");
+    // G7 requires the rows and their decision events to agree, including
+    // after cleanup while another attempt is still live. Sabotage: omit or
+    // duplicate the audit call in executions::start/end or checks::record,
+    // or give it another execution, attempt or check identity.
+    let executions = project
+        .rows("SELECT attempt, id AS execution FROM execution WHERE attempt = 1 ORDER BY id");
+    for event in ["execution.started", "execution.ended"] {
+        assert_eq!(
+            project.rows(&format!(
+                "SELECT attempt, execution FROM audit WHERE event = '{event}'
+                 AND (attempt = 1 OR execution IN (SELECT id FROM execution WHERE attempt = 1))
+                 ORDER BY execution"
+            )),
+            executions,
+            "{event} must name each execution exactly once"
+        );
+    }
+    assert_eq!(
+        project.rows(
+            "SELECT json_extract(data, '$.check') AS check_id, attempt, execution FROM audit
+             WHERE event = 'check.recorded'
+             AND (attempt = 1 OR execution IN (SELECT id FROM execution WHERE attempt = 1))
+             ORDER BY check_id"
+        ),
+        project.rows(
+            "SELECT c.id AS check_id, e.attempt, c.execution FROM \"check\" c
+             JOIN execution e ON e.id = c.execution WHERE e.attempt = 1 ORDER BY c.id"
+        ),
+        "each check must have exactly one event naming its check, attempt and execution"
+    );
     // Handles and usage are column writes, never events: every event is
     // one of the spec's closed list (ARCHITECTURE.md, Store).
     let spec = [
