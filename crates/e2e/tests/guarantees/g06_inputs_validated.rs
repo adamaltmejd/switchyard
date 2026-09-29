@@ -9,22 +9,16 @@ fn last_seq(project: &Project) -> i64 {
         .unwrap()
 }
 
-/// A worker's call straight to the MCP route, past its harness's schema
-/// check.
+/// A Claude worker's call through its own MCP session. Claude passes the
+/// model's arguments to the server unchecked, so no client schema stops a
+/// malformed one first.
 fn propose_directly(arguments: serde_json::Value) -> ToolCall {
-    let body = json!({
-        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-        "params": { "name": "yard_propose", "arguments": arguments },
-    });
-    bash(&format!(
-        "curl -s -H \"Authorization: Bearer $YARD_MCP_BEARER\" -H 'content-type: application/json' \
-         \"$YARD_MCP_ENDPOINT\" -d '{body}'"
-    ))
+    tool("mcp__yard__yard_propose", arguments)
 }
 
 /// A malformed tool payload is refused by name, nothing written: a
-/// proposal carrying one unknown key beside valid ones, sent straight to
-/// the route so no client schema stops it first. Control: the same proposal
+/// proposal carrying one unknown key beside valid ones, sent through a
+/// Claude worker's session so no client schema stops it first. Control: the same proposal
 /// without it is raised.
 ///
 /// Sabotage: make `mcp::strict` accept unknown keys; the first proposal is
@@ -40,8 +34,9 @@ fn a_malformed_tool_payload_is_refused_by_name() {
         )]),
         _ => Reply::Text("done".into()),
     });
+    machine.write_claude_env();
     machine.start();
-    let project = Project::new(&machine, "p", &config(""));
+    let project = Project::new(&machine, "p", &claude_config(""));
     let mut watch = project.watch(0);
     project.json(&["ticket", "new", "--title", "Too large"]);
     watch.until("the worker stopped", |event| {
@@ -58,9 +53,7 @@ fn a_malformed_tool_payload_is_refused_by_name() {
         .map(|(_, text)| text)
         .collect();
     assert_eq!(answers.len(), 2, "{answers:?}");
-    let refused: serde_json::Value = serde_json::from_str(answers[0].trim()).unwrap();
-    assert_eq!(refused["result"]["isError"], true, "{refused}");
-    assert!(answers[0].contains("colour"), "{refused}");
+    assert!(answers[0].contains("colour"), "{}", answers[0]);
     let proposals = project.rows("SELECT payload FROM attention WHERE kind = 'proposal'");
     assert_eq!(proposals.len(), 1);
     assert!(!proposals[0]["payload"].as_str().unwrap().contains("colour"));
