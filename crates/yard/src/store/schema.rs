@@ -189,4 +189,6 @@ ALTER TABLE "check" DROP COLUMN round;
 ALTER TABLE attempt DROP COLUMN nudge;
 ALTER TABLE attempt ADD COLUMN body_read TEXT;
 "#,
+    // The body an implementer execution's start transaction read.
+    "ALTER TABLE execution ADD COLUMN body TEXT;",
 ];

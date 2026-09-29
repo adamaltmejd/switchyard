@@ -142,7 +142,15 @@ pub fn spawn(daemon: &Arc<Daemon>, project: &Arc<Project>, kind: &str, execution
                             attempts::superseded_by_edit(tx, attempt.id, attempt.ticket, revision)
                                 .unwrap_or(false)
                         });
-                    if !edited && row.kind != "cleanup" {
+                    // An edit withdrew the approval a landing ran on.
+                    let withdrawn = match (row.kind.as_str(), row.approval) {
+                        ("landing", Some(id)) => {
+                            crate::store::checks::approval(tx, id)?.ticket_revision
+                                != crate::store::tickets::get(tx, attempt.ticket)?.revision
+                        }
+                        _ => false,
+                    };
+                    if !edited && !withdrawn && row.kind != "cleanup" {
                         attempts::raise(
                             tx,
                             attempts::Raise {

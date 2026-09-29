@@ -387,6 +387,10 @@ pub async fn land(
                             ..Default::default()
                         },
                     )?;
+                    // An edit withdrew this approval and returned the attempt already.
+                    if tickets::get(tx, ticket.id)?.revision != approval.ticket_revision {
+                        return Ok(());
+                    }
                     attempts::raise(
                         tx,
                         attempts::Raise {

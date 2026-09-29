@@ -38,14 +38,14 @@ pub fn start_implementation(
     attempt: &attempts::Attempt,
     reason: &str,
 ) -> Result<i64, Fail> {
-    // The revision is read here: the row names the revision the prompt carries.
+    // The revision and body are read here: the row names what the prompt carries.
     let ticket = tickets::get(tx, attempt.ticket)?;
     let name = attempt.implementer["name"].as_str().unwrap_or("default");
     let harness_version = attempt.implementer["harness"]
         .as_str()
         .and_then(crate::harness::get)
         .map(|harness| harness.version());
-    executions::start(
+    let id = executions::start(
         tx,
         executions::Start {
             attempt: attempt.id,
@@ -59,7 +59,12 @@ pub fn start_implementation(
             harness_version,
             ..Default::default()
         },
-    )
+    )?;
+    tx.execute(
+        "UPDATE execution SET body = ?2 WHERE id = ?1",
+        rusqlite::params![id, ticket.body],
+    )?;
+    Ok(id)
 }
 
 /// The project image, built from canonical's target head.
@@ -421,16 +426,18 @@ pub async fn implement(
     let loaded = load(daemon, project).await?;
     let row = project.read(|conn| executions::get(conn, execution))?;
     let attempt = project.read(|conn| attempts::get(conn, row.attempt))?;
-    // An edit between the start transaction and here is carried by this prompt,
-    // so the row is moved to the revision the prompt reads, in one transaction.
-    let ticket = project.tx(|tx| {
-        let ticket = tickets::get(tx, attempt.ticket)?;
-        tx.execute(
-            "UPDATE execution SET ticket_revision = ?2 WHERE id = ?1",
-            rusqlite::params![execution, ticket.revision],
-        )?;
-        Ok(ticket)
-    })?;
+    // The prompt carries the body the start transaction recorded; a later edit
+    // stays pending for the next execution.
+    let mut ticket = project.read(|conn| tickets::get(conn, attempt.ticket))?;
+    if let Some(body) = project.read(|conn| {
+        Ok(conn.query_row(
+            "SELECT body FROM execution WHERE id = ?1",
+            [execution],
+            |row| row.get::<_, Option<String>>(0),
+        )?)
+    })? {
+        ticket.body = body;
+    }
     let workflow = loaded.config.workflow(&attempt.workflow)?.clone();
     let provider = attempt.implementer["provider"].as_str();
     let connection = match provider {
@@ -880,7 +887,8 @@ async fn implementer_prompt(
     let next = attempt.next.clone().unwrap_or(json!({}));
     let workflow = loaded.config.workflow(&attempt.workflow)?;
     let mut prompt = String::new();
-    if !resumed {
+    // A resumed row from before body_read has no body to diff from.
+    if !resumed || attempt.body_read.is_none() {
         prompt.push_str(&format!(
             "You are working on ticket {}: {}\n\n{}\n\n",
             ticket_name(ticket.id),
