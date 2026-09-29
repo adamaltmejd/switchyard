@@ -455,6 +455,74 @@ fn a_host_landing_gate_runs_on_the_merged_ref_only_when_approved() {
     );
 }
 
+/// A host gate reads the snapshot `$YARD_PROOF` names, at the candidate
+/// stage and again at landing. The implementer writes the live proof and
+/// commits a same-named file; while the review seat is held the live proof
+/// changes, and the landing execution still reads the approved candidate's
+/// snapshot, not the changed live directory or the merged checkout's file.
+///
+/// Sabotage: set `YARD_PROOF` to the live proof directory in
+/// `supervise::host_gate`; the landing execution reads the changed live
+/// file. Or leave it unset; `proof=` names nothing.
+#[test]
+fn a_host_gate_receives_yard_proof() {
+    let hold = Latch::new();
+    let seat_hold = hold.clone();
+    let machine = Machine::new("g13-host-proof", move |request| {
+        if seat(request) {
+            if request.opens() {
+                return Reply::Hold(
+                    seat_hold.clone(),
+                    Box::new(Reply::Tools(vec![publish(json!([]))])),
+                );
+            }
+            return Reply::Text("done".into());
+        }
+        if request.opens() {
+            return Reply::Tools(vec![bash(
+                "cd /workspace && printf 'snapshot-evidence' > /yard/proof/evidence.txt \
+                 && printf 'checkout-evidence' > evidence.txt \
+                 && git add -A && git commit -q -m 'Add evidence' && echo committed",
+            )]);
+        }
+        Reply::Text("done".into())
+    });
+    machine.start();
+    let gate = "[gates.probe]\ncommand = \"echo proof=$(cat \\\"$YARD_PROOF/evidence.txt\\\" 2>/dev/null); echo checkout=$(cat evidence.txt 2>/dev/null)\"\nstage = \"candidate\"\nruns_in = \"host\"\n";
+    let project = Project::new(&machine, "p", &config(gate));
+    let mut watch = project.watch(0);
+    project.json(&["ticket", "new", "--title", "Add feature"]);
+    // The candidate execution ends before the seat starts; the seat is held.
+    hold.wait_held();
+    // The live proof changes after the snapshot; only the snapshot is judged.
+    let live = project
+        .path
+        .join(".yard/local/attempts/1/proof/evidence.txt");
+    std::fs::write(&live, "live-mutated").unwrap();
+    hold.release();
+
+    let approval = watch.attention();
+    assert_eq!(approval["data"]["kind"], "approval", "{approval}");
+    let head = approval["data"]["payload"]["head"].as_str().unwrap();
+    let proof = approval["data"]["payload"]["proof"].as_str().unwrap();
+    project.json(&[
+        "attempt", "approve", "Y-1", "--head", head, "--proof", proof,
+    ]);
+    watch.event("landing.recorded", &[]);
+
+    // The candidate execution, then the same gate again on the merged ref.
+    let gates = gate_details(&project);
+    assert_eq!(gates.len(), 2, "{gates:?}");
+    assert_eq!(gates[0]["reason"], "candidate", "{gates:?}");
+    assert_eq!(gates[1]["reason"], "landing", "{gates:?}");
+    for gate in &gates {
+        let detail = gate["detail"].as_str().unwrap();
+        assert!(detail.contains("proof=snapshot-evidence"), "{detail}");
+        // The checkout carries a same-named file with other content.
+        assert!(detail.contains("checkout=checkout-evidence"), "{detail}");
+    }
+}
+
 /// A `CLAUDE.md` override the implementer leaves in its clone, hidden from
 /// git's status with `assume-unchanged`, never reaches the seat; the
 /// committed `CLAUDE.md` does. In the clone the working tree carries the

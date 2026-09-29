@@ -935,7 +935,17 @@ pub async fn gate(
                         .await
                     }
                     RunsIn::Host => {
-                        host_gate(project, execution, gate, &checkout, &dir, lock, &base).await
+                        host_gate(
+                            project,
+                            execution,
+                            gate,
+                            &checkout,
+                            &dir,
+                            lock,
+                            &base,
+                            proof.as_deref(),
+                        )
+                        .await
                     }
                 },
             }
@@ -1105,10 +1115,14 @@ async fn box_gate(
 }
 
 /// A host gate: a child in its own process group holding the directory's
-/// lock descriptor, with only `PATH`, `HOME`, `YARD_BASE` and the variables
-/// it names. Its command starts once its handle is recorded: the child
-/// waits for a line on stdin, and exits without running if the daemon dies
-/// first.
+/// lock descriptor, with only `PATH`, `HOME`, `YARD_BASE`, `YARD_PROOF` and
+/// the variables it names. `YARD_PROOF` is the host path of the snapshot
+/// this execution judges. Its command starts once its handle is recorded:
+/// the child waits for a line on stdin, and exits without running if the
+/// daemon dies first.
+// Each argument is a separate input of the one gate run; a struct would
+// only rename them.
+#[allow(clippy::too_many_arguments)]
 async fn host_gate(
     project: &Project,
     execution: i64,
@@ -1117,6 +1131,7 @@ async fn host_gate(
     dir: &Path,
     lock: Option<&Lock>,
     base: &str,
+    proof: Option<&Path>,
 ) -> Result<GateResult, String> {
     let own;
     let lock = match lock {
@@ -1144,6 +1159,9 @@ async fn host_gate(
         .stderr(std::process::Stdio::piped())
         .process_group(0)
         .kill_on_drop(true);
+    if let Some(proof) = proof {
+        command.env("YARD_PROOF", proof);
+    }
     for name in &gate.env {
         if let Ok(value) = std::env::var(name) {
             command.env(name, value);
