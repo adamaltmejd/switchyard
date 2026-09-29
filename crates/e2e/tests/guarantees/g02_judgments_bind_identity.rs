@@ -116,7 +116,7 @@ fn a_new_commit_leaves_the_candidate_unverified() {
     assert_eq!(judged(&project, &head(&second)), once);
     let checks: Vec<i64> = project
         .rows(&format!(
-            "SELECT id FROM \"check\" WHERE head = '{}' ORDER BY id",
+            "SELECT c.id AS id FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE e.head = '{}' ORDER BY c.id",
             head(&second)
         ))
         .iter()
@@ -607,7 +607,7 @@ fn a_proof_only_change_is_a_new_candidate() {
 
     assert_eq!(head(&second), candidate_head);
     let gates =
-        project.rows("SELECT id, head, proof FROM \"check\" WHERE kind = 'gate' ORDER BY id");
+        project.rows("SELECT c.id AS id, e.head AS head, e.proof AS proof FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE c.kind = 'gate' ORDER BY c.id");
     assert_eq!(gates.len(), 2, "{gates:?}");
     assert_eq!(gates[0]["head"], candidate_head.as_str());
     assert_eq!(gates[1]["head"], candidate_head.as_str());
