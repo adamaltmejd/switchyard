@@ -437,6 +437,18 @@ fn render(value: &Value) -> String {
 /// `landing` (the queue), then the attention items and `seq`. Each open
 /// ticket is in exactly one section; an empty section is not printed.
 fn render_status(status: &Value) -> String {
+    let width = terminal_width();
+    let title_line = |indent: usize, id: &Value, out: &mut String| {
+        let title = array(status, "tickets")
+            .iter()
+            .find(|ticket| ticket["ticket"] == *id)
+            .map(|ticket| field(ticket, "title"))
+            .unwrap_or_default();
+        if !title.is_empty() {
+            out.push_str(&truncate(&format!("{:indent$}{title}", ""), width));
+            out.push('\n');
+        }
+    };
     let attempts = array(status, "attempts");
     let queue = array(status, "queue");
     let queued = |ticket: &Value| queue.iter().any(|item| item["ticket"] == ticket["ticket"]);
@@ -468,6 +480,7 @@ fn render_status(status: &Value) -> String {
             None => (idle_reason(ticket), String::new()),
         };
         (
+            ticket["ticket"].clone(),
             field(ticket, "ticket"),
             field(ticket, "priority"),
             phase,
@@ -482,13 +495,13 @@ fn render_status(status: &Value) -> String {
     let phase_width = rows
         .iter()
         .flatten()
-        .map(|line| line.2.chars().count())
+        .map(|line| line.3.chars().count())
         .max()
         .unwrap_or(0);
     let clock_width = rows
         .iter()
         .flatten()
-        .map(|line| line.3.chars().count())
+        .map(|line| line.4.chars().count())
         .max()
         .unwrap_or(0);
     let mut out = String::new();
@@ -498,12 +511,13 @@ fn render_status(status: &Value) -> String {
         }
         out.push_str(title);
         out.push('\n');
-        for (name, priority, phase, clocks, edges) in lines {
+        for (id, name, priority, phase, clocks, edges) in lines {
             let line = format!(
                 "  {name:<5} {priority}  {phase:<phase_width$}  {clocks:<clock_width$}  {edges}"
             );
             out.push_str(line.trim_end());
             out.push('\n');
+            title_line(2 + 5 + 1 + priority.chars().count() + 2, &id, &mut out);
         }
     }
 
@@ -519,6 +533,11 @@ fn render_status(status: &Value) -> String {
             );
             out.push_str(line.trim_end());
             out.push('\n');
+            title_line(
+                2 + 5 + 1 + head.chars().count() + 2,
+                &item["ticket"],
+                &mut out,
+            );
         }
     }
 
