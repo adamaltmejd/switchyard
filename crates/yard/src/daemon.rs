@@ -613,6 +613,7 @@ pub fn uninstall() -> Result<Value, Fail> {
 
 pub async fn restart() -> Result<Value, Fail> {
     let socket = api::socket_path();
+    let deadline = tokio::time::Instant::now() + RESTART_BOUND;
     let before = tokio::time::timeout(
         Duration::from_secs(5),
         api::call(&socket, "daemon.status", json!({})),
@@ -621,18 +622,45 @@ pub async fn restart() -> Result<Value, Fail> {
     .ok()
     .and_then(Result::ok)
     .map(|status| status["pid"].clone());
-    if cfg!(target_os = "macos") {
+    let argv: Vec<String> = if cfg!(target_os = "macos") {
         let uid = nix::unistd::getuid();
-        service(&[
-            "launchctl",
-            "kickstart",
-            "-k",
-            &format!("gui/{uid}/{LABEL}"),
-        ])?;
+        ["launchctl", "kickstart", "-k"]
+            .map(String::from)
+            .into_iter()
+            .chain([format!("gui/{uid}/{LABEL}")])
+            .collect()
     } else {
-        service(&["systemctl", "--user", "restart", "yard.service"])?;
+        ["systemctl", "--user", "restart", "yard.service"]
+            .map(String::from)
+            .into_iter()
+            .collect()
+    };
+    let timed_out = |what: String, socket: &Path, status: Value| {
+        Fail::new(
+            "daemon",
+            format!(
+                "{what} within {}s; socket {}; the service manager says {status}",
+                RESTART_BOUND.as_secs(),
+                socket.display()
+            ),
+        )
+    };
+    let mut command = tokio::process::Command::new(&argv[0]);
+    command.args(&argv[1..]).kill_on_drop(true);
+    let exited = tokio::time::timeout_at(deadline, command.status()).await;
+    let status = match exited {
+        Ok(status) => status.map_err(|error| Fail::refused(format!("{}: {error}", argv[0])))?,
+        Err(_) => {
+            return Err(timed_out(
+                format!("`{}` did not exit and was killed", argv.join(" ")),
+                &socket,
+                service_status().await,
+            ));
+        }
+    };
+    if !status.success() {
+        return Err(Fail::refused(format!("{} exited {status}", argv.join(" "))));
     }
-    let deadline = tokio::time::Instant::now() + RESTART_BOUND;
     let mut last;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -655,14 +683,10 @@ pub async fn restart() -> Result<Value, Fail> {
             Err(_) => last = "the daemon accepted and did not reply".to_string(),
         }
         if tokio::time::Instant::now() >= deadline {
-            return Err(Fail::new(
-                "daemon",
-                format!(
-                    "no new daemon answered at {} within {}s: {last}; the service manager says {}",
-                    socket.display(),
-                    RESTART_BOUND.as_secs(),
-                    service_status().await
-                ),
+            return Err(timed_out(
+                format!("no new daemon answered ({last})"),
+                &socket,
+                service_status().await,
             ));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
