@@ -11,10 +11,10 @@ protected_paths = ["AGENTS.md", "CLAUDE.md", ".agents/", ".claude/", ".codex/", 
 egress = ["index.crates.io", "static.crates.io"]
 
 [agents.implementer]
-harness = "pi"
-provider = "opencode-go"
-model = "deepseek-v4.1-flash"
-effort = "high"
+harness = "claude"
+login = true
+model = "claude-sonnet-5-5"
+effort = "medium"
 
 [agents.reviewer]
 harness = "codex"
