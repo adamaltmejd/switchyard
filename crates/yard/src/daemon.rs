@@ -612,6 +612,11 @@ pub fn uninstall() -> Result<Value, Fail> {
 }
 
 pub async fn restart() -> Result<Value, Fail> {
+    let socket = api::socket_path();
+    let before = api::call(&socket, "daemon.status", json!({}))
+        .await
+        .ok()
+        .map(|status| status["pid"].clone());
     if cfg!(target_os = "macos") {
         let uid = nix::unistd::getuid();
         service(&[
@@ -623,27 +628,35 @@ pub async fn restart() -> Result<Value, Fail> {
     } else {
         service(&["systemctl", "--user", "restart", "yard.service"])?;
     }
-    let socket = api::socket_path();
     let deadline = tokio::time::Instant::now() + RESTART_BOUND;
+    let mut last = "no answer".to_string();
     loop {
-        let last = match api::call(&socket, "daemon.status", json!({})).await {
-            Ok(status) => {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(remaining, api::call(&socket, "daemon.status", json!({}))).await
+        {
+            Ok(Ok(status)) if Some(&status["pid"]) != before.as_ref() => {
                 return Ok(json!({
                     "restarted": true,
                     "pid": status["pid"],
                     "boundary": status["boundary"],
                 }));
             }
-            Err(fail) => fail,
-        };
+            Ok(Ok(status)) => {
+                last = format!(
+                    "the daemon before the restart, pid {}, still answers",
+                    status["pid"]
+                )
+            }
+            Ok(Err(fail)) => last = fail.message,
+            Err(_) => last = "the daemon accepted and did not reply".to_string(),
+        }
         if tokio::time::Instant::now() >= deadline {
             return Err(Fail::new(
                 "daemon",
                 format!(
-                    "no daemon answered at {} within {}s: {}; the service manager says {}",
+                    "no new daemon answered at {} within {}s: {last}; the service manager says {}",
                     socket.display(),
                     RESTART_BOUND.as_secs(),
-                    last.message,
                     service_status().await
                 ),
             ));
