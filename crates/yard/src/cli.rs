@@ -28,14 +28,16 @@ enum Command {
     /// Import the checkout's branch into canonical, or consume canonical into it.
     Sync,
     /// The project's tickets, attempts and attention.
+    #[command(group(clap::ArgGroup::new("stream").args(["watch", "history"])))]
     Status {
-        /// Return as soon as an attention item is open; print the open items.
+        /// Return once an attention item is open (with --since, one raised
+        /// after it); print the open items and the seq.
         #[arg(long, conflicts_with = "history")]
         watch: bool,
         /// Follow the audit stream from --since, one line per event.
         #[arg(long, conflicts_with = "watch")]
         history: bool,
-        #[arg(long, requires = "history", conflicts_with = "watch")]
+        #[arg(long, requires = "stream")]
         since: Option<i64>,
     },
     #[command(subcommand)]
@@ -285,9 +287,13 @@ async fn dispatch(cli: &Cli) -> Result<Option<Value>, Fail> {
                 .await
                 .map(|()| None);
         }
-        Command::Status { watch: true, .. } => {
+        Command::Status {
+            watch: true, since, ..
+        } => {
             let project = resolve_project(&socket, &start).await?;
-            return watch(&socket, &project, cli.json).await.map(|()| None);
+            return watch(&socket, &project, *since, cli.json)
+                .await
+                .map(|()| None);
         }
         Command::Doctor => ("doctor".into(), json!({})),
         Command::Sync => ("sync".into(), json!({})),
@@ -356,17 +362,23 @@ fn find_project(start: &Path) -> Result<String, Fail> {
     }
 }
 
-/// Return as soon as at least one attention item is open; print the open
-/// items.
-async fn watch(socket: &Path, project: &str, json: bool) -> Result<(), Fail> {
+/// Return once an attention item is open, or with `since` once one raised
+/// after it is; print every open item and the seq to pass next.
+async fn watch(socket: &Path, project: &str, since: Option<i64>, json: bool) -> Result<(), Fail> {
     loop {
-        let result = api::call(socket, "attention", json!({ "project": project })).await?;
+        let result = api::call(
+            socket,
+            "attention",
+            json!({ "project": project, "since": since }),
+        )
+        .await?;
         let items = result["attention"].as_array().cloned().unwrap_or_default();
         if !items.is_empty() {
+            let seq = result["seq"].as_i64().unwrap_or_default();
             let text = if json {
-                Value::Array(items).to_string()
+                json!({ "seq": seq, "attention": items }).to_string()
             } else {
-                render_attention(&items).trim_end().to_string()
+                format!("{}\nseq {seq}", render_attention(&items).trim_end())
             };
             let _ = write_line(&text);
             return Ok(());

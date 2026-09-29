@@ -414,24 +414,45 @@ async fn events(daemon: &Daemon, params: &Value) -> Result<Value, Fail> {
     }
 }
 
-/// The open attention items, waiting until at least one exists.
+/// The open attention items and the audit seq they were read at, waiting
+/// until one is open, or with `since` until one raised after it is.
 async fn attention(daemon: &Daemon, params: &Value) -> Result<Value, Fail> {
     let project = project(daemon, params)?;
+    let since = params["since"].as_i64();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
     loop {
         let notified = project.events.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
-        let items = project.read(crate::store::attempts::open_attention)?;
-        if !items.is_empty() {
+        let (seq, items, fresh) = project.read(|conn| {
+            let seq = crate::store::last_seq(conn)?;
+            let items = crate::store::attempts::open_attention(conn)?;
+            let fresh = match since {
+                None => !items.is_empty(),
+                Some(since) => {
+                    let mut fresh = false;
+                    for item in &items {
+                        fresh |= conn.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM audit WHERE event = 'attention.raised'
+                             AND attention = ?1 AND seq > ?2)",
+                            rusqlite::params![item.id, since],
+                            |row| row.get::<_, bool>(0),
+                        )?;
+                    }
+                    fresh
+                }
+            };
+            Ok((seq, items, fresh))
+        })?;
+        if fresh {
             let items: Vec<Value> = items
                 .iter()
                 .map(crate::store::attempts::Attention::to_json)
                 .collect();
-            return Ok(json!({ "attention": items }));
+            return Ok(json!({ "seq": seq, "attention": items }));
         }
         if tokio::time::timeout_at(deadline, notified).await.is_err() {
-            return Ok(json!({ "attention": [] }));
+            return Ok(json!({ "seq": seq, "attention": [] }));
         }
     }
 }

@@ -11,7 +11,10 @@ see `yard-operator`; for filing work, see `yard-file`.
 ## The loop
 
 `yard status --watch --json` returns as soon as an attention item is open
-and prints the open items. After every decision you make, your next command
+and prints `{"seq", "attention"}`. To wait past items you are deliberately
+leaving open, pass the seq it printed: `--watch --since SEQ` returns only
+once an item raised after SEQ is open, and prints every open item.
+After every decision you make, your next command
 is the watch again; sync when woken. The open attention items in `yard
 status --json` are decisions you still owe. `yard status --history --since
 SEQ --json` follows the audit stream from `SEQ` when you need history; it is

@@ -229,7 +229,10 @@ fn a_ticket_lands_end_to_end_and_leaves_only_rows() {
 /// Sabotage: key `--watch` on events after start (follow the audit stream
 /// from the current seq). The already-open approval never raises again, so
 /// the first `status --watch` never returns and the test fails at the
-/// deadline.
+/// deadline. `--since SEQ` waits past items already open: it ignores an
+/// approval raised before SEQ and returns, printing every open item, once
+/// one is raised after it. Sabotage: ignore `--since`; the second watch
+/// exits at once and the running check fails.
 #[test]
 fn status_watch_returns_on_open_attention() {
     let machine = Machine::new("g7watch", |request| {
@@ -265,7 +268,7 @@ fn status_watch_returns_on_open_attention() {
 
     // The watch returns the open item at once, and prints the same objects
     // `status --json` reports.
-    let items = attention_items(watch_attention(&project));
+    let items = attention_items(watch_attention(&project, None));
     let attention = project.json(&["status"])["attention"].clone();
     assert_eq!(Value::Array(items.clone()), attention);
     assert_eq!(items.len(), 1, "{items:?}");
@@ -281,7 +284,7 @@ fn status_watch_returns_on_open_attention() {
             .as_array()
             .is_some_and(Vec::is_empty)
     );
-    let watching = watch_attention(&project);
+    let watching = watch_attention(&project, None);
     project.json(&["ticket", "unpark", "Y-1"]);
 
     // The scheduler starts Y-1 again; the watch returns its new approval.
@@ -289,4 +292,41 @@ fn status_watch_returns_on_open_attention() {
     assert_eq!(items.len(), 1, "{items:?}");
     assert_eq!(items[0]["kind"], "approval");
     assert_eq!(items[0]["ticket"], "Y-1");
+
+    // `--since` waits past an item already open. The answer's seq is the
+    // stream position: Y-1's approval is open and was raised at or before it.
+    let answered = watch_answer(watch_attention(&project, None));
+    let seq = answered["seq"].as_i64().expect("watch prints its seq");
+    let mut waiting = watch_attention(&project, Some(seq));
+    // A round trip to the daemon after the spawn; a watch that ignored
+    // `--since` would have answered by now.
+    project.json(&["status"]);
+    assert!(
+        waiting.try_wait().expect("poll watch").is_none(),
+        "watch --since returned on an item raised before it"
+    );
+
+    // Raise the next item through the fixture: the watch returns both open
+    // items and a seq at or after the new item's event.
+    project.json(&[
+        "ticket",
+        "new",
+        "--title",
+        "Second",
+        "--body",
+        "Create feature.txt",
+    ]);
+    let second = history.until("Y-2 approval", |event| {
+        event["event"] == "attention.raised" && event["ticket"] == "Y-2"
+    });
+    let answer = watch_answer(waiting);
+    let mut tickets: Vec<&str> = answer["attention"]
+        .as_array()
+        .expect("attention list")
+        .iter()
+        .map(|item| item["ticket"].as_str().unwrap_or_default())
+        .collect();
+    tickets.sort();
+    assert_eq!(tickets, ["Y-1", "Y-2"], "{answer}");
+    assert!(answer["seq"].as_i64().unwrap() >= second["seq"].as_i64().unwrap());
 }
