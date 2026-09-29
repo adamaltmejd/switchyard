@@ -31,8 +31,10 @@ item's exit names.
 
 - `approval` — first read `yard attempt show Y-n` and `yard attempt diff
   Y-n`, then `yard attempt approve Y-n --head SHA`, `yard attempt reject
-  Y-n --head SHA --text T`, or `yard attempt abandon Y-n`. Approval binds
-  the exact `--head`; a reject sends its notes back as a repair.
+  Y-n --head SHA --text T`, or `yard attempt abandon Y-n`. Add the
+  `--proof DIGEST` the item's exit names when the candidate has a proof
+  snapshot. Approval binds the exact `--head` and proof; a reject sends its
+  notes back as a repair.
 - `proposal` — `yard proposal accept ID` or `yard proposal reject ID`,
   where `ID` is the attention id.
 - `stopped` — `yard attempt start Y-n`, `yard attempt nudge Y-n --text T`,

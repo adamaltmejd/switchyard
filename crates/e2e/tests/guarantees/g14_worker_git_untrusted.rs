@@ -159,3 +159,84 @@ fn yard_reaches_only_its_routes_and_listens_locally() {
         assert!(line.contains(&socket), "{unix:?}");
     }
 }
+
+/// The worker leaves a symlink in `/yard/proof`, and separately passes the
+/// entry bound: each candidate is refused by name and no gate runs. Control:
+/// a regular file is accepted and its candidate gate runs.
+///
+/// Sabotage: follow links in `proof::snapshot`; the symlink is copied, the
+/// candidate is accepted and a gate runs.
+#[test]
+fn a_bad_proof_entry_is_refused_by_name() {
+    let machine = Machine::new("g14-proof", |request| {
+        let prompt = request.prompt();
+        let command = if prompt.contains("Y-1") {
+            "cd /workspace && printf 'feature' > feature.txt && git add -A && git commit -q -m 'Add feature' && ln -s /workspace/feature.txt /yard/proof/link && echo done"
+        } else if prompt.contains("Y-2") {
+            "cd /workspace && printf 'feature' > feature.txt && git add -A && git commit -q -m 'Add feature' && mkdir -p /yard/proof/many && i=0 && while [ $i -le 1024 ]; do : > \"$(printf '/yard/proof/many/f%04d' $i)\"; i=$((i+1)); done && echo done"
+        } else {
+            "cd /workspace && printf 'feature' > feature.txt && git add -A && git commit -q -m 'Add feature' && printf 'evidence' > /yard/proof/evidence.txt && echo done"
+        };
+        act(request, vec![bash(command)])
+    });
+    machine.start();
+    let project = Project::new(
+        &machine,
+        "p",
+        &config("[gates.check]\ncommand = \"test -f feature.txt\"\nstage = \"candidate\"\n")
+            .replace("max_lanes = 2", "max_lanes = 3")
+            .replace("review = [\"correctness\"]", "review = \"none\""),
+    );
+    let mut watch = project.watch(0);
+    project.json(&["ticket", "new", "--title", "Symlink proof"]);
+    project.json(&["ticket", "new", "--title", "Bound proof"]);
+    project.json(&["ticket", "new", "--title", "Good proof"]);
+
+    let mut stopped = 0;
+    let mut approval = None;
+    while stopped < 2 || approval.is_none() {
+        let event = watch.until("decision", |event| {
+            event["event"] == "attention.raised"
+                && (event["data"]["kind"] == "stopped" || event["data"]["kind"] == "approval")
+        });
+        if event["data"]["kind"] == "stopped" {
+            assert_eq!(event["data"]["reason"], "failed", "{event}");
+            stopped += 1;
+        } else {
+            approval = Some(event);
+        }
+    }
+
+    let refusals = project.rows(
+        "SELECT attempt.ticket AS ticket, execution.detail AS detail
+         FROM execution JOIN attempt ON attempt.id = execution.attempt
+         WHERE execution.kind = 'implementation' AND execution.outcome = 'refused'
+         ORDER BY attempt.ticket",
+    );
+    assert_eq!(refusals.len(), 2, "{refusals:?}");
+    let detail = |ticket: i64| {
+        refusals.iter().find(|row| row["ticket"] == ticket).unwrap()["detail"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert!(detail(1).contains("link"), "{}", detail(1));
+    assert!(detail(1).contains("symbolic link"), "{}", detail(1));
+    assert!(detail(2).contains("1024"), "{}", detail(2));
+    assert!(detail(2).contains("many/f"), "{}", detail(2));
+
+    // No gate ran for a refused candidate; the accepted one ran its gate.
+    let gates = project.rows(
+        "SELECT attempt.ticket AS ticket FROM execution
+         JOIN attempt ON attempt.id = execution.attempt
+         WHERE execution.kind = 'gate'",
+    );
+    assert_eq!(gates, vec![json!({ "ticket": 3 })], "{gates:?}");
+
+    // The control reached approval carrying the good proof digest, so an
+    // operator's approve can bind it.
+    let approval = approval.unwrap();
+    assert_eq!(approval["ticket"], "Y-3", "{approval}");
+    let proof = approval["data"]["payload"]["proof"].as_str().unwrap();
+    assert!(!proof.is_empty(), "{approval}");
+}

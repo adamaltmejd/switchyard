@@ -28,8 +28,9 @@ _Avoid_: worktree
 **Lane**: one of the places attempts run through. `max_lanes` and
 `YARD_MAX_LANES` count them; see Capacity for when an attempt holds one.
 
-**Candidate**: an attempt's exact `base..head` at a moment. Every check,
-approval and landing binds a candidate, never an attempt.
+**Candidate**: an attempt's exact `base..head` and proof snapshot at a
+moment. Every check, approval and landing binds a candidate, never an
+attempt.
 
 **Execution**: one unit of external work on the one persisted lifecycle:
 an implementer call, one reviewer seat, one gate command, one landing, one
@@ -98,6 +99,7 @@ credentials, or damages the host.
 | No credential in a box | Upstream keys and login tokens ride pinfold's injecting and login routes; a box sees a placeholder. The only secret a box holds is its own execution-scoped MCP bearer, which authenticates calls from inside it and authorises nothing else. |
 | Box is the sandbox | The harness runs fully permissive; access is what the box mounts writable, and Yard's own writes into a writable mount follow no link the box made. A reviewer reads a fresh read-only checkout of the head. A gate box reaches only the project's allowlist: no model, no MCP, no credential. |
 | Worker git is untrusted | A worker's clone shares no objects with canonical and the daemon runs no git command in it; a candidate arrives by a fetch run in canonical, and gates and reviewers read a fresh checkout of it. Every daemon git call disables hooks, `core.fsmonitor`, signing and every transport but validated local paths. |
+| Worker proof is untrusted | The proof directory is worker-written. Yard copies it with no link followed, refuses any entry that is not a regular file or a directory by name, and bounds its size and file count. |
 | No checkout writes | Yard never writes the operator's checkout except inside `yard sync` the operator ran. |
 | Gates run where the project says | A project chooses per gate whether it runs in a box or on the host. A host gate runs agent-written code with the operator's privileges and no containment: before any review at the candidate stage, after approval at landing. Which gates accept that is the project's decision. |
 | Fail safe | Unknown liveness or outcome never duplicates work, lands, deletes or kills (G5). |
@@ -156,7 +158,7 @@ reruns gates and no review (G2).
 **Verification identity.** What a judgment binds is written as data:
 
 ```
-candidate     = attempt, base, head
+candidate     = attempt, base, head, proof
 gate input    = candidate, ticket revision, gate digest
 review input  = candidate, ticket revision, review digest
 check         = its kind's input, verdict, image id
@@ -164,7 +166,8 @@ approval      = candidate, ticket revision, both digests, the checks it requires
 ```
 
 A ticket edit or a new head makes every input new; a new digest makes only
-its own kind's input new. A check whose input no longer matches is
+its own kind's input new. A changed proof with an unchanged head is a new
+candidate. A check whose input no longer matches is
 superseded and counts for nothing; one whose input still matches keeps
 counting, and its row is never rewritten. An approval is superseded when
 any of its parts is.
@@ -369,7 +372,9 @@ abandonment or a candidate returning from the queue for repair, which must
 reacquire a lane before its worker starts. A review round's seats run one
 at a time inside the attempt's lane. Each project's landing has its own
 lane outside `max_lanes`. `YARD_MAX_LANES` caps attempts across the machine;
-boxes never exceed attempts plus landings.
+boxes never exceed attempts plus landings. When a lane frees, the scheduler
+gives it to a live attempt waiting to reacquire one before admitting a new
+ticket.
 
 **Cancellation** is taking the box down. Yard never signals a process it did
 not start on the host, and never signals a process inside a box. Host work
@@ -427,7 +432,8 @@ rows and survive cleanup. Forward
 migrations only; a store from a newer schema is refused.
 
 Files live outside the clone while an attempt is live, under
-`.yard/local/attempts/<id>/`: transcripts, gate logs, harness state.
+`.yard/local/attempts/<id>/`: transcripts, gate logs, harness state, the
+worker's live `proof/` directory and its `proof-snapshots/<digest>` copies.
 Cleanup removes the directory. A surface that needs a log
 after cleanup does not get one; it gets the rows.
 
@@ -496,7 +502,7 @@ box spec names mounts, env, the harness, egress and memory.
 
 | Box | `/workspace` | Harness state | Egress | Env |
 |---|---|---|---|---|
-| implementer | the attempt's clone, writable, or read-only where the workflow's `access` says so | writable | model route, MCP route, `isolation.egress` | the harness's env, git identity, `YARD_MCP_BEARER` (from) |
+| implementer | the attempt's clone, writable, or read-only where the workflow's `access` says so; `/yard/proof` writable (no proof mount when read-only) | writable | model route, MCP route, `isolation.egress` | the harness's env, git identity, `YARD_MCP_BEARER` (from) |
 | reviewer | a fresh checkout of the head, read-only | its own, writable | model route, MCP route | the harness's env, git identity, `YARD_MCP_BEARER` (from) |
 | gate | a private disposable checkout of the exact commit, writable | none | `isolation.egress` only | `HOME`, `PATH`, `YARD_BASE` |
 
@@ -659,19 +665,19 @@ G15. Each is shown by one or more end-to-end scenarios; testing policy is in
 | # | Guarantee | Shown by |
 |---|---|---|
 | 1 | Only the queue lands | A worker with its MCP bearer and its clone: `git push` fails, no RPC lands, canonical is not reachable from the box. Control: the queue lands the same candidate. |
-| 2 | Judgments bind exact identity | A passed gate and review, then a new commit and a ticket edit each leave the candidate unverified; a synced gate change reruns the gate and keeps the review, a synced seat change the reverse. An approval given with `--head`, then a repair commit: the approval does not carry and `approval` is raised again; under `auto` a protected path still raises it. An automatic approval, then a sync that protects its path or sets `approve = "manual"`: the landing withdraws it, raises `approval` and reruns no check; with the attempt abandoned while the landing re-reads it, nothing is raised. An approve naming an old candidate, an edit naming an old revision, and an accepted edit proposal whose ticket moved each get a stale result and change no row. |
+| 2 | Judgments bind exact identity | A passed gate and review, then a new commit and a ticket edit each leave the candidate unverified; a synced gate change reruns the gate and keeps the review, a synced seat change the reverse. A repair that changes only the proof snapshot, with an unchanged head, is a new candidate: its gate reruns and the old check does not count. An approve or reject names the head and, when the candidate has a proof snapshot, its digest; a delayed answer naming the old digest is stale and writes no row, and the new digest answers. An approval given with `--head`, then a repair commit: the approval does not carry and `approval` is raised again; under `auto` a protected path still raises it. An automatic approval, then a sync that protects its path or sets `approve = "manual"`: the landing withdraws it, raises `approval` and reruns no check; with the attempt abandoned while the landing re-reads it, nothing is raised. An approve naming an old candidate, an edit naming an old revision, and an accepted edit proposal whose ticket moved each get a stale result and change no row. |
 | 3 | Landing is compare-and-swap and proved | Canonical moved by hand between verify and land: the landing retires and re-queues. On green, canonical is the verified ref and contains the head. The daemon killed after `update-ref`, before the landing is recorded: before restart canonical is the merged head, the intent is unresolved and no landing is recorded; on restart it is recorded once, no merge runs, the ticket closes. The daemon killed while its `update-ref` is held: restart keeps the intent and raises `red`; once the command is released, `start` records the landing once. A ticket edit racing the landing intent is refused naming the intent. |
-| 4 | Capacity holds | Two `attempt start`s race for the last lane: one wins and a ticket never has two live attempts. Two registered projects: `YARD_MAX_LANES` bounds attempts across both, and each keeps its own store; an execution ending in one leaves the other's execution of the same id its bearer. |
+| 4 | Capacity holds | Two `attempt start`s race for the last lane: one wins and a ticket never has two live attempts. Two registered projects: `YARD_MAX_LANES` bounds attempts across both, and each keeps its own store; an execution ending in one leaves the other's execution of the same id its bearer. A candidate returned from the queue for repair takes a freed lane before a ready ticket is admitted. |
 | 5 | Intent precedes effect, and a restart loses only the turn | Intent is ordered before effect: an execution's audit event precedes its box's creation time in `pinfold box list` and the fixture's first request. The daemon killed mid-execution: on restart the execution is `interrupted`, no second box exists, the tree is kept, and `start` continues. The daemon killed while a host landing gate runs: the gate's group is gone after restart and the landing re-queues. No command is answered before reconciliation has committed. |
 | 6 | Inputs are validated at the boundary | A malformed tool payload, a TOML with an unknown key, an unknown workflow name, a sync that removes a workflow an open ticket names: refused by name, nothing written. |
-| 7 | A ticket lands end to end and leaves only rows | New ticket, worker commit, candidate gate, review pass, approval, green landing: canonical moves and the ticket is done. Afterwards every decision has one audit event naming its target and text, the execution rows carry tokens, cost, model and start reason, every event is one the Store section names, the attempt directory and its boxes are gone, and another live attempt's directory and canonical are untouched. |
+| 7 | A ticket lands end to end and leaves only rows | New ticket, worker commit, candidate gate, review pass, approval, green landing: canonical moves and the ticket is done. The proof snapshot on the host holds what the worker wrote before landing. Afterwards every decision has one audit event naming its target and text, the execution rows carry tokens, cost, model and start reason, every event is one the Store section names, the attempt directory with its proof snapshot, boxes and proof copies are gone, the check and approval rows carry the proof digest, and another live attempt's directory and canonical are untouched. |
 | 8 | Review is a publication, and bounded | A seat that exits 0 without publishing is a review error; a seat killed after publishing has published; a second publication is refused; findings below `blocking` pass; a panel of `none` reaches approval marked unreviewed; a seat that publishes a block and is then held by the fixture: no repair starts until its box is gone; a seat that always blocks gets exactly `max_rounds` rounds, then `stopped:limit`. A candidate that commits a `.pi` extension which publishes a pass: nothing loads it, and the seat's own publication is the one recorded. Control: the seat's prompt carries a rule from the project's `AGENTS.md`. A candidate that commits a Claude plugin, settings hook and a `.mcp.json` server which publish a pass: nothing loads them, and the seat's own publication is the one recorded. Control: the seat's prompt carries the committed `CLAUDE.md` rule. A seat that publishes with no registration proof does not count, and a fresh seat runs. A gate error's `start` reruns that gate on the same head. |
 | 9 | Each implementer execution starts from the right place | A nudge mid-execution lets the execution end on its own and reaches the next prompt; `stop` delivers it sooner. A worker that leaves an untracked file gets no review and the next prompt lists the file; left again, `stopped:dirty`. With `max_session_executions = 2`: the second execution resumes the first, the third resumes nothing and its prompt is the brief, the fourth resumes the third, the fifth resumes nothing. |
 | 10 | The queue lands one at a time and re-judges what does not merge | Three approved candidates, the second red on its merged ref: the first lands, the second gets one repair and a second red raises `red`, the third lands on the moved target with its own gate run. A candidate that does not merge gets a repair naming the paths, and its next head takes gates, review and approval again. A conflict against a target that changed `.yard/config.toml`, in a clone made before it: the worker fetches the target from its bundle, merges, and the new candidate's base is the target, so it passes the `.yard` refusal and lands with the operator's configuration intact. |
 | 11 | Only the operator's sync changes `.yard` and canonical from outside | A worker commit under `.yard` comes back with the reason and no gate runs; the same change through `yard sync` is in force for the next execution. A checkout and canonical that each hold a commit the other lacks: both directions refuse naming both heads; a fast-forward passes. |
 | 12 | Boxes hold nothing secret | The key is absent from the box's environment and clone; the fixture behind the injecting route receives it. The claude token is absent from the box's environment, files and clone; the fixture behind the login route receives it as `Authorization: Bearer`. |
 | 13 | Every gate and seat runs where its row says | A seat that writes to `/workspace` fails and the head is unchanged. An `AGENTS.override.md` the implementer leaves in its clone, excluded through `.git/info/exclude`: the seat's prompt lacks its rule and carries the committed guidance's. A `CLAUDE.md` override the implementer leaves, hidden from git's status, does not reach the seat; the committed `CLAUDE.md` does. A gate box that calls the model or MCP route gets nothing, and an ignored file the implementer left is absent from its checkout; control: the worker box reaches the route. A host candidate gate runs on the head before any review and sees `YARD_BASE` and only the variables its `env` names; a host landing gate runs on the merged ref and never for a candidate whose approval was superseded, even by an edit while its landing merges. |
-| 14 | Worker git is untrusted, and Yard stays local | A worker that plants `core.fsmonitor`, a hook, a clean filter and a remote in its clone, corrupts an object and links its harness's models file to a host path: none of them acts on the host, canonical's objects are intact, the candidate is refused by name. Across G7's path every request the model's fixture receives came through the model route, and the daemon listens on its unix socket and the MCP listener only. |
+| 14 | Worker git is untrusted, and Yard stays local | A worker that plants `core.fsmonitor`, a hook, a clean filter and a remote in its clone, corrupts an object and links its harness's models file to a host path: none of them acts on the host, canonical's objects are intact, the candidate is refused by name. A worker that leaves a symlink in `/yard/proof`, or passes the proof entry bound, is refused by name and no gate runs; a regular file is accepted. Across G7's path every request the model's fixture receives came through the model route, and the daemon listens on its unix socket and the MCP listener only. |
 | 15 | Plans and proposals resolve | A ticket on `plan`: its clone refuses writes, it proposes children and a body edit, and the attempt ends with nothing raised; accepting them blocks the parent, which the scheduler does not start once they are done; `yard ticket done` then closes it and its dependents become ready. Closing a ticket with a live attempt is refused. One execution proposing A and B, B depending on A: accepting both mints A first and B's edge names it. |
 
 ## Code
@@ -690,7 +696,7 @@ Dependencies: `tokio`, `hyper` with `hyper-util` and `http-body-util`,
 ```
 crates/yard/src/
   store/    mod.rs (open, migrate, audit) schema.rs tickets.rs attempts.rs executions.rs checks.rs
-  jobs/     mod.rs (load, step, advance) admit.rs supervise.rs review.rs queue.rs reconcile.rs cleanup.rs
+  jobs/     mod.rs (load, step, advance) admit.rs supervise.rs review.rs queue.rs reconcile.rs cleanup.rs proof.rs
   git.rs box.rs harness.rs pi.rs pi-mcp-extension.ts claude.rs mcp.rs
   daemon.rs api.rs cli.rs config.rs main.rs
 crates/e2e/  src/lib.rs (harness, helpers) model.rs (fake model fixture), tests/guarantees/main.rs g*.rs

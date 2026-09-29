@@ -159,6 +159,14 @@ CREATE TABLE audit (
     data TEXT NOT NULL
 );
 "#,
+    // Candidate identity grew a proof snapshot: the copy of the worker-written
+    // proof directory a candidate was judged on.
+    r#"
+ALTER TABLE attempt ADD COLUMN proof TEXT;
+ALTER TABLE execution ADD COLUMN proof TEXT;
+ALTER TABLE "check" ADD COLUMN proof TEXT NOT NULL DEFAULT '';
+ALTER TABLE approval ADD COLUMN proof TEXT NOT NULL DEFAULT '';
+"#,
     // The harness's registration proof, once its reader yields a complete one:
     // `registered`, or `refused` when the reader refused it.
     "ALTER TABLE execution ADD COLUMN mcp TEXT;",

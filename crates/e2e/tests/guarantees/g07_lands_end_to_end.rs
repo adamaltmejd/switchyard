@@ -30,7 +30,9 @@ fn a_ticket_lands_end_to_end_and_leaves_only_rows() {
             return Reply::Hold(held.clone(), Box::new(Reply::Text("never mind".into())));
         }
         match request.turn() {
-            0 => Reply::Tools(vec![commit_file("feature.txt", "feature\n", "Add feature")]),
+            0 => Reply::Tools(vec![bash(
+                "cd /workspace && printf 'feature\\n' > feature.txt && git add -A && git commit -q -m 'Add feature' && printf 'evidence' > /yard/proof/evidence.txt && echo committed",
+            )]),
             _ => Reply::Text("done".into()),
         }
     });
@@ -82,8 +84,16 @@ fn a_ticket_lands_end_to_end_and_leaves_only_rows() {
         start
     );
 
+    // The snapshot is on the host before landing, holding what the worker
+    // wrote into `/yard/proof`.
+    let proof = raised["data"]["payload"]["proof"].as_str().unwrap();
+    let snapshot = project.path.join(format!(
+        ".yard/local/attempts/1/proof-snapshots/{proof}/evidence.txt"
+    ));
+    assert_eq!(std::fs::read(&snapshot).unwrap(), b"evidence");
+
     project.json(&[
-        "attempt", "approve", "Y-1", "--head", &head, "--text", "ship it",
+        "attempt", "approve", "Y-1", "--head", &head, "--proof", proof, "--text", "ship it",
     ]);
     watch.event("landing.recorded", &[]);
     watch.until("cleanup", |event| {
@@ -170,8 +180,24 @@ fn a_ticket_lands_end_to_end_and_leaves_only_rows() {
     assert_eq!(implementation["tokens_out"], 2 * COMPLETION_TOKENS as i64);
     assert!(implementation["cost"].as_f64().unwrap() > 0.0);
 
-    // The landed attempt left rows only: no directory, no box.
+    // The landed attempt left rows only: no directory, no box, and no proof
+    // snapshot; the check and approval rows carry the proof digest.
     assert!(!project.path.join(".yard/local/attempts/1").exists());
+    let attempt_proof = project.rows("SELECT proof FROM attempt WHERE id = 1")[0]["proof"].clone();
+    assert!(
+        attempt_proof
+            .as_str()
+            .is_some_and(|proof| !proof.is_empty()),
+        "{attempt_proof:?}"
+    );
+    let check_proofs = project.rows("SELECT proof FROM \"check\"");
+    assert!(!check_proofs.is_empty(), "no checks");
+    assert!(
+        check_proofs.iter().all(|row| row["proof"] == attempt_proof),
+        "{check_proofs:?}"
+    );
+    let approval_proofs = project.rows("SELECT proof FROM approval");
+    assert_eq!(approval_proofs, vec![json!({ "proof": attempt_proof })]);
     let handles = project.rows(
         "SELECT handle FROM execution WHERE attempt = 1 AND kind IN ('implementation', 'gate', 'review')",
     );

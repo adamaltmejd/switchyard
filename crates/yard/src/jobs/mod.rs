@@ -5,6 +5,7 @@
 
 pub mod admit;
 pub mod cleanup;
+pub mod proof;
 pub mod queue;
 pub mod reconcile;
 pub mod review;
@@ -87,11 +88,13 @@ pub async fn step(daemon: &Arc<Daemon>, project: &Arc<Project>) -> Result<(), Fa
     let Ok(loaded) = load(daemon, project).await else {
         return Ok(());
     };
-    admit::scheduled(daemon, project, &loaded)?;
+    // Live attempts reacquire a freed lane before new tickets are admitted,
+    // so a repair returning from the queue never starves behind admissions.
     let live = project.read(attempts::live)?;
     for attempt in live {
         advance(daemon, project, &loaded, &attempt).await?;
     }
+    admit::scheduled(daemon, project, &loaded)?;
     queue::next(daemon, project, &loaded).await?;
     cleanup::next(daemon, project)?;
     Ok(())
@@ -217,6 +220,7 @@ async fn advance(
         attempt: attempt.id,
         base: Some(base),
         head: Some(head),
+        proof: attempt.proof.as_deref(),
         ticket_revision: Some(ticket.revision),
         ticket: Some(ticket.id),
         ..Default::default()
@@ -225,6 +229,7 @@ async fn advance(
         attempt: attempt.id,
         base: base.to_string(),
         head: head.to_string(),
+        proof: attempt.proof.clone().unwrap_or_default(),
         ticket_revision: ticket.revision,
         digest: loaded.gate_digest.clone(),
     };
@@ -315,7 +320,8 @@ async fn advance(
 
     let protected = protected_paths(daemon, project, loaded, base, head).await?;
     let payload = json!({
-        "base": base, "head": head, "revision": ticket.revision,
+        "base": base, "head": head, "proof": attempt.proof.clone().unwrap_or_default(),
+        "revision": ticket.revision,
         "gate_digest": loaded.gate_digest, "review_digest": review_digest,
         "checks": passed, "protected": protected, "unreviewed": workflow.review.is_empty(),
     });
@@ -329,6 +335,7 @@ async fn advance(
             return Ok(());
         }
         if loaded.config.approve == Approve::Auto && protected.is_empty() {
+            let proof = attempt.proof.clone().unwrap_or_default();
             checks::approve(
                 tx,
                 checks::Approve {
@@ -336,6 +343,7 @@ async fn advance(
                     ticket: ticket.id,
                     base,
                     head,
+                    proof: &proof,
                     ticket_revision: ticket.revision,
                     gate_digest: &loaded.gate_digest,
                     review_digest: &review_digest,
@@ -386,6 +394,7 @@ pub fn stale_part(
     for (key, current) in [
         ("base", json!(base)),
         ("head", json!(head)),
+        ("proof", json!(attempt.proof.clone().unwrap_or_default())),
         ("revision", json!(ticket.revision)),
         ("gate_digest", json!(loaded.gate_digest)),
         (

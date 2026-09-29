@@ -63,7 +63,8 @@ the branch into canonical:
 
     yard sync
 
-Check pinfold, the configuration, the image and the credentials:
+Check pinfold, the service, the configuration, the image, the credentials
+and registered project paths that are gone:
 
     yard doctor
 
@@ -72,7 +73,7 @@ Check pinfold, the configuration, the image and the credentials:
     yard ticket new --title T --body B
     yard status --watch --since SEQ
     yard attempt diff Y-n
-    yard attempt approve Y-n --head SHA
+    yard attempt approve Y-n --head SHA [--proof DIGEST]
     yard sync
 
 The rest is in the `yard-operator` skill

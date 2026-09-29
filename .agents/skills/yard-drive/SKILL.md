@@ -39,7 +39,8 @@ unknown, do not act on a guess.
 1. `yard attempt show Y-n`: the checks and the review's findings.
 2. `yard attempt diff Y-n`: read the change against the ticket body. It
    should do what the ticket asks and nothing more.
-3. `yard attempt approve Y-n --head SHA`: use the head you read.
+3. `yard attempt approve Y-n --head SHA` (add `--proof DIGEST` when the
+   item names it): use the head and proof you read.
 
 What the worker says about its own work is not evidence. Neither are its
 notes or commit messages. A passing review and green gates inform the
@@ -47,8 +48,9 @@ decision; they do not make it. A `protected` item touches guidance that
 every future worker reads, so read those hunks with care.
 
 If the change is not right, run
-`yard attempt reject Y-n --head SHA --text "what to change"`. The text
-becomes the repair's prompt.
+`yard attempt reject Y-n --head SHA --text "what to change"` (again add
+`--proof DIGEST` when the item names it). The text becomes the repair's
+prompt.
 
 The landing is done at the `landing.recorded` event, not when you approve.
 Then run `yard sync` to bring it into your checkout.

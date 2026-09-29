@@ -9,6 +9,7 @@ pub struct Input {
     pub attempt: i64,
     pub base: String,
     pub head: String,
+    pub proof: String,
     pub ticket_revision: i64,
     pub digest: String,
 }
@@ -24,8 +25,7 @@ pub struct Check {
     pub round: Option<i64>,
 }
 
-const COLUMNS: &str =
-    "id, execution, attempt, kind, name, base, head, ticket_revision, digest, verdict, round";
+const COLUMNS: &str = "id, execution, attempt, kind, name, base, head, ticket_revision, digest, verdict, round, proof";
 
 fn row(row: &Row) -> rusqlite::Result<Check> {
     Ok(Check {
@@ -39,6 +39,7 @@ fn row(row: &Row) -> rusqlite::Result<Check> {
             head: row.get(6)?,
             ticket_revision: row.get(7)?,
             digest: row.get(8)?,
+            proof: row.get(11)?,
         },
         verdict: row.get(9)?,
         round: row.get(10)?,
@@ -54,6 +55,7 @@ impl Check {
             "name": self.name,
             "head": self.input.head,
             "base": self.input.base,
+            "proof": self.input.proof,
             "ticket_revision": self.input.ticket_revision,
             "verdict": self.verdict,
             "round": self.round,
@@ -75,10 +77,11 @@ pub fn current(
     Ok(conn
         .query_row(
             "SELECT c.id, c.execution, c.attempt, c.kind, c.name, c.base, c.head,
-                    c.ticket_revision, c.digest, c.verdict, c.round
+                    c.ticket_revision, c.digest, c.verdict, c.round, c.proof
              FROM \"check\" c JOIN execution e ON e.id = c.execution
              WHERE c.kind = ?1 AND c.name = ?2 AND c.attempt = ?3
              AND c.base = ?4 AND c.head = ?5 AND c.ticket_revision = ?6 AND c.digest = ?7
+             AND c.proof = ?8
              AND (c.kind != 'review' OR e.mcp = 'registered')
              ORDER BY c.id DESC LIMIT 1",
             params![
@@ -88,7 +91,8 @@ pub fn current(
                 input.base,
                 input.head,
                 input.ticket_revision,
-                input.digest
+                input.digest,
+                input.proof
             ],
             row,
         )
@@ -127,9 +131,9 @@ pub struct Record<'a> {
 
 pub fn record(tx: &Connection, record: Record) -> Result<i64, Fail> {
     tx.execute(
-        "INSERT INTO \"check\" (execution, attempt, kind, name, base, head, ticket_revision, digest,
+        "INSERT INTO \"check\" (execution, attempt, kind, name, base, head, proof, ticket_revision, digest,
             verdict, image_id, round, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             record.execution,
             record.input.attempt,
@@ -137,6 +141,7 @@ pub fn record(tx: &Connection, record: Record) -> Result<i64, Fail> {
             record.name,
             record.input.base,
             record.input.head,
+            record.input.proof,
             record.input.ticket_revision,
             record.input.digest,
             record.verdict,
@@ -157,7 +162,7 @@ pub fn record(tx: &Connection, record: Record) -> Result<i64, Fail> {
         },
         None,
         json!({ "check": id, "kind": record.kind, "name": record.name, "verdict": record.verdict,
-                "head": record.input.head, "round": record.round }),
+                "head": record.input.head, "proof": record.input.proof, "round": record.round }),
     )?;
     Ok(id)
 }
@@ -209,6 +214,7 @@ pub struct Approval {
     pub attempt: i64,
     pub base: String,
     pub head: String,
+    pub proof: String,
     pub ticket_revision: i64,
     pub gate_digest: String,
     pub review_digest: String,
@@ -217,8 +223,7 @@ pub struct Approval {
     pub state: String,
 }
 
-const APPROVAL_COLUMNS: &str =
-    "id, attempt, base, head, ticket_revision, gate_digest, review_digest, checks, actor, state";
+const APPROVAL_COLUMNS: &str = "id, attempt, base, head, ticket_revision, gate_digest, review_digest, checks, actor, state, proof";
 
 fn approval_row(row: &Row) -> rusqlite::Result<Approval> {
     Ok(Approval {
@@ -232,6 +237,7 @@ fn approval_row(row: &Row) -> rusqlite::Result<Approval> {
         checks: serde_json::from_str(&row.get::<_, String>(7)?).unwrap_or_default(),
         actor: row.get(8)?,
         state: row.get(9)?,
+        proof: row.get(10)?,
     })
 }
 
@@ -272,6 +278,7 @@ pub struct Approve<'a> {
     pub ticket: i64,
     pub base: &'a str,
     pub head: &'a str,
+    pub proof: &'a str,
     pub ticket_revision: i64,
     pub gate_digest: &'a str,
     pub review_digest: &'a str,
@@ -282,13 +289,14 @@ pub struct Approve<'a> {
 
 pub fn approve(tx: &Connection, approve: Approve) -> Result<i64, Fail> {
     tx.execute(
-        "INSERT INTO approval (attempt, base, head, ticket_revision, gate_digest, review_digest,
+        "INSERT INTO approval (attempt, base, head, proof, ticket_revision, gate_digest, review_digest,
             checks, actor, text, state, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'active', ?10)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'active', ?11)",
         params![
             approve.attempt,
             approve.base,
             approve.head,
+            approve.proof,
             approve.ticket_revision,
             approve.gate_digest,
             approve.review_digest,
@@ -309,7 +317,7 @@ pub fn approve(tx: &Connection, approve: Approve) -> Result<i64, Fail> {
         },
         approve.text,
         json!({ "approval": id, "actor": approve.actor, "head": approve.head, "base": approve.base,
-                "checks": approve.checks }),
+                "proof": approve.proof, "checks": approve.checks }),
     )?;
     Ok(id)
 }

@@ -568,6 +568,47 @@ pub fn restart() -> Result<Value, Fail> {
     Ok(json!({ "restarted": true }))
 }
 
+/// What the service manager says of the daemon's unit or agent.
+pub async fn service_status() -> Value {
+    if cfg!(target_os = "macos") {
+        let active = service_output("launchctl", &["list", LABEL])
+            .await
+            .is_some_and(|output| output.contains("PID"));
+        json!({ "installed": service_file().is_file(), "active": active })
+    } else {
+        let active = service_output("systemctl", &["--user", "is-active", "yard.service"])
+            .await
+            .is_some_and(|output| output.trim() == "active");
+        json!({ "installed": service_file().is_file(), "active": active })
+    }
+}
+
+/// The stdout of a child that exited 0 within the bound; `None` when it
+/// failed to run, timed out, or exited nonzero, as when the service manager
+/// has never heard of the unit.
+async fn service_output(program: &str, args: &[&str]) -> Option<String> {
+    let mut command = tokio::process::Command::new(program);
+    command.args(args).kill_on_drop(true);
+    let output = tokio::time::timeout(Duration::from_secs(5), command.output())
+        .await
+        .ok()?
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Registered paths the daemon did not open, because their `.yard` is gone.
+pub fn missing_projects(daemon: &Daemon) -> Result<Vec<PathBuf>, String> {
+    let registered = registry()?;
+    let served = daemon.projects.lock().expect("projects lock");
+    Ok(registered
+        .into_iter()
+        .filter(|root| !served.contains_key(root))
+        .collect())
+}
+
 fn loginctl_linger_enabled(user: &str) -> bool {
     let output = std::process::Command::new("loginctl")
         .args(["show-user", user, "-p", "Linger", "--value"])
