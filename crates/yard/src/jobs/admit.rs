@@ -1084,6 +1084,13 @@ pub fn attempt_abandon(daemon: &Daemon, project: &Project, params: &Value) -> Re
         }
         attempts::end(tx, attempt.id, "abandoned")?;
         super::audit_attempt(tx, "attempt.abandoned", &attempt, Some(reason), json!({}))?;
+        super::audit_attempt(
+            tx,
+            "attempt.ended",
+            &attempt,
+            None,
+            json!({ "outcome": "abandoned" }),
+        )?;
         Ok(executions::for_attempt(tx, attempt.id)?
             .into_iter()
             .filter(|row| row.status == "running")

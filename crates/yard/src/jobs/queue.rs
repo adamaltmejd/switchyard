@@ -544,6 +544,13 @@ pub fn record_landing(tx: &rusqlite::Connection, execution: i64) -> Result<(), F
         None,
         json!({ "by": "landing" }),
     )?;
+    super::audit_attempt(
+        tx,
+        "attempt.ended",
+        &attempt,
+        None,
+        json!({ "outcome": "landed" }),
+    )?;
     Ok(())
 }
 

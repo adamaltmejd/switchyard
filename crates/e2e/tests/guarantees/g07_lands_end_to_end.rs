@@ -305,7 +305,8 @@ fn status_watch_returns_on_open_attention() {
     assert_eq!(items[0]["ticket"], "Y-1");
 
     // Clear the item: park so the scheduler does not start it again, then
-    // abandon. The next watch starts with nothing open.
+    // abandon. The next watch starts with nothing open, and `--since` keeps it from
+    // returning at once on the idle board.
     project.json(&["ticket", "park", "Y-1"]);
     project.json(&["attempt", "abandon", "Y-1"]);
     assert!(
@@ -313,7 +314,10 @@ fn status_watch_returns_on_open_attention() {
             .as_array()
             .is_some_and(Vec::is_empty)
     );
-    let watching = watch_attention(&project, None);
+    let armed = project.json(&["status"])["seq"]
+        .as_i64()
+        .expect("status seq");
+    let watching = watch_attention(&project, Some(armed));
     project.json(&["ticket", "unpark", "Y-1"]);
 
     // The scheduler starts Y-1 again; the watch returns its new approval.
