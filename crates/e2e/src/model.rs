@@ -78,7 +78,8 @@ impl ModelRequest {
     }
 
     /// The text of every system and developer message, joined by newlines.
-    /// The Anthropic API puts the system prompt in a top-level `system` field.
+    /// The Anthropic API puts the system prompt in a top-level `system` field;
+    /// the Responses API puts it in `instructions`.
     pub fn system(&self) -> String {
         let mut texts: Vec<String> = self
             .messages()
@@ -88,6 +89,9 @@ impl ModelRequest {
             .collect();
         if let Some(system) = self.body.get("system") {
             texts.push(text(system));
+        }
+        if let Some(instructions) = self.body.get("instructions") {
+            texts.push(text(instructions));
         }
         texts.join("\n")
     }
@@ -167,6 +171,13 @@ impl ModelRequest {
                     results.push((name.to_owned(), text(&block["content"])));
                 }
             }
+            if message["type"] == "function_call_output" {
+                let name = message["call_id"]
+                    .as_str()
+                    .and_then(|id| names.get(id).map(String::as_str))
+                    .unwrap_or_default();
+                results.push((name.to_owned(), text(&message["output"])));
+            }
         }
         results
     }
@@ -188,6 +199,12 @@ impl ModelRequest {
                     names.insert(id.to_string(), name.to_string());
                 }
             }
+            if message["type"] == "function_call"
+                && let (Some(id), Some(name)) =
+                    (message["call_id"].as_str(), message["name"].as_str())
+            {
+                names.insert(id.to_string(), name.to_string());
+            }
         }
         names
     }
@@ -197,7 +214,11 @@ impl ModelRequest {
     }
 
     fn messages(&self) -> &[Value] {
-        self.body["messages"].as_array().map_or(&[], Vec::as_slice)
+        if let Some(messages) = self.body["messages"].as_array() {
+            messages
+        } else {
+            self.body["input"].as_array().map_or(&[], Vec::as_slice)
+        }
     }
 
     fn user_texts(&self) -> impl DoubleEndedIterator<Item = String> + '_ {
@@ -217,8 +238,12 @@ fn text(content: &Value) -> String {
     }
 }
 
-/// An Anthropic user message that carries only tool results.
+/// An Anthropic user message that carries only tool results, or a Responses
+/// `function_call_output` item.
 fn is_tool_result(message: &Value) -> bool {
+    if message["type"] == "function_call_output" {
+        return true;
+    }
     message["content"].as_array().is_some_and(|blocks| {
         !blocks.is_empty() && blocks.iter().all(|block| block["type"] == "tool_result")
     })
@@ -369,8 +394,167 @@ fn render(reply: Reply, request: &ModelRequest) -> Vec<u8> {
         }
         Reply::Text(text) if anthropic(request) => anthropic_text(&text, request),
         Reply::Tools(calls) if anthropic(request) => anthropic_tools(calls, request),
+        Reply::Text(text) if responses(request) => responses_text(&text, request),
+        Reply::Tools(calls) if responses(request) => responses_tools(calls, request),
         reply => openai(reply, request),
     }
+}
+
+/// The OpenAI Responses API Codex reaches through pinfold's codex login
+/// route, streamed as SSE.
+fn responses(request: &ModelRequest) -> bool {
+    request.path.starts_with("/backend-api/codex")
+}
+
+fn sse(name: &str, data: Value) -> String {
+    format!("event: {name}\ndata: {data}\n\n")
+}
+
+/// The `response` object each Responses event carries.
+fn responses_envelope(id: &str, request: &ModelRequest, status: &str) -> Value {
+    json!({
+        "id": id,
+        "object": "response",
+        "created_at": 0,
+        "status": status,
+        "model": request.body["model"].as_str().unwrap_or("fake-model"),
+        "output": [],
+        "usage": {
+            "input_tokens": PROMPT_TOKENS,
+            "output_tokens": COMPLETION_TOKENS,
+            "total_tokens": PROMPT_TOKENS + COMPLETION_TOKENS,
+        },
+    })
+}
+
+fn responses_text(text: &str, request: &ModelRequest) -> Vec<u8> {
+    let turn = request.turn();
+    let response_id = format!("resp_{turn}");
+    let item_id = format!("msg_{turn}");
+    let item = json!({
+        "id": item_id,
+        "type": "message",
+        "status": "completed",
+        "role": "assistant",
+        "content": [{ "type": "output_text", "text": text, "annotations": [] }],
+    });
+    let mut completed = responses_envelope(&response_id, request, "completed");
+    completed["output"] = json!([item.clone()]);
+    let body = [
+        sse(
+            "response.created",
+            json!({ "type": "response.created",
+                    "response": responses_envelope(&response_id, request, "in_progress") }),
+        ),
+        sse(
+            "response.output_item.added",
+            json!({ "type": "response.output_item.added", "output_index": 0,
+                    "item": { "id": item_id, "type": "message", "status": "in_progress",
+                              "role": "assistant", "content": [] } }),
+        ),
+        sse(
+            "response.content_part.added",
+            json!({ "type": "response.content_part.added", "item_id": item_id,
+                    "output_index": 0, "content_index": 0,
+                    "part": { "type": "output_text", "text": "", "annotations": [] } }),
+        ),
+        sse(
+            "response.output_text.delta",
+            json!({ "type": "response.output_text.delta", "item_id": item_id,
+                    "output_index": 0, "content_index": 0, "delta": text }),
+        ),
+        sse(
+            "response.output_text.done",
+            json!({ "type": "response.output_text.done", "item_id": item_id,
+                    "output_index": 0, "content_index": 0, "text": text }),
+        ),
+        sse(
+            "response.content_part.done",
+            json!({ "type": "response.content_part.done", "item_id": item_id,
+                    "output_index": 0, "content_index": 0,
+                    "part": { "type": "output_text", "text": text, "annotations": [] } }),
+        ),
+        sse(
+            "response.output_item.done",
+            json!({ "type": "response.output_item.done", "output_index": 0, "item": item }),
+        ),
+        sse(
+            "response.completed",
+            json!({ "type": "response.completed", "response": completed }),
+        ),
+    ]
+    .concat();
+    respond(200, "text/event-stream", body)
+}
+
+fn responses_tools(calls: Vec<ToolCall>, request: &ModelRequest) -> Vec<u8> {
+    let turn = request.turn();
+    let response_id = format!("resp_{turn}");
+    let mut body = sse(
+        "response.created",
+        json!({ "type": "response.created",
+                "response": responses_envelope(&response_id, request, "in_progress") }),
+    );
+    let mut output = Vec::new();
+    for (index, call) in calls.into_iter().enumerate() {
+        let item_id = format!("fc_{turn}_{index}");
+        let call_id = format!("call_{turn}_{index}");
+        let arguments = responses_arguments(request, &call).to_string();
+        let added = json!({ "id": item_id, "type": "function_call", "status": "in_progress",
+                            "arguments": "", "call_id": call_id, "name": call.name });
+        let done = json!({ "id": item_id, "type": "function_call", "status": "completed",
+                            "arguments": arguments, "call_id": call_id, "name": call.name });
+        body.push_str(&sse(
+            "response.output_item.added",
+            json!({ "type": "response.output_item.added", "output_index": index, "item": added }),
+        ));
+        body.push_str(&sse(
+            "response.function_call_arguments.delta",
+            json!({ "type": "response.function_call_arguments.delta", "item_id": item_id,
+                    "output_index": index, "delta": arguments }),
+        ));
+        body.push_str(&sse(
+            "response.function_call_arguments.done",
+            json!({ "type": "response.function_call_arguments.done", "item_id": item_id,
+                    "output_index": index, "arguments": arguments }),
+        ));
+        body.push_str(&sse(
+            "response.output_item.done",
+            json!({ "type": "response.output_item.done", "output_index": index, "item": done }),
+        ));
+        output.push(
+            json!({ "id": item_id, "type": "function_call", "status": "completed",
+                            "arguments": arguments, "call_id": call_id, "name": call.name }),
+        );
+    }
+    let mut completed = responses_envelope(&response_id, request, "completed");
+    completed["output"] = Value::Array(output);
+    body.push_str(&sse(
+        "response.completed",
+        json!({ "type": "response.completed", "response": completed }),
+    ));
+    respond(200, "text/event-stream", body)
+}
+
+/// The arguments a function call carries. Codex versions differ on whether a
+/// shell's `command` is a string or an array of argv strings, so render what
+/// the request's tool schema advertises.
+fn responses_arguments(request: &ModelRequest, call: &ToolCall) -> Value {
+    let mut arguments = call.arguments.clone();
+    if let Some(command) = arguments.get("command").and_then(Value::as_str) {
+        let wants_argv = request.body["tools"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|tool| {
+                tool["name"].as_str() == Some(call.name.as_str())
+                    && tool["parameters"]["properties"]["command"]["type"].as_str() == Some("array")
+            });
+        if wants_argv {
+            arguments["command"] = json!(["bash", "-lc", command]);
+        }
+    }
+    arguments
 }
 
 /// The Anthropic Messages API, streamed as SSE.

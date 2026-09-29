@@ -63,7 +63,7 @@ impl Harness for Claude {
     fn login(&self) -> Option<LoginInfo> {
         Some(LoginInfo {
             name: LOGIN,
-            key_var: TOKEN_VAR,
+            key_var: Some(TOKEN_VAR),
         })
     }
 
@@ -148,10 +148,10 @@ impl Harness for Claude {
             name: ROUTE.to_string(),
             route: crate::r#box::Route::Login {
                 login: LOGIN.to_string(),
-                from: TOKEN_VAR.to_string(),
+                from: Some(TOKEN_VAR.to_string()),
                 to: machine.vars.get(ORIGIN_VAR).cloned(),
             },
-            secret: (TOKEN_VAR.to_string(), token.clone()),
+            secret: Some((TOKEN_VAR.to_string(), token.clone())),
         })
     }
 

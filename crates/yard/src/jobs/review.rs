@@ -92,10 +92,8 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
         execution,
         kind: crate::mcp::Kind::Review,
     });
-    let secrets = vec![
-        (crate::harness::BEARER_VAR.to_string(), bearer),
-        model.secret.clone(),
-    ];
+    let mut secrets = vec![(crate::harness::BEARER_VAR.to_string(), bearer)];
+    secrets.extend(model.secret.clone());
     let spec = supervise::worker_spec(
         daemon,
         project,

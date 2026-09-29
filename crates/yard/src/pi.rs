@@ -101,7 +101,7 @@ impl Harness for Pi {
                     },
                 )]),
             },
-            secret: (connection.key_var.to_string(), key.clone()),
+            secret: Some((connection.key_var.to_string(), key.clone())),
         })
     }
 

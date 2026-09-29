@@ -1,7 +1,8 @@
 //! The harness adapter interface and the compiled-in registry.
 //!
 //! One adapter per harness: its launch argv, launch files, box env, model
-//! route, frame normalisation and registration proof. Pi is the one harness.
+//! route, frame normalisation and registration proof. Pi, Claude and Codex
+//! are the harnesses.
 
 use crate::r#box::Route;
 use crate::config::Agent;
@@ -127,16 +128,18 @@ pub struct ModelRoute {
     pub name: String,
     /// The injecting route the box reaches.
     pub route: Route,
-    /// The secret `box up` reads, `(variable, value)`.
-    pub secret: (String, String),
+    /// The secret `box up` reads, `(variable, value)`. `None` for a login
+    /// whose token pinfold resolves from the host itself, as Codex's.
+    pub secret: Option<(String, String)>,
 }
 
 /// A subscription login a harness reaches through a pinfold login route.
 pub struct LoginInfo {
     /// The login's name, as pinfold knows it.
     pub name: &'static str,
-    /// The `operator.env` variable holding the token.
-    pub key_var: &'static str,
+    /// The `operator.env` variable holding the token; `None` when the login
+    /// lives on the host, as Codex's does.
+    pub key_var: Option<&'static str>,
 }
 
 /// One harness adapter.
@@ -157,6 +160,13 @@ pub trait Harness: Send + Sync {
     fn guidance(&self, _workspace: &Path) -> Result<Option<String>, String> {
         Ok(None)
     }
+    /// Whether the harness proves registration by its required MCP server
+    /// connecting, without listing the server's tools. The daemon records
+    /// the tools it granted with that connection. Codex marks Yard's server
+    /// `required`; Pi and Claude list the tools they fetched.
+    fn registration_is_connection(&self) -> bool {
+        false
+    }
     /// Write the launch files into the attempt's state and input dirs.
     fn stage(&self, st: &Stage) -> std::io::Result<()>;
     /// The literal box env. The caller adds the MCP bearer.
@@ -171,7 +181,7 @@ pub trait Harness: Send + Sync {
 
 /// The compiled-in adapters. `name` is the config token.
 pub fn adapters() -> &'static [&'static dyn Harness] {
-    &[&crate::pi::Pi, &crate::claude::Claude]
+    &[&crate::pi::Pi, &crate::claude::Claude, &crate::codex::Codex]
 }
 
 pub fn get(name: &str) -> Option<&'static dyn Harness> {

@@ -4,6 +4,7 @@ mod api;
 mod r#box;
 mod claude;
 mod cli;
+mod codex;
 mod config;
 mod daemon;
 mod git;

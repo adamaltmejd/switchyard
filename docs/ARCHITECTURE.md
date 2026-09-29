@@ -137,7 +137,7 @@ cross-reference resolves at load; an unknown name is a load error.
 | `approve` | `manual` (default) or `auto` |
 | `[target]` | `ref`, `protected_paths` |
 | `[isolation]` | `egress` (hosts implementer and gate boxes may reach beyond their routes, typically package registries) |
-| `[agents.<name>]` | `harness` (`pi`, `claude`), `provider` or `login`, `model`, `effort`; a key the harness has no control for is a load error |
+| `[agents.<name>]` | `harness` (`pi`, `claude`, `codex`), `provider` or `login`, `model`, `effort`; a key the harness has no control for is a load error |
 | `[workflows.<name>]` | `implementer`, `review` (seat names in panel order, or `none`), `instructions`, `access` (`write` or `read-only`), `max_session_executions`, `inactivity_timeout_minutes`, `total_work_timeout_minutes`; every workflow inherits unset keys from `default` |
 | `[gates.<name>]` | `command`, `timeout_minutes`, `stage` (`landing` default, or `candidate`), `runs_in` (`box` default, or `host`), `env` (host variables a host gate receives, by name) |
 | `[review]` | `max_rounds`, `timeout_minutes`, `blocking` (P0–P3) |
@@ -202,13 +202,21 @@ catalog serves over another API (OpenRouter's `anthropic/*`) cannot run
 through the route.
 
 **Logins.** An agent's `login = true` reaches a subscription through a
-pinfold login route. Yard knows one, `claude`, over pinfold's `claude`
+pinfold login route. Yard knows two. `claude` runs over pinfold's `claude`
 route, and `operator.env` holds its `CLAUDE_CODE_OAUTH_TOKEN`, the `claude
 setup-token` token. Yard hands the token to `box up` as the route's `from`
 variable; pinfold sets `ANTHROPIC_BASE_URL` and a placeholder
 `CLAUDE_CODE_OAUTH_TOKEN` in the box and adds `Authorization: Bearer` on
 the host side. `operator.env` may set `YARD_ORIGIN_CLAUDE` to another
-origin. Yard never reads the token, and pinfold exposes no lapse.
+origin. `codex` runs over pinfold's `codex` route and uses the host's own
+Codex login: pinfold's host helper reads `CODEX_HOME` from `box up`'s
+environment and resolves the login itself, writes the box's codex config
+(`model_provider = "pinfold"`, `wire_api = "responses"`, the route's base
+URL, `requires_openai_auth = false`), and the route adds `Authorization:
+Bearer` and `ChatGPT-Account-ID` on the host side. `operator.env` may set
+`YARD_ORIGIN_CODEX` to another origin. Yard never reads either token, and
+pinfold exposes no lapse; an unusable Codex login is `box up`'s `login`
+refusal.
 
 ## Tickets
 
@@ -549,7 +557,7 @@ pin), `login` where the harness is a subscription login, `accepts`,
 automatic-compaction config, into the attempt's harness state and read-only
 input dir, `env`, `route`, `argv` and `reader`, a per-run reader over stdout
 and stderr yielding `Started`, `Finished`, `Failed`, `Registered` and
-`Refused`. Pi and Claude are the two.
+`Refused`. Pi, Claude and Codex are the three.
 
 Pi's launch argv starts or resumes a session, the normalisation of its
 frames yields `started`, `finished` and `failed`, and its launch files
@@ -579,10 +587,23 @@ registration proof. The `result` frame is the outcome. The model and effort
 ride the argv, `--resume` continues a session, and the token stays a pinfold
 placeholder in the box.
 
+Codex runs as a login too: pinfold's config carries the model provider and
+route, and the launch stages the required `yard` HTTP MCP server, whose
+bearer comes from the env, and its automatic-compaction setting as config
+overrides, so a worker's own files cannot replace the provider. Codex reads
+`AGENTS.md` from `/workspace` itself. Its `exec --json` stream starts a
+thread with `thread.started`, which names the session and proves the
+required server connected; `turn.completed` is the outcome and `turn.failed`
+or `error` names the failure. `resume <thread>` continues a session, `-s
+danger-full-access` is the sandbox, and the model and effort ride the argv.
+A panic exits 0, so the outcome is the terminal frame.
+
 An execution proceeds to its first turn only once the registration proof is
 seen: the reader yields it only when the session id is non-empty, every
-granted tool is in the fetched list and, for a login harness, the Yard
-server is `connected`. Yard records the proof on the execution row at once;
+granted tool is in the fetched list or, where the harness marks the Yard
+server `required`, the connection itself stands for the list, and, for a
+login harness, the Yard server is `connected`. Yard records the proof on the
+execution row at once;
 a refused proof ends the run. A review check counts only from an execution
 row that records the proof, so a seat that never proved itself never counts,
 before or after a restart, and a seat interrupted after its proof keeps its
@@ -653,8 +674,8 @@ the only history view. `attempt tail` prints the live transcript file as the
 harness wrote it. Every
 command runs without a terminal and answers `--json`. `doctor` reports what
 pinfold says of itself, the service, the project image, which connections
-have a credential, and each configured login's pin and whether its token is
-set.
+have a credential, and each configured login's pin and, where Yard holds its
+token, whether it is set.
 
 ## Guarantees
 
@@ -675,7 +696,7 @@ G15. Each is shown by one or more end-to-end scenarios; testing policy is in
 | 9 | Each implementer execution starts from the right place | A nudge mid-execution lets the execution end on its own and reaches the next prompt; `stop` delivers it sooner. A worker that leaves an untracked file gets no review and the next prompt lists the file; left again, `stopped:dirty`. With `max_session_executions = 2`: the second execution resumes the first, the third resumes nothing and its prompt is the brief, the fourth resumes the third, the fifth resumes nothing. |
 | 10 | The queue lands one at a time and re-judges what does not merge | Three approved candidates, the second red on its merged ref: the first lands, the second gets one repair and a second red raises `red`, the third lands on the moved target with its own gate run. A candidate that does not merge gets a repair naming the paths, and its next head takes gates, review and approval again. A conflict against a target that changed `.yard/config.toml`, in a clone made before it: the worker fetches the target from its bundle, merges, and the new candidate's base is the target, so it passes the `.yard` refusal and lands with the operator's configuration intact. |
 | 11 | Only the operator's sync changes `.yard` and canonical from outside | A worker commit under `.yard` comes back with the reason and no gate runs; the same change through `yard sync` is in force for the next execution. A checkout and canonical that each hold a commit the other lacks: both directions refuse naming both heads; a fast-forward passes. |
-| 12 | Boxes hold nothing secret | The key is absent from the box's environment and clone; the fixture behind the injecting route receives it. The claude token is absent from the box's environment, files and clone; the fixture behind the login route receives it as `Authorization: Bearer`. |
+| 12 | Boxes hold nothing secret | The key is absent from the box's environment and clone; the fixture behind the injecting route receives it. The claude token is absent from the box's environment, files and clone; the fixture behind the login route receives it as `Authorization: Bearer`. The codex host login is absent from the box's environment, files and clone; the fixture behind the login route receives it as `Authorization: Bearer` with `ChatGPT-Account-ID`. |
 | 13 | Every gate and seat runs where its row says | A seat that writes to `/workspace` fails and the head is unchanged. An `AGENTS.override.md` the implementer leaves in its clone, excluded through `.git/info/exclude`: the seat's prompt lacks its rule and carries the committed guidance's. A `CLAUDE.md` override the implementer leaves, hidden from git's status, does not reach the seat; the committed `CLAUDE.md` does. A gate box that calls the model or MCP route gets nothing, and an ignored file the implementer left is absent from its checkout; control: the worker box reaches the route. A host candidate gate runs on the head before any review and sees `YARD_BASE` and only the variables its `env` names; a host landing gate runs on the merged ref and never for a candidate whose approval was superseded, even by an edit while its landing merges. |
 | 14 | Worker git is untrusted, and Yard stays local | A worker that plants `core.fsmonitor`, a hook, a clean filter and a remote in its clone, corrupts an object and links its harness's models file to a host path: none of them acts on the host, canonical's objects are intact, the candidate is refused by name. A worker that leaves a symlink in `/yard/proof`, or passes the proof entry bound, is refused by name and no gate runs; a regular file is accepted. Across G7's path every request the model's fixture receives came through the model route, and the daemon listens on its unix socket and the MCP listener only. |
 | 15 | Plans and proposals resolve | A ticket on `plan`: its clone refuses writes, it proposes children and a body edit, and the attempt ends with nothing raised; accepting them blocks the parent, which the scheduler does not start once they are done; `yard ticket done` then closes it and its dependents become ready. Closing a ticket with a live attempt is refused. One execution proposing A and B, B depending on A: accepting both mints A first and B's edge names it. |
@@ -697,7 +718,7 @@ Dependencies: `tokio`, `hyper` with `hyper-util` and `http-body-util`,
 crates/yard/src/
   store/    mod.rs (open, migrate, audit) schema.rs tickets.rs attempts.rs executions.rs checks.rs
   jobs/     mod.rs (load, step, advance) admit.rs supervise.rs review.rs queue.rs reconcile.rs cleanup.rs proof.rs
-  git.rs box.rs harness.rs pi.rs pi-mcp-extension.ts claude.rs mcp.rs
+  git.rs box.rs harness.rs pi.rs pi-mcp-extension.ts claude.rs codex.rs mcp.rs
   daemon.rs api.rs cli.rs config.rs main.rs
 crates/e2e/  src/lib.rs (harness, helpers) model.rs (fake model fixture), tests/guarantees/main.rs g*.rs
 ```

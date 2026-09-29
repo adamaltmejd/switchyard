@@ -274,7 +274,7 @@ pub async fn run_harness(
                                 project.read(|conn| executions::set_worker(conn, execution, Some(session_id), None))?;
                             }
                             crate::harness::Event::Registered(registration) => {
-                                let registration = complete(registration.clone(), kind);
+                                let registration = complete(harness, registration.clone(), kind);
                                 project.read(|conn| executions::set_mcp(conn, execution, proof(&registration)))?;
                                 refused = matches!(registration, crate::harness::Registration::Refused(_));
                                 run.registered = Some(registration);
@@ -296,7 +296,7 @@ pub async fn run_harness(
             line = stderr.next_line(), if stderr_open => match line {
                 Ok(Some(line)) => {
                     if let Some(registration) = reader.stderr(&line) {
-                        let registration = complete(registration, kind);
+                        let registration = complete(harness, registration, kind);
                         let refused = matches!(registration, crate::harness::Registration::Refused(_));
                         project.read(|conn| executions::set_mcp(conn, execution, proof(&registration)))?;
                         run.registered = Some(registration);
@@ -333,13 +333,21 @@ fn proof(registration: &crate::harness::Registration) -> &'static str {
 }
 
 /// A registration is complete only when every tool the grant names is in the
-/// fetched list. An incomplete one is refused, and gates the run.
+/// fetched list. An incomplete one is refused, and gates the run. A harness
+/// whose required MCP server is the whole proof names no tools; the daemon
+/// records the tools it granted with that connection.
 fn complete(
+    harness: &'static dyn Harness,
     registration: crate::harness::Registration,
     kind: crate::mcp::Kind,
 ) -> crate::harness::Registration {
     let crate::harness::Registration::Registered(tools) = registration else {
         return registration;
+    };
+    let tools = if tools.is_empty() && harness.registration_is_connection() {
+        crate::mcp::tool_names(kind)
+    } else {
+        tools
     };
     match crate::mcp::tool_names(kind)
         .into_iter()
@@ -460,10 +468,8 @@ pub async fn implement(
         execution,
         kind: crate::mcp::Kind::Implementation,
     });
-    let secrets = vec![
-        (crate::harness::BEARER_VAR.to_string(), bearer),
-        model.secret.clone(),
-    ];
+    let mut secrets = vec![(crate::harness::BEARER_VAR.to_string(), bearer)];
+    secrets.extend(model.secret.clone());
     let spec = worker_spec(
         daemon,
         project,
