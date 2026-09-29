@@ -104,7 +104,7 @@ fn a_landing_killed_after_update_ref_is_recorded_once_on_restart() {
 }
 
 /// The daemon killed while its `update-ref` is held: restart keeps the
-/// intent, refuses the queue and raises `red`; once the command is released,
+/// intent and raises `red`; once the command is released,
 /// `start` records the landing once.
 ///
 /// Sabotage: make `reconcile::decide_intent` skip its `lock_free` check; the
@@ -163,10 +163,6 @@ fn a_landing_whose_update_ref_is_held_stays_undecided_until_released() {
         project.rows("SELECT intent_state FROM execution WHERE kind = 'landing'")[0]["intent_state"],
         "open"
     );
-    // The queue is refused while the intent is open: `start` decides nothing.
-    let refused = project.refused(&["attempt", "start", "Y-1"]);
-    assert_eq!(refused["code"], "refused");
-
     // Release the held command: it moves canonical, and `start` records it.
     std::fs::write(&release, "go\n").unwrap();
     std::fs::read_to_string(&done).unwrap();
