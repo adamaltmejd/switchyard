@@ -191,4 +191,6 @@ ALTER TABLE attempt ADD COLUMN body_read TEXT;
 "#,
     // The body an implementer execution's start transaction read.
     "ALTER TABLE execution ADD COLUMN body TEXT;",
+    // An approval given over a blocking review at the round limit says so.
+    "ALTER TABLE approval ADD COLUMN overrode INTEGER NOT NULL DEFAULT 0;",
 ];

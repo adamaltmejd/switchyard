@@ -268,13 +268,14 @@ pub struct Approve<'a> {
     pub checks: &'a [i64],
     pub actor: &'a str,
     pub text: Option<&'a str>,
+    pub overrode: bool,
 }
 
 pub fn approve(tx: &Connection, approve: Approve) -> Result<i64, Fail> {
     tx.execute(
         "INSERT INTO approval (attempt, base, head, proof, ticket_revision, gate_digest, review_digest,
-            checks, actor, text, state, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'active', ?11)",
+            checks, actor, text, state, created_at, overrode)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'active', ?11, ?12)",
         params![
             approve.attempt,
             approve.base,
@@ -286,7 +287,8 @@ pub fn approve(tx: &Connection, approve: Approve) -> Result<i64, Fail> {
             json!(approve.checks).to_string(),
             approve.actor,
             approve.text,
-            now()
+            now(),
+            approve.overrode
         ],
     )?;
     let id = tx.last_insert_rowid();
@@ -300,7 +302,7 @@ pub fn approve(tx: &Connection, approve: Approve) -> Result<i64, Fail> {
         },
         approve.text,
         json!({ "approval": id, "actor": approve.actor, "head": approve.head, "base": approve.base,
-                "proof": approve.proof, "checks": approve.checks }),
+                "proof": approve.proof, "checks": approve.checks, "overrode": approve.overrode }),
     )?;
     Ok(id)
 }

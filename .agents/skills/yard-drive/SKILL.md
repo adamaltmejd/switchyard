@@ -29,7 +29,9 @@ Answer each item with one of its `exits`. Nothing else.
 - `start` retries from where the item stopped. It is never a fresh attempt.
 - `edit` (`yard ticket edit`) resolves a `stopped` item and runs the
   implementer next. On `timeout` it renews the clock; on `limit` it allows
-  one more review round.
+  one more review round. On `limit`, `yard attempt approve Y-n --head SHA`
+  lands the candidate over the blocking findings once its gates pass; read
+  them first.
 - If no exit seems to fit, read the item's `reason`, `yard attempt show`,
   and the exit's `--help`. If still unsure, leave the item open and ask. An
   open item costs nothing; an abandoned attempt costs its whole run.

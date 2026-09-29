@@ -311,6 +311,7 @@ pub fn blocked(
             rusqlite::params![attempt.id, rounds],
         )?;
         if rounds >= limit {
+            let (base, head) = current.candidate().unwrap_or_default();
             attempts::raise(
                 tx,
                 attempts::Raise {
@@ -319,7 +320,14 @@ pub fn blocked(
                     ticket: Some(ticket.id),
                     attempt: Some(attempt.id),
                     execution: blocked.last().map(|check| check.execution),
-                    payload: json!({ "rounds": rounds, "findings": findings }),
+                    payload: json!({
+                        "rounds": rounds, "findings": findings,
+                        "base": base, "head": head,
+                        "proof": current.proof.clone().unwrap_or_default(),
+                        "revision": ticket.revision,
+                        "gate_digest": loaded.gate_digest,
+                        "review_digest": loaded.review_digest(&attempt.workflow)?,
+                    }),
                     text: None,
                 },
             )?;

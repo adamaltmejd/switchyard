@@ -39,7 +39,8 @@ item's exit names.
 - `proposal` — `yard proposal accept ID` or `yard proposal reject ID`,
   where `ID` is the attention id.
 - `stopped` — `yard attempt start Y-n`, `yard ticket edit Y-n`, or abandon.
-  On `timeout` and `limit` only edit and abandon; the edit reaches the next
+  On `timeout` only edit and abandon; on `limit` also `yard attempt approve
+  Y-n --head SHA`, over the blocking findings once gates pass. The edit reaches the next
   execution as a diff.
 - `red` — `start`, `yard ticket edit Y-n` or abandon, except a landing's item (no `attempt`) exits only
   `yard attempt start Y-n`.
