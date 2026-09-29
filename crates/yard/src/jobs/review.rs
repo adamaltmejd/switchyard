@@ -3,6 +3,7 @@
 //! decision.
 
 use super::load;
+use super::proof;
 use super::supervise::{self, Worker};
 use crate::api::Fail;
 use crate::daemon::{Daemon, Project};
@@ -34,6 +35,13 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
         .ok_or_else(|| Fail::invalid(format!("harness {:?} is unknown", agent.harness)))?;
     let head = row.head.clone().unwrap_or_default();
     let base = row.base.clone().unwrap_or_default();
+    // The seat reads the snapshot the candidate was judged on, never the
+    // implementer's live directory.
+    let proof = row
+        .proof
+        .as_deref()
+        .filter(|digest| !digest.is_empty())
+        .map(|digest| proof::snapshot_path(project, attempt.id, digest));
 
     let dir = project
         .attempt_dir(attempt.id)
@@ -61,6 +69,7 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
     let prompt = format!(
         "You are the {seat_name} reviewer for ticket {}: {}\n\n{}\n\n{}\n\n\
          The candidate is checked out read-only in /workspace at {head}; its base is {base}.\n\
+         The candidate's proof snapshot is at /yard/proof, read-only.\n\
          Changed files:\n{stat}\n\
          Read the change (`git diff {base} {head}`), then publish your review exactly once with \
          yard_publish_review. Give every finding a priority from P0 (worst) to P3, and a file and \
@@ -102,7 +111,7 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
             image: &image,
             workspace: &checkout,
             read_only: true,
-            proof: None,
+            proof: proof.as_deref(),
             harness,
             stage,
             model: &model,

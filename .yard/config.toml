@@ -4,7 +4,7 @@ approve = "manual"
 
 [target]
 ref = "main"
-protected_paths = ["AGENTS.md", "CLAUDE.md", ".agents/", ".claude/", ".pi/", "docs/ARCHITECTURE.md"]
+protected_paths = ["AGENTS.md", "CLAUDE.md", ".agents/", ".claude/", ".codex/", ".pi/", "docs/ARCHITECTURE.md"]
 
 [isolation]
 # A candidate that adds a crate fetches it through here.

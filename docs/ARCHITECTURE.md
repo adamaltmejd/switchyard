@@ -511,8 +511,8 @@ box spec names mounts, env, the harness, egress and memory.
 | Box | `/workspace` | Harness state | Egress | Env |
 |---|---|---|---|---|
 | implementer | the attempt's clone, writable, or read-only where the workflow's `access` says so; `/yard/proof` writable (no proof mount when read-only) | writable | model route, MCP route, `isolation.egress` | the harness's env, git identity, `YARD_MCP_BEARER` (from) |
-| reviewer | a fresh checkout of the head, read-only | its own, writable | model route, MCP route | the harness's env, git identity, `YARD_MCP_BEARER` (from) |
-| gate | a private disposable checkout of the exact commit, writable | none | `isolation.egress` only | `HOME`, `PATH`, `YARD_BASE` |
+| reviewer | a fresh checkout of the head, read-only; `/yard/proof` is the candidate's snapshot, read-only | its own, writable | model route, MCP route | the harness's env, git identity, `YARD_MCP_BEARER` (from) |
+| gate | a private disposable checkout of the exact commit, writable; `/yard/proof` is the candidate's snapshot, read-only | none | `isolation.egress` only | `HOME`, `PATH`, `YARD_BASE` |
 
 Every gate gets `YARD_BASE`, the commit its change is judged against: at
 the candidate stage the candidate's base, at landing the target head the
@@ -527,9 +527,11 @@ candidate adds is fetched by the gate through the allowlist.
 
 A host gate runs in the same kind of private checkout, made on the host
 under the attempt's or the landing's directory, as a child process in its own group with an
-explicit cwd, an environment of `PATH`, `HOME`, `YARD_BASE` and the
+explicit cwd, an environment of `PATH`, `HOME`, `YARD_BASE`, `YARD_PROOF` and the
 variables its `env` names, bounded output and its `timeout_minutes`. It exists for gates that
-need what a box cannot give, such as a container runtime.
+need what a box cannot give, such as a container runtime. `YARD_PROOF` is
+the host path of the proof snapshot this execution judges: the candidate's
+at the candidate stage, the approved candidate's at landing.
 
 Harness state (a harness's session store and launch files) is one
 directory per attempt under its files, mounted at one fixed path, written
@@ -651,8 +653,8 @@ The daemon owns the project registry, a list of absolute project paths in
 project forget` removes one; a registered path that is gone is skipped and
 reported by `doctor`. The CLI resolves its project from the working
 directory upward to the nearest `.yard/config.toml`, or from `--project`.
-Each project has its own store and its own audit sequence, so `status` and
-`status --watch --since` are per project.
+Each project has its own store and its own audit sequence, so `status`,
+`status --watch` and `status --history` are per project.
 
 The API is `POST /rpc` with
 `{method, params}` and one envelope `{boundary, ok, result | error}`.
@@ -662,7 +664,7 @@ expected identity (ticket revision, candidate, attention id) and a mismatch
 is a machine-readable stale result.
 
 ```
-yard init | doctor | sync | status [--watch --since SEQ] [--json]
+yard init | doctor | sync | status [--watch | --history [--since SEQ]] [--json]
 yard daemon run | install | uninstall | status | restart
 yard project list | forget
 yard ticket new | show | edit | park | unpark | depend | list | done | abandon
@@ -671,9 +673,10 @@ yard proposal accept | reject
 yard version
 ```
 
-`status --watch` follows the audit stream from a sequence and prints one
-line per event; it is the wake primitive and
-the only history view. `attempt tail` prints the live transcript file as the
+`status --watch` returns as soon as an attention item is open, prints the
+open items and exits; it is the wake primitive. `status --history` follows
+the audit stream from a sequence and prints one line per event; it is the
+only history view. `attempt tail` prints the live transcript file as the
 harness wrote it. Every
 command runs without a terminal and answers `--json`. `doctor` reports what
 pinfold says of itself, the service, the project image, which connections
@@ -694,13 +697,13 @@ G15. Each is shown by one or more end-to-end scenarios; testing policy is in
 | 4 | Capacity holds | Two `attempt start`s race for the last lane: one wins and a ticket never has two live attempts. Two registered projects: `YARD_MAX_LANES` bounds attempts across both, and each keeps its own store; an execution ending in one leaves the other's execution of the same id its bearer. A candidate returned from the queue for repair takes a freed lane before a ready ticket is admitted. |
 | 5 | Intent precedes effect, and a restart loses only the turn | Intent is ordered before effect: an execution's audit event precedes its box's creation time in `pinfold box list` and the fixture's first request. The daemon killed mid-execution: on restart the execution is `interrupted`, no second box exists, the tree is kept, and `start` continues. The daemon killed while a host landing gate runs: the gate's group is gone after restart and the landing re-queues. No command is answered before reconciliation has committed. |
 | 6 | Inputs are validated at the boundary | A malformed tool payload, a TOML with an unknown key, an unknown workflow name, a sync that removes a workflow an open ticket names: refused by name, nothing written. |
-| 7 | A ticket lands end to end and leaves only rows | New ticket, worker commit, candidate gate, review pass, approval, green landing: canonical moves and the ticket is done. The proof snapshot on the host holds what the worker wrote before landing. Afterwards every decision has one audit event naming its target and text, the execution rows carry tokens, cost, model and start reason, every event is one the Store section names, the attempt directory with its proof snapshot, boxes and proof copies are gone, the check and approval rows carry the proof digest, and another live attempt's directory and canonical are untouched. |
+| 7 | A ticket lands end to end and leaves only rows | New ticket, worker commit, candidate gate, review pass, approval, green landing: canonical moves and the ticket is done. The proof snapshot on the host holds what the worker wrote before landing. Afterwards every decision has one audit event naming its target and text, the execution rows carry tokens, cost, model and start reason, every event is one the Store section names, the attempt directory with its proof snapshot, boxes and proof copies are gone, the check and approval rows carry the proof digest, and another live attempt's directory and canonical are untouched. A `status --watch` returns an approval already open when it starts at once, and one started with nothing open returns when the next item is raised. |
 | 8 | Review is a publication, and bounded | A seat that exits 0 without publishing is a review error; a seat killed after publishing has published; a second publication is refused; findings below `blocking` pass; a panel of `none` reaches approval marked unreviewed; a seat that publishes a block and is then held by the fixture: no repair starts until its box is gone; a seat that always blocks gets exactly `max_rounds` rounds, then `stopped:limit`. A candidate that commits a `.pi` extension which publishes a pass: nothing loads it, and the seat's own publication is the one recorded. Control: the seat's prompt carries a rule from the project's `AGENTS.md`. A candidate that commits a Claude plugin, settings hook and a `.mcp.json` server which publish a pass: nothing loads them, and the seat's own publication is the one recorded. Control: the seat's prompt carries the committed `CLAUDE.md` rule. A candidate that commits a `.codex/config.toml` naming an MCP server that publishes a pass: nothing loads it, the seat's own publication is the one recorded, and the rogue server leaves no marker. Control: the seat's context carries the committed `AGENTS.md` rule. A seat that publishes with no registration proof does not count, and a fresh seat runs. A gate error's `start` reruns that gate on the same head. |
 | 9 | Each implementer execution starts from the right place | A nudge mid-execution lets the execution end on its own and reaches the next prompt; `stop` delivers it sooner. A worker that leaves an untracked file gets no review and the next prompt lists the file; left again, `stopped:dirty`. With `max_session_executions = 2`: the second execution resumes the first, the third resumes nothing and its prompt is the brief, the fourth resumes the third, the fifth resumes nothing. |
 | 10 | The queue lands one at a time and re-judges what does not merge | Three approved candidates, the second red on its merged ref: the first lands, the second gets one repair and a second red raises `red`, the third lands on the moved target with its own gate run. A candidate that does not merge gets a repair naming the paths, and its next head takes gates, review and approval again. A conflict against a target that changed `.yard/config.toml`, in a clone made before it: the worker fetches the target from its bundle, merges, and the new candidate's base is the target, so it passes the `.yard` refusal and lands with the operator's configuration intact. |
 | 11 | Only the operator's sync changes `.yard` and canonical from outside | A worker commit under `.yard` comes back with the reason and no gate runs; the same change through `yard sync` is in force for the next execution. A checkout and canonical that each hold a commit the other lacks: both directions refuse naming both heads; a fast-forward passes. |
 | 12 | Boxes hold nothing secret | The key is absent from the box's environment and clone; the fixture behind the injecting route receives it. The claude token is absent from the box's environment, files and clone; the fixture behind the login route receives it as `Authorization: Bearer`. The codex host login is absent from the box's environment, files and clone; the fixture behind the login route receives it as `Authorization: Bearer` with `ChatGPT-Account-ID`. |
-| 13 | Every gate and seat runs where its row says | A seat that writes to `/workspace` fails and the head is unchanged. An `AGENTS.override.md` the implementer leaves in its clone, excluded through `.git/info/exclude`: the seat's prompt lacks its rule and carries the committed guidance's. A `CLAUDE.md` override the implementer leaves, hidden from git's status, does not reach the seat; the committed `CLAUDE.md` does. A gate box that calls the model or MCP route gets nothing, and an ignored file the implementer left is absent from its checkout; control: the worker box reaches the route. A host candidate gate runs on the head before any review and sees `YARD_BASE` and only the variables its `env` names; a host landing gate runs on the merged ref and never for a candidate whose approval was superseded, even by an edit while its landing merges. |
+| 13 | Every gate and seat runs where its row says | A seat that writes to `/workspace` fails and the head is unchanged. A gate box and a seat read the candidate's proof snapshot at `/yard/proof` and their writes there fail; control: the implementer wrote the live proof. An `AGENTS.override.md` the implementer leaves in its clone, excluded through `.git/info/exclude`: the seat's prompt lacks its rule and carries the committed guidance's. A `CLAUDE.md` override the implementer leaves, hidden from git's status, does not reach the seat; the committed `CLAUDE.md` does. A gate box that calls the model or MCP route gets nothing, and an ignored file the implementer left is absent from its checkout; control: the worker box reaches the route. A host candidate gate runs on the head before any review and sees `YARD_BASE`, `YARD_PROOF`, the snapshot it judges, and only the variables its `env` names; a host landing gate runs on the merged ref, reads the approved candidate's proof snapshot and never for a candidate whose approval was superseded, even by an edit while its landing merges. |
 | 14 | Worker git is untrusted, and Yard stays local | A worker that plants `core.fsmonitor`, a hook, a clean filter and a remote in its clone, corrupts an object and links its harness's models file to a host path: none of them acts on the host, canonical's objects are intact, the candidate is refused by name. A worker that leaves a symlink in `/yard/proof`, or passes the proof entry bound, is refused by name and no gate runs; a regular file is accepted. Across G7's path every request the model's fixture receives came through the model route, and the daemon listens on its unix socket and the MCP listener only. |
 | 15 | Plans and proposals resolve | A ticket on `plan`: its clone refuses writes, it proposes children and a body edit, and the attempt ends with nothing raised; accepting them blocks the parent, which the scheduler does not start once they are done; `yard ticket done` then closes it and its dependents become ready. Closing a ticket with a live attempt is refused. One execution proposing A and B, B depending on A: accepting both mints A first and B's edge names it. |
 
@@ -730,8 +733,6 @@ crates/e2e/  src/lib.rs (harness, helpers) model.rs (fake model fixture), tests/
 
 - `replay` is out: whole-attempt disposal keeps no diff to seed from. The
   branch stays in canonical; an operator who wants it cherry-picks.
-- Attachments (a writable directory a worker leaves screenshots or logs in
-  for the reviewer) are out until a reviewer is seen to need one.
 - Batching several candidates into one landing, with bisection, is out
   until queue wait is measured.
 - Whether Yard later links pinfold as a library instead of a process.

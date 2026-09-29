@@ -127,8 +127,9 @@ pub struct Worker<'a> {
     pub image: &'a str,
     pub workspace: &'a Path,
     pub read_only: bool,
-    /// The worker-written live proof directory, mounted at `/yard/proof`
-    /// unless the workflow is read-only.
+    /// The proof directory mounted at `/yard/proof`: the implementer's live
+    /// worker-written directory (writable), or the reviewer's candidate
+    /// snapshot (read-only, matching the workspace).
     pub proof: Option<&'a Path>,
     pub harness: &'static dyn Harness,
     pub stage: Stage<'a>,
@@ -181,13 +182,11 @@ pub fn worker_spec(daemon: &Daemon, project: &Project, worker: &Worker) -> BoxSp
             readonly: true,
         },
     ];
-    if !worker.read_only
-        && let Some(proof) = worker.proof
-    {
+    if let Some(proof) = worker.proof {
         mounts.push(Mount {
             host: proof.into(),
             guest: "/yard/proof".into(),
-            readonly: false,
+            readonly: worker.read_only,
         });
     }
     BoxSpec {
@@ -921,6 +920,14 @@ pub async fn gate(
     let name = row.name.clone().unwrap_or_default();
     let commit = row.head.clone().unwrap_or_default();
     let base = row.base.clone().unwrap_or_default();
+    // The snapshot the execution was judged on: the candidate's proof, or a
+    // landing child's approval proof. Both are worker-written bytes already
+    // copied into the attempt's `proof-snapshots`.
+    let proof = row
+        .proof
+        .as_deref()
+        .filter(|digest| !digest.is_empty())
+        .map(|digest| proof::snapshot_path(project, attempt.id, digest));
     let dir = match row.parent {
         Some(landing) => super::queue::landing_dir(project, landing),
         None => project.attempt_dir(attempt.id),
@@ -938,10 +945,30 @@ pub async fn gate(
                 Err(error) => Err(error),
                 Ok(()) => match gate.runs_in {
                     RunsIn::Box => {
-                        box_gate(daemon, project, &loaded, execution, gate, &checkout, &base).await
+                        box_gate(
+                            daemon,
+                            project,
+                            &loaded,
+                            execution,
+                            gate,
+                            &checkout,
+                            &base,
+                            proof.as_deref(),
+                        )
+                        .await
                     }
                     RunsIn::Host => {
-                        host_gate(project, execution, gate, &checkout, &dir, lock, &base).await
+                        host_gate(
+                            project,
+                            execution,
+                            gate,
+                            &checkout,
+                            &dir,
+                            lock,
+                            &base,
+                            proof.as_deref(),
+                        )
+                        .await
                     }
                 },
             }
@@ -1024,6 +1051,9 @@ fn tail(output: &str) -> String {
     output[output.ceil_char_boundary(output.len().saturating_sub(LOG_TAIL))..].to_string()
 }
 
+// Each argument is a separate input of the one gate run; a struct would
+// only rename them.
+#[allow(clippy::too_many_arguments)]
 async fn box_gate(
     daemon: &Daemon,
     project: &Project,
@@ -1032,20 +1062,29 @@ async fn box_gate(
     gate: &crate::config::Gate,
     checkout: &Path,
     base: &str,
+    proof: Option<&Path>,
 ) -> Result<GateResult, String> {
     let image = image(daemon, project, loaded)
         .await
         .map_err(|fail| fail.message)?;
+    let mut mounts = vec![Mount {
+        host: checkout.into(),
+        guest: "/workspace".into(),
+        readonly: false,
+    }];
+    if let Some(proof) = proof {
+        mounts.push(Mount {
+            host: proof.into(),
+            guest: "/yard/proof".into(),
+            readonly: true,
+        });
+    }
     let spec = BoxSpec {
         name: box_name(project, execution),
         labels: labels(project),
         harness: None,
         image,
-        mounts: vec![Mount {
-            host: checkout.into(),
-            guest: "/workspace".into(),
-            readonly: false,
-        }],
+        mounts,
         env: BTreeMap::from([
             ("HOME".to_string(), EnvValue::Value("/tmp".into())),
             (
@@ -1099,10 +1138,14 @@ async fn box_gate(
 }
 
 /// A host gate: a child in its own process group holding the directory's
-/// lock descriptor, with only `PATH`, `HOME`, `YARD_BASE` and the variables
-/// it names. Its command starts once its handle is recorded: the child
-/// waits for a line on stdin, and exits without running if the daemon dies
-/// first.
+/// lock descriptor, with only `PATH`, `HOME`, `YARD_BASE`, `YARD_PROOF` and
+/// the variables it names. `YARD_PROOF` is the host path of the snapshot
+/// this execution judges. Its command starts once its handle is recorded:
+/// the child waits for a line on stdin, and exits without running if the
+/// daemon dies first.
+// Each argument is a separate input of the one gate run; a struct would
+// only rename them.
+#[allow(clippy::too_many_arguments)]
 async fn host_gate(
     project: &Project,
     execution: i64,
@@ -1111,6 +1154,7 @@ async fn host_gate(
     dir: &Path,
     lock: Option<&Lock>,
     base: &str,
+    proof: Option<&Path>,
 ) -> Result<GateResult, String> {
     let own;
     let lock = match lock {
@@ -1138,6 +1182,9 @@ async fn host_gate(
         .stderr(std::process::Stdio::piped())
         .process_group(0)
         .kill_on_drop(true);
+    if let Some(proof) = proof {
+        command.env("YARD_PROOF", proof);
+    }
     for name in &gate.env {
         if let Ok(value) = std::env::var(name) {
             command.env(name, value);
