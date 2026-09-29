@@ -1200,7 +1200,7 @@ async fn host_gate(
     let stdout = child.stdout.take().expect("stdout is piped");
     let stderr = child.stderr.take().expect("stderr is piped");
     let run = async {
-        let (stdout, stderr) = tokio::join!(
+        let ((stdout, _), (stderr, _)) = tokio::join!(
             crate::r#box::read_capped(stdout, crate::r#box::OUTPUT_CAP),
             crate::r#box::read_capped(stderr, crate::r#box::OUTPUT_CAP)
         );

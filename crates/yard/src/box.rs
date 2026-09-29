@@ -260,7 +260,7 @@ impl Pinfold {
             drop(stdin);
             let _ = tokio::time::timeout(TEARDOWN_GRACE, child.wait()).await;
             let detail = match tokio::time::timeout(Duration::from_secs(1), stderr).await {
-                Ok(Ok(text)) => text,
+                Ok(Ok((text, _))) => text,
                 _ => String::new(),
             };
             return Err(error("eof", detail));
@@ -465,16 +465,18 @@ async fn read_line(reader: &mut BufReader<ChildStdout>) -> Option<Vec<u8>> {
     }
 }
 
-/// The first `cap` bytes; the rest is read and dropped so the child never
-/// blocks on a full pipe.
-pub async fn read_capped(mut reader: impl AsyncRead + Unpin, cap: usize) -> String {
+/// The first `cap` bytes, and whether more followed; the rest is read and
+/// dropped so the child never blocks on a full pipe.
+pub async fn read_capped(mut reader: impl AsyncRead + Unpin, cap: usize) -> (String, bool) {
     let mut kept = Vec::new();
+    let mut over = false;
     let mut chunk = [0u8; 8192];
     while let Ok(n @ 1..) = reader.read(&mut chunk).await {
         let room = cap - kept.len();
+        over |= n > room;
         kept.extend_from_slice(&chunk[..n.min(room)]);
     }
-    String::from_utf8_lossy(&kept).into_owned()
+    (String::from_utf8_lossy(&kept).into_owned(), over)
 }
 
 async fn collect(mut command: Command, timeout: Duration) -> Result<ExecOutput, ExecError> {
@@ -485,7 +487,7 @@ async fn collect(mut command: Command, timeout: Duration) -> Result<ExecOutput, 
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
     let work = async {
-        let (stdout, stderr) = tokio::join!(
+        let ((stdout, _), (stderr, _)) = tokio::join!(
             read_capped(stdout, OUTPUT_CAP),
             read_capped(stderr, OUTPUT_CAP)
         );

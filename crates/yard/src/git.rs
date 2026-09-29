@@ -104,11 +104,17 @@ impl Git {
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr = child.stderr.take().expect("piped stderr");
         let run = async {
-            let (stdout, stderr) = tokio::join!(
+            let ((stdout, out_over), (stderr, err_over)) = tokio::join!(
                 crate::r#box::read_capped(stdout, OUTPUT_MAX),
                 crate::r#box::read_capped(stderr, OUTPUT_MAX)
             );
             let status = child.wait().await.map_err(|error| error.to_string())?;
+            if out_over || err_over {
+                return Err(format!(
+                    "git {} output exceeds the {OUTPUT_MAX} byte cap",
+                    args.first().unwrap_or(&"")
+                ));
+            }
             Ok::<_, String>(Out {
                 code: exit_code(status),
                 stdout,
