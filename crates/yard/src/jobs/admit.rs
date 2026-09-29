@@ -68,7 +68,7 @@ pub fn take_lane(
 /// Whether the scheduler would admit a ready ticket given a free lane: its
 /// workflow exists, and a read-only workflow runs once, then only by
 /// `yard attempt start`.
-fn admissible(
+pub fn admissible(
     conn: &rusqlite::Connection,
     loaded: &Loaded,
     ticket: &tickets::Ticket,

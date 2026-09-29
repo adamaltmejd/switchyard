@@ -405,7 +405,9 @@ async fn events(daemon: &Daemon, params: &Value) -> Result<Value, Fail> {
 }
 
 /// The open attention items and the audit seq they were read at, waiting
-/// until one is open, or with `since` until one raised after it is.
+/// until one is open, or with `since` until one raised after it is, or until
+/// the board is idle: no live attempt, open item or admissible ready ticket,
+/// and with `since` an `attempt.ended` after it. `idle` marks that return.
 async fn attention(daemon: &Daemon, params: &Value) -> Result<Value, Fail> {
     let project = project(daemon, params)?;
     let since = params["since"].as_i64();
@@ -414,7 +416,8 @@ async fn attention(daemon: &Daemon, params: &Value) -> Result<Value, Fail> {
         let notified = project.events.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
-        let (seq, items, fresh) = project.read(|conn| {
+        let loaded = project.loaded.lock().expect("loaded lock").clone();
+        let (seq, items, fresh, idle) = project.read(|conn| {
             let seq = crate::store::last_seq(conn)?;
             let items = crate::store::attempts::open_attention(conn)?;
             let fresh = match since {
@@ -432,17 +435,33 @@ async fn attention(daemon: &Daemon, params: &Value) -> Result<Value, Fail> {
                     fresh
                 }
             };
-            Ok((seq, items, fresh))
+            let mut idle = items.is_empty() && crate::store::attempts::live(conn)?.is_empty();
+            if idle {
+                let Some(loaded) = &loaded else {
+                    return Ok((seq, items, fresh, false));
+                };
+                for ticket in crate::store::tickets::ready(conn)? {
+                    idle &= !crate::jobs::admit::admissible(conn, loaded, &ticket)?;
+                }
+            }
+            if idle && let Some(since) = since {
+                idle = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM audit WHERE event = 'attempt.ended' AND seq > ?1)",
+                    [since],
+                    |row| row.get::<_, bool>(0),
+                )?;
+            }
+            Ok((seq, items, fresh, idle))
         })?;
-        if fresh {
+        if fresh || idle {
             let items: Vec<Value> = items
                 .iter()
                 .map(crate::store::attempts::Attention::to_json)
                 .collect();
-            return Ok(json!({ "seq": seq, "attention": items }));
+            return Ok(json!({ "seq": seq, "attention": items, "idle": idle }));
         }
         if tokio::time::timeout_at(deadline, notified).await.is_err() {
-            return Ok(json!({ "seq": seq, "attention": [] }));
+            return Ok(json!({ "seq": seq, "attention": [], "idle": false }));
         }
     }
 }

@@ -358,7 +358,7 @@ fn find_project(start: &Path) -> Result<String, Fail> {
 }
 
 /// Return once an attention item is open, or with `since` once one raised
-/// after it is; print every open item and the seq to pass next.
+/// after it is, or the board is idle; print every open item and the seq to pass next.
 async fn watch(socket: &Path, project: &str, since: Option<i64>, json: bool) -> Result<(), Fail> {
     loop {
         let result = api::call(
@@ -368,7 +368,7 @@ async fn watch(socket: &Path, project: &str, since: Option<i64>, json: bool) -> 
         )
         .await?;
         let items = result["attention"].as_array().cloned().unwrap_or_default();
-        if !items.is_empty() {
+        if !items.is_empty() || result["idle"].as_bool() == Some(true) {
             let seq = result["seq"].as_i64().unwrap_or_default();
             let text = if json {
                 json!({ "seq": seq, "attention": items }).to_string()

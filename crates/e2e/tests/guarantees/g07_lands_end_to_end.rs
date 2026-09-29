@@ -359,3 +359,77 @@ fn status_watch_returns_on_open_attention() {
     assert_eq!(tickets, ["Y-1", "Y-2"], "{answer}");
     assert!(answer["seq"].as_i64().unwrap() >= second["seq"].as_i64().unwrap());
 }
+
+/// `status --watch` also returns when the board is idle: no live attempt,
+/// no open item, no ready ticket. With `--since` that counts only once an
+/// attempt has ended after it, so a watch armed on an idle board keeps
+/// waiting; the one armed while Y-1's approval is open returns with no
+/// items after the landing.
+///
+/// Sabotage: drop the `attempt.ended`-after-since condition in `attention`
+/// (daemon.rs); the watch armed on the idle board returns at once and the
+/// running check fails.
+#[test]
+fn status_watch_returns_when_the_board_goes_idle() {
+    let machine = Machine::new("g7idle", |request| {
+        if request.has_tool("yard_publish_review") {
+            return act(request, vec![publish(json!([]))]);
+        }
+        act(
+            request,
+            vec![commit_file("feature.txt", "feature\n", "Add feature")],
+        )
+    });
+    machine.start();
+    let project = Project::new(
+        &machine,
+        "p",
+        &config("[gates.check]\ncommand = \"test -f feature.txt\"\nstage = \"candidate\"\n"),
+    );
+    let mut history = project.watch(0);
+
+    // Without `--since`, an idle board returns at once, with no items.
+    let idle = watch_answer(watch_attention(&project, None));
+    assert_eq!(idle["attention"], json!([]));
+    let seq = idle["seq"].as_i64().expect("watch prints its seq");
+
+    // Armed on the idle board, it keeps waiting past a status round trip.
+    let mut waiting = watch_attention(&project, Some(seq));
+    project.json(&["status"]);
+    assert!(
+        waiting.try_wait().expect("poll watch").is_none(),
+        "watch --since returned on an idle board with no attempt ended after it"
+    );
+
+    // Work arrives; the open approval wakes it.
+    project.json(&[
+        "ticket",
+        "new",
+        "--title",
+        "Add feature",
+        "--body",
+        "Create feature.txt",
+    ]);
+    let raised = history.until("approval raised", |event| {
+        event["event"] == "attention.raised" && event["data"]["kind"] == "approval"
+    });
+    let woken = watch_answer(waiting);
+    assert_eq!(woken["attention"].as_array().map(Vec::len), Some(1));
+
+    // Armed with the approval open, it waits until the ticket has landed.
+    let mut draining = watch_attention(&project, raised["seq"].as_i64());
+    project.json(&["status"]);
+    assert!(
+        draining.try_wait().expect("poll watch").is_none(),
+        "watch --since returned with an approval open"
+    );
+    let head = raised["data"]["payload"]["head"].as_str().unwrap();
+    let proof = raised["data"]["payload"]["proof"].as_str().unwrap();
+    project.json(&[
+        "attempt", "approve", "Y-1", "--head", head, "--proof", proof, "--text", "ship it",
+    ]);
+    let landed = history.event("landing.recorded", &[]);
+    let answer = watch_answer(draining);
+    assert_eq!(answer["attention"], json!([]));
+    assert!(answer["seq"].as_i64().unwrap() >= landed["seq"].as_i64().unwrap());
+}
