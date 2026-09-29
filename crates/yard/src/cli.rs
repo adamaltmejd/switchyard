@@ -259,7 +259,7 @@ async fn dispatch(cli: &Cli) -> Result<Option<Value>, Fail> {
     };
     let (method, mut params) = match &cli.command {
         Command::Daemon(DaemonCommand::Status) => ("daemon.status".into(), json!({})),
-        Command::Daemon(DaemonCommand::Install) => return crate::daemon::install().map(Some),
+        Command::Daemon(DaemonCommand::Install) => return crate::daemon::install().await.map(Some),
         Command::Daemon(DaemonCommand::Uninstall) => return crate::daemon::uninstall().map(Some),
         Command::Daemon(DaemonCommand::Restart) => return crate::daemon::restart().await.map(Some),
         Command::Daemon(DaemonCommand::Run) | Command::Version => unreachable!("handled above"),

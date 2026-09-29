@@ -698,9 +698,12 @@ socket path limit. The daemon passes the host's `XDG_RUNTIME_DIR` and
 every project, the landing restart table and the box prune included, and
 serves no command until that has committed. `yard daemon run` then prints
 one JSON line, `{"event": "serving", "socket", "pid", "boundary"}`, to
-stdout. `yard daemon install` writes and starts the
+stdout. `yard daemon install` writes the
 service: a systemd user unit on Linux, a launchd agent on macOS, both
-running `yard daemon run` from the installed binary's absolute path. On
+running `yard daemon run` from the installed binary's absolute path with
+the installing shell's `PATH` and no other variable. It then restarts the
+service and returns once the daemon answers, with its `pid` and `boundary`,
+or fails as `restart` does. On
 Linux it enables lingering so the daemon outlives the login session, and
 says so where it cannot. `yard daemon uninstall` stops and removes it;
 `yard daemon restart` goes through the service manager and returns once the

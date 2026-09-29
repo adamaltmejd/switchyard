@@ -572,40 +572,55 @@ fn service_file() -> PathBuf {
     }
 }
 
-pub fn install() -> Result<Value, Fail> {
+pub async fn install() -> Result<Value, Fail> {
     let exe = std::env::current_exe().map_err(|error| error.to_string())?;
     let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
-    if cfg!(target_os = "macos") {
+    let path = std::env::var("PATH").unwrap_or_default();
+    let mut result = if cfg!(target_os = "macos") {
         let plist = service_file();
+        let path = path
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;");
         let text = format!(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>{LABEL}</string>\n<key>ProgramArguments</key><array><string>{}</string><string>daemon</string><string>run</string></array>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><true/>\n</dict></plist>\n",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>{LABEL}</string>\n<key>ProgramArguments</key><array><string>{}</string><string>daemon</string><string>run</string></array>\n<key>EnvironmentVariables</key><dict><key>PATH</key><string>{path}</string></dict>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><true/>\n</dict></plist>\n",
             exe.display()
         );
         std::fs::create_dir_all(plist.parent().expect("agents dir"))
             .map_err(|error| error.to_string())?;
         std::fs::write(&plist, text).map_err(|error| error.to_string())?;
         service(&["launchctl", "load", "-w", &plist.to_string_lossy()])?;
-        return Ok(json!({ "service": plist }));
-    }
-    let unit = service_file();
-    let text = format!(
-        "[Unit]\nDescription=Switchyard daemon\n\n[Service]\nExecStart={} daemon run\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\n",
-        exe.display()
-    );
-    std::fs::create_dir_all(unit.parent().expect("unit dir")).map_err(|error| error.to_string())?;
-    std::fs::write(&unit, text).map_err(|error| error.to_string())?;
-    service(&["systemctl", "--user", "daemon-reload"])?;
-    service(&["systemctl", "--user", "enable", "--now", "yard.service"])?;
-    let user = std::env::var("USER").unwrap_or_default();
-    let linger = if loginctl_linger_enabled(&user) {
-        "enabled".to_string()
+        json!({ "service": plist })
     } else {
-        match service(&["loginctl", "enable-linger", &user]) {
-            Ok(()) => "enabled".to_string(),
-            Err(fail) => format!("not enabled: {}; the daemon stops at logout", fail.message),
-        }
+        let unit = service_file();
+        let path = path
+            .replace('%', "%%")
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        let text = format!(
+            "[Unit]\nDescription=Switchyard daemon\n\n[Service]\nExecStart={} daemon run\nEnvironment=\"PATH={path}\"\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\n",
+            exe.display()
+        );
+        std::fs::create_dir_all(unit.parent().expect("unit dir"))
+            .map_err(|error| error.to_string())?;
+        std::fs::write(&unit, text).map_err(|error| error.to_string())?;
+        service(&["systemctl", "--user", "daemon-reload"])?;
+        service(&["systemctl", "--user", "enable", "--now", "yard.service"])?;
+        let user = std::env::var("USER").unwrap_or_default();
+        let linger = if loginctl_linger_enabled(&user) {
+            "enabled".to_string()
+        } else {
+            match service(&["loginctl", "enable-linger", &user]) {
+                Ok(()) => "enabled".to_string(),
+                Err(fail) => format!("not enabled: {}; the daemon stops at logout", fail.message),
+            }
+        };
+        json!({ "service": unit, "linger": linger })
     };
-    Ok(json!({ "service": unit, "linger": linger }))
+    let restarted = restart().await?;
+    result["pid"] = restarted["pid"].clone();
+    result["boundary"] = restarted["boundary"].clone();
+    Ok(result)
 }
 
 pub fn uninstall() -> Result<Value, Fail> {
