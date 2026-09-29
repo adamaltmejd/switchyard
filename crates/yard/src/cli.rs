@@ -680,12 +680,7 @@ fn duration(ms: i64) -> String {
 fn render_attention(items: &[Value]) -> String {
     let mut out = String::new();
     for item in items {
-        let exits: Vec<&str> = item["exits"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-            .collect();
+        let exits = names(&item["exits"]);
         out.push_str(&format!(
             "  #{}  {}  {}  {}  {}\n",
             item["attention"].as_i64().unwrap_or_default(),
