@@ -551,7 +551,7 @@ candidate adds is fetched by the gate through the allowlist.
 A host gate runs in the same kind of private checkout, made on the host
 under the attempt's or the landing's directory, as a child process in its own group with an
 explicit cwd, an environment of `PATH`, `HOME`, `YARD_BASE`, `YARD_PROOF` and the
-variables its `env` names, bounded output (its stdout and stderr in the order it wrote them, so a red's detail is the end of the run) and its `timeout_minutes`. It exists for gates that
+variables its `env` names, bounded output (its stdout and stderr on one pipe, in the order it wrote them, the last 1 MiB kept, so a red's detail is the end of the run) and its `timeout_minutes`. It exists for gates that
 need what a box cannot give, such as a container runtime. `YARD_PROOF` is
 the host path of the proof snapshot this execution judges: the candidate's
 at the candidate stage, the approved candidate's at landing.

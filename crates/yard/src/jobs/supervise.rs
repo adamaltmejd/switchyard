@@ -1249,7 +1249,13 @@ async fn box_gate(
     };
     let _ = project
         .read(|conn| executions::set_handle(conn, execution, &live.name, live.image_id.as_deref()));
-    let argv = ["sh".to_string(), "-c".to_string(), gate.command.clone()];
+    let argv = [
+        "sh".to_string(),
+        "-c".to_string(),
+        "exec sh -c \"$1\" 2>&1".to_string(),
+        "gate".to_string(),
+        gate.command.clone(),
+    ];
     let exec = daemon.pinfold.exec(
         &live.name,
         Some("/workspace"),
@@ -1272,7 +1278,7 @@ async fn box_gate(
         Some(Ok(out)) => Ok(GateResult {
             stopped: false,
             code: out.code,
-            output: out.merged,
+            output: format!("{}{}", out.stdout, out.stderr),
             oom,
         }),
         Some(Err(crate::r#box::ExecError::Timeout)) => Ok(GateResult {
@@ -1317,7 +1323,7 @@ async fn host_gate(
     command
         .args([
             "-c",
-            "read -r _ || exit 125; exec sh -c \"$1\" < /dev/null",
+            "read -r _ || exit 125; exec sh -c \"$1\" < /dev/null 2>&1",
             "gate",
         ])
         .arg(&gate.command)
@@ -1328,7 +1334,7 @@ async fn host_gate(
         .env("YARD_BASE", base)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
         .process_group(0)
         .kill_on_drop(true);
     if let Some(proof) = proof {
@@ -1362,11 +1368,9 @@ async fn host_gate(
     drop(stdin);
     let limit = Duration::from_secs(gate.timeout_minutes * 60);
     let stdout = child.stdout.take().expect("stdout is piped");
-    let stderr = child.stderr.take().expect("stderr is piped");
     let run = async {
-        let (_, _, merged) =
-            crate::r#box::read_pair(stdout, stderr, crate::r#box::OUTPUT_CAP).await;
-        (merged, child.wait().await)
+        let output = crate::r#box::read_tail(stdout, crate::r#box::OUTPUT_CAP).await;
+        (output, child.wait().await)
     };
     let kill = || {
         let _ = nix::sys::signal::killpg(

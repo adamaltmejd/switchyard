@@ -59,7 +59,7 @@ fn the_queue_lands_in_order_and_rejudges_a_red_merge() {
     const MARKER: &str = "the-gate-ends-here";
     let gate = format!(
         "[gates.clean]\ncommand = \"test ! -f bad.txt && exit 0; \\
-         yes 'stderr noise noise noise' | head -n 1000 >&2; sleep 1; echo {MARKER}; exit 1\"\n"
+         yes 'stderr noise noise noise' | head -n 1000 >&2; echo {MARKER}; exit 1\"\n"
     );
     let machine = Machine::new("g10-order", |request| {
         let prompt = request.prompt();
