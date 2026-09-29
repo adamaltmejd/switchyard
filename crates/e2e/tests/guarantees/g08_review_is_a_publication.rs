@@ -2,6 +2,7 @@
 
 use e2e::*;
 use serde_json::{Value, json};
+use std::io::Write;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -846,4 +847,86 @@ fn a_bearer_outside_the_harness_session_is_inert_in_a_codex_seat() {
     let approval = watch.attention();
     assert_eq!(approval["data"]["kind"], "approval", "{approval}");
     assert_own_session_only(&project, &machine, codex_seat);
+}
+
+/// A seat held by the fixture while its attempt is abandoned, then released
+/// to end without publishing: its execution ends `abandoned` and no item is
+/// open. Control: `a_seat_that_exits_without_publishing_is_a_review_error`.
+///
+/// Sabotage: remove the liveness re-read in `review::run`'s end path; the
+/// seat ends `error` and a `red` item is open.
+#[test]
+fn a_seat_ended_by_an_abandon_is_abandoned() {
+    let hold = Latch::new();
+    let held = hold.clone();
+    let machine = Machine::new("g8-abandon", move |request| {
+        if !seat(&request) {
+            return implementer(request);
+        }
+        Reply::Hold(held.clone(), Box::new(Reply::Text("done".into())))
+    });
+    machine.start();
+    let project = Project::new(&machine, "p", &config(""));
+    let mut watch = project.watch(0);
+    project.json(&["ticket", "new", "--title", "Add feature"]);
+    hold.wait_held();
+    project.json(&["attempt", "abandon", "Y-1"]);
+    hold.release();
+    let ended = watch.event("execution.ended", &[("kind", "review")]);
+    assert_eq!(ended["data"]["outcome"], "abandoned", "{ended}");
+    assert_eq!(
+        project.rows("SELECT kind FROM attention WHERE state = 'open'"),
+        Vec::<Value>::new()
+    );
+}
+
+/// A candidate gate held in its host command while its attempt is abandoned,
+/// then released to fail: its execution ends `abandoned`, records no check
+/// and no item is open. Control: the gate rerun scenario's
+/// gate ends with a verdict on a live attempt.
+///
+/// Sabotage: remove the liveness re-read in `supervise::gate`'s end path; the
+/// gate ends `fail` and a check is recorded.
+#[test]
+fn a_gate_ended_by_an_abandon_is_abandoned() {
+    let machine = Machine::new("g8-gate-abandon", implementer);
+    let said = machine.root.join("said");
+    let hold = machine.root.join("hold");
+    for path in [&said, &hold] {
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(path)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    let mut release = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&hold)
+        .unwrap();
+    let gate = format!(
+        "[gates.held]\ncommand = \"echo held > {}; read line < {}; exit 1\"\nstage = \"candidate\"\nruns_in = \"host\"\n",
+        said.display(),
+        hold.display()
+    );
+    machine.start();
+    let project = Project::new(&machine, "p", &config(&gate));
+    let mut watch = project.watch(0);
+    project.json(&["ticket", "new", "--title", "Add feature"]);
+    assert_eq!(watch.said(&said), "held\n");
+    project.json(&["attempt", "abandon", "Y-1"]);
+    release.write_all(b"go\n").unwrap();
+    let ended = watch.event("execution.ended", &[("kind", "gate")]);
+    assert_eq!(ended["data"]["outcome"], "abandoned", "{ended}");
+    assert!(
+        project
+            .rows("SELECT id FROM \"check\" WHERE kind = 'gate'")
+            .is_empty()
+    );
+    assert_eq!(
+        project.rows("SELECT kind FROM attention WHERE state = 'open'"),
+        Vec::<Value>::new()
+    );
 }

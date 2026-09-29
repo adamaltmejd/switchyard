@@ -141,6 +141,17 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
     // Whether it counts is `checks::current`'s durable registration proof;
     // the outcome here is only the terminal frame and the publication.
     project.tx(|tx| {
+        if attempts::get(tx, attempt.id)?.state != "live" {
+            return executions::end(
+                tx,
+                execution,
+                executions::End {
+                    outcome: "abandoned",
+                    ticket: Some(ticket.id),
+                    ..Default::default()
+                },
+            );
+        }
         let published = checks::for_execution(tx, execution)?;
         let failure = match (&published, &run.registered, &run.terminal) {
             (Some(_), _, _) => None,
@@ -228,6 +239,9 @@ pub fn publish(grant: &crate::mcp::Grant, arguments: &Value) -> Result<Value, Fa
         }
         let row = executions::get(tx, grant.execution)?;
         let attempt = attempts::get(tx, row.attempt)?;
+        if attempt.state != "live" {
+            return Err(Fail::refused("the attempt has ended"));
+        }
         let blocked = findings.iter().any(|finding| {
             crate::config::priority(&finding.priority).is_some_and(|priority| priority <= blocking)
         });
