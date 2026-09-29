@@ -998,6 +998,14 @@ pub async fn attempt_approve(
             ));
         }
         let review_digest = loaded.review_digest(&attempt.workflow)?;
+        if item.kind == "stopped"
+            && attempt.rounds < i64::from(loaded.config.review.max_rounds) + attempt.extra_rounds
+        {
+            return Err(Fail::refused(format!(
+                "{} is not at its review round limit",
+                ticket_name(id)
+            )));
+        }
         // Before the staleness read, so a gate that changed names itself.
         let overrode = item.kind == "stopped";
         let checks: Vec<i64> = if overrode {

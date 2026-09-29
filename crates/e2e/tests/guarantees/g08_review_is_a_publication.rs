@@ -386,6 +386,9 @@ fn a_seat_that_always_blocks_gets_max_rounds() {
 /// passing check for, approve is refused naming the gate and writes no
 /// approval; removing the gate makes the same head approvable.
 ///
+/// A synced `max_rounds` above the rounds run refuses approve naming the
+/// limit.
+///
 /// Sabotage: drop the gate loop in `admit::limit_checks`;
 /// the refusal is not raised and an approval is written. Record no review
 /// check in `limit_checks`, or drop `overrode`; the row names no review or
@@ -430,6 +433,13 @@ fn the_operator_can_approve_over_a_blocking_review_at_the_limit() {
         .as_str()
         .unwrap()
         .to_string();
+
+    project.reconfigure(&config(gate));
+    let raised = project.refused(&["attempt", "approve", "Y-1", "--head", &head]);
+    assert!(
+        raised["message"].as_str().unwrap().contains("round limit"),
+        "{raised}"
+    );
 
     project.reconfigure(&config(&both).replace("max_rounds = 3", "max_rounds = 2"));
     let refused = project.refused(&["attempt", "approve", "Y-1", "--head", &head]);
