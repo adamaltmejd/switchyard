@@ -569,7 +569,8 @@ at the harness's user level, and nothing from `/workspace` loads: the base is
 the seat's candidate base, or the implementer's attempt base when the
 execution starts, so the candidate never steers its own review. The base is
 the operator's, so it loads whole, hooks included, in seats as in the
-implementer. Yard reads the named paths from canonical's objects on the
+implementer; a base file that itself names a `/workspace` path, a hook
+script or an instructions file, reads the candidate's copy. Yard reads the named paths from canonical's objects on the
 host, never from a worker's tree: root `AGENTS.md` and `CLAUDE.md` (64 KiB
 each), project skills (`.agents/skills/`, `.claude/skills/`,
 `.pi/skills/`), Pi extensions (`.pi/extensions/`), `.claude/settings.json`,
@@ -624,8 +625,8 @@ workspace whatever its settings say, so the argv disables each `SKILL.md`
 under `/workspace/.agents/skills/` and `/workspace/.codex/skills/`
 (`skills.config`), read from the seat's checkout or, for the implementer,
 its clone when the execution starts; a link at any component of those
-roots, a name that is not UTF-8, a tree past 32 directories or 512 skills
-refuses the Codex execution.
+roots, a name that is not UTF-8, a tree past 32 directories or 512 skills,
+or a list past the 128 KiB argument bound refuses the Codex execution.
 Its `exec --json` stream starts a
 thread with `thread.started`, which names the session and proves the
 required server connected; `turn.completed` is the outcome and `turn.failed`

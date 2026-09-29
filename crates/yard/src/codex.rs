@@ -178,7 +178,15 @@ fn argv(launch: &Launch) -> Result<Vec<String>, String> {
             .iter()
             .map(|path| format!("{{path={},enabled=false}}", Value::from(path.as_str())))
             .collect();
-        overrides.push(format!("skills.config=[{}]", entries.join(",")));
+        let config = format!("skills.config=[{}]", entries.join(","));
+        // One argv entry, under the same per-argument limit as the prompt.
+        if config.len() > PROMPT_MAX_BYTES {
+            return Err(format!(
+                "the workspace's {} skills pass the {PROMPT_MAX_BYTES} byte argument bound",
+                skills.len()
+            ));
+        }
+        overrides.push(config);
     }
     if let Some(effort) = launch.effort {
         overrides.push(format!("model_reasoning_effort={effort:?}"));
