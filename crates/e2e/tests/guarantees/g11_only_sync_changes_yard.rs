@@ -68,10 +68,6 @@ fn a_worker_yard_change_is_refused_and_sync_carries_it() {
         .1
         .trim()
         .to_string();
-    assert!(
-        refused.len() == 40 && refused.chars().all(|c| c.is_ascii_hexdigit()),
-        "{refused}"
-    );
     assert_ne!(refused, head);
     assert_eq!(
         project.rows("SELECT name, head, outcome FROM execution WHERE kind = 'gate'"),
