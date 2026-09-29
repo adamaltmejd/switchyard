@@ -281,7 +281,7 @@ split and stops.
    the ticket revision and the pending edit and records nothing for a pre-edit
    candidate. An edit pending at clock expiry loses to the timeout: `stopped:timeout`
    is raised, the edit stays pending, and the edit on that item renews the clock.
-      pending retry survives it. A fresh session gets the whole body; a resumed one gets the
+   A fresh session gets the whole body; a resumed one gets the
    body diff since the revision it last read, labelled as the operator's
    edit; seats always get the whole body. `stop` ends the execution now and keeps the tree.
    The attempt's inactivity and total-work clocks end it the same way. When

@@ -237,6 +237,13 @@ pub fn publish(grant: &crate::mcp::Grant, arguments: &Value) -> Result<Value, Fa
         }
         let row = executions::get(tx, grant.execution)?;
         let attempt = attempts::get(tx, row.attempt)?;
+        if let Some(read) = row.ticket_revision
+            && attempts::superseded_by_edit(tx, attempt.id, attempt.ticket, read)?
+        {
+            return Err(Fail::refused(
+                "the ticket was edited; this candidate is superseded and nothing is recorded",
+            ));
+        }
         let blocked = findings.iter().any(|finding| {
             crate::config::priority(&finding.priority).is_some_and(|priority| priority <= blocking)
         });

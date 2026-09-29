@@ -47,6 +47,16 @@ pub async fn next(
             continue;
         }
         let execution = project.tx(|tx| {
+            if checks::approval(tx, approval.id)?.state != "active"
+                || attempts::superseded_by_edit(
+                    tx,
+                    attempt.id,
+                    ticket.id,
+                    approval.ticket_revision,
+                )?
+            {
+                return Ok(None);
+            }
             executions::start(
                 tx,
                 executions::Start {
@@ -62,8 +72,11 @@ pub async fn next(
                     ..Default::default()
                 },
             )
+            .map(Some)
         })?;
-        spawn(daemon, project, "landing", execution);
+        if let Some(execution) = execution {
+            spawn(daemon, project, "landing", execution);
+        }
         return Ok(());
     }
     Ok(())
@@ -214,7 +227,12 @@ async fn admit<T>(
     };
     let admitted = project.tx(|tx| {
         let unchanged = checks::approval(tx, now.approval.id)?.state == now.approval.state
-            && tickets::get(tx, now.ticket.id)?.revision == now.ticket.revision
+            && !attempts::superseded_by_edit(
+                tx,
+                now.attempt.id,
+                now.ticket.id,
+                now.approval.ticket_revision,
+            )?
             && attempts::get(tx, now.attempt.id)?.state == now.attempt.state;
         match lapse {
             Some(lapse) => Ok(Err(lapse)),
@@ -585,6 +603,10 @@ async fn returned(
             },
         )?;
         checks::set_approval_state(tx, &approval, "retired", ticket, Some(outcome))?;
+        // An edit since the landing began owns the next step.
+        if attempts::superseded_by_edit(tx, attempt.id, ticket, approval.ticket_revision)? {
+            return Ok(());
+        }
         let reds = if outcome == "red" {
             attempt.landing_reds + 1
         } else {
