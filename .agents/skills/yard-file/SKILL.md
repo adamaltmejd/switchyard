@@ -30,6 +30,9 @@ Proposals:
 
 - **One ticket is one change you can read in one sitting.** Split larger
   work into tickets linked with `--depends-on`.
+- **One mechanism per ticket.** A change that must hold across several
+  independent mechanisms (harnesses, backends, adapters) is one ticket per
+  mechanism, after a shared first one.
 - **`--workflow plan` makes a read-only planner propose children and a
   body.** It does not make oversized work legitimate.
 - **A frightening size means the scope is wrong.** Cut or defer behaviour
@@ -46,6 +49,13 @@ same body. Write:
 - what is out of scope.
 
 Include the evidence you traced it from. Do not write the implementation.
+
+- **Decide before you file.** Write every choice a reviewer could block on
+  as a decision: which option, and what is excluded. An open question makes
+  each round a coin toss.
+- **Probe what you can.** A question the real tool answers (a CLI's flags,
+  a config's precedence, a harness's discovery) is answered before filing;
+  put the command and its output in the body.
 
 A candidate that touches `.yard/` is refused. When the work needs a package,
 a gate or a config change, the ticket says so, and the operator makes that
