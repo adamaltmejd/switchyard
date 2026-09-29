@@ -127,10 +127,12 @@ fn a_new_commit_leaves_the_candidate_unverified() {
 
 /// A passed gate and review, then a ticket edit: the approval is superseded
 /// and the implementer runs again, so the new candidate is judged afresh at
-/// the new revision.
+/// the new revision. An edit always moves the head, so the revision binding
+/// itself shows in the revision each judging execution records.
 ///
-/// Sabotage: make `admit::steer` set nothing; the approval is superseded but
-/// no implementer runs, and no second approval comes.
+/// Sabotage: make `admit::steer` set nothing; no implementer runs and no
+/// second approval comes. Record the old revision on the gate and review
+/// executions; `judged` no longer reads `revision + 1`.
 #[test]
 fn a_ticket_edit_leaves_the_candidate_unverified() {
     let machine = Machine::new(

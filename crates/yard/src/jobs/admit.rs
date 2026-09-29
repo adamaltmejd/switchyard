@@ -562,12 +562,7 @@ fn steer(tx: &rusqlite::Connection, id: i64) -> Result<Vec<i64>, Fail> {
     {
         attempts::resolve(tx, item, "edit", None)?;
         match item.reason.as_str() {
-            "timeout" => {
-                tx.execute(
-                    "UPDATE attempt SET work_ms = 0, lane_since = CASE WHEN lane = 1 THEN ?2 ELSE lane_since END WHERE id = ?1",
-                    rusqlite::params![attempt.id, store::now_ms()],
-                )?;
-            }
+            "timeout" => attempts::renew_clock(tx, attempt.id)?,
             "limit" => {
                 tx.execute(
                     "UPDATE attempt SET extra_rounds = extra_rounds + 1 WHERE id = ?1",
@@ -1092,6 +1087,7 @@ pub async fn proposal_answer(
         .ok_or_else(|| Fail::invalid("the call names no proposal"))?;
     let text = text_param(params, "text");
     let loaded = load(daemon, project).await?;
+    let stops = std::cell::RefCell::new(Vec::new());
     let minted = project.tx(|tx| {
         let item = attempts::attention(tx, id)?;
         if item.kind != "proposal" || item.state != "open" {
@@ -1152,7 +1148,7 @@ pub async fn proposal_answer(
                 let revision = payload["revision"]
                     .as_i64()
                     .ok_or_else(|| Fail::invalid("an edit proposal names no revision"))?;
-                edit(
+                let stopped = edit(
                     tx,
                     proposer,
                     revision,
@@ -1161,6 +1157,7 @@ pub async fn proposal_answer(
                     None,
                     None,
                 )?;
+                stops.borrow_mut().extend(stopped);
                 None
             }
             "link" => {
@@ -1185,6 +1182,7 @@ pub async fn proposal_answer(
         attempts::resolve(tx, &item, &resolution, text.as_deref())?;
         Ok(minted)
     })?;
+    stop_executions(daemon, project, &stops.into_inner());
     Ok(json!({ "proposal": id, "accepted": accept, "ticket": minted.map(ticket_name) }))
 }
 

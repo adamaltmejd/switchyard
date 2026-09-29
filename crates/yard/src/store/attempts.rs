@@ -179,6 +179,15 @@ pub fn set_next(tx: &Connection, attempt: i64, next: Option<&Value>) -> Result<(
     Ok(())
 }
 
+/// Renew the total-work clock: an operator's edit on a `timeout`.
+pub fn renew_clock(tx: &Connection, attempt: i64) -> Result<(), Fail> {
+    tx.execute(
+        "UPDATE attempt SET work_ms = 0, lane_since = CASE WHEN lane = 1 THEN ?2 ELSE lane_since END WHERE id = ?1",
+        params![attempt, super::now_ms()],
+    )?;
+    Ok(())
+}
+
 /// Take or give back a lane. Taking starts the total-work clock; giving it
 /// back banks the time.
 pub fn set_lane(tx: &Connection, attempt: i64, held: bool) -> Result<(), Fail> {

@@ -253,6 +253,9 @@ pub async fn run_harness(
         .lock()
         .expect("stops lock")
         .insert((project.key.clone(), execution), stop.clone());
+    if kind == crate::mcp::Kind::Review {
+        notify_if_edited(project, execution, &stop);
+    }
     std::fs::create_dir_all(transcript.parent().expect("transcript dir"))
         .map_err(|error| error.to_string())?;
     let mut file = tokio::fs::File::create(transcript)
@@ -681,11 +684,13 @@ pub async fn implement(
             _ => None,
         };
         // An edit made while this execution ran reaches the implementer
-        // before anything judges its candidate; an expired clock still waits
-        // for the edit that renews it.
+        // before anything judges its candidate; an expired clock is renewed by it.
         let edited = tickets::get(tx, ticket.id)?.revision != ticket.revision;
         let stop = |tx: &rusqlite::Connection, reason: &str, detail: &str| -> Result<(), Fail> {
-            if edited && reason != "timeout" {
+            if edited {
+                if reason == "timeout" {
+                    attempts::renew_clock(tx, attempt.id)?;
+                }
                 return attempts::set_next(tx, attempt.id, Some(&json!({ "reason": "edit" })));
             }
             attempts::raise(tx, attempts::Raise {
@@ -807,7 +812,7 @@ pub async fn implement(
                 ticket: Some(ticket.id),
                 ..Default::default()
             })?;
-            if workflow.read_only {
+            if workflow.read_only && !edited {
                 attempts::end(tx, attempt.id, "planned")?;
                 return super::audit_attempt(tx, "attempt.ended", &current, None, json!({ "outcome": "planned" })).map(|_| ());
             }
@@ -832,6 +837,23 @@ pub async fn implement(
         }
         Ok(())
     })
+}
+
+// An edit that landed before this execution's stop handle existed found nothing
+// to notify; the revision the execution started on tells.
+fn notify_if_edited(project: &Project, execution: i64, stop: &tokio::sync::Notify) {
+    let moved = project
+        .read(|conn| {
+            let row = executions::get(conn, execution)?;
+            let ticket = tickets::get(conn, attempts::get(conn, row.attempt)?.ticket)?;
+            Ok(row
+                .ticket_revision
+                .is_some_and(|revision| revision != ticket.revision))
+        })
+        .unwrap_or(false);
+    if moved {
+        stop.notify_one();
+    }
 }
 
 async fn implementer_prompt(
@@ -997,6 +1019,7 @@ pub async fn gate(
         .lock()
         .expect("stops lock")
         .insert((project.key.clone(), execution), stop.clone());
+    notify_if_edited(project, execution, &stop);
     let checkout = dir.join("gates").join(execution.to_string());
     let outcome = match loaded.config.gates.iter().find(|gate| gate.name == name) {
         None => Err(format!("gate {name} is no longer configured")),
