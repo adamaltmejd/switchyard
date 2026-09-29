@@ -80,11 +80,12 @@ _Avoid_: alert, notification, blocker
 | harness | every harness's launch argv, frame normalisation, registration proof and staged MCP client | jobs |
 | mcp | the tool surface workers call | daemon |
 | daemon | one process per machine: the unix-socket API, the MCP listener, the scheduler tick | `yard` |
-| cli | argument parsing, one call per command, rendering | the operator |
+| cli | argument parsing, project discovery, RPC dispatch, rendering | the operator |
 
 The store knows nothing of processes. `git` and `box` return data and never
-touch the store. The CLI never opens the store or a repository; it talks to
-the daemon.
+touch the store. The CLI never opens the store. It uses read-only git metadata
+and `project.list` to resolve a linked worktree, then sends the command to
+the daemon; it never mutates a repository itself.
 
 ## Threat model
 
@@ -800,7 +801,5 @@ crates/e2e/  src/lib.rs (harness, helpers) model.rs (fake model fixture), tests/
 - Batching several candidates into one landing, with bisection, is out
   until queue wait is measured.
 - Whether Yard later links pinfold as a library instead of a process.
-- Codex returns as a harness before the cutover, once pinfold's login route
-  carries its subscription login.
 - The Pi MCP client extension stays TypeScript inside the Rust binary as an
   embedded file; whether pinfold should carry it instead.

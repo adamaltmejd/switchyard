@@ -1,4 +1,4 @@
-//! Argument parsing, one call per command, rendering.
+//! Argument parsing, project discovery, RPC dispatch and rendering.
 
 use crate::api::{self, Fail};
 use clap::{Parser, Subcommand};
