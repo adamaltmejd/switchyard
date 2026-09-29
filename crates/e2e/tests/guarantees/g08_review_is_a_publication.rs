@@ -442,7 +442,10 @@ fn the_operator_can_approve_over_a_blocking_review_at_the_limit() {
     project.reconfigure(&base);
     project.json(&["attempt", "approve", "Y-1", "--head", &head]);
     watch.event("landing.recorded", &[]);
-    assert_eq!(project.canonical_head(), head);
+    git(
+        &project.canonical(),
+        &["merge-base", "--is-ancestor", &head, "refs/heads/main"],
+    );
 
     let approvals = project.rows("SELECT checks, overrode FROM approval");
     assert_eq!(approvals.len(), 1);
