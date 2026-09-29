@@ -123,8 +123,9 @@ changes only through `yard sync`, and a candidate whose diff touches it is
 refused at the candidate boundary and returned to the implementer with the
 reason. A worker that needs a package or a gate proposes the change.
 `.yard/local/` is ignored through `.yard/.gitignore` and holds the store and live state; losing it
-loses the backlog. The scaffold's `protected_paths` names the files that
-guide workers, `AGENTS.md`, `CLAUDE.md`, `.agents/` and `.pi/`, so a
+loses the backlog. The scaffold's `protected_paths` names every path Yard stages into a
+worker's harness, `AGENTS.md`, `CLAUDE.md`, `.agents/`, `.claude/`, `.codex/`
+and `.pi/`, so a
 candidate changing them always needs the operator's approval, under
 `approve = "auto"` too.
 
@@ -563,40 +564,67 @@ input dir, `env`, `route`, `argv` and `reader`, a per-run reader over stdout
 and stderr yielding `Started`, `Finished`, `Failed`, `Registered` and
 `Refused`. Pi, Claude and Codex are the three.
 
+Every worker gets the project's own agent environment from the base, staged
+at the harness's user level, and nothing from `/workspace` loads: the base is
+the seat's candidate base, or the implementer's attempt base when the
+execution starts, so the candidate never steers its own review. The base is
+the operator's, so it loads whole, hooks included, in seats as in the
+implementer. Yard reads the named paths from canonical's objects on the
+host, never from a worker's tree: root `AGENTS.md` and `CLAUDE.md` (64 KiB
+each), project skills (`.agents/skills/`, `.claude/skills/`,
+`.pi/skills/`), Pi extensions (`.pi/extensions/`), `.claude/settings.json`,
+and Codex's `.codex/config.toml`, `.codex/hooks.json` and `.codex/skills/`.
+Only regular files are taken, copied as their bytes. A link or submodule at
+any component of those paths, a file over 1 MiB, a set over 512 files or
+8 MiB, and guidance that is not UTF-8 or together passes the 128 KiB prompt
+bound each refuse the execution naming the path. Each harness gets the paths
+it would load from a project, into its own state; nothing is merged, and
+Yard's own keys ride the harness's highest-precedence layer, its argv.
+
 Pi's launch argv starts or resumes a session, the normalisation of its
 frames yields `started`, `finished` and `failed`, and its launch files
 include Yard's staged MCP client extension and `agent/models.json`, which
-moves the provider onto its route. Extension discovery is off, and so are
-prompt templates and themes: the staged client is the only code that loads
-in the harness, so nothing a candidate commits runs with a worker's bearer.
-Context files (`AGENTS.md`, `CLAUDE.md`) load as Pi finds them in
-`/workspace`, so every worker reads the project's own rules. Project skills
-and `.pi/` resources stay behind Pi's project trust, which Yard never
-grants. Pi's user level is the attempt's harness state, which Yard owns and
-leaves empty.
+moves the provider onto its route. Discovery of extensions, skills, context
+files, prompt templates and themes is off (`--no-extensions`, `--no-skills`,
+`--no-context-files`). The base's extensions and skills are staged in the
+agent dir and passed by path: `-e` for each extension Pi would discover (a
+`.ts` or `.js` file, or a directory's `index.ts` or `index.js`), `--skill`
+for each skill root. The base's guidance rides the system prompt. Pi's own
+agent settings stay Yard's; project settings are not staged.
 
 Claude runs as a login: its launch files hold a `--mcp-config` naming only
-the `yard` HTTP server, whose bearer comes from the env, and its
-automatic-compaction setting. `--strict-mcp-config` and `--setting-sources
-user` keep every committed MCP config, setting and hook from loading; a
-project plugin loads only through those settings and is kept out with them.
-`--setting-sources user` also stops Claude loading the project's own memory,
-so Yard reads the checkout's root `AGENTS.md` and `CLAUDE.md` on the host,
-follows no link, refuses a non-regular file and bounds each to 64 KiB, and
-appends them to Claude's system prompt. A seat reads them from its fresh
-checkout of the head; the implementer reads them from its clone. The
-`system`/`init` frame
-names the session id and the tools the server registered, and that is the
-registration proof. The `result` frame is the outcome. The model and effort
-ride the argv, `--resume` continues a session, and the token stays a pinfold
-placeholder in the box.
+the `yard` HTTP server, whose bearer comes from the env, and `--settings`
+with its automatic-compaction setting. `--strict-mcp-config` keeps Yard's
+server the only one; `--setting-sources user` keeps every workspace setting,
+hook and plugin from loading, and Claude's user level, `.claude/` in its
+home, holds the base's settings and skills. `--setting-sources user` also
+stops Claude loading project memory, so the base's `AGENTS.md` and
+`CLAUDE.md` are appended to Claude's system prompt. The `system`/`init`
+frame names the session id and the tools the server registered, and that is
+the registration proof. The `result` frame is the outcome. The model and
+effort ride the argv, `--resume` continues a session, and the token stays a
+pinfold placeholder in the box.
 
 Codex runs as a login too: pinfold's config carries the model provider and
-route, and the launch stages the required `yard` HTTP MCP server, whose
-bearer comes from the env, and its automatic-compaction setting as config
-overrides, so a worker's own files cannot replace the provider. Codex reads
-`AGENTS.md` from `/workspace` itself and no committed project config, MCP
-server, hook or profile. Its `exec --json` stream starts a
+route, and the attempt's `CODEX_HOME` is its user level, holding the base's
+`.codex/config.toml`, `hooks.json`, skills and guidance (`AGENTS.md` then
+`CLAUDE.md`), with `.agents/skills/` in its home. Yard's keys ride `-c`: the
+`mcp_servers` table holding only the required `yard` HTTP server, whose
+bearer comes from the env; the compaction threshold; `approval_policy =
+"never"` beside the sandbox; `project_doc_max_bytes=0`, so the workspace's
+`AGENTS.md` files do not load; `/workspace` pinned untrusted, so a staged
+config cannot activate the workspace's `.codex/config.toml` (an inline
+`projects` table, since a dotted key keeps its quotes); and the `pinfold`
+model provider. Codex merges a `-c mcp_servers` table into a staged one, so
+that table is dropped from the staged config, the one file not copied
+verbatim. Every launch passes `--dangerously-bypass-hook-trust`, since a
+fresh `CODEX_HOME` holds no hook trust. Codex discovers skills in the
+workspace whatever its settings say, so the argv disables each `SKILL.md`
+under `/workspace/.agents/skills/` and `/workspace/.codex/skills/`
+(`skills.config`), read from the seat's checkout or, for the implementer,
+its clone when the execution starts; a link at any component of those
+roots, a tree past 32 directories or 512 skills refuses the execution.
+Its `exec --json` stream starts a
 thread with `thread.started`, which names the session and proves the
 required server connected; `turn.completed` is the outcome and `turn.failed`
 or `error` names the failure. `resume <thread>` continues a session, `-s
@@ -710,12 +738,12 @@ G15. Each is shown by one or more end-to-end scenarios; testing policy is in
 | 5 | Intent precedes effect, and a restart loses only the turn | Intent is ordered before effect: an execution's audit event precedes its box's creation time in `pinfold box list` and the fixture's first request. The daemon killed mid-execution: on restart the execution is `interrupted`, no second box exists, the tree is kept, and `start` continues. The daemon killed while a host landing gate runs: the gate's group is gone after restart and the landing re-queues. No command is answered before reconciliation has committed. |
 | 6 | Inputs are validated at the boundary | A malformed tool payload, a TOML with an unknown key, an unknown workflow name, a sync that removes a workflow an open ticket names: refused by name, nothing written. |
 | 7 | A ticket lands end to end and leaves only rows | New ticket, worker commit, candidate gate, review pass, approval, green landing: canonical moves and the ticket is done. The proof snapshot on the host holds what the worker wrote before landing. Afterwards every decision has one audit event naming its target and text, the execution rows carry tokens, cost, model and start reason, every event is one the Store section names, the attempt directory with its proof snapshot, boxes and proof copies are gone, the approval row and each check's execution carry the proof digest, and another live attempt's directory and canonical are untouched. A `status --watch` returns an approval already open when it starts at once, and one started with nothing open returns when the next item is raised; with `--since` naming the seq of an open approval it keeps waiting until a further item is raised, then prints both. |
-| 8 | Review is a publication, and bounded | A seat that exits 0 without publishing is a review error; a seat killed after publishing has published; a second publication is refused; findings below `blocking` pass; a panel of `none` reaches approval marked unreviewed; a seat that publishes a block and is then held by the fixture: no repair starts until its box is gone; a seat that always blocks gets exactly `max_rounds` rounds, then `stopped:limit`. A candidate that commits a `.pi` extension which publishes a pass: nothing loads it, and the seat's own publication is the one recorded. Control: the seat's prompt carries a rule from the project's `AGENTS.md`. A candidate that commits a Claude plugin, settings hook and a `.mcp.json` server which publish a pass: nothing loads them, and the seat's own publication is the one recorded. Control: the seat's prompt carries the committed `CLAUDE.md` rule. A candidate that commits a `.codex/config.toml` naming an MCP server that publishes a pass: nothing loads it, the seat's own publication is the one recorded, and the rogue server leaves no marker. Control: the seat's context carries the committed `AGENTS.md` rule. A seat that publishes with no registration proof does not count, and a fresh seat runs. A gate error's `start` reruns that gate on the same head. A seat or gate that ends after its attempt was abandoned ends `abandoned`, records no check and raises no item. A process in a seat that reads the inherited bearer and posts its own `initialize` then a publication, in each of Pi, Claude and Codex: both are refused with 404 and the seat's own publication is the one recorded. |
+| 8 | Review is a publication, and bounded | A seat that exits 0 without publishing is a review error; a seat killed after publishing has published; a second publication is refused; findings below `blocking` pass; a panel of `none` reaches approval marked unreviewed; a seat that publishes a block and is then held by the fixture: no repair starts until its box is gone; a seat that always blocks gets exactly `max_rounds` rounds, then `stopped:limit`. A candidate that commits a `.pi` extension which publishes a pass, a skill and a new `AGENTS.md` rule: none loads, and the seat's own publication is the one recorded; control: the base's directory extension, its skills from `.pi/skills/` and `.agents/skills/` and its `AGENTS.md` rule are in every implementer and seat request. A candidate that commits a Claude plugin, settings hook and `.mcp.json` server which publish a pass, a skill and a new `CLAUDE.md` rule: none loads, and the seat's own publication is the one recorded; control: the base's `CLAUDE.md` rule, skill and hook output are in every implementer and seat request. A candidate that commits a `.codex/config.toml` naming an MCP server that publishes a pass, a skill and a new `AGENTS.md` rule, on a base whose staged config trusts `/workspace` and names its own server: nothing of the candidate's loads, the seat's own publication is the one recorded, and neither server leaves a marker; control: the base's `AGENTS.md` rule, skill and `hooks.json` hook output are in every implementer and seat request. A candidate that commits `.agents/skills` as a link: the execution is refused naming the path, though the seat would publish; control: the same skill as a regular directory reaches approval. A seat that publishes with no registration proof does not count, and a fresh seat runs. A gate error's `start` reruns that gate on the same head. A seat or gate that ends after its attempt was abandoned ends `abandoned`, records no check and raises no item. A process in a seat that reads the inherited bearer and posts its own `initialize` then a publication, in each of Pi, Claude and Codex: both are refused with 404 and the seat's own publication is the one recorded. |
 | 9 | Each implementer execution starts from the right place | A nudge mid-execution lets the execution end on its own and reaches the next prompt; `stop` delivers it sooner. A worker that leaves an untracked file gets no review and the next prompt lists the file; left again, `stopped:dirty`. With `max_session_executions = 2`: the second execution resumes the first, the third resumes nothing and its prompt is the brief, the fourth resumes the third, the fifth resumes nothing. |
 | 10 | The queue lands one at a time and re-judges what does not merge | Three approved candidates, the second red on its merged ref: the first lands, the second gets one repair and a second red raises `red`, the third lands on the moved target with its own gate run. A candidate that does not merge gets a repair naming the paths, and its next head takes gates, review and approval again. A conflict against a target that changed `.yard/config.toml`, in a clone made before it: the worker fetches the target from its bundle, merges, and the new candidate's base is the target, so it passes the `.yard` refusal and lands with the operator's configuration intact. |
 | 11 | Only the operator's sync changes `.yard` and canonical from outside | A worker commit under `.yard` comes back with the reason and no gate runs; the same change through `yard sync` is in force for the next execution. A checkout and canonical that each hold a commit the other lacks: both directions refuse naming both heads; a fast-forward passes. |
 | 12 | Boxes hold nothing secret | The key is absent from the box's environment and clone; the fixture behind the injecting route receives it. The claude token is absent from the box's environment, files and clone; the fixture behind the login route receives it as `Authorization: Bearer`. The codex host login is absent from the box's environment, files and clone; the fixture behind the login route receives it as `Authorization: Bearer` with `ChatGPT-Account-ID`. |
-| 13 | Every gate and seat runs where its row says | A seat that writes to `/workspace` fails and the head is unchanged. A gate box and a seat read the candidate's proof snapshot at `/yard/proof` and their writes there fail; control: the implementer wrote the live proof. An `AGENTS.override.md` the implementer leaves in its clone, excluded through `.git/info/exclude`: the seat's prompt lacks its rule and carries the committed guidance's. A `CLAUDE.md` override the implementer leaves, hidden from git's status, does not reach the seat; the committed `CLAUDE.md` does. A gate box that calls the model or MCP route gets nothing, and an ignored file the implementer left is absent from its checkout; control: the worker box reaches the route. A host candidate gate runs on the head before any review and sees `YARD_BASE`, `YARD_PROOF`, the snapshot it judges, and only the variables its `env` names; a host landing gate runs on the merged ref, reads the approved candidate's proof snapshot and never for a candidate whose approval was superseded, even by an edit while its landing merges. |
+| 13 | Every gate and seat runs where its row says | A seat that writes to `/workspace` fails and the head is unchanged. A gate box and a seat read the candidate's proof snapshot at `/yard/proof` and their writes there fail; control: the implementer wrote the live proof. A gate box that calls the model or MCP route gets nothing, and an ignored file the implementer left is absent from its checkout; control: the worker box reaches the route. A host candidate gate runs on the head before any review and sees `YARD_BASE`, `YARD_PROOF`, the snapshot it judges, and only the variables its `env` names; a host landing gate runs on the merged ref, reads the approved candidate's proof snapshot and never for a candidate whose approval was superseded, even by an edit while its landing merges. |
 | 14 | Worker git is untrusted, and Yard stays local | A worker that plants `core.fsmonitor`, a hook, a clean filter and a remote in its clone, corrupts an object and links its harness's models file to a host path: none of them acts on the host, canonical's objects are intact, the candidate is refused by name. A worker that leaves a symlink in `/yard/proof`, or passes the proof entry bound, is refused by name and no gate runs; a regular file is accepted. Across G7's path every request the model's fixture receives came through the model route, and the daemon listens on its unix socket and the MCP listener only. |
 | 15 | Plans and proposals resolve | A ticket on `plan`: its clone refuses writes, it proposes children and a body edit, and the attempt ends with nothing raised; accepting them blocks the parent, which the scheduler does not start once they are done; `yard ticket done` then closes it and its dependents become ready. Closing a ticket with a live attempt is refused. One execution proposing A and B, B depending on A: accepting both mints A first and B's edge names it. |
 
@@ -736,7 +764,7 @@ Dependencies: `tokio`, `hyper` with `hyper-util` and `http-body-util`,
 crates/yard/src/
   store/    mod.rs (open, migrate, audit) schema.rs tickets.rs attempts.rs executions.rs checks.rs
   jobs/     mod.rs (load, step, advance) admit.rs supervise.rs review.rs queue.rs reconcile.rs cleanup.rs proof.rs
-  git.rs box.rs harness.rs pi.rs pi-mcp-extension.ts claude.rs codex.rs mcp.rs
+  git.rs box.rs harness.rs agent_env.rs pi.rs pi-mcp-extension.ts claude.rs codex.rs mcp.rs
   daemon.rs api.rs cli.rs config.rs main.rs
 crates/e2e/  src/lib.rs (harness, helpers) model.rs (fake model fixture), tests/guarantees/main.rs g*.rs
 ```

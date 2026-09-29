@@ -2,8 +2,7 @@
 //! launch needs, and the normalisation of its JSON stream.
 //!
 //! Codex 0.158.0, as pinfold carries it. Pinfold writes the box's codex
-//! config (its model provider and route base URL) itself, so the adapter
-//! adds only the MCP server and compaction overrides.
+//! config (its model provider and route base URL) itself.
 
 use crate::config::Agent;
 use crate::daemon::Machine;
@@ -14,6 +13,7 @@ use serde_json::Value;
 
 const CODEX: &str = "/opt/pinfold/codex/codex";
 const HOME_GUEST: &str = "/yard/state/home";
+const CODEX_HOME_GUEST: &str = "/yard/state/codex";
 const MCP_ENDPOINT: &str = "http://yard.mcp/mcp";
 /// The server name the launch config registers under.
 const MCP_SERVER: &str = "yard";
@@ -22,6 +22,10 @@ const MCP_SERVER: &str = "yard";
 /// login.
 const LOGIN: &str = "codex";
 const ROUTE: &str = "codex.yard";
+/// The provider pinfold's config names, restated on the argv so a staged config
+/// cannot replace it. The base URL is the route's Codex backend path.
+const PROVIDER: &str = "pinfold";
+const PROVIDER_URL: &str = "http://codex.yard/backend-api/codex";
 /// The login's origin override, as `YARD_ORIGIN_<NAME>`.
 const ORIGIN_VAR: &str = "YARD_ORIGIN_CODEX";
 
@@ -76,20 +80,23 @@ impl Harness for Codex {
         Ok(())
     }
 
-    /// Codex reads `AGENTS.md` from the workspace itself, so Yard passes no
-    /// guidance. Its config is staged on the argv, not in a file the worker
-    /// could replace.
+    /// The base's project layer is Codex's user level, the attempt's
+    /// `CODEX_HOME`: its config, guidance, skills and hooks. Yard's own keys
+    /// ride the argv, which outranks the staged config.
     fn stage(&self, st: &Stage) -> std::io::Result<()> {
         // The box mounts the input dir read-only, so it must exist for the
         // mount even though Codex stages no file there.
         std::fs::create_dir_all(st.input)?;
-        // The worker's box mounts its state writable, so a link there is the
-        // worker's; HOME is created but nothing is written through it.
-        std::fs::create_dir_all(st.state.join("home"))
+        let env = st.env;
+        env.stage_file(st.state, "codex/config.toml", ".codex/config.toml")?;
+        env.stage_guidance(st.state, "codex/AGENTS.md")?;
+        env.stage_dir(st.state, "codex/skills", ".codex/skills/")?;
+        env.stage_file(st.state, "codex/hooks.json", ".codex/hooks.json")?;
+        env.stage_dir(st.state, "home/.agents/skills", ".agents/skills/")
     }
 
     fn env(&self, _st: &Stage) -> Vec<(String, String)> {
-        [("HOME", HOME_GUEST)]
+        [("HOME", HOME_GUEST), ("CODEX_HOME", CODEX_HOME_GUEST)]
             .map(|(name, value)| (name.to_string(), value.to_string()))
             .into()
     }
@@ -124,8 +131,9 @@ impl Harness for Codex {
 /// The full argv, run with `/workspace` as its cwd and stdin on /dev/null.
 ///
 /// The model provider and route base URL are pinfold's config; these
-/// overrides add the required MCP server and the compaction threshold
-/// without replacing it. The bearer reaches the box through the environment,
+/// overrides pin the required MCP server (replacing any the staged config
+/// names), the approval policy and the compaction threshold, and switch off
+/// what the workspace would load. The bearer reaches the box through the environment,
 /// never argv.
 fn argv(launch: &Launch) -> Result<Vec<String>, String> {
     check_model(launch.model)?;
@@ -138,25 +146,49 @@ fn argv(launch: &Launch) -> Result<Vec<String>, String> {
         "danger-full-access",
         "-m",
         launch.model,
-        "-c",
     ]
     .map(String::from)
     .into();
-    argv.push(format!("mcp_servers.{MCP_SERVER}.url={MCP_ENDPOINT:?}"));
-    argv.push("-c".into());
-    argv.push(format!(
-        "mcp_servers.{MCP_SERVER}.bearer_token_env_var={:?}",
-        crate::harness::BEARER_VAR
+    // A fresh `CODEX_HOME` has no persisted hook trust, and the staged hooks
+    // are the base's, which the operator committed.
+    argv.push("--dangerously-bypass-hook-trust".into());
+    let mut overrides = vec![
+        format!(
+            "mcp_servers={{{MCP_SERVER}={{url={MCP_ENDPOINT:?},bearer_token_env_var={:?},required=true}}}}",
+            crate::harness::BEARER_VAR
+        ),
+        "approval_policy=\"never\"".to_string(),
+        // The workspace's AGENTS.md files are the candidate's; the base's
+        // guidance is staged in `CODEX_HOME`.
+        "project_doc_max_bytes=0".to_string(),
+        format!("model_auto_compact_token_limit={COMPACTION_TOKEN_LIMIT}"),
+    ];
+    // A trusted `/workspace` in the staged config would activate the
+    // candidate's own `.codex/config.toml`.
+    // Inline table: a dotted key keeps its quotes as part of the name.
+    overrides.push("projects={\"/workspace\"={trust_level=\"untrusted\"}}".into());
+    // The login route is Yard's: a staged config cannot pick another provider.
+    overrides.push(format!("model_provider={PROVIDER:?}"));
+    overrides.push(format!(
+        "model_providers.{PROVIDER}={{name={PROVIDER:?},base_url={PROVIDER_URL:?},wire_api=\"responses\",requires_openai_auth=false}}"
     ));
-    argv.push("-c".into());
-    argv.push(format!("mcp_servers.{MCP_SERVER}.required=true"));
-    argv.push("-c".into());
-    argv.push(format!(
-        "model_auto_compact_token_limit={COMPACTION_TOKEN_LIMIT}"
-    ));
+    // Codex discovers skills in the workspace whatever its settings say;
+    // only a per-file entry turns one off. JSON strings are TOML strings.
+    if !launch.env.workspace_skills.is_empty() {
+        let entries: Vec<String> = launch
+            .env
+            .workspace_skills
+            .iter()
+            .map(|path| format!("{{path={},enabled=false}}", Value::from(path.as_str())))
+            .collect();
+        overrides.push(format!("skills.config=[{}]", entries.join(",")));
+    }
     if let Some(effort) = launch.effort {
+        overrides.push(format!("model_reasoning_effort={effort:?}"));
+    }
+    for value in overrides {
         argv.push("-c".into());
-        argv.push(format!("model_reasoning_effort={effort:?}"));
+        argv.push(value);
     }
     if let Some(id) = launch.resume {
         check_session_id(id)?;

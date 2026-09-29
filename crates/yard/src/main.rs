@@ -1,5 +1,6 @@
 //! `yard`: client and daemon in one binary.
 
+mod agent_env;
 mod api;
 mod r#box;
 mod claude;
