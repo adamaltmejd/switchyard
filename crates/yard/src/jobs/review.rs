@@ -134,7 +134,6 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
         &supervise::transcript(project, attempt.id, execution),
         timeout,
         tokio::time::Instant::now() + timeout,
-        None,
     )
     .await;
     daemon.grants.revoke(project, execution);

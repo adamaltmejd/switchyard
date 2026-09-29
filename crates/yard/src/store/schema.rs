@@ -191,4 +191,6 @@ ALTER TABLE attempt ADD COLUMN body_read TEXT;
 "#,
     // The body an implementer execution's start transaction read.
     "ALTER TABLE execution ADD COLUMN body TEXT;",
+    // The diff baseline is the latest launched execution's body.
+    "ALTER TABLE attempt DROP COLUMN body_read;",
 ];

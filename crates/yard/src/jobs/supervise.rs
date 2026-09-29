@@ -262,7 +262,6 @@ pub async fn run_harness(
     transcript: &Path,
     inactivity: Duration,
     deadline: tokio::time::Instant,
-    body_read: Option<(i64, &str)>,
 ) -> Result<Run, Fail> {
     let stop = Arc::new(tokio::sync::Notify::new());
     daemon
@@ -282,16 +281,6 @@ pub async fn run_harness(
         .pinfold
         .exec_streaming(&box_name(project, execution), Some("/workspace"), argv)
         .map_err(|error| error.to_string())?;
-    // The worker has the prompt from here; only now has it read the body.
-    if let Some((attempt, body)) = body_read {
-        project.read(|conn| {
-            conn.execute(
-                "UPDATE attempt SET body_read = ?2 WHERE id = ?1",
-                rusqlite::params![attempt, body],
-            )?;
-            Ok(())
-        })?;
-    }
     let mut stdout = BufReader::new(child.stdout.take().expect("piped")).lines();
     let mut stderr = BufReader::new(child.stderr.take().expect("piped")).lines();
     let mut reader = harness.reader();
@@ -526,8 +515,8 @@ pub async fn implement(
         &loaded,
         &attempt,
         &ticket,
+        resume.as_ref().map(|(id, _)| *id),
         row.reason.as_deref().unwrap_or("first"),
-        resume.is_some(),
     )
     .await?;
     let argv = harness
@@ -589,7 +578,6 @@ pub async fn implement(
         &transcript(project, attempt.id, execution),
         Duration::from_secs(workflow.inactivity_timeout_minutes * 60),
         deadline,
-        Some((attempt.id, ticket.body.as_str())),
     )
     .await;
     let run = match run {
@@ -899,14 +887,25 @@ async fn implementer_prompt(
     loaded: &Loaded,
     attempt: &attempts::Attempt,
     ticket: &tickets::Ticket,
+    resumed: Option<i64>,
     reason: &str,
-    resumed: bool,
 ) -> Result<String, Fail> {
     let next = attempt.next.clone().unwrap_or(json!({}));
     let workflow = loaded.config.workflow(&attempt.workflow)?;
     let mut prompt = String::new();
-    // A resumed row from before body_read has no body to diff from.
-    if !resumed || attempt.body_read.is_none() {
+    // The resumed session's owner launched its harness with this body.
+    let body_read: Option<String> = match resumed {
+        Some(owner) => project.read(|conn| {
+            Ok(
+                conn.query_row("SELECT body FROM execution WHERE id = ?1", [owner], |row| {
+                    row.get(0)
+                })?,
+            )
+        })?,
+        None => None,
+    };
+    let resumed = resumed.is_some();
+    if !resumed || body_read.is_none() {
         prompt.push_str(&format!(
             "You are working on ticket {}: {}\n\n{}\n\n",
             ticket_name(ticket.id),
@@ -979,12 +978,7 @@ async fn implementer_prompt(
         "restart" | "retry" if resumed => prompt.push_str("Continue the work.\n"),
         _ => {}
     }
-    if resumed
-        && let Some(read) = attempt
-            .body_read
-            .as_deref()
-            .filter(|read| *read != ticket.body)
-    {
+    if resumed && let Some(read) = body_read.as_deref().filter(|read| *read != ticket.body) {
         let diff = body_diff(daemon, project, attempt.id, read, &ticket.body).await?;
         prompt.push_str(&format!("\nThe operator edited the ticket:\n{diff}\n"));
     }
