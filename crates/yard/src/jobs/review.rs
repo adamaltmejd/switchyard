@@ -239,6 +239,9 @@ pub fn publish(grant: &crate::mcp::Grant, arguments: &Value) -> Result<Value, Fa
         }
         let row = executions::get(tx, grant.execution)?;
         let attempt = attempts::get(tx, row.attempt)?;
+        if attempt.state != "live" {
+            return Err(Fail::refused("the attempt has ended"));
+        }
         let blocked = findings.iter().any(|finding| {
             crate::config::priority(&finding.priority).is_some_and(|priority| priority <= blocking)
         });

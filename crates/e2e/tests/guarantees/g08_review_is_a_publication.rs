@@ -2,6 +2,7 @@
 
 use e2e::*;
 use serde_json::{Value, json};
+use std::io::Write;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -737,6 +738,57 @@ fn a_seat_ended_by_an_abandon_is_abandoned() {
     hold.release();
     let ended = watch.event("execution.ended", &[("kind", "review")]);
     assert_eq!(ended["data"]["outcome"], "abandoned", "{ended}");
+    assert_eq!(
+        project.rows("SELECT kind FROM attention WHERE state = 'open'"),
+        Vec::<Value>::new()
+    );
+}
+
+/// A candidate gate held in its host command while its attempt is abandoned,
+/// then released to fail: its execution ends `abandoned`, records no check
+/// and no item is open. Control: the gate rerun scenario's
+/// gate ends with a verdict on a live attempt.
+///
+/// Sabotage: remove the liveness re-read in `supervise::gate`'s end path; the
+/// gate ends `fail` and a check is recorded.
+#[test]
+fn a_gate_ended_by_an_abandon_is_abandoned() {
+    let machine = Machine::new("g8-gate-abandon", implementer);
+    let said = machine.root.join("said");
+    let hold = machine.root.join("hold");
+    for path in [&said, &hold] {
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(path)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    let mut release = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&hold)
+        .unwrap();
+    let gate = format!(
+        "[gates.held]\ncommand = \"echo held > {}; read line < {}; exit 1\"\nstage = \"candidate\"\nruns_in = \"host\"\n",
+        said.display(),
+        hold.display()
+    );
+    machine.start();
+    let project = Project::new(&machine, "p", &config(&gate));
+    let mut watch = project.watch(0);
+    project.json(&["ticket", "new", "--title", "Add feature"]);
+    assert_eq!(watch.said(&said), "held\n");
+    project.json(&["attempt", "abandon", "Y-1"]);
+    release.write_all(b"go\n").unwrap();
+    let ended = watch.event("execution.ended", &[("kind", "gate")]);
+    assert_eq!(ended["data"]["outcome"], "abandoned", "{ended}");
+    assert!(
+        project
+            .rows("SELECT id FROM \"check\" WHERE kind = 'gate'")
+            .is_empty()
+    );
     assert_eq!(
         project.rows("SELECT kind FROM attention WHERE state = 'open'"),
         Vec::<Value>::new()
