@@ -59,55 +59,16 @@ fn a_malformed_tool_payload_is_refused_by_name() {
     assert!(!proposals[0]["payload"].as_str().unwrap().contains("colour"));
 }
 
-/// A TOML with an unknown key is refused by name, nothing written. The key
-/// is inside a gate, a table read by name, and misspells an optional key,
-/// so only the unknown-key check stands between it and a gate with the
-/// default timeout. Control: the corrected configuration syncs.
-///
-/// Sabotage: drop `deny_unknown_fields` from the gate's table; the sync
-/// imports the misspelt gate.
-#[test]
-fn a_config_with_an_unknown_key_is_refused_by_name() {
-    let machine = Machine::new("g6-toml", |_| Reply::Text("unused".into()));
-    machine.start();
-    let project = Project::new(&machine, "p", &config(""));
-    let canonical = project.canonical_head();
-    let seq = last_seq(&project);
-
-    project.write(
-        ".yard/config.toml",
-        &config("[gates.check]\ncommand = \"true\"\ntimout_minutes = 5\n"),
-    );
-    project.git(&["commit", "--quiet", "-am", "Misspelt gate"]);
-    let refused = project.refused(&["sync"]);
-    assert_eq!(refused["code"], "invalid", "{refused}");
-    assert!(
-        refused["message"]
-            .as_str()
-            .unwrap()
-            .contains("timout_minutes"),
-        "{refused}"
-    );
-    assert_eq!(project.canonical_head(), canonical);
-    assert_eq!(last_seq(&project), seq);
-    assert!(git(&project.canonical(), &["for-each-ref", "refs/yard"]).is_empty());
-
-    project.write(
-        ".yard/config.toml",
-        &config("[gates.check]\ncommand = \"true\"\ntimeout_minutes = 5\n"),
-    );
-    project.git(&["commit", "--quiet", "-am", "Fix the gate"]);
-    assert_eq!(project.json(&["sync"])["sync"], "imported");
-}
-
 /// An unknown workflow name is refused by name, nothing written, on filing
 /// and on an edit. Control: a configured workflow is accepted by both.
+/// Removing the named workflow refuses until that ticket is abandoned.
+/// An unknown TOML key refuses until corrected; each refusal writes nothing.
 ///
 /// Sabotage: make `admit::ticket_new` skip its workflow lookup; the filing
 /// is accepted and a ticket exists. Make `admit::ticket_edit` skip its
 /// workflow lookup; the edit names a workflow that does not exist.
 #[test]
-fn an_unknown_workflow_name_is_refused_by_name() {
+fn unknown_names_and_keys_are_refused_without_writes() {
     let machine = Machine::new("g6-workflow", |_| Reply::Text("unused".into()));
     machine.start();
     let project = Project::new(&machine, "p", &config(""));
@@ -168,25 +129,15 @@ fn an_unknown_workflow_name_is_refused_by_name() {
         project.json(&["ticket", "show", "Y-1"])["workflow"],
         "default"
     );
-}
 
-/// A sync that removes a workflow an open ticket names is refused, naming
-/// the ticket, nothing written. The ticket is parked, so nothing runs on
-/// it. Control: once the ticket is abandoned the same sync imports.
-///
-/// Sabotage: make `admit::sync` skip parked tickets in its check; the sync
-/// imports and the ticket names a workflow that is gone.
-#[test]
-fn a_sync_removing_a_named_workflow_is_refused() {
-    let machine = Machine::new("g6-removal", |_| Reply::Text("unused".into()));
-    machine.start();
-    let project = Project::new(&machine, "p", &config(""));
+    // The accepted workflow can be edited back, but cannot disappear while
+    // this parked ticket names it. Sabotage: skip parked tickets in sync.
     project.json(&[
         "ticket",
-        "new",
-        "--title",
-        "Plan",
-        "--parked",
+        "edit",
+        "Y-1",
+        "--revision",
+        "2",
         "--workflow",
         "plan",
     ]);
@@ -207,5 +158,35 @@ fn a_sync_removing_a_named_workflow_is_refused() {
     assert_eq!(last_seq(&project), seq);
 
     project.json(&["ticket", "abandon", "Y-1", "--reason", "Not needed"]);
+    assert_eq!(project.json(&["sync"])["sync"], "imported");
+
+    // A misspelt optional gate key must not import using its default.
+    // Sabotage: remove Gate's deny_unknown_fields.
+    let canonical = project.canonical_head();
+    let seq = last_seq(&project);
+
+    project.write(
+        ".yard/config.toml",
+        &config("[gates.check]\ncommand = \"true\"\ntimout_minutes = 5\n"),
+    );
+    project.git(&["commit", "--quiet", "-am", "Misspelt gate"]);
+    let refused = project.refused(&["sync"]);
+    assert_eq!(refused["code"], "invalid", "{refused}");
+    assert!(
+        refused["message"]
+            .as_str()
+            .unwrap()
+            .contains("timout_minutes"),
+        "{refused}"
+    );
+    assert_eq!(project.canonical_head(), canonical);
+    assert_eq!(last_seq(&project), seq);
+    assert!(git(&project.canonical(), &["for-each-ref", "refs/yard"]).is_empty());
+
+    project.write(
+        ".yard/config.toml",
+        &config("[gates.check]\ncommand = \"true\"\ntimeout_minutes = 5\n"),
+    );
+    project.git(&["commit", "--quiet", "-am", "Fix the gate"]);
     assert_eq!(project.json(&["sync"])["sync"], "imported");
 }
