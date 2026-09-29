@@ -408,6 +408,8 @@ async fn events(daemon: &Daemon, params: &Value) -> Result<Value, Fail> {
 /// until one is open, or with `since` until one raised after it is, or until
 /// the board is idle: no live attempt, open item or admissible ready ticket,
 /// and with `since` an `attempt.ended` after it. `idle` marks that return.
+/// The config is read at the current canonical head; an unreadable one is
+/// never idle.
 async fn attention(daemon: &Daemon, params: &Value) -> Result<Value, Fail> {
     let project = project(daemon, params)?;
     let since = params["since"].as_i64();
@@ -416,7 +418,7 @@ async fn attention(daemon: &Daemon, params: &Value) -> Result<Value, Fail> {
         let notified = project.events.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
-        let loaded = project.loaded.lock().expect("loaded lock").clone();
+        let loaded = crate::jobs::load(daemon, &project).await.ok();
         let (seq, items, fresh, idle) = project.read(|conn| {
             let seq = crate::store::last_seq(conn)?;
             let items = crate::store::attempts::open_attention(conn)?;
