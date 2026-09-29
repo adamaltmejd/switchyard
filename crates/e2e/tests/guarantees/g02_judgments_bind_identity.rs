@@ -125,21 +125,24 @@ fn a_new_commit_leaves_the_candidate_unverified() {
     assert_eq!(second["payload"]["checks"], json!(checks));
 }
 
-/// A passed gate and review, then a ticket edit: the approval is superseded
-/// and the implementer runs again, so the new candidate is judged afresh at
-/// the new revision. An edit always moves the head, so the revision binding
+/// A passed gate and review, then a ticket edit whose implementer run makes no
+/// commit: the same head is judged afresh at the new revision, without
+/// `stopped:unchanged`. The head does not move, so the revision binding
 /// itself shows in the revision each judging execution records.
 ///
 /// Sabotage: make `admit::steer` set nothing; no implementer runs and no
-/// second approval comes. Record the old revision on the gate and review
-/// executions; `judged` no longer reads `revision + 1`.
+/// second approval comes. Keep `stop("unchanged")` for edit runs; the attempt
+/// stops. Record the old revision on the gate and review executions; `judged`
+/// no longer reads `revision + 1`.
 #[test]
 fn a_ticket_edit_leaves_the_candidate_unverified() {
     let machine = Machine::new(
         "g2-edit",
         worker(
             "nothing else",
-            bash("cd /workspace && git commit -q --allow-empty -m Again && echo committed"),
+            bash(
+                "cd /workspace && { [ \"$(git log -1 --format=%s)\" = Again ] || git commit -q --allow-empty -m Again; } && echo done",
+            ),
         ),
     );
     machine.start();
@@ -169,7 +172,7 @@ fn a_ticket_edit_leaves_the_candidate_unverified() {
     ]);
     let second = approval(&mut watch);
 
-    assert_ne!(head(&second), head(&first));
+    assert_eq!(head(&second), head(&first));
     assert_eq!(second["payload"]["revision"], revision + 1);
     let superseded =
         project.rows("SELECT resolution FROM attention WHERE kind = 'approval' ORDER BY id");

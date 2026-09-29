@@ -293,7 +293,8 @@ split and stops.
    clean before the box comes down: a clean committed head is a candidate;
    a dirty clone goes back to the implementer once with the listing, and
    raises `stopped:dirty` if still dirty; an unchanged head raises
-   `stopped`. The next implementer execution resumes the session where the
+   `stopped`, except that an edit-started execution ending clean on the attempt's
+   current head sends that candidate to judgment at the current revision. The next implementer execution resumes the session where the
    harness offers one. Context is the harness's business: Yard stages each
    harness's own automatic-compaction threshold with the launch and never
    compacts a session itself. After `max_session_executions` executions on
