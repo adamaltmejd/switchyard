@@ -23,6 +23,14 @@ fn gate_details(project: &Project) -> Vec<Value> {
     )
 }
 
+/// The `write=<status>` a probe echoed: non-zero when the write was refused.
+fn write_failed(text: &str) -> bool {
+    text.lines()
+        .find_map(|line| line.strip_prefix("write="))
+        .and_then(|status| status.trim().parse::<i32>().ok())
+        .is_some_and(|status| status != 0)
+}
+
 /// A seat that writes to `/workspace` fails and the head is unchanged: it
 /// tries a file, a commit and a ref, then publishes. The implementer's clone
 /// still holds, by git, the head the fixture's commit produced, and no
@@ -129,12 +137,12 @@ fn a_gate_and_a_seat_read_the_proof_read_only() {
     assert_eq!(gates.len(), 1);
     let detail = gates[0]["detail"].as_str().unwrap();
     assert!(detail.contains("read=snapshot-payload"), "{detail}");
-    assert!(detail.contains("write=1"), "{detail}");
+    assert!(write_failed(detail), "{detail}");
     assert!(detail.contains("Read-only file system"), "{detail}");
 
     let seat = seat_probe.lock().unwrap().clone();
     assert!(seat.contains("read=snapshot-payload"), "{seat}");
-    assert!(seat.contains("write=1"), "{seat}");
+    assert!(write_failed(&seat), "{seat}");
 }
 
 /// An `AGENTS.override.md` the implementer leaves in its clone, excluded
