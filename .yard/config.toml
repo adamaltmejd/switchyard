@@ -1,5 +1,5 @@
 # Switchyard project configuration. Changes land only through `yard sync`.
-max_lanes = 4
+max_lanes = 2
 approve = "manual"
 
 [target]
@@ -18,8 +18,8 @@ effort = "high"
 
 [agents.reviewer]
 harness = "pi"
-provider = "openrouter"
-model = "openai/gpt-6-sol"
+provider = "opencode-go"
+model = "muse-spark-1.3-contributor"
 effort = "high"
 
 [workflows.default]
