@@ -466,10 +466,7 @@ pub async fn implement(
         _ => None,
     };
     project.read(|conn| {
-        conn.execute(
-            "UPDATE attempt SET next = NULL, body_read = ?2 WHERE id = ?1",
-            rusqlite::params![attempt.id, ticket.body],
-        )?;
+        conn.execute("UPDATE attempt SET next = NULL WHERE id = ?1", [attempt.id])?;
         conn.execute(
             "UPDATE execution SET resumed = ?2 WHERE id = ?1",
             rusqlite::params![execution, resume.as_ref().map(|(id, _)| *id)],
@@ -527,6 +524,18 @@ pub async fn implement(
         },
     );
     let live = up_worker(daemon, project, execution, &spec, &secrets).await?;
+    // The worker receives the prompt from here; only now has it read the body.
+    if let Err(fail) = project.read(|conn| {
+        conn.execute(
+            "UPDATE attempt SET body_read = ?2 WHERE id = ?1",
+            rusqlite::params![attempt.id, ticket.body],
+        )?;
+        Ok(())
+    }) {
+        daemon.grants.revoke(project, execution);
+        let _ = live.down(DOWN_TIMEOUT).await;
+        return Err(fail);
+    }
 
     let deadline = {
         let spent = attempt.work_ms

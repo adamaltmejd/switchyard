@@ -134,8 +134,15 @@ pub fn spawn(daemon: &Arc<Daemon>, project: &Arc<Project>, kind: &str, execution
                             ..Default::default()
                         },
                     )?;
-                    if row.kind != "cleanup" {
-                        let attempt = attempts::get(tx, row.attempt)?;
+                    let attempt = attempts::get(tx, row.attempt)?;
+                    // An edit made while the implementer ran outranks its setup failure.
+                    let edited = row.kind == "implementation"
+                        && row.ticket_revision.is_some_and(|revision| {
+                            tickets::get(tx, attempt.ticket).is_ok_and(|t| t.revision != revision)
+                        });
+                    if edited {
+                        attempts::set_next(tx, attempt.id, Some(&json!({ "reason": "edit" })))?;
+                    } else if row.kind != "cleanup" {
                         attempts::raise(
                             tx,
                             attempts::Raise {

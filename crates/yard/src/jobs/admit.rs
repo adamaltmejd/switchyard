@@ -484,7 +484,7 @@ pub async fn ticket_edit(
     }
     let priority = priority_param(&params["priority"])?;
     let stops = project.tx(|tx| {
-        edit(
+        let stops = edit(
             tx,
             id,
             revision,
@@ -492,7 +492,15 @@ pub async fn ticket_edit(
             params["body"].as_str(),
             priority,
             workflow.as_deref(),
-        )
+        )?;
+        if let Some(attempt) = attempts::live_for(tx, id)? {
+            for item in attempts::open_for_attempt(tx, attempt.id)? {
+                if item.kind == "proposal" && item.reason == "edit" {
+                    attempts::resolve(tx, &item, "superseded", None)?;
+                }
+            }
+        }
+        Ok(stops)
     })?;
     stop_executions(daemon, project, &stops);
     project.read(|conn| Ok(tickets::get(conn, id)?.to_json()))
@@ -554,6 +562,7 @@ fn steer(tx: &rusqlite::Connection, id: i64) -> Result<Vec<i64>, Fail> {
         .filter(|row| row.status == "running")
         .collect();
     if running.iter().any(|row| row.kind == "implementation") {
+        attempts::set_next(tx, attempt.id, Some(&json!({ "reason": "edit" })))?;
         return Ok(Vec::new());
     }
     if let Some(approval) = checks::active_for(tx, attempt.id)? {
