@@ -613,10 +613,14 @@ pub fn uninstall() -> Result<Value, Fail> {
 
 pub async fn restart() -> Result<Value, Fail> {
     let socket = api::socket_path();
-    let before = api::call(&socket, "daemon.status", json!({}))
-        .await
-        .ok()
-        .map(|status| status["pid"].clone());
+    let before = tokio::time::timeout(
+        Duration::from_secs(5),
+        api::call(&socket, "daemon.status", json!({})),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .map(|status| status["pid"].clone());
     if cfg!(target_os = "macos") {
         let uid = nix::unistd::getuid();
         service(&[
