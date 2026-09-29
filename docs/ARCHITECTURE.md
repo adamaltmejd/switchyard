@@ -341,7 +341,7 @@ A worker execution records, on its row: agent, harness and its version
 fails if a harness has no pin), provider,
 model, effort, the execution it resumed and its session id, start
 and end, exit cause, tokens in and out, reported cost, and the reason it was
-started (`first`, `repair`, `nudge`, `retry`, `dirty`, `restart`, `fresh`).
+started (`first`, `repair`, `nudge`, `retry`, `dirty`, `restart`).
 A gate execution records gate name, verdict, exit code, duration and the
 box's OOM count. Every operator decision
 records the exact target it acted on and the text it carried. These rows are
