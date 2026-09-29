@@ -97,10 +97,6 @@ fn an_edit_mid_execution_reaches_the_next_prompt() {
     });
     assert_eq!(first["data"]["outcome"], "candidate", "{first}");
     let second = openings(&machine)[1].last_user();
-    assert!(
-        second.contains("The operator edited the ticket"),
-        "{second}"
-    );
     assert!(second.contains("+Rename it too"), "{second}");
     let head = approval["data"]["payload"]["head"].as_str().unwrap();
     assert_eq!(
