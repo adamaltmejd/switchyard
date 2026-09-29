@@ -1177,7 +1177,7 @@ pub async fn proposal_answer(
         .ok_or_else(|| Fail::invalid("the call names no proposal"))?;
     let text = text_param(params, "text");
     let loaded = load(daemon, project).await?;
-    let stops = std::cell::RefCell::new(Vec::new());
+    let mut stops = Vec::new();
     let minted = project.tx(|tx| {
         let item = attempts::attention(tx, id)?;
         if item.kind != "proposal" || item.state != "open" {
@@ -1238,7 +1238,7 @@ pub async fn proposal_answer(
                 let revision = payload["revision"]
                     .as_i64()
                     .ok_or_else(|| Fail::invalid("an edit proposal names no revision"))?;
-                let stopped = edit(
+                stops = edit(
                     tx,
                     proposer,
                     revision,
@@ -1247,7 +1247,6 @@ pub async fn proposal_answer(
                     None,
                     None,
                 )?;
-                stops.borrow_mut().extend(stopped);
                 None
             }
             "link" => {
@@ -1272,7 +1271,7 @@ pub async fn proposal_answer(
         attempts::resolve(tx, &item, &resolution, text.as_deref())?;
         Ok(minted)
     })?;
-    stop_executions(daemon, project, &stops.into_inner());
+    stop_executions(daemon, project, &stops);
     Ok(json!({ "proposal": id, "accepted": accept, "ticket": minted.map(ticket_name) }))
 }
 
