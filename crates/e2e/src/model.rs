@@ -547,40 +547,38 @@ fn anthropic(request: &ModelRequest) -> bool {
 }
 
 fn anthropic_text(text: &str, request: &ModelRequest) -> Vec<u8> {
-    let event = |name: &str, data: Value| format!("event: {name}\ndata: {data}\n\n");
     let body = [
-        event(
+        sse(
             "message_start",
             json!({
                 "type": "message_start",
                 "message": anthropic_message(request),
             }),
         ),
-        event(
+        sse(
             "content_block_start",
             json!({ "type": "content_block_start", "index": 0,
                     "content_block": { "type": "text", "text": "" } }),
         ),
-        event(
+        sse(
             "content_block_delta",
             json!({ "type": "content_block_delta", "index": 0,
                     "delta": { "type": "text_delta", "text": text } }),
         ),
-        event(
+        sse(
             "content_block_stop",
             json!({ "type": "content_block_stop", "index": 0 }),
         ),
         anthropic_delta("end_turn"),
-        event("message_stop", json!({ "type": "message_stop" })),
+        sse("message_stop", json!({ "type": "message_stop" })),
     ]
     .concat();
     respond(200, "text/event-stream", body)
 }
 
 fn anthropic_tools(calls: Vec<ToolCall>, request: &ModelRequest) -> Vec<u8> {
-    let event = |name: &str, data: Value| format!("event: {name}\ndata: {data}\n\n");
     let turn = request.turn();
-    let mut body = event(
+    let mut body = sse(
         "message_start",
         json!({
             "type": "message_start",
@@ -588,24 +586,24 @@ fn anthropic_tools(calls: Vec<ToolCall>, request: &ModelRequest) -> Vec<u8> {
         }),
     );
     for (index, call) in calls.into_iter().enumerate() {
-        body.push_str(&event(
+        body.push_str(&sse(
             "content_block_start",
             json!({ "type": "content_block_start", "index": index,
                     "content_block": { "type": "tool_use", "id": format!("toolu_{turn}_{index}"),
                                       "name": call.name, "input": {} } }),
         ));
-        body.push_str(&event(
+        body.push_str(&sse(
             "content_block_delta",
             json!({ "type": "content_block_delta", "index": index,
                     "delta": { "type": "input_json_delta", "partial_json": call.arguments.to_string() } }),
         ));
-        body.push_str(&event(
+        body.push_str(&sse(
             "content_block_stop",
             json!({ "type": "content_block_stop", "index": index }),
         ));
     }
     body.push_str(&anthropic_delta("tool_use"));
-    body.push_str(&event("message_stop", json!({ "type": "message_stop" })));
+    body.push_str(&sse("message_stop", json!({ "type": "message_stop" })));
     respond(200, "text/event-stream", body)
 }
 
