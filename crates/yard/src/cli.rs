@@ -432,67 +432,83 @@ fn render(value: &Value) -> String {
     }
 }
 
-/// The `status` board: one line per open ticket without an approved
-/// candidate, the landing queue, the attention items, then `seq`.
+/// The `status` board, in the order a ticket moves: `parked`, `waiting`
+/// (idle open tickets with their reason), `running` (live attempts), and
+/// `landing` (the queue), then the attention items and `seq`. Each open
+/// ticket is in exactly one section; an empty section is not printed.
 fn render_status(status: &Value) -> String {
     let attempts = array(status, "attempts");
     let queue = array(status, "queue");
     let queued = |ticket: &Value| queue.iter().any(|item| item["ticket"] == ticket["ticket"]);
-    let mut tickets: Vec<&Value> = array(status, "tickets")
+    let attempt_of = |ticket: &Value| {
+        attempts
+            .iter()
+            .find(|attempt| attempt["ticket"] == ticket["ticket"])
+    };
+    let open: Vec<&Value> = array(status, "tickets")
         .iter()
         .filter(|ticket| !queued(ticket))
         .collect();
-    let live = |ticket: &Value| {
-        attempts
-            .iter()
-            .any(|attempt| attempt["ticket"] == ticket["ticket"])
+    let is_parked = |ticket: &Value| ticket["parked"].as_bool().unwrap_or(false);
+    let pick = |keep: &dyn Fn(&Value) -> bool| -> Vec<&Value> {
+        open.iter().copied().filter(|ticket| keep(ticket)).collect()
     };
-    tickets.sort_by_key(|ticket| !live(ticket));
+    let sections = [
+        ("parked", pick(&|t| attempt_of(t).is_none() && is_parked(t))),
+        (
+            "waiting",
+            pick(&|t| attempt_of(t).is_none() && !is_parked(t)),
+        ),
+        ("running", pick(&|t| attempt_of(t).is_some())),
+    ];
 
-    let lines: Vec<(String, String, String, String, String)> = tickets
+    let row = |ticket: &Value| {
+        let (phase, clocks) = match attempt_of(ticket) {
+            Some(attempt) => attempt_line(status, attempt),
+            None => (idle_reason(ticket), String::new()),
+        };
+        (
+            field(ticket, "ticket"),
+            field(ticket, "priority"),
+            phase,
+            clocks,
+            depends_on(ticket),
+        )
+    };
+    let rows: Vec<Vec<_>> = sections
         .iter()
-        .map(|ticket| {
-            let attempt = attempts
-                .iter()
-                .find(|attempt| attempt["ticket"] == ticket["ticket"]);
-            let (phase, clocks) = match attempt {
-                Some(attempt) => attempt_line(status, attempt),
-                None => (idle_reason(ticket), String::new()),
-            };
-            let edges = depends_on(ticket);
-            (
-                field(ticket, "ticket"),
-                field(ticket, "priority"),
-                phase,
-                clocks,
-                edges,
-            )
-        })
+        .map(|(_, tickets)| tickets.iter().map(|ticket| row(ticket)).collect())
         .collect();
-    let phase_width = lines
+    let phase_width = rows
         .iter()
+        .flatten()
         .map(|line| line.2.chars().count())
         .max()
         .unwrap_or(0);
-    let clock_width = lines
+    let clock_width = rows
         .iter()
+        .flatten()
         .map(|line| line.3.chars().count())
         .max()
         .unwrap_or(0);
     let mut out = String::new();
-    if !lines.is_empty() {
-        out.push_str("tickets\n");
-    }
-    for (name, priority, phase, clocks, edges) in lines {
-        let line = format!(
-            "  {name:<5} {priority}  {phase:<phase_width$}  {clocks:<clock_width$}  {edges}"
-        );
-        out.push_str(line.trim_end());
+    for ((title, _), lines) in sections.iter().zip(rows) {
+        if lines.is_empty() {
+            continue;
+        }
+        out.push_str(title);
         out.push('\n');
+        for (name, priority, phase, clocks, edges) in lines {
+            let line = format!(
+                "  {name:<5} {priority}  {phase:<phase_width$}  {clocks:<clock_width$}  {edges}"
+            );
+            out.push_str(line.trim_end());
+            out.push('\n');
+        }
     }
 
     if !queue.is_empty() {
-        out.push_str("queue\n");
+        out.push_str("landing\n");
         for item in queue {
             let head: String = field(item, "head").chars().take(7).collect();
             let line = format!(
@@ -570,7 +586,7 @@ fn idle_reason(ticket: &Value) -> String {
     } else if ticket["no_lane"].as_bool().unwrap_or(false) {
         "no lane".into()
     } else {
-        String::new()
+        "ready".into()
     }
 }
 
