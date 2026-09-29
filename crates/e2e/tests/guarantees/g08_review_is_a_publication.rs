@@ -382,15 +382,16 @@ fn a_seat_that_always_blocks_gets_max_rounds() {
 /// A seat that always blocks reaches `stopped:limit`; the operator approves
 /// the head over it and the candidate lands. The approval row names the
 /// blocking review check as overridden and says it overrode a review.
-/// Control, in the same project: with a gate added that the head has no
-/// passing check for, approve is refused naming the gate and writes no
-/// approval; removing the gate makes the same head approvable.
+/// Control, in the same project: after a synced gate change the head has no
+/// passing check at the new gate digest; approve is stale naming the gate
+/// digest and writes no approval, and removing the gate makes the same head
+/// approvable.
 ///
 /// A synced `max_rounds` above the rounds run refuses approve naming the
 /// limit.
 ///
-/// Sabotage: drop the gate loop in `admit::limit_checks`;
-/// the refusal is not raised and an approval is written. Record no review
+/// Sabotage: drop `gate_digest` from `jobs::stale_part`; the gate-change
+/// approve is not refused and an approval is written. Record no review
 /// check in `limit_checks`, or drop `overrode`; the row names no review or
 /// `overrode` is 0.
 #[test]
@@ -443,8 +444,9 @@ fn the_operator_can_approve_over_a_blocking_review_at_the_limit() {
 
     project.reconfigure(&config(&both).replace("max_rounds = 3", "max_rounds = 2"));
     let refused = project.refused(&["attempt", "approve", "Y-1", "--head", &head]);
+    assert_eq!(refused["code"], "stale", "{refused}");
     assert!(
-        refused["message"].as_str().unwrap().contains("late"),
+        refused["message"].as_str().unwrap().contains("gate_digest"),
         "{refused}"
     );
     assert!(project.rows("SELECT id FROM approval").is_empty());

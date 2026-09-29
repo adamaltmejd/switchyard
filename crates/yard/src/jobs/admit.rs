@@ -924,8 +924,8 @@ fn approval_item(
 }
 
 /// What an approval over a limit item names: every candidate gate's passing
-/// check, then the blocking review checks it overrides. A gate without a
-/// passing check at the head refuses it.
+/// check, then the blocking review checks it overrides. The item's gate
+/// digest, checked as stale first, is what guarantees the gates passed.
 fn limit_checks(
     tx: &rusqlite::Connection,
     attempt: &attempts::Attempt,
@@ -948,14 +948,10 @@ fn limit_checks(
         .iter()
         .filter(|gate| gate.stage == Stage::Candidate)
     {
-        match checks::current(tx, "gate", &gate.name, &input)? {
-            Some(check) if check.verdict == "pass" => named.push(check.id),
-            _ => {
-                return Err(Fail::refused(format!(
-                    "gate {} has no passing check on {head}",
-                    gate.name
-                )));
-            }
+        if let Some(check) = checks::current(tx, "gate", &gate.name, &input)?
+            && check.verdict == "pass"
+        {
+            named.push(check.id);
         }
     }
     let review = checks::Input {
@@ -1006,7 +1002,15 @@ pub async fn attempt_approve(
                 ticket_name(id)
             )));
         }
-        // Before the staleness read, so a gate that changed names itself.
+        if let Some((key, recorded, current)) =
+            super::stale_part(&item.payload, &attempt, &ticket, &loaded)?
+        {
+            return Err(Fail::stale(
+                format!("the item's {key} is no longer current"),
+                recorded,
+                current,
+            ));
+        }
         let overrode = item.kind == "stopped";
         let checks: Vec<i64> = if overrode {
             limit_checks(tx, &attempt, &ticket, &loaded)?
@@ -1018,15 +1022,6 @@ pub async fn attempt_approve(
                 .filter_map(Value::as_i64)
                 .collect()
         };
-        if let Some((key, recorded, current)) =
-            super::stale_part(&item.payload, &attempt, &ticket, &loaded)?
-        {
-            return Err(Fail::stale(
-                format!("the item's {key} is no longer current"),
-                recorded,
-                current,
-            ));
-        }
         let proof = attempt.proof.clone().unwrap_or_default();
         let approval = checks::approve(
             tx,
