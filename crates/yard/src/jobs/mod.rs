@@ -189,10 +189,12 @@ async fn advance(
         return Ok(());
     }
     let open = project.read(|conn| attempts::open_for_attempt(conn, attempt.id))?;
-    if open
-        .iter()
-        .any(|item| (item.kind != "proposal" && item.kind != "approval") || item.reason == "edit")
-    {
+    // A pending edit outranks an edit proposal made from the pre-edit text.
+    let edited = project.read(|conn| attempts::edit_pending(conn, attempt.id))?;
+    if open.iter().any(|item| {
+        (item.kind != "proposal" && item.kind != "approval")
+            || (item.reason == "edit" && !(edited && item.kind == "proposal"))
+    }) {
         return Ok(());
     }
     let ticket = project.read(|conn| tickets::get(conn, attempt.ticket))?;
@@ -220,7 +222,7 @@ async fn advance(
         return Ok(());
     }
     // A pending edit is derived: the ticket is newer than the last implementer's read.
-    if project.read(|conn| attempts::edit_pending(conn, attempt.id))? {
+    if edited {
         let execution = project.tx(|tx| supervise::start_implementation(tx, attempt, "edit"))?;
         spawn(daemon, project, "implementation", execution);
         return Ok(());

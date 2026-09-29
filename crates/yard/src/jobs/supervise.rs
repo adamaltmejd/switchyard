@@ -64,6 +64,16 @@ pub fn start_implementation(
         "UPDATE execution SET body = ?2 WHERE id = ?1",
         rusqlite::params![id, ticket.body],
     )?;
+    for item in attempts::open_for_attempt(tx, attempt.id)? {
+        if item.kind == "proposal"
+            && item.reason == "edit"
+            && item.payload["revision"]
+                .as_i64()
+                .is_some_and(|revision| revision < ticket.revision)
+        {
+            attempts::resolve(tx, &item, "stale", None)?;
+        }
+    }
     Ok(id)
 }
 
@@ -829,7 +839,7 @@ pub async fn implement(
                 ticket: Some(ticket.id),
                 ..Default::default()
             })?;
-            if workflow.read_only {
+            if workflow.read_only && !run.stopped {
                 // With an edit pending the implementer runs again.
                 if edited {
                     return Ok(());
