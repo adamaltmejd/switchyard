@@ -835,9 +835,9 @@ instructions = "Review for correctness."
     )
 }
 
-/// Codex's shell tool, whose input field is `command`.
+/// Codex's shell tool, whose input field is `cmd`.
 pub fn codex_shell(command: &str) -> ToolCall {
-    tool("shell", serde_json::json!({ "command": command }))
+    tool("exec_command", serde_json::json!({ "cmd": command }))
 }
 
 /// Write `files` and commit them in one Codex shell call.
@@ -861,31 +861,43 @@ pub fn codex_commit_file(path: &str, text: &str, message: &str) -> ToolCall {
     codex_files(&[(path, text)], message)
 }
 
-/// Whether the request is a Codex review seat: Yard's publish tool is
-/// offered under whatever name the pinned version namespaces it with.
-pub fn codex_seat(request: &ModelRequest) -> bool {
-    request.body["tools"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .any(|tool| {
-            tool["name"]
-                .as_str()
-                .is_some_and(|name| name.ends_with("yard_publish_review"))
-        })
+/// Yard's publish tool as Codex's Responses request advertises it: a tool
+/// inside the `mcp__yard` namespace, or at the top level. Returns the
+/// namespace when there is one and the bare tool name.
+fn codex_publish_tool(request: &ModelRequest) -> Option<(Option<String>, String)> {
+    for tool in request.body["tools"].as_array().into_iter().flatten() {
+        if let Some(name) = tool["name"].as_str()
+            && name.ends_with("yard_publish_review")
+        {
+            return Some((None, name.to_string()));
+        }
+        for inner in tool["tools"].as_array().into_iter().flatten() {
+            if let (Some(namespace), Some(name)) = (tool["name"].as_str(), inner["name"].as_str())
+                && name.ends_with("yard_publish_review")
+            {
+                return Some((Some(namespace.to_string()), name.to_string()));
+            }
+        }
+    }
+    None
 }
 
-/// A review publication through the tool name Codex advertises for Yard's
-/// MCP server.
+/// Whether the request is a Codex review seat: Yard's publish tool is
+/// offered inside the namespace Codex wraps an MCP server's tools in.
+pub fn codex_seat(request: &ModelRequest) -> bool {
+    codex_publish_tool(request).is_some()
+}
+
+/// A review publication through the tool Codex advertises for Yard's MCP
+/// server, carrying the namespace Codex wraps it in.
 pub fn codex_publish(request: &ModelRequest, findings: Value) -> ToolCall {
-    let name = request.body["tools"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|tool| tool["name"].as_str())
-        .find(|name| name.ends_with("yard_publish_review"))
-        .unwrap_or("yard_publish_review");
-    tool(name, serde_json::json!({ "findings": findings }))
+    let (namespace, name) =
+        codex_publish_tool(request).unwrap_or((None, "yard_publish_review".to_string()));
+    ToolCall {
+        name,
+        namespace,
+        arguments: serde_json::json!({ "findings": findings }),
+    }
 }
 
 /// A JWT pinfold's codex login route accepts: `exp` in the future and an

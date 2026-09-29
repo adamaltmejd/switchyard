@@ -260,6 +260,9 @@ pub enum Reply {
 
 pub struct ToolCall {
     pub name: String,
+    /// The namespace a Responses API function call wraps the tool in, as
+    /// Codex does for an MCP server's tools.
+    pub namespace: Option<String>,
     pub arguments: Value,
 }
 
@@ -271,6 +274,7 @@ pub fn bash(command: &str) -> ToolCall {
 pub fn tool(name: &str, arguments: Value) -> ToolCall {
     ToolCall {
         name: name.to_owned(),
+        namespace: None,
         arguments,
     }
 }
@@ -499,11 +503,15 @@ fn responses_tools(calls: Vec<ToolCall>, request: &ModelRequest) -> Vec<u8> {
     for (index, call) in calls.into_iter().enumerate() {
         let item_id = format!("fc_{turn}_{index}");
         let call_id = format!("call_{turn}_{index}");
-        let arguments = responses_arguments(request, &call).to_string();
-        let added = json!({ "id": item_id, "type": "function_call", "status": "in_progress",
+        let arguments = call.arguments.to_string();
+        let mut added = json!({ "id": item_id, "type": "function_call", "status": "in_progress",
                             "arguments": "", "call_id": call_id, "name": call.name });
-        let done = json!({ "id": item_id, "type": "function_call", "status": "completed",
+        let mut done = json!({ "id": item_id, "type": "function_call", "status": "completed",
                             "arguments": arguments, "call_id": call_id, "name": call.name });
+        if let Some(namespace) = &call.namespace {
+            added["namespace"] = json!(namespace);
+            done["namespace"] = json!(namespace);
+        }
         body.push_str(&sse(
             "response.output_item.added",
             json!({ "type": "response.output_item.added", "output_index": index, "item": added }),
@@ -522,10 +530,7 @@ fn responses_tools(calls: Vec<ToolCall>, request: &ModelRequest) -> Vec<u8> {
             "response.output_item.done",
             json!({ "type": "response.output_item.done", "output_index": index, "item": done }),
         ));
-        output.push(
-            json!({ "id": item_id, "type": "function_call", "status": "completed",
-                            "arguments": arguments, "call_id": call_id, "name": call.name }),
-        );
+        output.push(done.clone());
     }
     let mut completed = responses_envelope(&response_id, request, "completed");
     completed["output"] = Value::Array(output);
@@ -534,27 +539,6 @@ fn responses_tools(calls: Vec<ToolCall>, request: &ModelRequest) -> Vec<u8> {
         json!({ "type": "response.completed", "response": completed }),
     ));
     respond(200, "text/event-stream", body)
-}
-
-/// The arguments a function call carries. Codex versions differ on whether a
-/// shell's `command` is a string or an array of argv strings, so render what
-/// the request's tool schema advertises.
-fn responses_arguments(request: &ModelRequest, call: &ToolCall) -> Value {
-    let mut arguments = call.arguments.clone();
-    if let Some(command) = arguments.get("command").and_then(Value::as_str) {
-        let wants_argv = request.body["tools"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .any(|tool| {
-                tool["name"].as_str() == Some(call.name.as_str())
-                    && tool["parameters"]["properties"]["command"]["type"].as_str() == Some("array")
-            });
-        if wants_argv {
-            arguments["command"] = json!(["bash", "-lc", command]);
-        }
-    }
-    arguments
 }
 
 /// The Anthropic Messages API, streamed as SSE.

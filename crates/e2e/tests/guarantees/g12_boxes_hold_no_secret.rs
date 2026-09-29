@@ -181,7 +181,9 @@ fn the_codex_login_is_absent_from_the_box_and_reaches_the_route() {
     );
     let mut watch = project.watch(0);
     project.json(&["ticket", "new", "--title", "Add feature"]);
-    watch.until("approval", |event| event["event"] == "attention.raised");
+    watch.until("approval", |event| {
+        event["event"] == "attention.raised" && event["data"]["kind"] == "approval"
+    });
 
     let counts: Vec<String> = found
         .lock()
