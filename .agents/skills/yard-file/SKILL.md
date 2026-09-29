@@ -33,6 +33,11 @@ Proposals:
 - **One mechanism per ticket.** A change that must hold across several
   independent mechanisms (harnesses, backends, adapters) is one ticket per
   mechanism, after a shared first one.
+- **A rule over every state of an attempt is several tickets.** "X holds
+  wherever the attempt is" touches every job, and each review round finds
+  the next pair of states it missed. File one ticket per state the rule
+  changes, or cut the rule to the states that need it and say what the
+  others do.
 - **`--workflow plan` makes a read-only planner propose children and a
   body.** It does not make oversized work legitimate.
 - **A frightening size means the scope is wrong.** Cut or defer behaviour
