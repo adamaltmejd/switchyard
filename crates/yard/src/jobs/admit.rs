@@ -67,6 +67,20 @@ pub fn take_lane(
     Ok(true)
 }
 
+/// Whether the scheduler would admit a ready ticket given a free lane: its
+/// workflow exists, and a read-only workflow runs once, then only by
+/// `yard attempt start`.
+fn admissible(
+    conn: &rusqlite::Connection,
+    loaded: &Loaded,
+    ticket: &tickets::Ticket,
+) -> Result<bool, Fail> {
+    let Ok(workflow) = loaded.config.workflow(&ticket.workflow) else {
+        return Ok(false);
+    };
+    Ok(!(workflow.read_only && attempts::latest_for(conn, ticket.id)?.is_some()))
+}
+
 /// The scheduler's admissions: ready tickets in priority order.
 pub fn scheduled(
     daemon: &Arc<Daemon>,
@@ -81,14 +95,7 @@ pub fn scheduled(
             if free <= 0 {
                 break;
             }
-            let Ok(workflow) = loaded.config.workflow(&ticket.workflow) else {
-                continue;
-            };
-            if workflow.read_only
-                && project
-                    .read(|conn| attempts::latest_for(conn, ticket.id))?
-                    .is_some()
-            {
+            if !project.read(|conn| admissible(conn, loaded, &ticket))? {
                 continue;
             }
             admitted.push(project.tx(|tx| admit(tx, loaded, &ticket))?);
@@ -125,16 +132,48 @@ fn admit(
     super::supervise::start_implementation(tx, &row, ticket, "first")
 }
 
-pub fn status(project: &Project) -> Result<Value, Fail> {
+pub async fn status(daemon: &Daemon, project: &Project) -> Result<Value, Fail> {
+    let loaded = load(daemon, project).await.ok();
+    let no_lane = match &loaded {
+        Some(loaded) => free_lanes(daemon, project, loaded)? <= 0,
+        None => false,
+    };
+    let now = store::now_ms();
     project.read(|conn| {
         let tickets: Vec<Value> = tickets::list(conn)?
             .iter()
             .filter(|ticket| ticket.state == "open")
-            .map(tickets::Ticket::to_json)
-            .collect();
+            .map(|ticket| {
+                let mut value = ticket.to_json();
+                let edges = tickets::dependencies(conn, ticket.id)?;
+                let mut unfinished = Vec::new();
+                for &on in &edges {
+                    if tickets::get(conn, on)?.state != "done" {
+                        unfinished.push(ticket_name(on));
+                    }
+                }
+                value["depends_on"] =
+                    json!(edges.iter().map(|on| ticket_name(*on)).collect::<Vec<_>>());
+                value["waiting_on"] = json!(unfinished);
+                let no_lane = match &loaded {
+                    Some(loaded) if no_lane && tickets::blocker(conn, ticket.id)?.is_none() => {
+                        admissible(conn, loaded, ticket)?
+                    }
+                    _ => false,
+                };
+                value["no_lane"] = json!(no_lane);
+                Ok(value)
+            })
+            .collect::<Result<_, Fail>>()?;
         let attempts: Vec<Value> = attempts::live(conn)?
             .iter()
-            .map(attempts::Attempt::to_json)
+            .map(|attempt| {
+                let mut value = attempt.to_json();
+                let spent =
+                    attempt.work_ms + attempt.lane_since.map(|since| now - since).unwrap_or(0);
+                value["work_ms"] = json!(spent.max(0));
+                value
+            })
             .collect();
         let attention: Vec<Value> = attempts::open_attention(conn)?
             .iter()
@@ -143,13 +182,31 @@ pub fn status(project: &Project) -> Result<Value, Fail> {
         let queue: Vec<Value> = checks::queue(conn)?
             .iter()
             .map(|approval| {
-                json!({ "approval": approval.id, "attempt": approval.attempt,
-                                    "head": approval.head, "actor": approval.actor })
+                let ticket = attempts::get(conn, approval.attempt)?.ticket;
+                let edges: Vec<String> = tickets::dependencies(conn, ticket)?
+                    .into_iter()
+                    .map(ticket_name)
+                    .collect();
+                Ok(
+                    json!({ "approval": approval.id, "attempt": approval.attempt,
+                           "ticket": ticket_name(ticket),
+                           "depends_on": edges,
+                           "head": approval.head, "actor": approval.actor }),
+                )
             })
-            .collect();
+            .collect::<Result<_, Fail>>()?;
+        let activity = daemon.activity.lock().expect("activity lock");
         let running: Vec<Value> = executions::running(conn)?
             .iter()
-            .map(executions::Execution::to_json)
+            .map(|execution| {
+                let mut value = execution.to_json();
+                value["quiet_ms"] = json!(
+                    activity
+                        .get(&(project.key.clone(), execution.id))
+                        .map(|last| last.elapsed().as_millis() as u64)
+                );
+                value
+            })
             .collect();
         Ok(json!({
             "seq": store::last_seq(conn)?,

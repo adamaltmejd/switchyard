@@ -430,7 +430,7 @@ pub async fn protected_paths(
 pub async fn command(daemon: &Arc<Daemon>, method: &str, params: Value) -> Result<Value, Fail> {
     let project = crate::daemon::project(daemon, &params)?;
     match method {
-        "status" => admit::status(&project),
+        "status" => admit::status(daemon, &project).await,
         "sync" => admit::sync(daemon, &project).await,
         "doctor" => admit::doctor(daemon, &project).await,
         "ticket.new" => admit::ticket_new(daemon, &project, &params).await,

@@ -26,6 +26,9 @@ pub struct Daemon {
     /// Running executions' stop signals, by execution id.
     /// Keyed by project key and execution id; execution ids are per project.
     pub stops: Mutex<HashMap<(String, i64), Arc<Notify>>>,
+    /// When each running worker last produced output, by project key and
+    /// execution id: the reading the inactivity clock resets on.
+    pub activity: Mutex<HashMap<(String, i64), std::time::Instant>>,
     /// Serialises admission, so capacity is counted once per decision.
     pub admission: Mutex<()>,
     /// Image ids built per target head, by project key.
@@ -157,6 +160,7 @@ async fn serve() -> Result<(), String> {
         mcp_port,
         wake: Notify::new(),
         stops: Mutex::new(HashMap::new()),
+        activity: Mutex::new(HashMap::new()),
         admission: Mutex::new(()),
         images: Mutex::new(HashMap::new()),
         image_build: tokio::sync::Mutex::new(()),
