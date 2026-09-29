@@ -294,9 +294,14 @@ fn walk(workspace: &Path, rel: &str, depth: usize, found: &mut Vec<String>) -> R
         return Err(format!("{rel} is deeper than {WALK_DEPTH} directories"));
     }
     let entries = std::fs::read_dir(dir).map_err(|error| format!("{rel}: {error}"))?;
-    for entry in entries.flatten() {
-        let (Ok(name), Ok(kind)) = (entry.file_name().into_string(), entry.file_type()) else {
-            continue;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("{rel}: {error}"))?;
+        let kind = entry
+            .file_type()
+            .map_err(|error| format!("{rel}: {error}"))?;
+        // A name no `skills.config` entry can spell would stay enabled.
+        let Ok(name) = entry.file_name().into_string() else {
+            return Err(format!("{rel} holds a name that is not UTF-8"));
         };
         let child = format!("{rel}/{name}");
         if kind.is_symlink() {
