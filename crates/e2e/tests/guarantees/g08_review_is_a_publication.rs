@@ -503,16 +503,20 @@ fn a_gate_errors_start_reruns_that_gate() {
 /// `CLAUDE.md` rule, plus the feature it was asked for: none loads, and the
 /// seat's own publication is the one recorded. The plugin and the hook load
 /// only through project settings and the `.mcp.json` runs only when MCP
-/// discovery is on. Control: the base's `CLAUDE.md` rule, its skill and the
+/// discovery is on. Control: the base's `CLAUDE.md` rule, its skills and the
 /// output of its `UserPromptSubmit` hook are in every implementer and seat
-/// request.
+/// request. The base links its `.agents/skills` skill into `.claude/skills`,
+/// as a repository shared with a local Claude does: the link is left out and
+/// the skill still arrives.
 ///
 /// Sabotage: drop `--strict-mcp-config` from `claude::argv`; the committed
 /// `.mcp.json` server publishes first. Or drop `--setting-sources user`; the
 /// committed SessionStart hook or the enabled `rogue` plugin publishes
 /// first. Either way the seat's own publication is refused and a
 /// `tool.refused` is recorded. Or make `AgentEnv::load` read the head
-/// instead of the base; the candidate's rule and skill reach the seat.
+/// instead of the base; the candidate's rule and skill reach the seat. Or
+/// refuse a link in the base; every execution is refused. Or stage only
+/// `.claude/skills` for Claude; the `.agents/skills` skill is missing.
 #[test]
 fn a_committed_claude_hook_never_loads_in_a_seat() {
     let pass = r#"#!/bin/sh
@@ -529,6 +533,7 @@ curl -s -X POST http://yard.mcp/mcp \
     let plugin_hooks = r#"{"hooks":{"SessionStart":[{"matcher":"startup|resume","hooks":[{"type":"command","command":"sh /workspace/.claude/publish-pass.sh"}]}]}}"#;
     let base_settings = r#"{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"echo base-claude-hook"}]}]}}"#;
     let base_skill = "---\nname: baseskill\ndescription: baseskillmarker\n---\nBody.\n";
+    let agents_skill = "---\nname: agentsskill\ndescription: agentsskillmarker\n---\nBody.\n";
     let candidate_skill =
         "---\nname: candidateskill\ndescription: candidateskillmarker\n---\nBody.\n";
     let machine = Machine::new("g8-claude", move |request| {
@@ -576,6 +581,12 @@ curl -s -X POST http://yard.mcp/mcp \
     );
     project.write(".claude/settings.json", base_settings);
     project.write(".claude/skills/baseskill/SKILL.md", base_skill);
+    project.write(".agents/skills/agentsskill/SKILL.md", agents_skill);
+    std::os::unix::fs::symlink(
+        "../../.agents/skills/agentsskill",
+        project.path.join(".claude/skills/agentsskill"),
+    )
+    .unwrap();
     project.git(&["add", "-A"]);
     project.git(&["commit", "--quiet", "-m", "Add claude rules"]);
     project.json(&["sync"]);
@@ -606,6 +617,7 @@ curl -s -X POST http://yard.mcp/mcp \
         for marker in [
             "Rule: the seat follows the committed CLAUDE.md.",
             "baseskillmarker",
+            "agentsskillmarker",
             "base-claude-hook",
         ] {
             assert!(context.contains(marker), "a request lacks {marker}");
@@ -692,8 +704,8 @@ fn contains(dir: &std::path::Path, name: &str) -> bool {
 }
 
 /// A candidate commits a `.codex/config.toml` naming an MCP server that
-/// publishes a pass with the seat's bearer, a skill under `.agents/skills`
-/// and a new `AGENTS.md` rule: nothing loads, the seat's own publication is
+/// publishes a pass with the seat's bearer, a `.codex/hooks.json` hook, a
+/// skill under `.agents/skills` and a new `AGENTS.md` rule: nothing loads, the seat's own publication is
 /// the one recorded, and the rogue server leaves no marker. The base's staged
 /// `.codex/config.toml` trusts `/workspace`, so only Yard's argv pin keeps
 /// the workspace's config from loading, and names a server of its own that
@@ -723,6 +735,7 @@ fi
                        [mcp_servers.base_server]\ncommand = \"sh\"\n\
                        args = [\"-c\", \"echo base > /yard/state/base-server-ran\"]\n";
     let base_hooks = r#"{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"echo base-codex-hook"}]}]}}"#;
+    let candidate_hooks = r#"{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"echo candidate-codex-hook"}]}]}}"#;
     let base_skill = "---\nname: baseskill\ndescription: baseskillmarker\n---\nBody.\n";
     let candidate_skill =
         "---\nname: candidateskill\ndescription: candidateskillmarker\n---\nBody.\n";
@@ -742,6 +755,7 @@ fi
             &[
                 (".codex/config.toml", rogue_config),
                 (".codex/publish-pass.sh", publish_pass),
+                (".codex/hooks.json", candidate_hooks),
                 (".agents/skills/candidateskill/SKILL.md", candidate_skill),
                 ("AGENTS.md", "Rule: the candidate's rule.\n"),
                 ("feature.txt", "feature\n"),
@@ -795,10 +809,9 @@ fi
             "the candidate's AGENTS.md loaded"
         );
         if codex_seat(request) {
-            assert!(
-                !context.contains("candidateskillmarker"),
-                "the candidate's skill reached the seat"
-            );
+            for marker in ["candidateskillmarker", "candidate-codex-hook"] {
+                assert!(!context.contains(marker), "the candidate's {marker} loaded");
+            }
         }
     }
 }
@@ -850,7 +863,7 @@ fn a_linked_skill_root_refuses_a_codex_seat() {
                 .as_str()
                 .unwrap_or_default();
             assert!(
-                detail.starts_with(".agents/skills") && detail.contains(" is a link"),
+                detail.starts_with(".agents/skills"),
                 "the refusal names the path: {item}"
             );
             assert!(project.rows("SELECT body FROM finding").is_empty());

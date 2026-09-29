@@ -28,7 +28,6 @@ const FILES: [&str; 5] = [
     ".codex/config.toml",
     ".codex/hooks.json",
 ];
-const TOPS: [&str; 4] = [".agents", ".claude", ".pi", ".codex"];
 const GUIDANCE: [&str; 2] = ["AGENTS.md", "CLAUDE.md"];
 const GUIDANCE_MAX: u64 = 64 * 1024;
 const FILE_MAX: u64 = 1024 * 1024;
@@ -50,14 +49,14 @@ pub struct File {
 #[derive(Debug)]
 pub struct AgentEnv {
     files: Vec<File>,
-    /// `SKILL.md` paths in the workspace as the worker sees them, so Codex
-    /// can be told not to load them.
-    pub workspace_skills: Vec<String>,
+    /// The worker's tree on the host, mounted at `/workspace`.
+    workspace: PathBuf,
 }
 
 impl AgentEnv {
-    /// The named paths of `base`, verbatim. A link or submodule at any path
-    /// component, or a file over a bound, refuses the whole read.
+    /// The regular files at the named paths of `base`, verbatim. A link or
+    /// submodule is left out, never followed, as is a file where a directory
+    /// is named or the reverse. A file over a bound refuses the whole read.
     pub async fn load(
         git: &Git,
         canonical: &Path,
@@ -66,38 +65,16 @@ impl AgentEnv {
     ) -> Result<AgentEnv, String> {
         let mut files = Vec::new();
         let mut total = 0;
-        // A link at any component of a staged path is refused: the top
-        // directories here, everything below them in the listing.
-        for entry in git.ls_tree(canonical, base, &TOPS, false).await? {
-            if !entry.dir {
-                return Err(format!(
-                    "{} is {} in the base, not a directory",
-                    entry.path,
-                    if entry.regular {
-                        "a file"
-                    } else {
-                        "a link or submodule"
-                    }
-                ));
-            }
-        }
-        for entry in git.ls_tree(canonical, base, &PATHS, true).await? {
-            if !entry.regular {
-                return Err(format!("{} is a link or submodule in the base", entry.path));
-            }
-            let wrong_type = PATHS.iter().any(|path| {
+        for entry in git.ls_tree(canonical, base, &PATHS).await? {
+            let named = PATHS.iter().any(|path| {
                 if FILES.contains(path) {
-                    entry.path.starts_with(&format!("{path}/"))
-                } else {
                     entry.path == *path
+                } else {
+                    entry.path.starts_with(&format!("{path}/"))
                 }
             });
-            if wrong_type {
-                return Err(format!(
-                    "{} is the wrong type in the base (a file where a directory is \
-                     expected, or a tree where a file is)",
-                    entry.path
-                ));
+            if !entry.regular || !named {
+                continue;
             }
             let max = if GUIDANCE.contains(&entry.path.as_str()) {
                 GUIDANCE_MAX
@@ -145,11 +122,11 @@ impl AgentEnv {
             .iter_mut()
             .find(|file| file.path == ".codex/config.toml")
         {
-            file.bytes = without_mcp_servers(&file.bytes)?;
+            file.bytes = without_yard_keys(&file.bytes)?;
         }
         Ok(AgentEnv {
             files,
-            workspace_skills: workspace_skills(workspace)?,
+            workspace: workspace.to_path_buf(),
         })
     }
 
@@ -201,13 +178,35 @@ impl AgentEnv {
         }
     }
 
-    /// Replace `rel` under `state` with the files under `prefix`.
-    pub fn stage_dir(&self, state: &Path, rel: &str, prefix: &str) -> std::io::Result<()> {
+    /// Replace `rel` under `state` with the files under each of `prefixes`.
+    /// An entry named under an earlier prefix hides the same name under a
+    /// later one.
+    pub fn stage_dir(&self, state: &Path, rel: &str, prefixes: &[&str]) -> std::io::Result<()> {
         let dest = prepare(state, rel)?;
-        for (rest, file) in self.under(prefix) {
-            write(&dest.join(rest), file)?;
+        let top = |rest: &str| rest.split('/').next().unwrap_or_default().to_string();
+        let mut taken = std::collections::BTreeSet::new();
+        for prefix in prefixes {
+            let mut names = Vec::new();
+            for (rest, file) in self.under(prefix) {
+                if !taken.contains(&top(rest)) {
+                    write(&dest.join(rest), file)?;
+                }
+                names.push(top(rest));
+            }
+            taken.extend(names);
         }
         Ok(())
+    }
+
+    /// Every `SKILL.md` Codex would discover in the workspace, by the path the
+    /// worker sees. Nothing is followed. A tree beyond the bounds refuses the
+    /// execution, since a skill left unlisted would load.
+    pub fn workspace_skills(&self) -> Result<Vec<String>, String> {
+        let mut found = Vec::new();
+        for root in WORKSPACE_SKILL_ROOTS {
+            walk(&self.workspace, root, 0, &mut found)?;
+        }
+        Ok(found)
     }
 
     /// Replace the file `rel` under `state` with `path`'s bytes, or remove it
@@ -263,17 +262,6 @@ fn write(dest: &Path, file: &File) -> std::io::Result<()> {
         .write_all(&file.bytes)
 }
 
-/// Every `SKILL.md` Codex would discover in the workspace, by the path the
-/// worker sees. Nothing is followed. A tree beyond the bounds refuses the
-/// execution, since a skill left unlisted would load.
-fn workspace_skills(workspace: &Path) -> Result<Vec<String>, String> {
-    let mut found = Vec::new();
-    for root in WORKSPACE_SKILL_ROOTS {
-        walk(workspace, root, 0, &mut found)?;
-    }
-    Ok(found)
-}
-
 fn walk(workspace: &Path, rel: &str, depth: usize, found: &mut Vec<String>) -> Result<(), String> {
     let dir = workspace.join(rel);
     if depth == 0 {
@@ -319,14 +307,16 @@ fn walk(workspace: &Path, rel: &str, depth: usize, found: &mut Vec<String>) -> R
     Ok(())
 }
 
-/// The Codex config without its `mcp_servers` table: an override of the table
-/// merges into it, so Yard's server stays the only one by not staging any.
-/// The one file not copied verbatim.
-fn without_mcp_servers(config: &[u8]) -> Result<Vec<u8>, String> {
+/// The Codex config without its `mcp_servers` table and `profile`, the one
+/// file not copied verbatim. An override of the table merges into it, so
+/// Yard's server stays the only one by staging no other; a selected profile
+/// outranks the argv's keys.
+fn without_yard_keys(config: &[u8]) -> Result<Vec<u8>, String> {
     let mut table: toml::Table = std::str::from_utf8(config)
         .map_err(|_| ".codex/config.toml is not UTF-8".to_string())?
         .parse()
         .map_err(|error| format!(".codex/config.toml is not valid TOML: {error}"))?;
     table.remove("mcp_servers");
+    table.remove("profile");
     Ok(table.to_string().into_bytes())
 }

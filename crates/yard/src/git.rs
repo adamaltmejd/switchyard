@@ -41,7 +41,6 @@ struct RawOut {
 pub struct TreeEntry {
     /// A regular file: not a link, not a submodule.
     pub regular: bool,
-    pub dir: bool,
     pub exec: bool,
     pub size: u64,
     pub oid: String,
@@ -239,19 +238,14 @@ impl Git {
         Ok((out.code == 0).then_some(out.stdout))
     }
 
-    /// The entries of `commit` at `paths`, with sizes; recursive lists blobs.
+    /// The files of `commit` under `paths`, with sizes.
     pub async fn ls_tree(
         &self,
         repo: &Path,
         commit: &str,
         paths: &[&str],
-        recursive: bool,
     ) -> Result<Vec<TreeEntry>, String> {
-        let mut args = vec!["ls-tree", "-l", "-z", "--full-tree"];
-        if recursive {
-            args.push("-r");
-        }
-        args.extend([commit, "--"]);
+        let mut args = vec!["ls-tree", "-r", "-l", "-z", "--full-tree", commit, "--"];
         args.extend(paths);
         let out = self.run(repo, &args).await?.ok("ls-tree")?;
         out.stdout
@@ -266,7 +260,6 @@ impl Git {
                 let size = fields.next().ok_or_else(bad)?;
                 Ok(TreeEntry {
                     regular: mode == "100644" || mode == "100755",
-                    dir: mode == "040000",
                     exec: mode == "100755",
                     // A submodule's size is `-`.
                     size: size.parse().unwrap_or(0),

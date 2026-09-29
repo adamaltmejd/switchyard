@@ -1,8 +1,7 @@
 //! Codex, the subscription-login harness: its launch argv, the files a
 //! launch needs, and the normalisation of its JSON stream.
 //!
-//! Codex 0.158.0, as pinfold carries it. Pinfold writes the box's codex
-//! config (its model provider and route base URL) itself.
+//! Codex 0.158.0, as pinfold carries it.
 
 use crate::config::Agent;
 use crate::daemon::Machine;
@@ -22,8 +21,8 @@ const MCP_SERVER: &str = "yard";
 /// login.
 const LOGIN: &str = "codex";
 const ROUTE: &str = "codex.yard";
-/// The provider pinfold's config names, restated on the argv so a staged config
-/// cannot replace it. The base URL is the route's Codex backend path.
+/// The provider the argv names, so a staged config cannot replace it. The
+/// base URL is the route's Codex backend path.
 const PROVIDER: &str = "pinfold";
 const PROVIDER_URL: &str = "http://codex.yard/backend-api/codex";
 /// The login's origin override, as `YARD_ORIGIN_<NAME>`.
@@ -90,9 +89,9 @@ impl Harness for Codex {
         let env = st.env;
         env.stage_file(st.state, "codex/config.toml", ".codex/config.toml")?;
         env.stage_guidance(st.state, "codex/AGENTS.md")?;
-        env.stage_dir(st.state, "codex/skills", ".codex/skills/")?;
+        env.stage_dir(st.state, "codex/skills", &[".codex/skills/"])?;
         env.stage_file(st.state, "codex/hooks.json", ".codex/hooks.json")?;
-        env.stage_dir(st.state, "home/.agents/skills", ".agents/skills/")
+        env.stage_dir(st.state, "home/.agents/skills", &[".agents/skills/"])
     }
 
     fn env(&self, _st: &Stage) -> Vec<(String, String)> {
@@ -130,11 +129,10 @@ impl Harness for Codex {
 
 /// The full argv, run with `/workspace` as its cwd and stdin on /dev/null.
 ///
-/// The model provider and route base URL are pinfold's config; these
-/// overrides pin the required MCP server (replacing any the staged config
-/// names), the approval policy and the compaction threshold, and switch off
-/// what the workspace would load. The bearer reaches the box through the environment,
-/// never argv.
+/// These overrides pin the required MCP server (the staged config names
+/// none), the approval policy, the compaction threshold, the model provider
+/// and its route, and switch off what the workspace would load. The bearer
+/// reaches the box through the environment, never argv.
 fn argv(launch: &Launch) -> Result<Vec<String>, String> {
     check_model(launch.model)?;
     check_prompt(launch.prompt)?;
@@ -174,10 +172,9 @@ fn argv(launch: &Launch) -> Result<Vec<String>, String> {
     ));
     // Codex discovers skills in the workspace whatever its settings say;
     // only a per-file entry turns one off. JSON strings are TOML strings.
-    if !launch.env.workspace_skills.is_empty() {
-        let entries: Vec<String> = launch
-            .env
-            .workspace_skills
+    let skills = launch.env.workspace_skills()?;
+    if !skills.is_empty() {
+        let entries: Vec<String> = skills
             .iter()
             .map(|path| format!("{{path={},enabled=false}}", Value::from(path.as_str())))
             .collect();

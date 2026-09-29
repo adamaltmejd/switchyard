@@ -88,9 +88,13 @@ impl Harness for Claude {
             .to_string(),
         )?;
         // The base's skills and settings are Claude's user level; its own
-        // settings ride `--settings`, which outranks them.
-        st.env
-            .stage_dir(st.state, "home/.claude/skills", ".claude/skills/")?;
+        // settings ride `--settings`, which outranks them. Claude reads no
+        // `.agents/skills`, so those join its own under the same names.
+        st.env.stage_dir(
+            st.state,
+            "home/.claude/skills",
+            &[".claude/skills/", ".agents/skills/"],
+        )?;
         st.env.stage_file(
             st.state,
             "home/.claude/settings.json",

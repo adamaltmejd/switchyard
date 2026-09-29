@@ -212,10 +212,10 @@ fn extensions(env: &AgentEnv) -> Vec<String> {
 /// each execution.
 fn stage_environment(st: &Stage) -> std::io::Result<()> {
     st.env
-        .stage_dir(st.state, "agent/extensions", EXTENSIONS_BASE)?;
+        .stage_dir(st.state, "agent/extensions", &[EXTENSIONS_BASE])?;
     for (root, name) in SKILL_ROOTS {
         st.env
-            .stage_dir(st.state, &format!("agent/skills/{name}"), root)?;
+            .stage_dir(st.state, &format!("agent/skills/{name}"), &[root])?;
     }
     Ok(())
 }

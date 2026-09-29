@@ -574,12 +574,12 @@ host, never from a worker's tree: root `AGENTS.md` and `CLAUDE.md` (64 KiB
 each), project skills (`.agents/skills/`, `.claude/skills/`,
 `.pi/skills/`), Pi extensions (`.pi/extensions/`), `.claude/settings.json`,
 and Codex's `.codex/config.toml`, `.codex/hooks.json` and `.codex/skills/`.
-Only regular files are taken, copied as their bytes. A link or submodule at
-any component of those paths, a file over 1 MiB, a set over 512 files or
+Only regular files are taken, copied as their bytes; a link or submodule
+is left out, never followed. A file over 1 MiB, a set over 512 files or
 8 MiB, and guidance that is not UTF-8 or together passes the 128 KiB prompt
 bound each refuse the execution naming the path. Each harness gets the paths
-it would load from a project, into its own state; nothing is merged, and
-Yard's own keys ride the harness's highest-precedence layer, its argv.
+it would load from a project, into its own state, and Yard's own keys ride
+the harness's highest-precedence layer, its argv.
 
 Pi's launch argv starts or resumes a session, the normalisation of its
 frames yields `started`, `finished` and `failed`, and its launch files
@@ -597,7 +597,8 @@ the `yard` HTTP server, whose bearer comes from the env, and `--settings`
 with its automatic-compaction setting. `--strict-mcp-config` keeps Yard's
 server the only one; `--setting-sources user` keeps every workspace setting,
 hook and plugin from loading, and Claude's user level, `.claude/` in its
-home, holds the base's settings and skills. `--setting-sources user` also
+home, holds the base's settings and skills: those of `.claude/skills/`,
+then those of `.agents/skills/` under names not already taken. `--setting-sources user` also
 stops Claude loading project memory, so the base's `AGENTS.md` and
 `CLAUDE.md` are appended to Claude's system prompt. The `system`/`init`
 frame names the session id and the tools the server registered, and that is
@@ -605,8 +606,7 @@ the registration proof. The `result` frame is the outcome. The model and
 effort ride the argv, `--resume` continues a session, and the token stays a
 pinfold placeholder in the box.
 
-Codex runs as a login too: pinfold's config carries the model provider and
-route, and the attempt's `CODEX_HOME` is its user level, holding the base's
+Codex runs as a login too, and the attempt's `CODEX_HOME` is its user level, holding the base's
 `.codex/config.toml`, `hooks.json`, skills and guidance (`AGENTS.md` then
 `CLAUDE.md`), with `.agents/skills/` in its home. Yard's keys ride `-c`: the
 `mcp_servers` table holding only the required `yard` HTTP server, whose
@@ -615,15 +615,17 @@ bearer comes from the env; the compaction threshold; `approval_policy =
 `AGENTS.md` files do not load; `/workspace` pinned untrusted, so a staged
 config cannot activate the workspace's `.codex/config.toml` (an inline
 `projects` table, since a dotted key keeps its quotes); and the `pinfold`
-model provider. Codex merges a `-c mcp_servers` table into a staged one, so
-that table is dropped from the staged config, the one file not copied
+model provider on the route. Codex merges a `-c mcp_servers` table into a
+staged one, and a selected profile outranks `-c`, so the `mcp_servers` table
+and `profile` are dropped from the staged config, the one file not copied
 verbatim. Every launch passes `--dangerously-bypass-hook-trust`, since a
 fresh `CODEX_HOME` holds no hook trust. Codex discovers skills in the
 workspace whatever its settings say, so the argv disables each `SKILL.md`
 under `/workspace/.agents/skills/` and `/workspace/.codex/skills/`
 (`skills.config`), read from the seat's checkout or, for the implementer,
 its clone when the execution starts; a link at any component of those
-roots, a tree past 32 directories or 512 skills refuses the execution.
+roots, a name that is not UTF-8, a tree past 32 directories or 512 skills
+refuses the Codex execution.
 Its `exec --json` stream starts a
 thread with `thread.started`, which names the session and proves the
 required server connected; `turn.completed` is the outcome and `turn.failed`
@@ -738,7 +740,7 @@ G15. Each is shown by one or more end-to-end scenarios; testing policy is in
 | 5 | Intent precedes effect, and a restart loses only the turn | Intent is ordered before effect: an execution's audit event precedes its box's creation time in `pinfold box list` and the fixture's first request. The daemon killed mid-execution: on restart the execution is `interrupted`, no second box exists, the tree is kept, and `start` continues. The daemon killed while a host landing gate runs: the gate's group is gone after restart and the landing re-queues. No command is answered before reconciliation has committed. |
 | 6 | Inputs are validated at the boundary | A malformed tool payload, a TOML with an unknown key, an unknown workflow name, a sync that removes a workflow an open ticket names: refused by name, nothing written. |
 | 7 | A ticket lands end to end and leaves only rows | New ticket, worker commit, candidate gate, review pass, approval, green landing: canonical moves and the ticket is done. The proof snapshot on the host holds what the worker wrote before landing. Afterwards every decision has one audit event naming its target and text, the execution rows carry tokens, cost, model and start reason, every event is one the Store section names, the attempt directory with its proof snapshot, boxes and proof copies are gone, the approval row and each check's execution carry the proof digest, and another live attempt's directory and canonical are untouched. A `status --watch` returns an approval already open when it starts at once, and one started with nothing open returns when the next item is raised; with `--since` naming the seq of an open approval it keeps waiting until a further item is raised, then prints both. |
-| 8 | Review is a publication, and bounded | A seat that exits 0 without publishing is a review error; a seat killed after publishing has published; a second publication is refused; findings below `blocking` pass; a panel of `none` reaches approval marked unreviewed; a seat that publishes a block and is then held by the fixture: no repair starts until its box is gone; a seat that always blocks gets exactly `max_rounds` rounds, then `stopped:limit`. A candidate that commits a `.pi` extension which publishes a pass, a skill and a new `AGENTS.md` rule: none loads, and the seat's own publication is the one recorded; control: the base's directory extension, its skills from `.pi/skills/` and `.agents/skills/` and its `AGENTS.md` rule are in every implementer and seat request. A candidate that commits a Claude plugin, settings hook and `.mcp.json` server which publish a pass, a skill and a new `CLAUDE.md` rule: none loads, and the seat's own publication is the one recorded; control: the base's `CLAUDE.md` rule, skill and hook output are in every implementer and seat request. A candidate that commits a `.codex/config.toml` naming an MCP server that publishes a pass, a skill and a new `AGENTS.md` rule, on a base whose staged config trusts `/workspace` and names its own server: nothing of the candidate's loads, the seat's own publication is the one recorded, and neither server leaves a marker; control: the base's `AGENTS.md` rule, skill and `hooks.json` hook output are in every implementer and seat request. A candidate that commits `.agents/skills` as a link: the execution is refused naming the path, though the seat would publish; control: the same skill as a regular directory reaches approval. A seat that publishes with no registration proof does not count, and a fresh seat runs. A gate error's `start` reruns that gate on the same head. A seat or gate that ends after its attempt was abandoned ends `abandoned`, records no check and raises no item. A process in a seat that reads the inherited bearer and posts its own `initialize` then a publication, in each of Pi, Claude and Codex: both are refused with 404 and the seat's own publication is the one recorded. |
+| 8 | Review is a publication, and bounded | A seat that exits 0 without publishing is a review error; a seat killed after publishing has published; a second publication is refused; findings below `blocking` pass; a panel of `none` reaches approval marked unreviewed; a seat that publishes a block and is then held by the fixture: no repair starts until its box is gone; a seat that always blocks gets exactly `max_rounds` rounds, then `stopped:limit`. A candidate that commits a `.pi` extension which publishes a pass, a skill and a new `AGENTS.md` rule: none loads, and the seat's own publication is the one recorded; control: the base's directory extension, its skills from `.pi/skills/` and `.agents/skills/` and its `AGENTS.md` rule are in every implementer and seat request. A candidate that commits a Claude plugin, settings hook and `.mcp.json` server which publish a pass, a skill and a new `CLAUDE.md` rule: none loads, and the seat's own publication is the one recorded; control: the base's `CLAUDE.md` rule, skill and hook output are in every implementer and seat request, and so is its `.agents/skills/` skill, which the base also links into `.claude/skills/`. A candidate that commits a `.codex/config.toml` naming an MCP server that publishes a pass, a `hooks.json` hook, a skill and a new `AGENTS.md` rule, on a base whose staged config trusts `/workspace` and names its own server: nothing of the candidate's loads, the seat's own publication is the one recorded, and neither server leaves a marker; control: the base's `AGENTS.md` rule, skill and `hooks.json` hook output are in every implementer and seat request. A candidate that commits `.agents/skills` as a link: the execution is refused naming the path, though the seat would publish; control: the same skill as a regular directory reaches approval. A seat that publishes with no registration proof does not count, and a fresh seat runs. A gate error's `start` reruns that gate on the same head. A seat or gate that ends after its attempt was abandoned ends `abandoned`, records no check and raises no item. A process in a seat that reads the inherited bearer and posts its own `initialize` then a publication, in each of Pi, Claude and Codex: both are refused with 404 and the seat's own publication is the one recorded. |
 | 9 | Each implementer execution starts from the right place | A nudge mid-execution lets the execution end on its own and reaches the next prompt; `stop` delivers it sooner. A worker that leaves an untracked file gets no review and the next prompt lists the file; left again, `stopped:dirty`. With `max_session_executions = 2`: the second execution resumes the first, the third resumes nothing and its prompt is the brief, the fourth resumes the third, the fifth resumes nothing. |
 | 10 | The queue lands one at a time and re-judges what does not merge | Three approved candidates, the second red on its merged ref: the first lands, the second gets one repair and a second red raises `red`, the third lands on the moved target with its own gate run. A candidate that does not merge gets a repair naming the paths, and its next head takes gates, review and approval again. A conflict against a target that changed `.yard/config.toml`, in a clone made before it: the worker fetches the target from its bundle, merges, and the new candidate's base is the target, so it passes the `.yard` refusal and lands with the operator's configuration intact. |
 | 11 | Only the operator's sync changes `.yard` and canonical from outside | A worker commit under `.yard` comes back with the reason and no gate runs; the same change through `yard sync` is in force for the next execution. A checkout and canonical that each hold a commit the other lacks: both directions refuse naming both heads; a fast-forward passes. |
