@@ -820,6 +820,33 @@ pub fn codex_commit_file(path: &str, text: &str, message: &str) -> ToolCall {
     codex_files(&[(path, text)], message)
 }
 
+/// Whether the request is a Codex review seat: Yard's publish tool is
+/// offered under whatever name the pinned version namespaces it with.
+pub fn codex_seat(request: &ModelRequest) -> bool {
+    request.body["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|tool| {
+            tool["name"]
+                .as_str()
+                .is_some_and(|name| name.ends_with("yard_publish_review"))
+        })
+}
+
+/// A review publication through the tool name Codex advertises for Yard's
+/// MCP server.
+pub fn codex_publish(request: &ModelRequest, findings: Value) -> ToolCall {
+    let name = request.body["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|tool| tool["name"].as_str())
+        .find(|name| name.ends_with("yard_publish_review"))
+        .unwrap_or("yard_publish_review");
+    tool(name, serde_json::json!({ "findings": findings }))
+}
+
 /// A JWT pinfold's codex login route accepts: `exp` in the future and an
 /// `https://api.openai.com/auth` claim holding `chatgpt_account_id`.
 pub fn codex_jwt(account_id: &str, exp_in_seconds: u64) -> String {

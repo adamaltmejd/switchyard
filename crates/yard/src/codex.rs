@@ -114,7 +114,7 @@ impl Harness for Codex {
     }
 
     fn reader(&self) -> Box<dyn Reader> {
-        Box::new(Normalizer)
+        Box::new(Normalizer::default())
     }
 }
 
@@ -215,7 +215,11 @@ fn check_session_id(id: &str) -> Result<(), String> {
 /// that ends without a terminal turn has decided nothing. A panic exits 0,
 /// so the exit status is never the outcome.
 #[derive(Default)]
-pub struct Normalizer;
+pub struct Normalizer {
+    /// A thread has started, so the run is registered and no later stderr
+    /// line may downgrade it.
+    registered: bool,
+}
 
 impl Reader for Normalizer {
     fn stdout(&mut self, line: &str) -> Vec<Event> {
@@ -233,12 +237,13 @@ impl Reader for Normalizer {
                         "the thread.started frame named no thread".into(),
                     ))];
                 };
+                self.registered = true;
                 vec![
                     Event::Started {
                         session_id: id.into(),
                     },
-                    // Codex does not list the MCP tools; the daemon records
-                    // the tools it granted with this connection.
+                    // Codex lists no tools; the daemon's MCP server records
+                    // the connection and the tools it served.
                     Event::Registered(Registration::Registered(Vec::new())),
                 ]
             }
@@ -257,16 +262,20 @@ impl Reader for Normalizer {
         }
     }
 
-    /// A JSON error line on stderr is the refusal that ended the run before a
-    /// thread started.
+    /// A JSON error line on stderr is the refusal that ended the run before
+    /// a thread started. After `thread.started` the run is registered; a
+    /// later stderr line is the harness's own and never downgrades it.
     fn stderr(&mut self, line: &str) -> Option<Registration> {
+        if self.registered {
+            return None;
+        }
         refusal(line)
     }
 }
 
 fn refusal(line: &str) -> Option<Registration> {
     let value: Value = serde_json::from_str(line.trim()).ok()?;
-    if value.get("type").and_then(Value::as_str) != Some("error") && value.get("error").is_none() {
+    if value.get("type").and_then(Value::as_str) != Some("error") {
         return None;
     }
     Some(Registration::Refused(message(&value)))
