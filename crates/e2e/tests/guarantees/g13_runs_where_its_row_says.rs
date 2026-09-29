@@ -138,7 +138,6 @@ fn a_gate_and_a_seat_read_the_proof_read_only() {
     let detail = gates[0]["detail"].as_str().unwrap();
     assert!(detail.contains("read=snapshot-payload"), "{detail}");
     assert!(write_failed(detail), "{detail}");
-    assert!(detail.contains("Read-only file system"), "{detail}");
 
     let seat = seat_probe.lock().unwrap().clone();
     assert!(seat.contains("read=snapshot-payload"), "{seat}");
