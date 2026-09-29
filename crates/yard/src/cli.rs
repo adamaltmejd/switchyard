@@ -479,13 +479,18 @@ fn render_status(status: &Value) -> String {
             Some(attempt) => attempt_line(status, attempt),
             None => (idle_reason(ticket), String::new()),
         };
+        let edges = if phase.starts_with("waiting on") {
+            String::new()
+        } else {
+            depends_on(ticket)
+        };
         (
             ticket["ticket"].clone(),
             field(ticket, "ticket"),
             field(ticket, "priority"),
             phase,
             clocks,
-            depends_on(ticket),
+            edges,
         )
     };
     let rows: Vec<Vec<_>> = sections
@@ -563,9 +568,9 @@ fn names(value: &Value) -> Vec<&str> {
         .collect()
 }
 
-/// A ticket's dependency edges, all of them, as the board prints them.
+/// A ticket's unfinished dependencies, as the board prints them.
 fn depends_on(ticket: &Value) -> String {
-    let edges = names(&ticket["depends_on"]);
+    let edges = names(&ticket["waiting_on"]);
     if edges.is_empty() {
         String::new()
     } else {
