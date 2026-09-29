@@ -842,7 +842,7 @@ pub async fn implement(
                 ..Default::default()
             })?;
             // With an edit pending the implementer runs again.
-            if edited {
+            if edited && !run.stopped {
                 return Ok(());
             }
             if workflow.read_only && !run.stopped {
