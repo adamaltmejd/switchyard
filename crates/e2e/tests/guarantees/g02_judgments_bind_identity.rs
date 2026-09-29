@@ -558,3 +558,92 @@ fn an_edit_naming_an_old_revision_is_stale() {
     assert_eq!(last_seq(&project), seq);
     assert_eq!(project.json(&["ticket", "show", "Y-1"])["body"], "First");
 }
+
+/// A passed candidate gate; a repair changes only `/yard/proof`; the gate
+/// reruns on the same head under the new proof digest and the old check does
+/// not count. An approve naming the old proof is stale and writes no row;
+/// the approve naming the new proof is given.
+///
+/// Sabotage: match only base and head in `checks::current`; the old gate
+/// counts for the new proof and no gate reruns. Drop the proof comparison in
+/// `admit::approval_item`; the delayed approve names the old proof and is
+/// given anyway.
+#[test]
+fn a_proof_only_change_is_a_new_candidate() {
+    let machine = Machine::new("g2-proof", |request| {
+        if request.opens() && request.last_user().contains("Change the proof") {
+            return Reply::Tools(vec![bash("printf 'second' > /yard/proof/evidence.txt")]);
+        }
+        act(
+            request,
+            vec![bash(
+                "cd /workspace && printf 'feature\\n' > feature.txt && git add -A \
+                 && git commit -q -m 'Add feature' && printf 'first' > /yard/proof/evidence.txt \
+                 && echo committed",
+            )],
+        )
+    });
+    machine.start();
+    let project = Project::new(&machine, "p", &unreviewed(GATE));
+    let mut watch = project.watch(0);
+    project.json(&["ticket", "new", "--title", "Add feature"]);
+    let first = approval(&mut watch);
+    let candidate_head = head(&first);
+    let first_proof = first["payload"]["proof"].as_str().unwrap().to_string();
+    let first_gate = first["payload"]["checks"][0].as_i64().unwrap();
+
+    project.json(&[
+        "attempt",
+        "reject",
+        "Y-1",
+        "--head",
+        &candidate_head,
+        "--proof",
+        &first_proof,
+        "--text",
+        "Change the proof",
+    ]);
+    let second = approval(&mut watch);
+
+    assert_eq!(head(&second), candidate_head);
+    let gates =
+        project.rows("SELECT id, head, proof FROM \"check\" WHERE kind = 'gate' ORDER BY id");
+    assert_eq!(gates.len(), 2, "{gates:?}");
+    assert_eq!(gates[0]["head"], candidate_head.as_str());
+    assert_eq!(gates[1]["head"], candidate_head.as_str());
+    assert_ne!(gates[0]["proof"], gates[1]["proof"]);
+    assert_ne!(gates[1]["id"].as_i64().unwrap(), first_gate);
+    assert_eq!(second["payload"]["checks"], json!([gates[1]["id"]]));
+    assert_eq!(second["payload"]["proof"], gates[1]["proof"]);
+
+    let seq = last_seq(&project);
+    let refused = project.refused(&[
+        "attempt",
+        "approve",
+        "Y-1",
+        "--head",
+        &candidate_head,
+        "--proof",
+        &first_proof,
+    ]);
+    assert_eq!(refused["code"], "stale", "{refused}");
+    assert_eq!(refused["data"]["expected"], first_proof.as_str());
+    assert_eq!(refused["data"]["current"], second["payload"]["proof"]);
+    assert_eq!(last_seq(&project), seq);
+    assert!(project.rows("SELECT id FROM approval").is_empty());
+
+    let second_proof = second["payload"]["proof"].as_str().unwrap().to_string();
+    project.json(&[
+        "attempt",
+        "approve",
+        "Y-1",
+        "--head",
+        &candidate_head,
+        "--proof",
+        &second_proof,
+    ]);
+    assert_eq!(
+        project.rows("SELECT head, proof FROM approval"),
+        vec![json!({ "head": candidate_head, "proof": second_proof })]
+    );
+}

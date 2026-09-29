@@ -72,7 +72,7 @@ and registered project paths that are gone:
     yard ticket new --title T --body B
     yard status --watch --since SEQ
     yard attempt diff Y-n
-    yard attempt approve Y-n --head SHA
+    yard attempt approve Y-n --head SHA [--proof DIGEST]
     yard sync
 
 The rest is in the `yard-operator` skill

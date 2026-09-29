@@ -1,7 +1,8 @@
 //! The schema, one forward migration per entry. A store whose
 //! `user_version` is past the last entry is from a newer Yard and refused.
 
-pub const MIGRATIONS: &[&str] = &[r#"
+pub const MIGRATIONS: &[&str] = &[
+    r#"
 CREATE TABLE ticket (
     id INTEGER PRIMARY KEY,
     title TEXT NOT NULL,
@@ -157,4 +158,13 @@ CREATE TABLE audit (
     text TEXT,
     data TEXT NOT NULL
 );
-"#];
+"#,
+    // Candidate identity grew a proof snapshot: the copy of the worker-written
+    // proof directory a candidate was judged on.
+    r#"
+ALTER TABLE attempt ADD COLUMN proof TEXT;
+ALTER TABLE execution ADD COLUMN proof TEXT;
+ALTER TABLE "check" ADD COLUMN proof TEXT NOT NULL DEFAULT '';
+ALTER TABLE approval ADD COLUMN proof TEXT NOT NULL DEFAULT '';
+"#,
+];

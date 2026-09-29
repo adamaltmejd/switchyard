@@ -55,6 +55,7 @@ pub async fn next(
                     reason: Some("queue"),
                     base: Some(&approval.base),
                     head: Some(&approval.head),
+                    proof: Some(&approval.proof),
                     ticket_revision: Some(approval.ticket_revision),
                     approval: Some(approval.id),
                     ticket: Some(ticket.id),
@@ -98,7 +99,9 @@ async fn holds(
         Some("the approval was withdrawn")
     } else if attempt.state != "live" {
         Some("the attempt ended")
-    } else if attempt.candidate() != Some((approval.base.as_str(), approval.head.as_str())) {
+    } else if attempt.candidate() != Some((approval.base.as_str(), approval.head.as_str()))
+        || attempt.proof.clone().unwrap_or_default() != approval.proof
+    {
         Some("the candidate changed")
     } else if ticket.revision != approval.ticket_revision {
         Some("the ticket changed")
@@ -156,7 +159,7 @@ fn lapsed(
     };
     let workflow = loaded.config.workflow(&attempt.workflow)?;
     let payload = json!({
-        "base": approval.base, "head": approval.head,
+        "base": approval.base, "head": approval.head, "proof": approval.proof,
         "revision": approval.ticket_revision,
         "gate_digest": approval.gate_digest, "review_digest": approval.review_digest,
         "checks": approval.checks, "protected": protected,
@@ -311,6 +314,7 @@ pub async fn land(
                         reason: Some("landing"),
                         base: Some(&target),
                         head: Some(&merged),
+                        proof: Some(&now.approval.proof),
                         ticket_revision: Some(now.ticket.revision),
                         digest: Some(&now.loaded.gate_digest),
                         name: Some(&gate.name),
