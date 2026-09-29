@@ -223,48 +223,26 @@ fn a_plan_proposes_children_that_block_it() {
     let control = answers.lock().unwrap()[1].clone();
     assert!(control.contains("mounted"), "{control}");
     assert!(control.contains("write=0"), "{control}");
-}
 
-/// Closing a ticket with a live attempt is refused, naming the attempt. The
-/// attempt waits on its `approval` item with no execution running, so a
-/// check keyed on running executions would let the close through. Control:
-/// once the attempt is abandoned, closing succeeds.
-///
-/// Sabotage: key the live-attempt check in `admit::ticket_close` on running
-/// executions; the ticket closes under its waiting attempt.
-#[test]
-fn closing_a_ticket_with_a_live_attempt_is_refused() {
-    let machine = Machine::new("g15-close", |request| {
-        act(
-            request,
-            vec![commit_file("feature.txt", "feature\n", "Add feature")],
-        )
-    });
-    machine.start();
-    let project = Project::new(
-        &machine,
-        "p",
-        &config("").replace("review = [\"correctness\"]", "review = \"none\""),
-    );
-    let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Busy"]);
-    let approval = watch.attention();
-    assert_eq!(approval["data"]["kind"], "approval", "{approval}");
+    // A waiting attempt is live even with no execution running. Sabotage:
+    // key admit::ticket_close on running executions; this close succeeds.
+    // Control: abandon that attempt and the same close succeeds.
+    let attempt = project.rows("SELECT id FROM attempt WHERE ticket = 6")[0]["id"].clone();
     assert!(
         project
-            .rows("SELECT id FROM execution WHERE status = 'running'")
+            .rows(&format!(
+                "SELECT id FROM execution WHERE attempt = {attempt} AND status = 'running'"
+            ))
             .is_empty()
     );
-
-    let refused = project.refused(&["ticket", "done", "Y-1", "--reason", "Not needed"]);
+    let refused = project.refused(&["ticket", "done", "Y-6", "--reason", "Not needed"]);
     assert_eq!(refused["code"], "refused", "{refused}");
-    assert_eq!(refused["data"]["attempt"], 1);
-    assert_eq!(project.json(&["ticket", "show", "Y-1"])["state"], "open");
-
-    project.json(&["ticket", "park", "Y-1"]);
-    project.json(&["attempt", "abandon", "Y-1"]);
-    project.json(&["ticket", "done", "Y-1", "--reason", "Not needed"]);
-    assert_eq!(project.json(&["ticket", "show", "Y-1"])["state"], "done");
+    assert_eq!(refused["data"]["attempt"], attempt);
+    assert_eq!(project.json(&["ticket", "show", "Y-6"])["state"], "open");
+    project.json(&["ticket", "park", "Y-6"]);
+    project.json(&["attempt", "abandon", "Y-6"]);
+    project.json(&["ticket", "done", "Y-6", "--reason", "Not needed"]);
+    assert_eq!(project.json(&["ticket", "show", "Y-6"])["state"], "done");
 }
 
 /// One execution proposing A and B, B depending on A: accepting both mints
