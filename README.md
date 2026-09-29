@@ -42,11 +42,10 @@ machine's settings:
     OPENROUTER_API_KEY=...
     OPENCODE_API_KEY=...
     CLAUDE_CODE_OAUTH_TOKEN=...
-    YARD_MAX_LANES=2
     YARD_BOX_MEMORY=4g
 
-`YARD_MAX_LANES` caps live attempts across the machine; `YARD_BOX_MEMORY`
-gives each box a share of memory; `YARD_ORIGIN_<NAME>` overrides a
+`YARD_BOX_MEMORY` gives each box a share of memory;
+`YARD_ORIGIN_<NAME>` overrides a
 connection's origin (`http` for a host service). The connections, logins
 and their keys are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 

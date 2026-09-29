@@ -25,8 +25,8 @@ candidate, and the executions that produced and judged it. A ticket has at
 most one live attempt and any number of ended ones.
 _Avoid_: worktree
 
-**Lane**: one of the places attempts run through. `max_lanes` and
-`YARD_MAX_LANES` count them; see Capacity for when an attempt holds one.
+**Lane**: one of the places attempts run through. `max_lanes`
+counts them; see Capacity for when an attempt holds one.
 
 **Candidate**: an attempt's exact `base..head` and proof snapshot at a
 moment. Every check, approval and landing binds a candidate, never an
@@ -188,8 +188,8 @@ its execution.
 `operator.env` (`$XDG_CONFIG_HOME/yard/operator.env`, `~/.config` when
 unset, mode 0600) holds the
 machine's credentials, one per connection or login, and the machine's own settings:
-`YARD_MAX_LANES` caps live attempts across every project on the machine;
-`YARD_BOX_MEMORY` gives each box a share of memory. Neither is a project key.
+`YARD_BOX_MEMORY` gives each box a share of memory, and `YARD_ORIGIN_<NAME>`
+overrides a connection's origin. Neither is a project key.
 
 **Connections.** An agent's `provider` names a connection: an upstream
 origin and the header its key rides in. Yard knows two, each with its key
@@ -397,8 +397,8 @@ its audit event. Execution end records only the outcome.
 abandonment or a candidate returning from the queue for repair, which must
 reacquire a lane before its worker starts. A review round's seats run one
 at a time inside the attempt's lane. Each project's landing has its own
-lane outside `max_lanes`. `YARD_MAX_LANES` caps attempts across the machine;
-boxes never exceed attempts plus landings. When a lane frees, the scheduler
+lane outside `max_lanes`.
+Boxes never exceed attempts plus landings. When a lane frees, the scheduler
 gives it to a live attempt waiting to reacquire one before admitting a new
 ticket.
 
@@ -758,7 +758,7 @@ G15. Each is shown by one or more end-to-end scenarios; testing policy is in
 | 1 | Only the queue lands | A worker with its MCP bearer and its clone: `git push` fails, no RPC lands, canonical is not reachable from the box. Control: the queue lands the same candidate. |
 | 2 | Judgments bind exact identity | A passed gate and review, then a new commit and a ticket edit each leave the candidate unverified (an edit supersedes the approval and the implementer runs; when it makes no commit, the same head gets fresh gate and review checks at the new revision, with no `stopped:unchanged`); an edit while a seat is held stops that seat, its box is gone before the implementer runs, and the round count is unchanged; a synced gate change reruns the gate and keeps the review, a synced seat change the reverse. A repair that changes only the proof snapshot, with an unchanged head, is a new candidate: its gate reruns and the old check does not count. An approve or reject names the head and, when the candidate has a proof snapshot, its digest; a delayed answer naming the old digest is stale and writes no row, and the new digest answers. An approval given with `--head`, then a repair commit: the approval does not carry and `approval` is raised again; under `auto` a protected path still raises it. An automatic approval, then a sync that protects its path or sets `approve = "manual"`: the landing withdraws it, raises `approval` and reruns no check; with the attempt abandoned while the landing re-reads it, nothing is raised. An approve naming an old candidate, an edit naming an old revision, and an accepted edit proposal whose ticket moved each get a stale result and change no row. |
 | 3 | Landing is compare-and-swap and proved | Canonical moved by hand between verify and land: the landing retires and re-queues. On green, canonical is the verified ref and contains the head. The daemon killed after `update-ref`, before the landing is recorded: before restart canonical is the merged head, the intent is unresolved and no landing is recorded; on restart it is recorded once, no merge runs, the ticket closes. The daemon killed while its `update-ref` is held: restart keeps the intent and raises `red`; once the command is released, `start` records the landing once. A ticket edit racing the landing intent is refused naming the intent. |
-| 4 | Capacity holds | Two `attempt start`s race for the last lane: one wins and a ticket never has two live attempts. Two registered projects: `YARD_MAX_LANES` bounds attempts across both, and each keeps its own store; an execution ending in one leaves the other's execution of the same id its bearer. A candidate returned from the queue for repair takes a freed lane before a ready ticket is admitted. |
+| 4 | Capacity holds | Two `attempt start`s race for the last lane: one wins and a ticket never has two live attempts. Two registered projects each keep their own store; an execution ending in one leaves the other's execution of the same id its bearer. A candidate returned from the queue for repair takes a freed lane before a ready ticket is admitted. |
 | 5 | Intent precedes effect, and a restart loses only the turn | Intent is ordered before effect: an execution's audit event precedes its box's creation time in `pinfold box list` and the fixture's first request. The daemon killed mid-execution: on restart the execution is `interrupted`, no second box exists, the tree is kept, and `start` continues. The daemon killed while a host landing gate runs: the gate's group is gone after restart and the landing re-queues. No command is answered before reconciliation has committed. |
 | 6 | Inputs are validated at the boundary | A malformed tool payload, a TOML with an unknown key, an unknown workflow name, a sync that removes a workflow an open ticket names: refused by name, nothing written. |
 | 7 | A ticket lands end to end and leaves only rows | New ticket, worker commit, candidate gate, review pass, approval, green landing: canonical moves and the ticket is done. The proof snapshot on the host holds what the worker wrote before landing. Afterwards every decision has one audit event naming its target and text, the execution rows carry tokens, cost, model and start reason, every event is one the Store section names, the attempt directory with its proof snapshot, boxes and proof copies are gone, the approval row and each check's execution carry the proof digest, and another live attempt's directory and canonical are untouched. A `status --watch` returns an approval already open when it starts at once, and one started with nothing open returns when the next item is raised; with `--since` naming the seq of an open approval it keeps waiting until a further item is raised, then prints both. |

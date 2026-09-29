@@ -40,7 +40,6 @@ pub struct Daemon {
 
 /// The machine's own settings, from `operator.env`.
 pub struct Machine {
-    pub max_lanes: Option<u32>,
     pub box_memory: Option<String>,
     /// Every variable `operator.env` set, for connection keys and origins.
     pub vars: BTreeMap<String, String>,
@@ -291,16 +290,7 @@ fn read_machine() -> Result<Machine, String> {
             vars.insert(name.trim().to_string(), value.to_string());
         }
     }
-    let max_lanes = vars
-        .get("YARD_MAX_LANES")
-        .map(|value| {
-            value
-                .parse()
-                .map_err(|_| format!("YARD_MAX_LANES {value:?} is not a number"))
-        })
-        .transpose()?;
     Ok(Machine {
-        max_lanes,
         box_memory: vars.get("YARD_BOX_MEMORY").cloned(),
         vars,
     })
