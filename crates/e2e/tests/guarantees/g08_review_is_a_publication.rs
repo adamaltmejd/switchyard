@@ -951,7 +951,7 @@ fn a_linked_skill_root_refuses_a_codex_seat() {
             return act(request, vec![codex_publish(request, json!([]))]);
         }
         if request.opens() {
-            let skills = if request.prompt().contains("Linked skill") {
+            let skills = if request.last_user().contains("Linked skill") {
                 "mkdir -p evil/x .agents && ln -s ../evil .agents/skills && \
                  printf -- '---\\nname: s\\ndescription: s\\n---\\n' > evil/x/SKILL.md"
             } else {
