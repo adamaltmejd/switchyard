@@ -152,14 +152,18 @@ fn a_plan_proposes_children_that_block_it() {
             project.json(&["proposal", "accept", &id.to_string()]);
         }
     }
-    let seq = project.rows("SELECT MAX(seq) AS seq FROM audit")[0]["seq"].clone();
+    // The refusal changes no row. Cleanup executions for the ended plan
+    // attempts land on their own schedule, so a `MAX(seq)` read would race
+    // them; observe the body and revision the stale edit could change, and
+    // the item that stays open.
     let refused = project.refused(&["proposal", "accept", &stale.to_string()]);
     assert_eq!(refused["code"], "stale", "{refused}");
     assert_eq!(refused["data"]["expected"], 1);
     assert_eq!(refused["data"]["current"], 2);
+    let plan = project.json(&["ticket", "show", "Y-1"]);
     assert_eq!(
-        project.rows("SELECT MAX(seq) AS seq FROM audit")[0]["seq"],
-        seq
+        (plan["body"].as_str(), plan["revision"].as_i64()),
+        (Some("The plan: A, then B."), Some(2))
     );
     assert_eq!(
         project.rows(&format!("SELECT state FROM attention WHERE id = {stale}")),
@@ -324,12 +328,22 @@ fn proposals_of_one_execution_mint_in_order() {
     let (first_a, second_a, second_b) = (titled("First A"), titled("Second A"), titled("Second B"));
     project.json(&["proposal", "accept", &first_a.to_string()]);
 
-    let seq = project.rows("SELECT MAX(seq) AS seq FROM audit")[0]["seq"].clone();
+    // The refusal changes no row. Cleanup executions for the ended plan
+    // attempts land on their own schedule, so a `MAX(seq)` read would race
+    // them; observe the mint and the item the refused accept could touch.
     let refused = project.refused(&["proposal", "accept", &second_b.to_string()]);
     assert_eq!(refused["code"], "refused", "{refused}");
+    assert!(
+        project
+            .rows("SELECT id FROM ticket WHERE title = 'Second B'")
+            .is_empty(),
+        "the refused accept minted Second B"
+    );
     assert_eq!(
-        project.rows("SELECT MAX(seq) AS seq FROM audit")[0]["seq"],
-        seq
+        project.rows(&format!(
+            "SELECT state FROM attention WHERE id = {second_b}"
+        )),
+        vec![json!({ "state": "open" })]
     );
 
     let a = project.json(&["proposal", "accept", &second_a.to_string()]);
