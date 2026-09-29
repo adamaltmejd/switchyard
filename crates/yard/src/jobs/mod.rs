@@ -88,7 +88,8 @@ pub async fn step(daemon: &Arc<Daemon>, project: &Arc<Project>) -> Result<(), Fa
     let Ok(loaded) = load(daemon, project).await else {
         return Ok(());
     };
-    // Live attempts reacquire a freed lane before new tickets are admitted,
+    // Live attempts reacquire a freed lane before new tickets are admitted
+    // (the scheduler also reserves lanes for them under the admission lock),
     // so a repair returning from the queue never starves behind admissions.
     let live = project.read(attempts::live)?;
     for attempt in live {
@@ -179,6 +180,38 @@ pub fn spawn(daemon: &Arc<Daemon>, project: &Arc<Project>, kind: &str, execution
     });
 }
 
+/// Whether a live attempt could start its next execution once it holds a
+/// lane. `Some` if so, carrying the stale approval item it must supersede.
+fn runnable(
+    conn: &rusqlite::Connection,
+    loaded: &Loaded,
+    attempt: &attempts::Attempt,
+) -> Result<Option<Option<attempts::Attention>>, Fail> {
+    let executions = executions::for_attempt(conn, attempt.id)?;
+    if executions.iter().any(|row| row.status == "running") {
+        return Ok(None);
+    }
+    let open = attempts::open_for_attempt(conn, attempt.id)?;
+    // A pending edit outranks an edit proposal made from the pre-edit text.
+    let edited = attempts::edit_pending(conn, attempt.id)?;
+    if open.iter().any(|item| {
+        (item.kind != "proposal" && item.kind != "approval")
+            || (item.reason == "edit" && !(edited && item.kind == "proposal"))
+    }) {
+        return Ok(None);
+    }
+    let ticket = tickets::get(conn, attempt.ticket)?;
+    if checks::active_for(conn, attempt.id)?.is_some() {
+        return Ok(None);
+    }
+    // An approval item counts while everything it binds is current; a new
+    // head, ticket revision or digest supersedes it.
+    match open.into_iter().find(|item| item.kind == "approval") {
+        Some(item) if stale_part(&item.payload, attempt, &ticket, loaded)?.is_none() => Ok(None),
+        item => Ok(Some(item)),
+    }
+}
+
 /// Decide the next execution for one live attempt, if any.
 async fn advance(
     daemon: &Arc<Daemon>,
@@ -186,34 +219,15 @@ async fn advance(
     loaded: &Loaded,
     attempt: &attempts::Attempt,
 ) -> Result<(), Fail> {
+    let Some(superseded) = project.read(|conn| runnable(conn, loaded, attempt))? else {
+        return Ok(());
+    };
+    if let Some(item) = superseded {
+        project.tx(|tx| attempts::resolve(tx, &item, "superseded", None))?;
+    }
     let executions = project.read(|conn| executions::for_attempt(conn, attempt.id))?;
-    if executions.iter().any(|row| row.status == "running") {
-        return Ok(());
-    }
-    let open = project.read(|conn| attempts::open_for_attempt(conn, attempt.id))?;
-    // A pending edit outranks an edit proposal made from the pre-edit text.
     let edited = project.read(|conn| attempts::edit_pending(conn, attempt.id))?;
-    if open.iter().any(|item| {
-        (item.kind != "proposal" && item.kind != "approval")
-            || (item.reason == "edit" && !(edited && item.kind == "proposal"))
-    }) {
-        return Ok(());
-    }
     let ticket = project.read(|conn| tickets::get(conn, attempt.ticket))?;
-    if project
-        .read(|conn| checks::active_for(conn, attempt.id))?
-        .is_some()
-    {
-        return Ok(());
-    }
-    // An approval item counts while everything it binds is current; a new
-    // head, ticket revision or digest supersedes it.
-    if let Some(item) = open.iter().find(|item| item.kind == "approval") {
-        if stale_part(&item.payload, attempt, &ticket, loaded)?.is_none() {
-            return Ok(());
-        }
-        project.tx(|tx| attempts::resolve(tx, item, "superseded", None))?;
-    }
     if !attempt.lane && !admit::take_lane(daemon, project, loaded, attempt.id)? {
         return Ok(());
     }
