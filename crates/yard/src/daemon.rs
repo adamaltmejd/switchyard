@@ -572,6 +572,15 @@ fn service_file() -> PathBuf {
     }
 }
 
+fn agent_loaded() -> bool {
+    std::process::Command::new("launchctl")
+        .args(["list", LABEL])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
 pub async fn install() -> Result<Value, Fail> {
     let exe = std::env::current_exe().map_err(|error| error.to_string())?;
     let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
@@ -589,13 +598,7 @@ pub async fn install() -> Result<Value, Fail> {
         std::fs::create_dir_all(plist.parent().expect("agents dir"))
             .map_err(|error| error.to_string())?;
         std::fs::write(&plist, text).map_err(|error| error.to_string())?;
-        let loaded = std::process::Command::new("launchctl")
-            .args(["list", LABEL])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success());
-        if loaded {
+        if agent_loaded() {
             service(&["launchctl", "unload", &plist.to_string_lossy()])?;
         }
         service(&["launchctl", "load", "-w", &plist.to_string_lossy()])?;
@@ -635,7 +638,9 @@ pub async fn install() -> Result<Value, Fail> {
 pub fn uninstall() -> Result<Value, Fail> {
     if cfg!(target_os = "macos") {
         let plist = service_file();
-        let _ = service(&["launchctl", "unload", "-w", &plist.to_string_lossy()]);
+        if agent_loaded() {
+            let _ = service(&["launchctl", "unload", "-w", &plist.to_string_lossy()]);
+        }
         let _ = std::fs::remove_file(&plist);
         return Ok(json!({ "removed": plist }));
     }
