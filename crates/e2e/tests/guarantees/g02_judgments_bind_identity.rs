@@ -171,10 +171,8 @@ fn a_ticket_edit_leaves_the_candidate_unverified() {
 
     assert_ne!(head(&second), head(&first));
     assert_eq!(second["payload"]["revision"], revision + 1);
-    let superseded = project.rows(&format!(
-        "SELECT resolution FROM attention WHERE id = {}",
-        first["id"]
-    ));
+    let superseded =
+        project.rows("SELECT resolution FROM attention WHERE kind = 'approval' ORDER BY id");
     assert_eq!(superseded[0]["resolution"], "superseded");
     for id in first["payload"]["checks"].as_array().unwrap() {
         assert!(
