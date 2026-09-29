@@ -445,7 +445,7 @@ async fn init(daemon: &Arc<Daemon>, params: &Value) -> Result<Value, Fail> {
             root.display()
         )));
     }
-    if let Some(main) = crate::git::main_checkout(&root) {
+    if let Some(main) = daemon.git.main_checkout(&root).await {
         return Err(Fail::refused(format!(
             "{} is a linked worktree; run `yard init` in the main checkout {}",
             root.display(),

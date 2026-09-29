@@ -123,6 +123,31 @@ impl Git {
         }
     }
 
+    /// The main checkout when `dir` is in a linked worktree, else `None`.
+    pub async fn main_checkout(&self, dir: &Path) -> Option<PathBuf> {
+        let out = self
+            .run(
+                dir,
+                &[
+                    "rev-parse",
+                    "--path-format=absolute",
+                    "--git-dir",
+                    "--git-common-dir",
+                ],
+            )
+            .await
+            .ok()?;
+        if out.code != 0 {
+            return None;
+        }
+        let mut lines = out.stdout.lines();
+        let (git_dir, common) = (lines.next()?, lines.next()?);
+        if git_dir == common {
+            return None;
+        }
+        Path::new(common).parent().map(Path::to_path_buf)
+    }
+
     /// A bare repository whose HEAD names `branch`: the target's name.
     pub async fn init_bare(&self, dir: &Path, branch: &str) -> Result<(), String> {
         std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
@@ -438,30 +463,6 @@ pub fn exit_code(status: std::process::ExitStatus) -> i32 {
     status
         .code()
         .unwrap_or_else(|| 128 + status.signal().unwrap_or(0))
-}
-
-/// The main checkout when `dir` is a linked worktree, else `None`.
-pub fn main_checkout(dir: &Path) -> Option<PathBuf> {
-    let output = std::process::Command::new("git")
-        .args([
-            "rev-parse",
-            "--path-format=absolute",
-            "--git-dir",
-            "--git-common-dir",
-        ])
-        .current_dir(dir)
-        .env_clear()
-        .env("PATH", std::env::var_os("PATH")?)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .output()
-        .ok()?;
-    let text = String::from_utf8(output.stdout).ok()?;
-    let mut lines = text.lines();
-    let (git_dir, common) = (lines.next()?, lines.next()?);
-    if git_dir == common {
-        return None;
-    }
-    Path::new(common).parent().map(Path::to_path_buf)
 }
 
 pub fn target_ref(branch: &str) -> String {

@@ -318,10 +318,13 @@ fn method(group: &str, command: &impl serde::Serialize) -> (String, Value) {
 }
 
 /// `find_project`, except that a linked worktree resolves to its main
-/// checkout when that is a registered project.
+/// checkout when that is a registered project, whether or not the worktree
+/// checks out `.yard/config.toml`.
 async fn resolve_project(socket: &Path, start: &Path) -> Result<String, Fail> {
-    let found = find_project(start)?;
-    if let Some(main) = crate::git::main_checkout(Path::new(&found)) {
+    let dir = std::fs::canonicalize(start)
+        .map_err(|error| Fail::invalid(format!("{}: {error}", start.display())))?;
+    let git = crate::git::Git::new(std::env::var("PATH").unwrap_or_default());
+    if let Some(main) = git.main_checkout(&dir).await {
         let listed = api::call(socket, "project.list", json!({})).await?;
         let registered = listed.as_array().is_some_and(|roots| {
             roots
@@ -332,7 +335,7 @@ async fn resolve_project(socket: &Path, start: &Path) -> Result<String, Fail> {
             return Ok(main.to_string_lossy().into_owned());
         }
     }
-    Ok(found)
+    find_project(&dir)
 }
 
 /// The nearest directory at or above `start` holding `.yard/config.toml`.
