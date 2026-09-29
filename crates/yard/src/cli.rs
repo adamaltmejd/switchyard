@@ -643,6 +643,12 @@ fn attempt_line(status: &Value, attempt: &Value) -> (String, String) {
         }
     } else if let Some(item) = item {
         format!("{}: {}", field(item, "kind"), field(item, "reason"))
+    } else if let Some(reason) = attempt["next"]["reason"].as_str() {
+        if attempt["lane"].as_bool().unwrap_or(false) {
+            format!("{reason} next")
+        } else {
+            format!("{reason}: no lane")
+        }
     } else {
         String::new()
     };
