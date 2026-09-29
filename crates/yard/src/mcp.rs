@@ -30,7 +30,7 @@ pub enum Kind {
 #[derive(Default)]
 pub struct Grants {
     bearers: Mutex<HashMap<String, Grant>>,
-    /// `(project key, execution)` whose grant a harness has listed tools for.
+    /// `(project key, execution)` whose grant a harness has initialized.
     /// A required MCP server's connection is the registration proof, and this
     /// is the daemon's own positive signal that the harness reached it.
     connected: Mutex<HashSet<(String, i64)>>,
@@ -69,7 +69,7 @@ impl Grants {
             .remove(&(project.key.clone(), execution));
     }
 
-    /// Whether the harness fetched this execution's tools from the server.
+    /// Whether the harness initialized this execution's connection.
     pub fn connected(&self, project: &Project, execution: i64) -> bool {
         self.connected
             .lock()
@@ -283,12 +283,7 @@ async fn answer(daemon: &Arc<Daemon>, request: Request<Incoming>) -> Response<Fu
                 "serverInfo": { "name": "yard", "version": env!("CARGO_PKG_VERSION") },
             }))
         }
-        ("tools/list", Some(_)) => {
-            daemon
-                .grants
-                .mark_connected(&grant.project, grant.execution);
-            Ok(json!({ "tools": tools(grant.kind) }))
-        }
+        ("tools/list", Some(_)) => Ok(json!({ "tools": tools(grant.kind) })),
         ("tools/call", Some(_)) => Ok(call(daemon, &grant, &message["params"]).await),
         _ => Err(json!({ "code": -32601, "message": format!("method {method:?} is not served") })),
     };

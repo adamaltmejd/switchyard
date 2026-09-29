@@ -672,8 +672,8 @@ exit status alone. Yard never parses a transcript for a verdict.
 
 The MCP listener is HTTP on loopback, reached through a pinfold route,
 authenticated by a per-execution bearer. The bearer's first `initialize` opens
-its one session: Yard answers with a random `Mcp-Session-Id` header, kept
-only in the harness's memory. Every later request must carry it; a second
+its one session and records the connection before replying with a random
+`Mcp-Session-Id` header, kept only in the harness's memory. Every later request must carry it; a second
 `initialize` or a request without it is refused with 404 and names nothing of
 the grant. Four tools, granted by execution kind:
 
