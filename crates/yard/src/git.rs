@@ -129,6 +129,31 @@ impl Git {
         }
     }
 
+    /// The main checkout when `dir` is in a linked worktree, else `None`.
+    pub async fn main_checkout(&self, dir: &Path) -> Option<PathBuf> {
+        let out = self
+            .run(
+                dir,
+                &[
+                    "rev-parse",
+                    "--path-format=absolute",
+                    "--git-dir",
+                    "--git-common-dir",
+                ],
+            )
+            .await
+            .ok()?;
+        if out.code != 0 {
+            return None;
+        }
+        let mut lines = out.stdout.lines();
+        let (git_dir, common) = (lines.next()?, lines.next()?);
+        if git_dir == common {
+            return None;
+        }
+        Path::new(common).parent().map(Path::to_path_buf)
+    }
+
     /// A bare repository whose HEAD names `branch`: the target's name.
     pub async fn init_bare(&self, dir: &Path, branch: &str) -> Result<(), String> {
         std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;

@@ -652,7 +652,10 @@ The daemon owns the project registry, a list of absolute project paths in
 `$XDG_STATE_HOME/yard/projects`. `yard init` registers a project and `yard
 project forget` removes one; a registered path that is gone is skipped and
 reported by `doctor`. The CLI resolves its project from the working
-directory upward to the nearest `.yard/config.toml`, or from `--project`.
+directory upward to the nearest `.yard/config.toml`, or from `--project`;
+a linked git worktree resolves to its main checkout when that is
+registered, and `yard init` refuses a linked worktree, naming the main
+checkout.
 Each project has its own store and its own audit sequence, so `status`,
 `status --watch` and `status --history` are per project.
 
