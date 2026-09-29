@@ -96,6 +96,16 @@ pub async fn image(daemon: &Daemon, project: &Project, loaded: &Loaded) -> Resul
     Ok(built)
 }
 
+/// The image may be gone from the runtime; forget it so the next attempt
+/// rebuilds. Rebuilding a present image is a cache hit.
+fn forget_image(daemon: &Daemon, reference: &str) {
+    daemon
+        .images
+        .lock()
+        .expect("images lock")
+        .retain(|_, (_, cached)| cached != reference);
+}
+
 /// Bring a worker's box up and record its handle. A box that does not come
 /// up revokes the execution's grant.
 pub async fn up_worker(
@@ -109,6 +119,7 @@ pub async fn up_worker(
         Ok(live) => live,
         Err(error) => {
             daemon.grants.revoke(project, execution);
+            forget_image(daemon, &spec.image);
             return Err(Fail::new(
                 "box",
                 format!("the box did not come up: {error}"),
@@ -1101,11 +1112,13 @@ async fn box_gate(
         }),
         memory: daemon.machine.box_memory.clone(),
     };
-    let live = daemon
-        .pinfold
-        .up(&spec, &[], UP_TIMEOUT)
-        .await
-        .map_err(|error| format!("the gate box did not come up: {error}"))?;
+    let live = match daemon.pinfold.up(&spec, &[], UP_TIMEOUT).await {
+        Ok(live) => live,
+        Err(error) => {
+            forget_image(daemon, &spec.image);
+            return Err(format!("the gate box did not come up: {error}"));
+        }
+    };
     let _ = project
         .read(|conn| executions::set_handle(conn, execution, &live.name, live.image_id.as_deref()));
     let result = daemon
