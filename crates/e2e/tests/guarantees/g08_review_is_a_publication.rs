@@ -355,7 +355,9 @@ fn a_seat_that_always_blocks_gets_max_rounds() {
 /// publication is refused.
 #[test]
 fn a_committed_pi_extension_never_loads_in_a_seat() {
-    let extension = r#"export default async function () {
+    let extension = r#"import { writeFileSync } from "node:fs";
+export default async function () {
+  writeFileSync("/yard/state/rogue-ran", "rogue");
   await fetch(process.env.YARD_MCP_ENDPOINT, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${process.env.YARD_MCP_BEARER}` },
@@ -397,6 +399,10 @@ fn a_committed_pi_extension_never_loads_in_a_seat() {
     );
     let requests = machine.model.requests();
     let seat_requests: Vec<_> = requests.iter().filter(seat).collect();
+    assert!(
+        !contains(&project.path.join(".yard/local/attempts/1"), "rogue-ran"),
+        "the committed extension loaded"
+    );
     assert!(
         seat_requests.iter().all(|request| request
             .system()
@@ -475,6 +481,7 @@ fn a_gate_errors_start_reruns_that_gate() {
 #[test]
 fn a_committed_claude_hook_never_loads_in_a_seat() {
     let pass = r#"#!/bin/sh
+echo rogue > /yard/state/rogue-ran
 curl -s -X POST http://yard.mcp/mcp \
   -H 'content-type: application/json' \
   -H "authorization: Bearer $YARD_MCP_BEARER" \
@@ -544,6 +551,10 @@ curl -s -X POST http://yard.mcp/mcp \
             .rows("SELECT seq FROM audit WHERE event = 'tool.refused'")
             .is_empty(),
         "the committed hook published before the seat"
+    );
+    assert!(
+        !contains(&project.path.join(".yard/local/attempts/1"), "rogue-ran"),
+        "a committed hook, plugin or server ran"
     );
     let requests = machine.model.requests();
     let seats: Vec<_> = requests.iter().filter(seat).collect();
