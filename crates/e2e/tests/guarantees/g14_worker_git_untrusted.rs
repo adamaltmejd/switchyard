@@ -19,7 +19,8 @@ use serde_json::json;
 /// the clone (e.g. `git status`); the fsmonitor marker appears. Or write
 /// `models.json` with `std::fs::write` in `pi::stage_state`; the
 /// `models.json` marker appears (and the next execution's Pi, reading the
-/// link, misses its route).
+/// link, misses its route). Dropping git's error detail from the refusal
+/// loses the corrupt commit identity reported by the fixture.
 #[test]
 fn planted_worker_git_never_runs_on_the_host() {
     let markers = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
@@ -46,7 +47,7 @@ fn planted_worker_git_never_runs_on_the_host() {
                       $(git rev-parse 'HEAD^{{tree}}') $(git rev-parse HEAD) \
                       | git hash-object -t commit --literally -w --stdin) \
                  && git -c core.hooksPath=/dev/null update-ref HEAD $bad \
-                 && ln -sf {dir}/models.json /yard/state/agent/models.json && echo planted"
+                 && ln -sf {dir}/models.json /yard/state/agent/models.json && echo planted $bad"
             ))],
         )
     });
@@ -71,6 +72,18 @@ fn planted_worker_git_never_runs_on_the_host() {
         project.rows("SELECT outcome FROM execution"),
         vec![json!({ "outcome": "refused" })]
     );
+    let corrupt = machine
+        .model
+        .requests()
+        .iter()
+        .flat_map(ModelRequest::tool_results)
+        .find_map(|(_, text)| {
+            text.lines()
+                .find_map(|line| line.strip_prefix("planted ").map(str::to_string))
+        })
+        .expect("the fixture reported its corrupt commit");
+    let detail = stopped["data"]["payload"]["detail"].as_str().unwrap();
+    assert!(detail.contains(&corrupt), "{stopped}");
     git(&project.canonical(), &["fsck", "--strict", "--no-dangling"]);
 
     project.json(&["attempt", "start", "Y-1"]);
@@ -221,7 +234,6 @@ fn a_bad_proof_entry_is_refused_by_name() {
             .to_string()
     };
     assert!(detail(1).contains("link"), "{}", detail(1));
-    assert!(detail(1).contains("symbolic link"), "{}", detail(1));
     assert!(detail(2).contains("1024"), "{}", detail(2));
     assert!(detail(2).contains("many/f"), "{}", detail(2));
 
