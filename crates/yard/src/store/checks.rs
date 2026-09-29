@@ -20,29 +20,31 @@ pub struct Check {
     pub execution: i64,
     pub kind: String,
     pub name: String,
-    pub input: Input,
+    pub base: String,
+    pub head: String,
+    pub proof: String,
+    pub ticket_revision: i64,
     pub verdict: String,
     pub round: Option<i64>,
 }
 
-const COLUMNS: &str = "id, execution, attempt, kind, name, base, head, ticket_revision, digest, verdict, round, proof";
+// A check is its execution's input plus a verdict, read through the join.
+const SELECT: &str = "SELECT c.id, c.execution, c.kind, COALESCE(e.name, ''), COALESCE(e.base, ''),
+    COALESCE(e.head, ''), COALESCE(e.proof, ''), COALESCE(e.ticket_revision, 0), c.verdict, e.round
+    FROM \"check\" c JOIN execution e ON e.id = c.execution";
 
 fn row(row: &Row) -> rusqlite::Result<Check> {
     Ok(Check {
         id: row.get(0)?,
         execution: row.get(1)?,
-        kind: row.get(3)?,
-        name: row.get(4)?,
-        input: Input {
-            attempt: row.get(2)?,
-            base: row.get(5)?,
-            head: row.get(6)?,
-            ticket_revision: row.get(7)?,
-            digest: row.get(8)?,
-            proof: row.get(11)?,
-        },
-        verdict: row.get(9)?,
-        round: row.get(10)?,
+        kind: row.get(2)?,
+        name: row.get(3)?,
+        base: row.get(4)?,
+        head: row.get(5)?,
+        proof: row.get(6)?,
+        ticket_revision: row.get(7)?,
+        verdict: row.get(8)?,
+        round: row.get(9)?,
     })
 }
 
@@ -53,10 +55,10 @@ impl Check {
             "execution": self.execution,
             "kind": self.kind,
             "name": self.name,
-            "head": self.input.head,
-            "base": self.input.base,
-            "proof": self.input.proof,
-            "ticket_revision": self.input.ticket_revision,
+            "head": self.head,
+            "base": self.base,
+            "proof": self.proof,
+            "ticket_revision": self.ticket_revision,
             "verdict": self.verdict,
             "round": self.round,
         })
@@ -76,14 +78,14 @@ pub fn current(
 ) -> Result<Option<Check>, Fail> {
     Ok(conn
         .query_row(
-            "SELECT c.id, c.execution, c.attempt, c.kind, c.name, c.base, c.head,
-                    c.ticket_revision, c.digest, c.verdict, c.round, c.proof
-             FROM \"check\" c JOIN execution e ON e.id = c.execution
-             WHERE c.kind = ?1 AND c.name = ?2 AND c.attempt = ?3
-             AND c.base = ?4 AND c.head = ?5 AND c.ticket_revision = ?6 AND c.digest = ?7
-             AND c.proof = ?8
-             AND (c.kind != 'review' OR e.mcp = 'registered')
-             ORDER BY c.id DESC LIMIT 1",
+            &format!(
+                "{SELECT}
+                 WHERE c.kind = ?1 AND e.name = ?2 AND e.attempt = ?3
+                 AND e.base = ?4 AND e.head = ?5 AND e.ticket_revision = ?6 AND e.digest = ?7
+                 AND COALESCE(e.proof, '') = ?8
+                 AND (c.kind != 'review' OR e.mcp = 'registered')
+                 ORDER BY c.id DESC LIMIT 1"
+            ),
             params![
                 kind,
                 name,
@@ -102,7 +104,7 @@ pub fn current(
 pub fn for_execution(conn: &Connection, execution: i64) -> Result<Option<Check>, Fail> {
     Ok(conn
         .query_row(
-            &format!("SELECT {COLUMNS} FROM \"check\" WHERE execution = ?1"),
+            &format!("{SELECT} WHERE c.execution = ?1"),
             [execution],
             row,
         )
@@ -112,7 +114,7 @@ pub fn for_execution(conn: &Connection, execution: i64) -> Result<Option<Check>,
 pub fn for_attempt(conn: &Connection, attempt: i64) -> Result<Vec<Check>, Fail> {
     super::all(
         conn,
-        &format!("SELECT {COLUMNS} FROM \"check\" WHERE attempt = ?1 ORDER BY id"),
+        &format!("{SELECT} WHERE e.attempt = ?1 ORDER BY c.id"),
         [attempt],
         row,
     )
@@ -121,34 +123,15 @@ pub fn for_attempt(conn: &Connection, attempt: i64) -> Result<Vec<Check>, Fail> 
 pub struct Record<'a> {
     pub execution: i64,
     pub kind: &'a str,
-    pub name: &'a str,
-    pub input: &'a Input,
     pub verdict: &'a str,
-    pub image_id: Option<&'a str>,
-    pub round: Option<i64>,
     pub ticket: i64,
 }
 
 pub fn record(tx: &Connection, record: Record) -> Result<i64, Fail> {
+    let row = super::executions::get(tx, record.execution)?;
     tx.execute(
-        "INSERT INTO \"check\" (execution, attempt, kind, name, base, head, proof, ticket_revision, digest,
-            verdict, image_id, round, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-        params![
-            record.execution,
-            record.input.attempt,
-            record.kind,
-            record.name,
-            record.input.base,
-            record.input.head,
-            record.input.proof,
-            record.input.ticket_revision,
-            record.input.digest,
-            record.verdict,
-            record.image_id,
-            record.round,
-            now()
-        ],
+        "INSERT INTO \"check\" (execution, kind, verdict, created_at) VALUES (?1, ?2, ?3, ?4)",
+        params![record.execution, record.kind, record.verdict, now()],
     )?;
     let id = tx.last_insert_rowid();
     audit(
@@ -156,13 +139,13 @@ pub fn record(tx: &Connection, record: Record) -> Result<i64, Fail> {
         "check.recorded",
         Target {
             ticket: Some(record.ticket),
-            attempt: Some(record.input.attempt),
+            attempt: Some(row.attempt),
             execution: Some(record.execution),
             attention: None,
         },
         None,
-        json!({ "check": id, "kind": record.kind, "name": record.name, "verdict": record.verdict,
-                "head": record.input.head, "proof": record.input.proof, "round": record.round }),
+        json!({ "check": id, "kind": record.kind, "name": row.name, "verdict": record.verdict,
+                "head": row.head.unwrap_or_default(), "proof": row.proof.unwrap_or_default(), "round": row.round }),
     )?;
     Ok(id)
 }

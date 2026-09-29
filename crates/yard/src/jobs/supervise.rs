@@ -976,14 +976,14 @@ pub async fn gate(
     };
     let _ = std::fs::remove_dir_all(&checkout);
     let log = dir.join("gates").join(format!("{execution}.log"));
-    let (verdict, detail, code, oom, image) = match outcome {
+    let (verdict, detail, code, oom) = match outcome {
         Ok(result) => {
             let _ = std::fs::write(&log, &result.output);
             let tail = tail(&result.output);
             let verdict = if result.code == 0 { "pass" } else { "fail" };
-            (verdict, tail, Some(result.code), result.oom, result.image)
+            (verdict, tail, Some(result.code), result.oom)
         }
-        Err(error) => ("error", error, None, None, None),
+        Err(error) => ("error", error, None, None),
     };
     project.tx(|tx| {
         executions::end(
@@ -1021,18 +1021,7 @@ pub async fn gate(
             checks::Record {
                 execution,
                 kind: "gate",
-                name: &name,
-                input: &checks::Input {
-                    attempt: attempt.id,
-                    base: row.base.clone().unwrap_or_default(),
-                    head: commit.clone(),
-                    proof: row.proof.clone().unwrap_or_default(),
-                    ticket_revision: row.ticket_revision.unwrap_or_default(),
-                    digest: row.digest.clone().unwrap_or_default(),
-                },
                 verdict,
-                image_id: image.as_deref(),
-                round: None,
                 ticket: attempt.ticket,
             },
         )?;
@@ -1044,7 +1033,6 @@ pub struct GateResult {
     pub code: i32,
     pub output: String,
     pub oom: Option<u64>,
-    pub image: Option<String>,
 }
 
 fn tail(output: &str) -> String {
@@ -1118,20 +1106,17 @@ async fn box_gate(
         )
         .await;
     let oom = daemon.pinfold.oom_kills(&live.name).await;
-    let image = live.image_id.clone();
     let _ = live.down(DOWN_TIMEOUT).await;
     match result {
         Ok(out) => Ok(GateResult {
             code: out.code,
             output: format!("{}{}", out.stdout, out.stderr),
             oom,
-            image,
         }),
         Err(crate::r#box::ExecError::Timeout) => Ok(GateResult {
             code: 124,
             output: format!("the gate ran past its {} minutes", gate.timeout_minutes),
             oom,
-            image,
         }),
         Err(error) => Err(format!("the gate could not run: {error}")),
     }
@@ -1226,7 +1211,6 @@ async fn host_gate(
             code: crate::git::exit_code(status),
             output,
             oom: None,
-            image: None,
         }),
         Ok((_, Err(error))) => Err(format!("the host gate could not run: {error}")),
         Err(_) => {
@@ -1238,7 +1222,6 @@ async fn host_gate(
                 code: 124,
                 output: format!("the gate ran past its {} minutes", gate.timeout_minutes),
                 oom: None,
-                image: None,
             })
         }
     }

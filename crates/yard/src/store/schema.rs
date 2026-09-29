@@ -170,4 +170,17 @@ ALTER TABLE approval ADD COLUMN proof TEXT NOT NULL DEFAULT '';
     // The harness's registration proof, once its reader yields a complete one:
     // `registered`, or `refused` when the reader refused it.
     "ALTER TABLE execution ADD COLUMN mcp TEXT;",
+    // A check is its execution's input plus a verdict; the copies go.
+    r#"
+DROP INDEX check_attempt;
+ALTER TABLE "check" DROP COLUMN attempt;
+ALTER TABLE "check" DROP COLUMN name;
+ALTER TABLE "check" DROP COLUMN base;
+ALTER TABLE "check" DROP COLUMN head;
+ALTER TABLE "check" DROP COLUMN proof;
+ALTER TABLE "check" DROP COLUMN ticket_revision;
+ALTER TABLE "check" DROP COLUMN digest;
+ALTER TABLE "check" DROP COLUMN image_id;
+ALTER TABLE "check" DROP COLUMN round;
+"#,
 ];

@@ -17,7 +17,6 @@ pub struct Execution {
     pub head: Option<String>,
     pub proof: Option<String>,
     pub ticket_revision: Option<i64>,
-    pub digest: Option<String>,
     pub name: Option<String>,
     pub round: Option<i64>,
     pub handle: Option<String>,
@@ -32,7 +31,7 @@ pub struct Execution {
 }
 
 const COLUMNS: &str = "id, attempt, parent, kind, reason, status, outcome, detail, base, head,
-    proof, ticket_revision, digest, name, round, handle, session_id, approval, intent_old, intent_merged,
+    proof, ticket_revision, name, round, handle, session_id, approval, intent_old, intent_merged,
     intent_state, progress, harness_version, resumed";
 
 fn row(row: &Row) -> rusqlite::Result<Execution> {
@@ -49,18 +48,17 @@ fn row(row: &Row) -> rusqlite::Result<Execution> {
         head: row.get(9)?,
         proof: row.get(10)?,
         ticket_revision: row.get(11)?,
-        digest: row.get(12)?,
-        name: row.get(13)?,
-        round: row.get(14)?,
-        handle: row.get(15)?,
-        session_id: row.get(16)?,
-        approval: row.get(17)?,
-        intent_old: row.get(18)?,
-        intent_merged: row.get(19)?,
-        intent_state: row.get(20)?,
-        progress: row.get(21)?,
-        harness_version: row.get(22)?,
-        resumed: row.get(23)?,
+        name: row.get(12)?,
+        round: row.get(13)?,
+        handle: row.get(14)?,
+        session_id: row.get(15)?,
+        approval: row.get(16)?,
+        intent_old: row.get(17)?,
+        intent_merged: row.get(18)?,
+        intent_state: row.get(19)?,
+        progress: row.get(20)?,
+        harness_version: row.get(21)?,
+        resumed: row.get(22)?,
     })
 }
 

@@ -228,11 +228,6 @@ pub fn publish(grant: &crate::mcp::Grant, arguments: &Value) -> Result<Value, Fa
         }
         let row = executions::get(tx, grant.execution)?;
         let attempt = attempts::get(tx, row.attempt)?;
-        let image: Option<String> = tx.query_row(
-            "SELECT image_id FROM execution WHERE id = ?1",
-            [grant.execution],
-            |row| row.get(0),
-        )?;
         let blocked = findings.iter().any(|finding| {
             crate::config::priority(&finding.priority).is_some_and(|priority| priority <= blocking)
         });
@@ -241,18 +236,7 @@ pub fn publish(grant: &crate::mcp::Grant, arguments: &Value) -> Result<Value, Fa
             checks::Record {
                 execution: grant.execution,
                 kind: "review",
-                name: row.name.as_deref().unwrap_or_default(),
-                input: &checks::Input {
-                    attempt: attempt.id,
-                    base: row.base.clone().unwrap_or_default(),
-                    head: row.head.clone().unwrap_or_default(),
-                    proof: row.proof.clone().unwrap_or_default(),
-                    ticket_revision: row.ticket_revision.unwrap_or_default(),
-                    digest: row.digest.clone().unwrap_or_default(),
-                },
                 verdict: if blocked { "fail" } else { "pass" },
-                image_id: image.as_deref(),
-                round: row.round,
                 ticket: attempt.ticket,
             },
         )?;
