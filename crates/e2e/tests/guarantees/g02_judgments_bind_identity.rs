@@ -138,12 +138,7 @@ fn a_new_commit_leaves_the_candidate_unverified() {
 fn a_ticket_edit_leaves_the_candidate_unverified() {
     let machine = Machine::new(
         "g2-edit",
-        worker(
-            "nothing else",
-            bash(
-                "cd /workspace && { [ \"$(git log -1 --format=%s)\" = Again ] || git commit -q --allow-empty -m Again; } && echo done",
-            ),
-        ),
+        worker("nothing else", bash("cd /workspace && echo unchanged")),
     );
     machine.start();
     let project = Project::new(&machine, "p", &config(GATE));
