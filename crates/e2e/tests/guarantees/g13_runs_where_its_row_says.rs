@@ -287,6 +287,12 @@ fn a_host_candidate_gate_sees_the_head_and_only_its_env() {
 /// merged ref; its head is not a merge of the target and the first head. Or
 /// set `YARD_BASE` to the candidate head; `base=` names it instead of the
 /// target.
+///
+/// Sabotage: in `queue::admit` (crates/yard/src/jobs/queue.rs), which the
+/// landing calls after the held merge, skip the reread by replacing `let
+/// lapse = holds(...).await?;` with `let lapse = None;` and `unchanged` with
+/// `true`; the superseded Y-2 goes on to a gate and the decisive-event
+/// assertion fails on `execution.started` instead of `attention.raised`.
 #[test]
 fn a_host_landing_gate_runs_on_the_merged_ref_only_when_approved() {
     let machine = Machine::new("g13-host-landing", |request| {

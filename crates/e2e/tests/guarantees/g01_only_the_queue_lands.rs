@@ -13,8 +13,9 @@ use std::sync::{Arc, Mutex};
 /// Sabotage: mount the project's `.yard/local` into the worker box at its
 /// host path; the push to canonical lands the commit. Mount the daemon's
 /// state dir (the socket) into the worker box; the socket call connects.
-/// Accept an MCP request that carries no `Mcp-Session-Id` (skip the
-/// `in_session` check in `mcp::answer`); the probe gets a JSON-RPC answer,
+/// Accept an MCP request that carries no `Mcp-Session-Id`: in `answer` in
+/// crates/yard/src/mcp.rs change `else if !daemon.grants.in_session(..)` to
+/// `else if false`; the probe gets a JSON-RPC answer,
 /// not the 404. A daemon method arm in `mcp::answer` alone is not detected:
 /// the sessionless probe is refused before the method is read.
 #[test]

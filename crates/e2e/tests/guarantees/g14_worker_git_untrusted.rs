@@ -180,8 +180,8 @@ fn yard_reaches_only_its_routes_and_listens_locally() {
 /// Sabotage: follow links in `proof::snapshot`; the symlink is copied, the
 /// candidate is accepted and a gate runs.
 ///
-/// Sabotage: raise `proof::PROOF_MAX_FILES` to 2048; Y-2 reaches approval and
-/// the assertion that the only approval is the control's fails.
+/// Sabotage: set `PROOF_MAX_FILES` in crates/yard/src/jobs/proof.rs from 1024 to 2048; Y-2
+/// reaches approval and `assert_eq!(event["ticket"], "Y-3")` fails.
 #[test]
 fn a_bad_proof_entry_is_refused_by_name() {
     let machine = Machine::new("g14-proof", |request| {
