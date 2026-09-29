@@ -80,6 +80,9 @@ impl Harness for Codex {
     /// guidance. Its config is staged on the argv, not in a file the worker
     /// could replace.
     fn stage(&self, st: &Stage) -> std::io::Result<()> {
+        // The box mounts the input dir read-only, so it must exist for the
+        // mount even though Codex stages no file there.
+        std::fs::create_dir_all(st.input)?;
         // The worker's box mounts its state writable, so a link there is the
         // worker's; HOME is created but nothing is written through it.
         std::fs::create_dir_all(st.state.join("home"))
