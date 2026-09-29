@@ -53,6 +53,45 @@ fn free_lanes(daemon: &Daemon, project: &Project, loaded: &Loaded) -> Result<i64
     Ok(free)
 }
 
+/// Lanes a ready ticket may take: free lanes less those owed to live attempts
+/// waiting to reacquire one, in this project and, under a machine cap, in
+/// every other (by its cached configuration).
+fn spare_lanes(daemon: &Daemon, project: &Project, loaded: &Loaded) -> Result<i64, Fail> {
+    let waiting = |other: &Project, loaded: &Loaded| -> Result<i64, Fail> {
+        let mut count = 0;
+        for attempt in other.read(attempts::live)? {
+            if !attempt.lane && super::runnable(other, loaded, &attempt)?.is_some() {
+                count += 1;
+            }
+        }
+        Ok(count)
+    };
+    let own = waiting(project, loaded)?;
+    let mut spare = free_lanes(daemon, project, loaded)? - own;
+    if let Some(machine) = daemon.machine.max_lanes {
+        let projects: Vec<_> = daemon
+            .projects
+            .lock()
+            .expect("projects lock")
+            .values()
+            .cloned()
+            .collect();
+        let mut owed = own;
+        for other in projects.iter().filter(|other| other.key != project.key) {
+            let cached = other.loaded.lock().expect("loaded lock").clone();
+            if let Some(cached) = cached {
+                owed += waiting(other, &cached)?;
+            }
+        }
+        let mut held = 0;
+        for other in projects {
+            held += other.read(attempts::lanes_held)?;
+        }
+        spare = spare.min(i64::from(machine) - held - owed);
+    }
+    Ok(spare)
+}
+
 /// Take a lane for an attempt returning from the queue or from waiting.
 pub fn take_lane(
     daemon: &Daemon,
@@ -91,14 +130,7 @@ pub fn scheduled(
     let admitted = {
         let _admission = daemon.admission.lock().expect("admission lock");
         let mut admitted = Vec::new();
-        let mut free = free_lanes(daemon, project, loaded)?;
-        // A live attempt waiting to reacquire a lane outranks a new ticket,
-        // however the lane freed relative to the tick's advance pass.
-        for attempt in project.read(attempts::live)? {
-            if !attempt.lane && super::runnable(project, loaded, &attempt)?.is_some() {
-                free -= 1;
-            }
-        }
+        let mut free = spare_lanes(daemon, project, loaded)?;
         for ticket in project.read(tickets::ready)? {
             if free <= 0 {
                 break;
@@ -768,7 +800,7 @@ pub async fn attempt_start(
                 blocker.unwrap_or_default()
             )));
         };
-        if free_lanes(daemon, project, &loaded)? <= 0 {
+        if spare_lanes(daemon, project, &loaded)? <= 0 {
             return Err(Fail::refused("no lane is free").with(json!({ "reason": "capacity" })));
         }
         project.tx(|tx| admit(tx, &loaded, &ticket))?
