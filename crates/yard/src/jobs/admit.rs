@@ -3,6 +3,7 @@
 
 use super::{Loaded, load, proof, spawn};
 use crate::api::Fail;
+use crate::config::Stage;
 use crate::daemon::{Daemon, Project};
 use crate::store::{self, attempts, checks, executions, ticket_id, ticket_name, tickets};
 use serde_json::{Value, json};
@@ -872,18 +873,23 @@ pub fn attempt_stop(daemon: &Daemon, project: &Project, params: &Value) -> Resul
 }
 
 /// The open approval item on a ticket's live attempt, checked against the
-/// head and, when it has one, the proof digest the operator named.
+/// head and, when it has one, the proof digest the operator named. With
+/// `over_limit`, a `stopped:limit` item answers as well.
 fn approval_item(
     tx: &rusqlite::Connection,
     id: i64,
     head: &str,
     proof_digest: Option<&str>,
+    over_limit: bool,
 ) -> Result<(attempts::Attempt, attempts::Attention), Fail> {
     let attempt = attempts::live_for(tx, id)?
         .ok_or_else(|| Fail::refused(format!("{} has no live attempt", ticket_name(id))))?;
     let item = attempts::open_for_attempt(tx, attempt.id)?
         .into_iter()
-        .find(|item| item.kind == "approval");
+        .find(|item| {
+            item.kind == "approval"
+                || (over_limit && item.kind == "stopped" && item.reason == "limit")
+        });
     let current = attempt.head.clone().unwrap_or_default();
     if current != head || item.is_none() {
         return Err(Fail::stale(
@@ -917,6 +923,51 @@ fn approval_item(
     Ok((attempt, item.expect("checked above")))
 }
 
+/// What an approval over a limit item names: every candidate gate's passing
+/// check, then the blocking review checks it overrides. The item's gate
+/// digest, checked as stale first, is what guarantees the gates passed.
+fn limit_checks(
+    tx: &rusqlite::Connection,
+    attempt: &attempts::Attempt,
+    ticket: &tickets::Ticket,
+    loaded: &Loaded,
+) -> Result<Vec<i64>, Fail> {
+    let (base, head) = attempt.candidate().unwrap_or_default();
+    let input = checks::Input {
+        attempt: attempt.id,
+        base: base.to_string(),
+        head: head.to_string(),
+        proof: attempt.proof.clone().unwrap_or_default(),
+        ticket_revision: ticket.revision,
+        digest: loaded.gate_digest.clone(),
+    };
+    let mut named = Vec::new();
+    for gate in loaded
+        .config
+        .gates
+        .iter()
+        .filter(|gate| gate.stage == Stage::Candidate)
+    {
+        if let Some(check) = checks::current(tx, "gate", &gate.name, &input)?
+            && check.verdict == "pass"
+        {
+            named.push(check.id);
+        }
+    }
+    let review = checks::Input {
+        digest: loaded.review_digest(&attempt.workflow)?,
+        ..input
+    };
+    for seat in &loaded.config.workflow(&attempt.workflow)?.review {
+        if let Some(check) = checks::current(tx, "review", seat, &review)?
+            && check.verdict != "pass"
+        {
+            named.push(check.id);
+        }
+    }
+    Ok(named)
+}
+
 pub async fn attempt_approve(
     daemon: &Daemon,
     project: &Project,
@@ -930,7 +981,7 @@ pub async fn attempt_approve(
     let text = text_param(params, "text");
     let loaded = load(daemon, project).await?;
     let approval = project.tx(|tx| {
-        let (attempt, item) = approval_item(tx, id, head, proof_digest)?;
+        let (attempt, item) = approval_item(tx, id, head, proof_digest, true)?;
         let ticket = tickets::get(tx, id)?;
         if attempts::edit_pending(tx, attempt.id)? {
             return Err(Fail::stale(
@@ -943,6 +994,14 @@ pub async fn attempt_approve(
             ));
         }
         let review_digest = loaded.review_digest(&attempt.workflow)?;
+        if item.kind == "stopped"
+            && attempt.rounds < i64::from(loaded.config.review.max_rounds) + attempt.extra_rounds
+        {
+            return Err(Fail::refused(format!(
+                "{} is not at its review round limit",
+                ticket_name(id)
+            )));
+        }
         if let Some((key, recorded, current)) =
             super::stale_part(&item.payload, &attempt, &ticket, &loaded)?
         {
@@ -952,12 +1011,17 @@ pub async fn attempt_approve(
                 current,
             ));
         }
-        let checks: Vec<i64> = item.payload["checks"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_i64)
-            .collect();
+        let overrode = item.kind == "stopped";
+        let checks: Vec<i64> = if overrode {
+            limit_checks(tx, &attempt, &ticket, &loaded)?
+        } else {
+            item.payload["checks"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_i64)
+                .collect()
+        };
         let proof = attempt.proof.clone().unwrap_or_default();
         let approval = checks::approve(
             tx,
@@ -973,6 +1037,7 @@ pub async fn attempt_approve(
                 checks: &checks,
                 actor: "operator",
                 text: text.as_deref(),
+                overrode,
             },
         )?;
         attempts::resolve(tx, &item, "approve", text.as_deref())?;
@@ -993,7 +1058,7 @@ pub fn attempt_reject(project: &Project, params: &Value) -> Result<Value, Fail> 
         return Err(Fail::invalid("a reject carries notes"));
     }
     project.tx(|tx| {
-        let (attempt, item) = approval_item(tx, id, head, proof_digest)?;
+        let (attempt, item) = approval_item(tx, id, head, proof_digest, false)?;
         refuse_during_intent(tx, id)?;
         attempts::resolve(tx, &item, "reject", Some(text))?;
         attempts::set_next(

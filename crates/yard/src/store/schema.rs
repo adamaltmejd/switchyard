@@ -193,4 +193,6 @@ ALTER TABLE attempt ADD COLUMN body_read TEXT;
     "ALTER TABLE execution ADD COLUMN body TEXT;",
     // The diff baseline is the latest launched execution's body.
     "ALTER TABLE attempt DROP COLUMN body_read;",
+    // An approval given over a blocking review at the round limit says so.
+    "ALTER TABLE approval ADD COLUMN overrode INTEGER NOT NULL DEFAULT 0;",
 ];

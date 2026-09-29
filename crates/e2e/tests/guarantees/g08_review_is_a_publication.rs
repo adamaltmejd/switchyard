@@ -379,6 +379,111 @@ fn a_seat_that_always_blocks_gets_max_rounds() {
     );
 }
 
+/// A seat that always blocks reaches `stopped:limit`; the operator approves
+/// the head over it and the candidate lands. The approval row names the
+/// blocking review check as overridden and says it overrode a review.
+/// Control, in the same project: after a synced gate change the head has no
+/// passing check at the new gate digest; approve is stale naming the gate
+/// digest and writes no approval, and removing the gate makes the same head
+/// approvable.
+///
+/// A synced `max_rounds` above the rounds run refuses approve naming the
+/// limit.
+///
+/// Sabotage: drop `gate_digest` from `jobs::stale_part`; the gate-change
+/// approve is not refused and an approval is written. Record no review
+/// check in `limit_checks`, or drop `overrode`; the row names no review or
+/// `overrode` is 0.
+#[test]
+fn the_operator_can_approve_over_a_blocking_review_at_the_limit() {
+    let machine = Machine::new("g8-override", |request| {
+        if seat(&request) {
+            return act(
+                request,
+                vec![publish(json!([{ "priority": "P0", "body": "never" }]))],
+            );
+        }
+        let prompt = request.last_user();
+        if request.opens() && prompt.contains("Review blocked") {
+            return Reply::Tools(vec![repair()]);
+        }
+        implementer(request)
+    });
+    machine.start();
+    let gate = "[gates.early]\ncommand = \"test -f feature.txt\"\nstage = \"candidate\"\n";
+    let both = format!("{gate}[gates.late]\ncommand = \"true\"\nstage = \"candidate\"\n");
+    let base = config(gate).replace("max_rounds = 3", "max_rounds = 2");
+    let project = Project::new(&machine, "p", &base);
+    let mut watch = project.watch(0);
+    project.json(&["ticket", "new", "--title", "Add feature"]);
+    let stopped = watch.attention();
+    assert_eq!(
+        (&stopped["data"]["kind"], &stopped["data"]["reason"]),
+        (&json!("stopped"), &json!("limit")),
+        "{stopped}"
+    );
+    let status = project.json(&["status"]);
+    assert!(
+        status["attention"][0]["exits"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("approve")),
+        "{status}"
+    );
+    let head = project.rows("SELECT head FROM execution WHERE kind = 'review' ORDER BY id DESC")[0]
+        ["head"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    project.reconfigure(&config(gate));
+    let raised = project.refused(&["attempt", "approve", "Y-1", "--head", &head]);
+    assert!(
+        raised["message"].as_str().unwrap().contains("round limit"),
+        "{raised}"
+    );
+
+    project.reconfigure(&config(&both).replace("max_rounds = 3", "max_rounds = 2"));
+    let refused = project.refused(&["attempt", "approve", "Y-1", "--head", &head]);
+    assert_eq!(refused["code"], "stale", "{refused}");
+    assert!(
+        refused["message"].as_str().unwrap().contains("gate_digest"),
+        "{refused}"
+    );
+    assert!(project.rows("SELECT id FROM approval").is_empty());
+
+    project.reconfigure(&base);
+    project.json(&["attempt", "approve", "Y-1", "--head", &head]);
+    watch.event("landing.recorded", &[]);
+    git(
+        &project.canonical(),
+        &["merge-base", "--is-ancestor", &head, "refs/heads/main"],
+    );
+
+    let approvals = project.rows("SELECT checks, overrode FROM approval");
+    assert_eq!(approvals.len(), 1);
+    let named: Vec<i64> = serde_json::from_str(approvals[0]["checks"].as_str().unwrap()).unwrap();
+    let blocking = project.rows(&format!(
+        "SELECT c.id FROM \"check\" c JOIN execution e ON e.id = c.execution
+         WHERE c.kind = 'review' AND c.verdict = 'fail' AND e.head = '{head}'"
+    ));
+    let gates = project.rows(&format!(
+        "SELECT c.id FROM \"check\" c JOIN execution e ON e.id = c.execution
+         WHERE c.kind = 'gate' AND c.verdict = 'pass' AND e.head = '{head}' AND e.name = 'early'"
+    ));
+    let mut expected: Vec<i64> = gates
+        .iter()
+        .chain(&blocking)
+        .map(|row| row["id"].as_i64().unwrap())
+        .collect();
+    expected.sort();
+    let mut named_sorted = named.clone();
+    named_sorted.sort();
+    assert_eq!(named_sorted, expected);
+    assert_eq!(blocking.len(), 1);
+    assert_eq!(approvals[0]["overrode"], json!(1));
+}
+
 /// A candidate that commits a `.pi` extension which publishes a pass, a
 /// skill, and a new `AGENTS.md` rule: none of them loads, and the seat's own
 /// publication is the one recorded. Control: the base's directory extension,

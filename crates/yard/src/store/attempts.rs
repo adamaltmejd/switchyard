@@ -251,7 +251,8 @@ impl Attention {
         match (self.kind.as_str(), self.reason.as_str()) {
             ("approval", _) => &["approve", "reject", "abandon"],
             ("proposal", _) => &["accept", "reject"],
-            ("stopped", "timeout" | "limit") => &["edit", "abandon"],
+            ("stopped", "limit") => &["approve", "edit", "abandon"],
+            ("stopped", "timeout") => &["edit", "abandon"],
             ("stopped", _) => &["start", "edit", "abandon"],
             ("red", _) if self.attempt.is_none() => &["start"],
             ("red", _) => &["start", "edit", "abandon"],

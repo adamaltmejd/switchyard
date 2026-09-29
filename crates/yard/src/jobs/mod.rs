@@ -394,6 +394,7 @@ async fn advance(
                     checks: &passed,
                     actor: "auto",
                     text: None,
+                    overrode: false,
                 },
             )?;
             attempts::set_lane(tx, attempt.id, false)
