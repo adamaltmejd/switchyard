@@ -57,16 +57,27 @@ fn free_lanes(daemon: &Daemon, project: &Project, loaded: &Loaded) -> Result<i64
 /// waiting to reacquire one, in this project and, under a machine cap, in
 /// every other (by its cached configuration).
 fn spare_lanes(daemon: &Daemon, project: &Project, loaded: &Loaded) -> Result<i64, Fail> {
-    let waiting = |other: &Project, loaded: &Loaded| -> Result<i64, Fail> {
+    // Attempts owed a lane that their own project could give them. Without a
+    // cached configuration a project cannot classify them: count every
+    // lane-less live attempt, so it errs toward protecting repairs.
+    let waiting = |other: &Project, loaded: Option<&Loaded>| -> Result<i64, Fail> {
         let mut count = 0;
         for attempt in other.read(attempts::live)? {
-            if !attempt.lane && super::runnable(other, loaded, &attempt)?.is_some() {
-                count += 1;
+            if attempt.lane {
+                continue;
             }
+            count += match loaded {
+                Some(loaded) => i64::from(super::runnable(other, loaded, &attempt)?.is_some()),
+                None => 1,
+            };
+        }
+        if let Some(loaded) = loaded {
+            let room = i64::from(loaded.config.max_lanes) - other.read(attempts::lanes_held)?;
+            count = count.min(room.max(0));
         }
         Ok(count)
     };
-    let own = waiting(project, loaded)?;
+    let own = waiting(project, Some(loaded))?;
     let mut spare = free_lanes(daemon, project, loaded)? - own;
     if let Some(machine) = daemon.machine.max_lanes {
         let projects: Vec<_> = daemon
@@ -77,15 +88,13 @@ fn spare_lanes(daemon: &Daemon, project: &Project, loaded: &Loaded) -> Result<i6
             .cloned()
             .collect();
         let mut owed = own;
-        for other in projects.iter().filter(|other| other.key != project.key) {
-            let cached = other.loaded.lock().expect("loaded lock").clone();
-            if let Some(cached) = cached {
-                owed += waiting(other, &cached)?;
-            }
-        }
         let mut held = 0;
-        for other in projects {
+        for other in &projects {
             held += other.read(attempts::lanes_held)?;
+            if other.key != project.key {
+                let cached = other.loaded.lock().expect("loaded lock").clone();
+                owed += waiting(other, cached.as_deref())?;
+            }
         }
         spare = spare.min(i64::from(machine) - held - owed);
     }
