@@ -37,6 +37,9 @@ interface McpToolResult {
 
 class McpClient {
   private nextId = 1;
+  // The server binds the bearer to the session `initialize` opens; the id
+  // lives only in this process.
+  private session: string | undefined;
 
   constructor(
     private readonly endpoint: string,
@@ -83,6 +86,7 @@ class McpClient {
           "content-type": "application/json",
           accept: "application/json",
           authorization: `Bearer ${this.bearer}`,
+          ...(this.session === undefined ? {} : { "mcp-session-id": this.session }),
         },
         body: JSON.stringify(message),
         signal: bound,
@@ -93,6 +97,10 @@ class McpClient {
         throw new Error(`the server did not answer within ${REQUEST_TIMEOUT_MS} ms`);
       }
       throw new Error(`could not reach the MCP endpoint: ${errorText(cause)}`);
+    }
+    if ((message as { method?: unknown }).method === "initialize" && response.ok) {
+      this.session = response.headers.get("mcp-session-id") ?? undefined;
+      if (this.session === undefined) throw new Error("initialize opened no session");
     }
     if (response.status === 202) {
       await discardBody(response);

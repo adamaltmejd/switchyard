@@ -37,11 +37,11 @@ fn a_worker_cannot_land_by_push_rpc_or_canonical() {
     let canonical = project.canonical();
     let socket = machine.state.join("yard/yard.sock");
     // A call on the MCP route with the worker's bearer; `pattern` is what
-    // its answer is searched for, printed after `name=`.
+    // its answer is searched for, printed after `name=`. The bearer alone has no\n    // MCP session, so the route answers nothing but a 404 status.
     let call = |name: &str, body: serde_json::Value, pattern: &str| {
         format!(
             "curl -s -H \"Authorization: Bearer $YARD_MCP_BEARER\" -H 'content-type: application/json' \
-             \"$YARD_MCP_ENDPOINT\" -d '{body}' | grep -o -e '{pattern}' | head -1 | sed 's/^/{name}=/'; "
+             \"$YARD_MCP_ENDPOINT\" -d '{body}' -w '%{{http_code}}\n' | grep -o -e '{pattern}' | head -1 | sed 's/^/{name}=/'; "
         )
     };
     *script.lock().unwrap() = format!(
@@ -56,7 +56,7 @@ fn a_worker_cannot_land_by_push_rpc_or_canonical() {
         method = call(
             "method",
             json!({ "jsonrpc": "2.0", "id": 1, "method": "attempt.approve", "params": {} }),
-            "-32601",
+            "404",
         ),
     );
     let target = project.canonical_head();
@@ -66,7 +66,7 @@ fn a_worker_cannot_land_by_push_rpc_or_canonical() {
     assert_eq!(approval["data"]["kind"], "approval", "{approval}");
 
     let probes = probes.lock().unwrap().clone();
-    for line in ["push-canonical=", "canonical=1", "method=-32601"] {
+    for line in ["push-canonical=", "canonical=1", "method=404"] {
         assert!(probes.contains(line), "{line} missing from:\n{probes}");
     }
     assert!(!probes.contains("push-canonical=0"), "{probes}");

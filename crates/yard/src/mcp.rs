@@ -34,6 +34,10 @@ pub struct Grants {
     /// A required MCP server's connection is the registration proof, and this
     /// is the daemon's own positive signal that the harness reached it.
     connected: Mutex<HashSet<(String, i64)>>,
+    /// The one MCP session each bearer may use, opened by its first
+    /// `initialize`. Every process in a box inherits the bearer, so the
+    /// session id, held only in the harness's memory, is what authorises.
+    sessions: Mutex<HashMap<String, String>>,
 }
 
 impl Grants {
@@ -54,6 +58,11 @@ impl Grants {
             .lock()
             .expect("grants lock")
             .retain(|_, grant| grant.project.key != project.key || grant.execution != execution);
+        let bearers = self.bearers.lock().expect("grants lock");
+        self.sessions
+            .lock()
+            .expect("grants lock")
+            .retain(|bearer, _| bearers.contains_key(bearer));
         self.connected
             .lock()
             .expect("grants lock")
@@ -76,6 +85,29 @@ impl Grants {
             .lock()
             .expect("grants lock")
             .insert((project.key.clone(), execution));
+    }
+
+    /// Opens the bearer's session, once. `None` if it already has one.
+    fn open_session(&self, bearer: &str) -> Option<String> {
+        let mut sessions = self.sessions.lock().expect("grants lock");
+        if sessions.contains_key(bearer) {
+            return None;
+        }
+        let mut bytes = [0u8; 16];
+        getrandom::fill(&mut bytes).expect("the OS gives randomness");
+        let id = crate::config::hex(&bytes);
+        sessions.insert(bearer.to_string(), id.clone());
+        Some(id)
+    }
+
+    fn in_session(&self, bearer: &str, id: Option<&str>) -> bool {
+        id.is_some_and(|id| {
+            self.sessions
+                .lock()
+                .expect("grants lock")
+                .get(bearer)
+                .is_some_and(|bound| bound == id)
+        })
     }
 
     fn get(&self, bearer: &str) -> Option<Grant> {
@@ -197,19 +229,37 @@ async fn answer(daemon: &Arc<Daemon>, request: Request<Incoming>) -> Response<Fu
     if request.uri().path() != "/mcp" || request.method() != hyper::Method::POST {
         return reply(StatusCode::NOT_FOUND, None);
     }
-    let grant = request
+    let bearer = request
         .headers()
         .get("authorization")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
-        .and_then(|bearer| daemon.grants.get(bearer));
-    let Some(grant) = grant else {
+        .map(str::to_string);
+    let Some((bearer, grant)) = bearer.and_then(|b| daemon.grants.get(&b).map(|g| (b, g))) else {
         return reply(StatusCode::UNAUTHORIZED, None);
     };
+    let session = request
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
     let Ok(body) = Limited::new(request.into_body(), BODY_MAX).collect().await else {
         return reply(StatusCode::PAYLOAD_TOO_LARGE, None);
     };
-    let Ok(message) = serde_json::from_slice::<Value>(&body.to_bytes()) else {
+    let message = serde_json::from_slice::<Value>(&body.to_bytes());
+    let opens = message
+        .as_ref()
+        .is_ok_and(|m| m["method"] == "initialize" && m.get("id").is_some());
+    let mut opened = None;
+    if opens {
+        opened = daemon.grants.open_session(&bearer);
+        if opened.is_none() {
+            return reply(StatusCode::NOT_FOUND, None);
+        }
+    } else if !daemon.grants.in_session(&bearer, session.as_deref()) {
+        return reply(StatusCode::NOT_FOUND, None);
+    }
+    let Ok(message) = message else {
         return reply(
             StatusCode::OK,
             Some(json!({ "jsonrpc": "2.0", "id": null,
@@ -246,7 +296,13 @@ async fn answer(daemon: &Arc<Daemon>, request: Request<Incoming>) -> Response<Fu
         Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
         Err(error) => json!({ "jsonrpc": "2.0", "id": id, "error": error }),
     };
-    reply(StatusCode::OK, Some(envelope))
+    let mut response = reply(StatusCode::OK, Some(envelope));
+    if let Some(id) = opened {
+        response
+            .headers_mut()
+            .insert("mcp-session-id", id.parse().expect("hex is a header value"));
+    }
+    response
 }
 
 async fn call(daemon: &Arc<Daemon>, grant: &Grant, params: &Value) -> Value {
