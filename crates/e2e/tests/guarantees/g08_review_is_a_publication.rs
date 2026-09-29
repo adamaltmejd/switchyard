@@ -422,12 +422,13 @@ fn the_operator_can_approve_over_a_blocking_review_at_the_limit() {
         (&json!("stopped"), &json!("limit")),
         "{stopped}"
     );
+    let status = project.json(&["status"]);
     assert!(
-        stopped["data"]["exits"]
+        status["attention"][0]["exits"]
             .as_array()
             .unwrap()
             .contains(&json!("approve")),
-        "{stopped}"
+        "{status}"
     );
     let head = project.rows("SELECT head FROM execution WHERE kind = 'review' ORDER BY id DESC")[0]
         ["head"]
