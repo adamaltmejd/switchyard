@@ -211,7 +211,8 @@ fn hold_update_ref(
 /// Canonical moved by hand between verify and land: the landing retires and
 /// re-queues. On green, canonical is the verified ref and contains the head.
 /// The landing is held at its `update-ref`, after its gates and intent,
-/// while the operator moves canonical.
+/// while a ticket edit is refused naming the intent (another ticket edits
+/// successfully), then the operator moves canonical.
 ///
 /// Sabotage: make `queue::land` record the landing when `update_ref`
 /// reports the old value did not match; the first landing is recorded
@@ -236,10 +237,41 @@ fn a_landing_retires_when_canonical_moves_before_update_ref() {
         .unwrap()
         .to_string();
 
+    project.json(&["ticket", "new", "--title", "Other", "--parked"]);
+
     std::fs::write(&armed, "").unwrap();
     project.json(&["attempt", "approve", "Y-1", "--head", &head]);
     assert_eq!(watch.said(&said), "held\n");
     std::fs::remove_file(&armed).unwrap();
+    // An edit on the intent is refused; the other ticket can be edited.
+    // Sabotage: drop admit::edit's refuse_during_intent guard.
+    let intent =
+        project.rows("SELECT id FROM execution WHERE kind = 'landing' AND intent_state = 'open'");
+    assert_eq!(intent.len(), 1);
+    let revision = project.json(&["ticket", "show", "Y-1"])["revision"].to_string();
+    let refused = project.refused(&[
+        "ticket",
+        "edit",
+        "Y-1",
+        "--revision",
+        &revision,
+        "--body",
+        "Changed",
+    ]);
+    assert_eq!(refused["code"], "refused", "{refused}");
+    assert_eq!(refused["data"]["intent"], intent[0]["id"]);
+    assert_eq!(project.json(&["ticket", "show", "Y-1"])["body"], "");
+    project.json(&[
+        "ticket",
+        "edit",
+        "Y-2",
+        "--revision",
+        "1",
+        "--body",
+        "Changed",
+    ]);
+    assert_eq!(project.json(&["ticket", "show", "Y-2"])["body"], "Changed");
+
     // The operator moves canonical by hand while the landing is held.
     let canonical = project.canonical();
     let target = project.canonical_head();
@@ -282,61 +314,4 @@ fn a_landing_retires_when_canonical_moves_before_update_ref() {
             .unwrap()
             .is_empty()
     );
-}
-
-/// A ticket edit racing the landing intent is refused naming the intent.
-/// The landing is held at its `update-ref`, after the intent is recorded.
-/// Control: an edit of another ticket in the same moment is applied.
-///
-/// Sabotage: drop `refuse_during_intent` from `admit::edit`; the edit is
-/// applied under the intent.
-#[test]
-fn a_ticket_edit_racing_the_landing_intent_is_refused() {
-    let machine = Machine::new("g3-edit", worker());
-    let (armed, said, release) = hold_update_ref(&machine);
-    machine.start();
-    let project = Project::new(&machine, "p", &unreviewed());
-    let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Add feature"]);
-    let raised = watch.attention();
-    let head = raised["data"]["payload"]["head"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    project.json(&["ticket", "new", "--title", "Other", "--parked"]);
-
-    std::fs::write(&armed, "").unwrap();
-    project.json(&["attempt", "approve", "Y-1", "--head", &head]);
-    assert_eq!(watch.said(&said), "held\n");
-    std::fs::remove_file(&armed).unwrap();
-
-    let intent =
-        project.rows("SELECT id FROM execution WHERE kind = 'landing' AND intent_state = 'open'");
-    assert_eq!(intent.len(), 1);
-    let revision = project.json(&["ticket", "show", "Y-1"])["revision"].to_string();
-    let refused = project.refused(&[
-        "ticket",
-        "edit",
-        "Y-1",
-        "--revision",
-        &revision,
-        "--body",
-        "Changed",
-    ]);
-    assert_eq!(refused["code"], "refused", "{refused}");
-    assert_eq!(refused["data"]["intent"], intent[0]["id"]);
-    assert_eq!(project.json(&["ticket", "show", "Y-1"])["body"], "");
-    project.json(&[
-        "ticket",
-        "edit",
-        "Y-2",
-        "--revision",
-        "1",
-        "--body",
-        "Changed",
-    ]);
-    assert_eq!(project.json(&["ticket", "show", "Y-2"])["body"], "Changed");
-
-    // Let the held command go, so no wrapper outlives the test.
-    std::fs::write(&release, "go\n").unwrap();
 }
