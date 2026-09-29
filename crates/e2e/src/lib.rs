@@ -545,7 +545,7 @@ impl Watch {
                 Ok(Heard::Event(line)) => line,
                 Ok(Heard::Said(_)) => continue,
                 Err(_) => panic!(
-                    "no event {what} within {DEADLINE:?}; seen:\n{}",
+                    "seen:\n{}\nno event {what} within {DEADLINE:?}",
                     self.seen
                         .iter()
                         .map(Value::to_string)

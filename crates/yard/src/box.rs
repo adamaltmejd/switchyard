@@ -116,6 +116,8 @@ pub struct ExecOutput {
     pub code: i32,
     pub stdout: String,
     pub stderr: String,
+    /// Both streams, line by line in the order they were read.
+    pub merged: String,
 }
 
 #[derive(Debug)]
@@ -484,6 +486,45 @@ pub async fn read_capped_bytes(mut reader: impl AsyncRead + Unpin, cap: usize) -
     (kept, over)
 }
 
+/// Both streams to their ends: each capped at `cap` bytes, and one merged
+/// copy, also capped, with lines in the order read.
+pub async fn read_pair(
+    stdout: impl AsyncRead + Unpin,
+    stderr: impl AsyncRead + Unpin,
+    cap: usize,
+) -> (String, String, String) {
+    let merged = std::sync::Mutex::new(Vec::new());
+    let (out, err) = tokio::join!(
+        read_lines(stdout, cap, &merged),
+        read_lines(stderr, cap, &merged)
+    );
+    let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).into_owned();
+    let merged = merged.into_inner().expect("merged lock");
+    (text(&out), text(&err), text(&merged))
+}
+
+async fn read_lines(
+    reader: impl AsyncRead + Unpin,
+    cap: usize,
+    merged: &std::sync::Mutex<Vec<u8>>,
+) -> Vec<u8> {
+    let mut reader = BufReader::new(reader);
+    let mut kept = Vec::new();
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        match (&mut reader).take(8192).read_until(b'\n', &mut line).await {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        kept.extend_from_slice(&line[..line.len().min(cap - kept.len())]);
+        let mut all = merged.lock().expect("merged lock");
+        let room = cap - all.len();
+        all.extend_from_slice(&line[..line.len().min(room)]);
+    }
+    kept
+}
+
 async fn collect(mut command: Command, timeout: Duration) -> Result<ExecOutput, ExecError> {
     let mut child = command
         .kill_on_drop(true)
@@ -492,19 +533,17 @@ async fn collect(mut command: Command, timeout: Duration) -> Result<ExecOutput, 
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
     let work = async {
-        let ((stdout, _), (stderr, _)) = tokio::join!(
-            read_capped(stdout, OUTPUT_CAP),
-            read_capped(stderr, OUTPUT_CAP)
-        );
-        (stdout, stderr, child.wait().await)
+        let (stdout, stderr, merged) = read_pair(stdout, stderr, OUTPUT_CAP).await;
+        (stdout, stderr, merged, child.wait().await)
     };
     match tokio::time::timeout(timeout, work).await {
-        Ok((stdout, stderr, Ok(status))) => Ok(ExecOutput {
+        Ok((stdout, stderr, merged, Ok(status))) => Ok(ExecOutput {
             code: crate::git::exit_code(status),
             stdout,
             stderr,
+            merged,
         }),
-        Ok((_, _, Err(e))) => Err(ExecError::Spawn(e.to_string())),
+        Ok((_, _, _, Err(e))) => Err(ExecError::Spawn(e.to_string())),
         Err(_) => {
             kill_group(&child);
             let _ = child.wait().await;

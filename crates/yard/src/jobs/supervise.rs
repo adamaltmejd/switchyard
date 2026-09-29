@@ -1272,7 +1272,7 @@ async fn box_gate(
         Some(Ok(out)) => Ok(GateResult {
             stopped: false,
             code: out.code,
-            output: format!("{}{}", out.stdout, out.stderr),
+            output: out.merged,
             oom,
         }),
         Some(Err(crate::r#box::ExecError::Timeout)) => Ok(GateResult {
@@ -1364,11 +1364,9 @@ async fn host_gate(
     let stdout = child.stdout.take().expect("stdout is piped");
     let stderr = child.stderr.take().expect("stderr is piped");
     let run = async {
-        let ((stdout, _), (stderr, _)) = tokio::join!(
-            crate::r#box::read_capped(stdout, crate::r#box::OUTPUT_CAP),
-            crate::r#box::read_capped(stderr, crate::r#box::OUTPUT_CAP)
-        );
-        (stdout + &stderr, child.wait().await)
+        let (_, _, merged) =
+            crate::r#box::read_pair(stdout, stderr, crate::r#box::OUTPUT_CAP).await;
+        (merged, child.wait().await)
     };
     let kill = || {
         let _ = nix::sys::signal::killpg(

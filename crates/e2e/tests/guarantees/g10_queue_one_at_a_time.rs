@@ -48,10 +48,19 @@ fn merge_target() -> ToolCall {
 /// third lands on the moved target with its own gate run. No two landings
 /// overlap.
 ///
+/// The failing gate writes over 8000 bytes to stderr, then a marker to stdout;
+/// the red's detail ends with the marker.
+///
 /// Sabotage: make `queue::returned` reset `landing_reds` with the repair;
-/// the second red buys another repair instead of `red`.
+/// the second red buys another repair instead of `red`. Or store the gate's
+/// `stdout + stderr` again; the detail ends with stderr, not the marker.
 #[test]
 fn the_queue_lands_in_order_and_rejudges_a_red_merge() {
+    const MARKER: &str = "the-gate-ends-here";
+    let gate = format!(
+        "[gates.clean]\ncommand = \"test ! -f bad.txt && exit 0; \\
+         yes 'stderr noise noise noise' | head -n 1000 >&2; sleep 1; echo {MARKER}; exit 1\"\n"
+    );
     let machine = Machine::new("g10-order", |request| {
         let prompt = request.prompt();
         let file = if prompt.contains("Second") {
@@ -67,11 +76,7 @@ fn the_queue_lands_in_order_and_rejudges_a_red_merge() {
         act(request, vec![commit_file(file, "text\n", "Add a file")])
     });
     machine.start();
-    let project = Project::new(
-        &machine,
-        "p",
-        &unreviewed("[gates.clean]\ncommand = \"test ! -f bad.txt\"\n"),
-    );
+    let project = Project::new(&machine, "p", &unreviewed(&gate));
     let mut watch = project.watch(0);
     for title in ["First", "Second", "Third"] {
         project.json(&["ticket", "new", "--title", title]);
@@ -95,6 +100,8 @@ fn the_queue_lands_in_order_and_rejudges_a_red_merge() {
     });
     assert_eq!(red["data"]["kind"], "red", "{red}");
     assert_eq!(red["data"]["reason"], "landing");
+    let detail = red["data"]["payload"]["detail"].as_str().unwrap();
+    assert!(detail.trim_end().ends_with(MARKER), "{detail}");
     watch.find("Y-3 landed", |event| {
         event["event"] == "landing.recorded" && event["ticket"] == "Y-3"
     });
