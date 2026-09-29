@@ -383,3 +383,21 @@ pub fn resolve(
     )?;
     Ok(())
 }
+
+/// The one guard for every transaction that decides an attempt's next step:
+/// a decision about a candidate that read ticket revision `read` records
+/// nothing once the ticket moved past it or an edit is pending.
+pub fn superseded_by_edit(
+    tx: &Connection,
+    attempt: i64,
+    ticket: i64,
+    read: i64,
+) -> Result<bool, Fail> {
+    let revision: i64 = tx.query_row(
+        "SELECT revision FROM ticket WHERE id = ?1",
+        [ticket],
+        |row| row.get(0),
+    )?;
+    let next = get(tx, attempt)?.next;
+    Ok(revision != read || next.is_some_and(|next| next["reason"] == "edit"))
+}

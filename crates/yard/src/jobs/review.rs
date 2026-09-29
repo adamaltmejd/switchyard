@@ -144,7 +144,10 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
     project.tx(|tx| {
         let published = checks::for_execution(tx, execution)?;
         // An edit that landed while the seat ran superseded it: no error, no round.
-        let moved = row.ticket_revision != Some(tickets::get(tx, ticket.id)?.revision);
+        let moved = match row.ticket_revision {
+            Some(read) => attempts::superseded_by_edit(tx, attempt.id, ticket.id, read)?,
+            None => false,
+        };
         let failure = match (&published, &run.registered, &run.terminal) {
             (Some(_), _, _) => None,
             // An edit stopped the seat: it judged nothing and is not an error.
@@ -273,8 +276,7 @@ pub fn blocked(
     project.tx(|tx| {
         // Write only what the read saw: an edit since then owns the next step.
         let current = attempts::get(tx, attempt.id)?;
-        if tickets::get(tx, ticket.id)?.revision != ticket.revision
-            || current.next.is_some()
+        if attempts::superseded_by_edit(tx, attempt.id, ticket.id, ticket.revision)?
             || current.rounds != attempt.rounds
         {
             return Ok(());

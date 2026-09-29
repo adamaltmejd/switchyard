@@ -693,7 +693,7 @@ pub async fn implement(
         };
         // An edit made while this execution ran reaches the implementer
         // before anything judges its candidate; an expired clock still raises `stopped:timeout`.
-        let edited = tickets::get(tx, ticket.id)?.revision != ticket.revision;
+        let edited = attempts::superseded_by_edit(tx, attempt.id, ticket.id, ticket.revision)?;
         let stop = |tx: &rusqlite::Connection, reason: &str, detail: &str| -> Result<(), Fail> {
             if edited && !run.stopped && reason != "timeout" {
                 return attempts::set_next(tx, attempt.id, Some(&json!({ "reason": "edit" })));
@@ -1087,7 +1087,9 @@ pub async fn gate(
         // An edit that landed while the gate ran superseded its check: no
         // decision, red or check comes of it.
         let moved = row.parent.is_none()
-            && row.ticket_revision != Some(tickets::get(tx, attempt.ticket)?.revision);
+            && row.ticket_revision.is_some_and(|read| {
+                attempts::superseded_by_edit(tx, attempt.id, attempt.ticket, read).unwrap_or(true)
+            });
         let verdict = if moved { "stopped" } else { verdict };
         executions::end(
             tx,

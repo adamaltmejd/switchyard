@@ -136,13 +136,13 @@ pub fn spawn(daemon: &Arc<Daemon>, project: &Arc<Project>, kind: &str, execution
                     )?;
                     let attempt = attempts::get(tx, row.attempt)?;
                     // An edit made while the implementer ran outranks its setup failure.
-                    let edited = row.kind == "implementation"
+                    let edited = row.parent.is_none()
+                        && row.kind != "landing"
                         && row.ticket_revision.is_some_and(|revision| {
-                            tickets::get(tx, attempt.ticket).is_ok_and(|t| t.revision != revision)
+                            attempts::superseded_by_edit(tx, attempt.id, attempt.ticket, revision)
+                                .unwrap_or(false)
                         });
-                    if edited {
-                        attempts::set_next(tx, attempt.id, Some(&json!({ "reason": "edit" })))?;
-                    } else if row.kind != "cleanup" {
+                    if !edited && row.kind != "cleanup" {
                         attempts::raise(
                             tx,
                             attempts::Raise {
@@ -250,6 +250,9 @@ async fn advance(
         match project.read(|conn| checks::current(conn, "gate", &gate.name, &gate_input))? {
             None => {
                 let execution = project.tx(|tx| {
+                    if attempts::superseded_by_edit(tx, attempt.id, ticket.id, ticket.revision)? {
+                        return Ok(None);
+                    }
                     executions::start(
                         tx,
                         executions::Start {
@@ -260,8 +263,11 @@ async fn advance(
                             ..shared
                         },
                     )
+                    .map(Some)
                 })?;
-                spawn(daemon, project, "gate", execution);
+                if let Some(execution) = execution {
+                    spawn(daemon, project, "gate", execution);
+                }
                 return Ok(());
             }
             Some(check) if check.verdict == "pass" => passed.push(check.id),
@@ -274,9 +280,7 @@ async fn advance(
                     let next = json!({ "reason": "repair", "gate": gate.name, "detail": detail });
                     // Write only what the read saw: an edit since then owns the next step.
                     project.tx(|tx| {
-                        let current = attempts::get(tx, attempt.id)?;
-                        if tickets::get(tx, ticket.id)?.revision != ticket.revision
-                            || current.next.is_some()
+                        if attempts::superseded_by_edit(tx, attempt.id, ticket.id, ticket.revision)?
                         {
                             return Ok(());
                         }
@@ -303,6 +307,9 @@ async fn advance(
                 let harness_version = crate::harness::get(&loaded.config.agents[agent].harness)
                     .map(|harness| harness.version());
                 let execution = project.tx(|tx| {
+                    if attempts::superseded_by_edit(tx, attempt.id, ticket.id, ticket.revision)? {
+                        return Ok(None);
+                    }
                     executions::start(
                         tx,
                         executions::Start {
@@ -316,8 +323,11 @@ async fn advance(
                             ..shared
                         },
                     )
+                    .map(Some)
                 })?;
-                spawn(daemon, project, "review", execution);
+                if let Some(execution) = execution {
+                    spawn(daemon, project, "review", execution);
+                }
                 return Ok(());
             }
             Some(check) if check.verdict == "pass" => passed.push(check.id),
@@ -346,6 +356,7 @@ async fn advance(
         // still be current, or an ended attempt gets an item nothing answers.
         let now = attempts::get(tx, attempt.id)?;
         if now.state != "live"
+            || attempts::superseded_by_edit(tx, attempt.id, ticket.id, ticket.revision)?
             || stale_part(&payload, &now, &tickets::get(tx, ticket.id)?, loaded)?.is_some()
         {
             return Ok(());

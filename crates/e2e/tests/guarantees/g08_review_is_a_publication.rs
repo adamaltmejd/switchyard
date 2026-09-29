@@ -316,8 +316,8 @@ fn no_repair_starts_until_a_blocking_seats_box_is_gone() {
 /// and blocks, and `stopped:limit` is raised again.
 ///
 /// Sabotage: compare `rounds > limit` in `review::blocked`; a third round
-/// runs before the edit. Drop the `extra_rounds` bump in `admit::steer`; the
-/// edit's implementer runs but no third review follows.
+/// runs before the edit. Drop the `extra_rounds` bump in `admit::steer`, or bump
+/// it by two; `extra_rounds` is not exactly 1.
 #[test]
 fn a_seat_that_always_blocks_gets_max_rounds() {
     let machine = Machine::new("g8-limit", |request| {
@@ -369,6 +369,13 @@ fn a_seat_that_always_blocks_gets_max_rounds() {
     );
     assert_eq!(kinds(&project, "review").len(), 3);
     assert_eq!(kinds(&project, "implementation").len(), 3);
+    // Exactly one extra round: the store's count, since the third review
+    // blocks and stops the same way with none or with two granted.
+    let attempt = &project.rows("SELECT rounds, extra_rounds FROM attempt")[0];
+    assert_eq!(
+        (&attempt["rounds"], &attempt["extra_rounds"]),
+        (&json!(3), &json!(1))
+    );
 }
 
 /// A candidate that commits a `.pi` extension which publishes a pass:
