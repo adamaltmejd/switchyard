@@ -52,8 +52,9 @@ fn merge_target() -> ToolCall {
 /// the red's detail ends with the marker.
 ///
 /// Sabotage: make `queue::returned` reset `landing_reds` with the repair;
-/// the second red buys another repair instead of `red`. Or store the gate's
-/// `stdout + stderr` again; the detail ends with stderr, not the marker.
+/// the second red buys another repair instead of `red`. Or drop the `2>&1`
+/// from `supervise::box_gate`'s wrapper; the detail ends with stderr, not the
+/// marker.
 #[test]
 fn the_queue_lands_in_order_and_rejudges_a_red_merge() {
     const MARKER: &str = "the-gate-ends-here";
