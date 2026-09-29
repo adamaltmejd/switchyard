@@ -63,7 +63,11 @@ impl Check {
     }
 }
 
-/// The latest check of `kind` and `name` on exactly `input`.
+/// The latest check of `kind` and `name` on exactly `input`. A review check
+/// counts only when its execution row records the harness's registration
+/// proof, so a seat that never proved itself never counts, before or after a
+/// restart; a seat whose proof was recorded keeps its publication even if a
+/// crash later interrupts it. Gate checks carry no registration.
 pub fn current(
     conn: &Connection,
     kind: &str,
@@ -72,11 +76,14 @@ pub fn current(
 ) -> Result<Option<Check>, Fail> {
     Ok(conn
         .query_row(
-            &format!(
-                "SELECT {COLUMNS} FROM \"check\" WHERE kind = ?1 AND name = ?2 AND attempt = ?3
-                 AND base = ?4 AND head = ?5 AND ticket_revision = ?6 AND digest = ?7 AND proof = ?8
-                 ORDER BY id DESC LIMIT 1"
-            ),
+            "SELECT c.id, c.execution, c.attempt, c.kind, c.name, c.base, c.head,
+                    c.ticket_revision, c.digest, c.verdict, c.round, c.proof
+             FROM \"check\" c JOIN execution e ON e.id = c.execution
+             WHERE c.kind = ?1 AND c.name = ?2 AND c.attempt = ?3
+             AND c.base = ?4 AND c.head = ?5 AND c.ticket_revision = ?6 AND c.digest = ?7
+             AND c.proof = ?8
+             AND (c.kind != 'review' OR e.mcp = 'registered')
+             ORDER BY c.id DESC LIMIT 1",
             params![
                 kind,
                 name,

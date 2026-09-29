@@ -23,8 +23,13 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
         .get(&seat_name)
         .ok_or_else(|| Fail::invalid(format!("seat {seat_name} is no longer configured")))?;
     let agent = &loaded.config.agents[&seat.agent];
-    let connection = crate::harness::connection(&agent.provider)
-        .ok_or_else(|| Fail::invalid(format!("connection {:?} is unknown", agent.provider)))?;
+    let connection = match &agent.provider {
+        Some(name) => Some(
+            crate::harness::connection(name)
+                .ok_or_else(|| Fail::invalid(format!("connection {name:?} is unknown")))?,
+        ),
+        None => None,
+    };
     let harness = crate::harness::get(&agent.harness)
         .ok_or_else(|| Fail::invalid(format!("harness {:?} is unknown", agent.harness)))?;
     let head = row.head.clone().unwrap_or_default();
@@ -65,24 +70,28 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
         ticket.body,
         seat.instructions
     );
+    let guidance = harness.guidance(&checkout).map_err(Fail::refused)?;
     let argv = harness
         .argv(&crate::harness::Launch {
-            provider: &agent.provider,
+            provider: agent.provider.as_deref(),
             model: &agent.model,
             effort: agent.effort.as_deref(),
             resume: None,
             prompt: &prompt,
+            guidance: guidance.as_deref(),
         })
         .map_err(Fail::invalid)?;
     let image = supervise::image(daemon, project, &loaded).await?;
+    // Resolve the route, including a login's token, before any bearer is
+    // issued, so a missing credential never leaves a live grant.
+    let model = harness
+        .route(&stage, &daemon.machine)
+        .map_err(Fail::refused)?;
     let bearer = daemon.grants.issue(crate::mcp::Grant {
         project: project.clone(),
         execution,
         kind: crate::mcp::Kind::Review,
     });
-    let model = harness
-        .route(&stage, &daemon.machine)
-        .map_err(Fail::refused)?;
     let secrets = vec![
         (crate::harness::BEARER_VAR.to_string(), bearer),
         model.secret.clone(),
@@ -122,10 +131,14 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
     let run = run?;
 
     // The box is gone: only now does the verdict count toward anything.
+    // Whether it counts is `checks::current`'s durable registration proof;
+    // the outcome here is only the terminal frame and the publication.
     project.tx(|tx| {
         let published = checks::for_execution(tx, execution)?;
         let failure = match (&published, &run.registered, &run.terminal) {
             (Some(_), _, _) => None,
+            // A refused registration ends the run before a terminal frame, so
+            // name its reason rather than the generic no-publication error.
             (None, Some(crate::harness::Registration::Refused(reason)), _) => Some(reason.clone()),
             (None, _, _) if run.timed_out => {
                 Some("the seat ran past its timeout without publishing".to_string())
@@ -133,13 +146,17 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
             (None, _, Some(crate::harness::Event::Failed { message, .. })) => Some(message.clone()),
             (None, _, _) => Some("the seat ended without publishing".to_string()),
         };
+        let outcome = match &failure {
+            Some(_) => "error",
+            None => published
+                .as_ref()
+                .map_or("error", |check| check.verdict.as_str()),
+        };
         executions::end(
             tx,
             execution,
             executions::End {
-                outcome: published
-                    .as_ref()
-                    .map_or("error", |check| check.verdict.as_str()),
+                outcome,
                 detail: failure.as_deref(),
                 exit_code: run.exit_code,
                 ticket: Some(ticket.id),

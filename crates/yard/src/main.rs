@@ -2,6 +2,7 @@
 
 mod api;
 mod r#box;
+mod claude;
 mod cli;
 mod config;
 mod daemon;

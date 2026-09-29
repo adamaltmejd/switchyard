@@ -183,7 +183,8 @@ pub struct Start<'a> {
     pub round: Option<i64>,
     pub approval: Option<i64>,
     pub ticket: Option<i64>,
-    /// Worker settings: agent name and its `{harness, provider, model, effort}`.
+    /// Worker settings: agent name and its `{harness, provider login, model,
+    /// effort}`.
     pub agent: Option<(&'a str, &'a Value)>,
     /// The pinfold pin of the worker's harness, recorded with the intent.
     pub harness_version: Option<&'a str>,
@@ -277,6 +278,16 @@ pub fn set_progress(conn: &Connection, id: i64, note: &str) -> Result<(), Fail> 
     conn.execute(
         "UPDATE execution SET progress = ?2 WHERE id = ?1",
         params![id, note],
+    )?;
+    Ok(())
+}
+
+/// Observational: the harness's registration proof, recorded once its reader
+/// yields a complete one. `mcp` is `registered` or `refused`.
+pub fn set_mcp(conn: &Connection, id: i64, mcp: &str) -> Result<(), Fail> {
+    conn.execute(
+        "UPDATE execution SET mcp = ?2 WHERE id = ?1",
+        params![id, mcp],
     )?;
     Ok(())
 }
