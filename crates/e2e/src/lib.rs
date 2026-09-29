@@ -354,6 +354,15 @@ pub struct Project<'a> {
 
 /// A configuration naming one Pi agent on the fake model.
 pub fn config(extra: &str) -> String {
+    agent_config(
+        r#"harness = "pi"
+provider = "openrouter"
+model = "fake-model""#,
+        extra,
+    )
+}
+
+fn agent_config(agent: &str, extra: &str) -> String {
     format!(
         r#"max_lanes = 2
 approve = "manual"
@@ -363,9 +372,7 @@ ref = "main"
 protected_paths = ["AGENTS.md", "CLAUDE.md", ".agents/", ".pi/"]
 
 [agents.worker]
-harness = "pi"
-provider = "openrouter"
-model = "fake-model"
+{agent}
 
 [workflows.default]
 implementer = "worker"
@@ -744,6 +751,10 @@ pub fn claude_bash(command: &str) -> ToolCall {
 
 /// Write `files` and commit them in one Claude Bash call.
 pub fn claude_files(files: &[(&str, &str)], message: &str) -> ToolCall {
+    claude_bash(&files_command(files, message))
+}
+
+fn files_command(files: &[(&str, &str)], message: &str) -> String {
     let mut command = String::from("cd /workspace");
     for (path, text) in files {
         command.push_str(&format!(
@@ -755,7 +766,7 @@ pub fn claude_files(files: &[(&str, &str)], message: &str) -> ToolCall {
         " && git add -A && git commit -q -m {} && echo committed",
         shell_quote(message)
     ));
-    claude_bash(&command)
+    command
 }
 
 /// One file, one commit, through Claude's `Bash` tool.
@@ -773,35 +784,11 @@ pub fn claude_publish(findings: Value) -> ToolCall {
 
 /// A configuration naming one Claude login agent on the fake model.
 pub fn claude_config(extra: &str) -> String {
-    format!(
-        r#"max_lanes = 2
-approve = "manual"
-
-[target]
-ref = "main"
-protected_paths = ["AGENTS.md", "CLAUDE.md", ".agents/", ".pi/"]
-
-[agents.worker]
-harness = "claude"
+    agent_config(
+        r#"harness = "claude"
 login = true
-model = "claude-sonnet-4-5"
-
-[workflows.default]
-implementer = "worker"
-review = ["correctness"]
-
-[workflows.plan]
-access = "read-only"
-review = "none"
-
-[review]
-max_rounds = 3
-blocking = "P1"
-
-[review.seats.correctness]
-agent = "worker"
-instructions = "Review for correctness."
-{extra}"#
+model = "claude-sonnet-4-5""#,
+        extra,
     )
 }
 
@@ -816,35 +803,11 @@ pub fn act(request: &ModelRequest, calls: Vec<ToolCall>) -> Reply {
 
 /// A configuration naming one Codex login agent on the fake model.
 pub fn codex_config(extra: &str) -> String {
-    format!(
-        r#"max_lanes = 2
-approve = "manual"
-
-[target]
-ref = "main"
-protected_paths = ["AGENTS.md", "CLAUDE.md", ".agents/", ".pi/"]
-
-[agents.worker]
-harness = "codex"
+    agent_config(
+        r#"harness = "codex"
 login = true
-model = "gpt-5-codex"
-
-[workflows.default]
-implementer = "worker"
-review = ["correctness"]
-
-[workflows.plan]
-access = "read-only"
-review = "none"
-
-[review]
-max_rounds = 3
-blocking = "P1"
-
-[review.seats.correctness]
-agent = "worker"
-instructions = "Review for correctness."
-{extra}"#
+model = "gpt-5-codex""#,
+        extra,
     )
 }
 
@@ -855,18 +818,7 @@ pub fn codex_shell(command: &str) -> ToolCall {
 
 /// Write `files` and commit them in one Codex shell call.
 pub fn codex_files(files: &[(&str, &str)], message: &str) -> ToolCall {
-    let mut command = String::from("cd /workspace");
-    for (path, text) in files {
-        command.push_str(&format!(
-            " && mkdir -p \"$(dirname {path})\" && printf '%s' {} > {path}",
-            shell_quote(text)
-        ));
-    }
-    command.push_str(&format!(
-        " && git add -A && git commit -q -m {} && echo committed",
-        shell_quote(message)
-    ));
-    codex_shell(&command)
+    codex_shell(&files_command(files, message))
 }
 
 /// One file, one commit, through Codex's shell tool.
