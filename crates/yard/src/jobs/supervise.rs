@@ -444,10 +444,19 @@ pub async fn implement(
     if !workflow.read_only {
         std::fs::create_dir_all(&proof_dir).map_err(|error| error.to_string())?;
     }
+    let env = crate::agent_env::AgentEnv::load(
+        &daemon.git,
+        &project.canonical_dir(),
+        &attempt.base,
+        &clone,
+    )
+    .await
+    .map_err(Fail::refused)?;
     let stage = Stage {
         state: &state,
         input: &input,
         connection,
+        env: &env,
     };
     harness.stage(&stage).map_err(|error| error.to_string())?;
 
@@ -483,7 +492,6 @@ pub async fn implement(
         resume.is_some(),
     )
     .await?;
-    let guidance = harness.guidance(&clone).map_err(Fail::refused)?;
     let argv = harness
         .argv(&crate::harness::Launch {
             provider,
@@ -491,7 +499,7 @@ pub async fn implement(
             effort: attempt.implementer["effort"].as_str(),
             resume: resume.as_ref().map(|(_, session)| session.as_str()),
             prompt: &prompt,
-            guidance: guidance.as_deref(),
+            env: &env,
         })
         .map_err(Fail::invalid)?;
 

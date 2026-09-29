@@ -399,7 +399,7 @@ approve = "manual"
 
 [target]
 ref = "main"
-protected_paths = ["AGENTS.md", "CLAUDE.md", ".agents/", ".pi/"]
+protected_paths = ["AGENTS.md", "CLAUDE.md", ".agents/", ".claude/", ".codex/", ".pi/"]
 
 [isolation]
 egress = []

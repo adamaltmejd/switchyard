@@ -55,10 +55,15 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
         .git
         .clone_detached(&project.canonical_dir(), &checkout, &head)
         .await?;
+    let env =
+        crate::agent_env::AgentEnv::load(&daemon.git, &project.canonical_dir(), &base, &checkout)
+            .await
+            .map_err(Fail::refused)?;
     let stage = crate::harness::Stage {
         state: &state,
         input: &input,
         connection,
+        env: &env,
     };
     harness.stage(&stage).map_err(|error| error.to_string())?;
 
@@ -79,7 +84,6 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
         ticket.body,
         seat.instructions
     );
-    let guidance = harness.guidance(&checkout).map_err(Fail::refused)?;
     let argv = harness
         .argv(&crate::harness::Launch {
             provider: agent.provider.as_deref(),
@@ -87,7 +91,7 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
             effort: agent.effort.as_deref(),
             resume: None,
             prompt: &prompt,
-            guidance: guidance.as_deref(),
+            env: &env,
         })
         .map_err(Fail::invalid)?;
     let image = supervise::image(daemon, project, &loaded).await?;

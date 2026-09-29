@@ -31,6 +31,22 @@ pub struct Out {
     pub stderr: String,
 }
 
+struct RawOut {
+    code: i32,
+    stdout: Vec<u8>,
+    stderr: String,
+}
+
+/// One entry of a commit's tree.
+pub struct TreeEntry {
+    /// A regular file: not a link, not a submodule.
+    pub regular: bool,
+    pub exec: bool,
+    pub size: u64,
+    pub oid: String,
+    pub path: String,
+}
+
 impl Out {
     fn ok(self, what: &str) -> Result<Out, String> {
         if self.code == 0 {
@@ -74,6 +90,20 @@ impl Git {
         args: &[&str],
         lock: Option<RawFd>,
     ) -> Result<Out, String> {
+        let raw = self.run_bytes(cwd, args, lock).await?;
+        Ok(Out {
+            code: raw.code,
+            stdout: String::from_utf8_lossy(&raw.stdout).into_owned(),
+            stderr: raw.stderr,
+        })
+    }
+
+    async fn run_bytes(
+        &self,
+        cwd: &Path,
+        args: &[&str],
+        lock: Option<RawFd>,
+    ) -> Result<RawOut, String> {
         let mut command = Command::new("git");
         command
             .current_dir(cwd)
@@ -105,7 +135,7 @@ impl Git {
         let stderr = child.stderr.take().expect("piped stderr");
         let run = async {
             let ((stdout, out_over), (stderr, err_over)) = tokio::join!(
-                crate::r#box::read_capped(stdout, OUTPUT_MAX),
+                crate::r#box::read_capped_bytes(stdout, OUTPUT_MAX),
                 crate::r#box::read_capped(stderr, OUTPUT_MAX)
             );
             let status = child.wait().await.map_err(|error| error.to_string())?;
@@ -115,7 +145,7 @@ impl Git {
                     args.first().unwrap_or(&"")
                 ));
             }
-            Ok::<_, String>(Out {
+            Ok::<_, String>(RawOut {
                 code: exit_code(status),
                 stdout,
                 stderr,
@@ -206,6 +236,49 @@ impl Git {
             .run(repo, &["cat-file", "blob", &format!("{commit}:{path}")])
             .await?;
         Ok((out.code == 0).then_some(out.stdout))
+    }
+
+    /// The files of `commit` under `paths`, with sizes.
+    pub async fn ls_tree(
+        &self,
+        repo: &Path,
+        commit: &str,
+        paths: &[&str],
+    ) -> Result<Vec<TreeEntry>, String> {
+        let mut args = vec!["ls-tree", "-r", "-l", "-z", "--full-tree", commit, "--"];
+        args.extend(paths);
+        let out = self.run(repo, &args).await?.ok("ls-tree")?;
+        out.stdout
+            .split('\0')
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| {
+                let bad = || format!("malformed ls-tree entry {entry:?}");
+                let (meta, path) = entry.split_once('\t').ok_or_else(bad)?;
+                let mut fields = meta.split_whitespace();
+                let mode = fields.next().ok_or_else(bad)?;
+                let oid = fields.nth(1).ok_or_else(bad)?;
+                let size = fields.next().ok_or_else(bad)?;
+                Ok(TreeEntry {
+                    regular: mode == "100644" || mode == "100755",
+                    exec: mode == "100755",
+                    // A submodule's size is `-`.
+                    size: size.parse().unwrap_or(0),
+                    oid: oid.to_string(),
+                    path: path.to_string(),
+                })
+            })
+            .collect()
+    }
+
+    /// A blob's bytes, undecoded.
+    pub async fn blob(&self, repo: &Path, oid: &str) -> Result<Vec<u8>, String> {
+        let raw = self
+            .run_bytes(repo, &["cat-file", "blob", oid], None)
+            .await?;
+        match raw.code {
+            0 => Ok(raw.stdout),
+            code => Err(format!("git cat-file exited {code}: {}", raw.stderr.trim())),
+        }
     }
 
     /// Fetch `refspec` from the repository at `from` into `repo`.
