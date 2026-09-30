@@ -18,21 +18,30 @@ fn propose_directly(arguments: serde_json::Value) -> ToolCall {
 
 /// A malformed tool payload is refused by name, nothing written: a
 /// proposal carrying one unknown key beside valid ones, sent through a
-/// Claude worker's session so no client schema stops it first. Control: the same proposal
-/// without it is raised.
+/// Claude worker's session so no client schema stops it first. Control: the
+/// same proposal without it, in the same turn, is raised.
+///
+/// On the same machine, in a second project: an unknown workflow name is
+/// refused by name, nothing written, on filing and on an edit. Control: a
+/// configured workflow is accepted by both. Removing the named workflow
+/// refuses until that ticket is abandoned. An unknown TOML key refuses until
+/// corrected; each refusal writes nothing.
 ///
 /// Sabotage: make `mcp::strict` accept unknown keys; the first proposal is
-/// raised and there are two.
+/// raised and there are two. Make `admit::ticket_new` skip its workflow
+/// lookup; the filing is accepted and a ticket exists. Make
+/// `admit::ticket_edit` skip its workflow lookup; the edit names a workflow
+/// that does not exist.
 #[test]
-fn a_malformed_tool_payload_is_refused_by_name() {
-    let machine = Machine::new("g6-tool", |request| match request.tool_results().len() {
-        _ if request.opens() => Reply::Tools(vec![propose_directly(
-            json!({ "kind": "ticket", "title": "Split", "colour": "red" }),
-        )]),
-        1 => Reply::Tools(vec![propose_directly(
-            json!({ "kind": "ticket", "title": "Split" }),
-        )]),
-        _ => Reply::Text("done".into()),
+fn inputs_are_refused_by_name_and_write_nothing() {
+    let machine = Machine::new("g6", |request| {
+        act(
+            request,
+            vec![
+                propose_directly(json!({ "kind": "ticket", "title": "Split", "colour": "red" })),
+                propose_directly(json!({ "kind": "ticket", "title": "Split" })),
+            ],
+        )
     });
     machine.write_claude_env();
     machine.start();
@@ -57,21 +66,9 @@ fn a_malformed_tool_payload_is_refused_by_name() {
     let proposals = project.rows("SELECT payload FROM attention WHERE kind = 'proposal'");
     assert_eq!(proposals.len(), 1);
     assert!(!proposals[0]["payload"].as_str().unwrap().contains("colour"));
-}
 
-/// An unknown workflow name is refused by name, nothing written, on filing
-/// and on an edit. Control: a configured workflow is accepted by both.
-/// Removing the named workflow refuses until that ticket is abandoned.
-/// An unknown TOML key refuses until corrected; each refusal writes nothing.
-///
-/// Sabotage: make `admit::ticket_new` skip its workflow lookup; the filing
-/// is accepted and a ticket exists. Make `admit::ticket_edit` skip its
-/// workflow lookup; the edit names a workflow that does not exist.
-#[test]
-fn unknown_names_and_keys_are_refused_without_writes() {
-    let machine = Machine::new("g6-workflow", |_| Reply::Text("unused".into()));
-    machine.start();
-    let project = Project::new(&machine, "p", &config(""));
+    // No worker runs in this project: its one ticket stays parked.
+    let project = Project::new(&machine, "q", &claude_config(""));
     let seq = last_seq(&project);
 
     let refused = project.refused(&[
@@ -144,7 +141,7 @@ fn unknown_names_and_keys_are_refused_without_writes() {
     let canonical = project.canonical_head();
     let seq = last_seq(&project);
 
-    let without = config("").replace(
+    let without = claude_config("").replace(
         "[workflows.plan]\naccess = \"read-only\"\nreview = \"none\"\n",
         "",
     );
@@ -167,7 +164,7 @@ fn unknown_names_and_keys_are_refused_without_writes() {
 
     project.write(
         ".yard/config.toml",
-        &config("[gates.check]\ncommand = \"true\"\ntimout_minutes = 5\n"),
+        &claude_config("[gates.check]\ncommand = \"true\"\ntimout_minutes = 5\n"),
     );
     project.git(&["commit", "--quiet", "-am", "Misspelt gate"]);
     let refused = project.refused(&["sync"]);
@@ -185,7 +182,7 @@ fn unknown_names_and_keys_are_refused_without_writes() {
 
     project.write(
         ".yard/config.toml",
-        &config("[gates.check]\ncommand = \"true\"\ntimeout_minutes = 5\n"),
+        &claude_config("[gates.check]\ncommand = \"true\"\ntimeout_minutes = 5\n"),
     );
     project.git(&["commit", "--quiet", "-am", "Fix the gate"]);
     assert_eq!(project.json(&["sync"])["sync"], "imported");
