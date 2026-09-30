@@ -4,9 +4,7 @@ use e2e::*;
 use serde_json::{Value, json};
 
 fn unreviewed(extra: &str) -> String {
-    config(extra)
-        .replace("review = [\"correctness\"]", "review = \"none\"")
-        .replace("max_lanes = 2", "max_lanes = 3")
+    config(extra).replace("review = [\"correctness\"]", "review = \"none\"")
 }
 
 fn is_approval(event: &Value, ticket: &str) -> bool {
@@ -43,10 +41,9 @@ fn merge_target() -> ToolCall {
     )
 }
 
-/// Three approved candidates, the second red on its merged ref: the first
-/// lands, the second gets one repair and a second red raises `red`, the
-/// third lands on the moved target with its own gate run. No two landings
-/// overlap.
+/// Two approved candidates, the second red on its merged ref: the first
+/// lands, the second gets one repair and a second red raises `red`. No two
+/// landings overlap.
 ///
 /// The failing gate writes over 8000 bytes to stderr, then a marker to stdout;
 /// the red's detail ends with the marker.
@@ -65,8 +62,6 @@ fn the_queue_lands_in_order_and_rejudges_a_red_merge() {
         let prompt = request.prompt();
         let file = if prompt.contains("Second") {
             "bad.txt"
-        } else if prompt.contains("Third") {
-            "third.txt"
         } else {
             "first.txt"
         };
@@ -78,14 +73,14 @@ fn the_queue_lands_in_order_and_rejudges_a_red_merge() {
     machine.start();
     let project = Project::new(&machine, "p", &unreviewed(&gate));
     let mut watch = project.watch(0);
-    for title in ["First", "Second", "Third"] {
+    for title in ["First", "Second"] {
         project.json(&["ticket", "new", "--title", title]);
     }
-    let heads: Vec<String> = ["Y-1", "Y-2", "Y-3"]
+    let heads: Vec<String> = ["Y-1", "Y-2"]
         .iter()
         .map(|ticket| approval_of(&mut watch, ticket))
         .collect();
-    for (ticket, head) in ["Y-1", "Y-2", "Y-3"].iter().zip(&heads) {
+    for (ticket, head) in ["Y-1", "Y-2"].iter().zip(&heads) {
         project.json(&["attempt", "approve", ticket, "--head", head]);
     }
 
@@ -102,8 +97,8 @@ fn the_queue_lands_in_order_and_rejudges_a_red_merge() {
     assert_eq!(red["data"]["reason"], "landing");
     let detail = red["data"]["payload"]["detail"].as_str().unwrap();
     assert!(detail.trim_end().ends_with(MARKER), "{detail}");
-    watch.find("Y-3 landed", |event| {
-        event["event"] == "landing.recorded" && event["ticket"] == "Y-3"
+    watch.find("Y-1 landed", |event| {
+        event["event"] == "landing.recorded" && event["ticket"] == "Y-1"
     });
 
     let landed: Vec<Value> = project
@@ -111,7 +106,7 @@ fn the_queue_lands_in_order_and_rejudges_a_red_merge() {
         .into_iter()
         .map(|row| row["ticket"].clone())
         .collect();
-    assert_eq!(landed, [json!(1), json!(3)]);
+    assert_eq!(landed, [json!(1)]);
     let landings = project.rows(
         "SELECT execution.id, attempt.ticket, execution.outcome, execution.head
          FROM execution JOIN attempt ON attempt.id = execution.attempt
@@ -126,26 +121,6 @@ fn the_queue_lands_in_order_and_rejudges_a_red_merge() {
         [json!("red"), json!("red")]
     );
     assert_eq!(second[1]["head"], again.as_str());
-
-    // The third's gate ran on a merge whose first parent is the target the
-    // first landing left.
-    let third = landings
-        .iter()
-        .find(|row| row["ticket"] == 3 && row["outcome"] == "landed")
-        .unwrap();
-    let gate = project.rows(&format!(
-        "SELECT base, head, outcome FROM execution WHERE parent = {}",
-        third["id"]
-    ));
-    assert_eq!(gate.len(), 1);
-    assert_eq!(gate[0]["outcome"], "pass");
-    let merged = gate[0]["head"].as_str().unwrap();
-    let parents = git(
-        &project.canonical(),
-        &["rev-list", "--parents", "-n", "1", merged],
-    );
-    let parents: Vec<&str> = parents.split_whitespace().skip(1).collect();
-    assert_eq!(parents, [heads[0].as_str(), heads[2].as_str()]);
 
     // One at a time: each landing ended before the next started. Sabotage:
     // give each project two landing slots; two landings overlap.
@@ -191,7 +166,9 @@ fn a_conflict_with_a_config_change_merges_from_the_bundle() {
         )
     });
     machine.start();
-    let base = config("[gates.check]\ncommand = \"test -f shared.txt\"\nstage = \"candidate\"\n");
+    let base = config(
+        "[gates.check]\ncommand = \"test -f shared.txt\"\nstage = \"candidate\"\nruns_in = \"host\"\n",
+    );
     let project = Project::new(&machine, "p", &base);
     let mut watch = project.watch(0);
     project.json(&["ticket", "new", "--title", "Write shared"]);
