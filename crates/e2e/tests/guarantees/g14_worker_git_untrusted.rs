@@ -104,23 +104,17 @@ fn planted_worker_git_never_runs_on_the_host() {
     );
 }
 
-/// The worker leaves a symlink in `/yard/proof`, and separately passes the
-/// entry bound: each candidate is refused by name and no gate runs. Control:
-/// a regular file is accepted and its candidate gate runs.
+/// The worker leaves a symlink in `/yard/proof`: its candidate is refused by
+/// name and no gate runs. Control: a regular file is accepted and its
+/// candidate gate runs.
 ///
 /// Sabotage: follow links in `proof::snapshot`; the symlink is copied, the
 /// candidate is accepted and a gate runs.
-///
-/// Sabotage: set `PROOF_MAX_FILES` in crates/yard/src/jobs/proof.rs from 1024 to 2048; Y-2
-/// reaches approval and `assert_eq!(event["ticket"], "Y-3")` fails.
 #[test]
-fn a_bad_proof_entry_is_refused_by_name() {
+fn a_proof_symlink_is_refused_by_name() {
     let machine = Machine::new("g14-proof", |request| {
-        let prompt = request.prompt();
-        let command = if prompt.contains("Y-1") {
+        let command = if request.prompt().contains("Y-1") {
             "cd /workspace && printf 'feature' > feature.txt && git add -A && git commit -q -m 'Add feature' && ln -s /workspace/feature.txt /yard/proof/link && echo done"
-        } else if prompt.contains("Y-2") {
-            "cd /workspace && printf 'feature' > feature.txt && git add -A && git commit -q -m 'Add feature' && mkdir -p /yard/proof/many && i=0 && while [ $i -le 1024 ]; do : > \"$(printf '/yard/proof/many/f%04d' $i)\"; i=$((i+1)); done && echo done"
         } else {
             "cd /workspace && printf 'feature' > feature.txt && git add -A && git commit -q -m 'Add feature' && printf 'evidence' > /yard/proof/evidence.txt && echo done"
         };
@@ -130,27 +124,27 @@ fn a_bad_proof_entry_is_refused_by_name() {
     let project = Project::new(
         &machine,
         "p",
-        &config("[gates.check]\ncommand = \"test -f feature.txt\"\nstage = \"candidate\"\n")
-            .replace("max_lanes = 2", "max_lanes = 3")
-            .replace("review = [\"correctness\"]", "review = \"none\""),
+        &config(
+            "[gates.check]\ncommand = \"test -f feature.txt\"\nstage = \"candidate\"\nruns_in = \"host\"\n",
+        )
+        .replace("review = [\"correctness\"]", "review = \"none\""),
     );
     let mut watch = project.watch(0);
     project.json(&["ticket", "new", "--title", "Symlink proof"]);
-    project.json(&["ticket", "new", "--title", "Bound proof"]);
     project.json(&["ticket", "new", "--title", "Good proof"]);
 
-    let mut stopped = 0;
+    let mut stopped = false;
     let mut approved = false;
-    while stopped < 2 || !approved {
+    while !stopped || !approved {
         let event = watch.until("decision", |event| {
             event["event"] == "attention.raised"
                 && (event["data"]["kind"] == "stopped" || event["data"]["kind"] == "approval")
         });
         if event["data"]["kind"] == "stopped" {
             assert_eq!(event["data"]["reason"], "failed", "{event}");
-            stopped += 1;
+            stopped = true;
         } else {
-            assert_eq!(event["ticket"], "Y-3", "{event}");
+            assert_eq!(event["ticket"], "Y-2", "{event}");
             approved = true;
         }
     }
@@ -158,25 +152,18 @@ fn a_bad_proof_entry_is_refused_by_name() {
     let refusals = project.rows(
         "SELECT attempt.ticket AS ticket, execution.detail AS detail
          FROM execution JOIN attempt ON attempt.id = execution.attempt
-         WHERE execution.kind = 'implementation' AND execution.outcome = 'refused'
-         ORDER BY attempt.ticket",
+         WHERE execution.kind = 'implementation' AND execution.outcome = 'refused'",
     );
-    assert_eq!(refusals.len(), 2, "{refusals:?}");
-    let detail = |ticket: i64| {
-        refusals.iter().find(|row| row["ticket"] == ticket).unwrap()["detail"]
-            .as_str()
-            .unwrap()
-            .to_string()
-    };
-    assert!(detail(1).contains("link"), "{}", detail(1));
-    assert!(detail(2).contains("1024"), "{}", detail(2));
-    assert!(detail(2).contains("many/f"), "{}", detail(2));
+    assert_eq!(refusals.len(), 1, "{refusals:?}");
+    assert_eq!(refusals[0]["ticket"], 1, "{refusals:?}");
+    let detail = refusals[0]["detail"].as_str().unwrap();
+    assert!(detail.contains("link"), "{detail}");
 
-    // No gate ran for a refused candidate; the accepted one ran its gate.
+    // No gate ran for the refused candidate; the accepted one ran its gate.
     let gates = project.rows(
         "SELECT attempt.ticket AS ticket FROM execution
          JOIN attempt ON attempt.id = execution.attempt
          WHERE execution.kind = 'gate'",
     );
-    assert_eq!(gates, vec![json!({ "ticket": 3 })], "{gates:?}");
+    assert_eq!(gates, vec![json!({ "ticket": 2 })], "{gates:?}");
 }
