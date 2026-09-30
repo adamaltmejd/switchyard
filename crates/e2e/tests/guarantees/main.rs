@@ -12,6 +12,7 @@ mod g08_review_is_a_publication;
 mod g09_implementer_starts_right;
 mod g10_queue_one_at_a_time;
 mod g11_only_sync_changes_yard;
+// G12 is established by G8's Pi, Claude and Codex seat scenarios.
 mod g13_runs_where_its_row_says;
 mod g14_worker_git_untrusted;
 mod g15_plans_and_proposals;

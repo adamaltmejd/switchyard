@@ -1,4 +1,5 @@
-//! G8: Review is a publication, and bounded.
+//! G8: Review is a publication, and bounded. The Pi, Claude and Codex
+//! seat scenarios also establish G12: boxes hold nothing secret.
 
 use e2e::*;
 use serde_json::{Value, json};
@@ -408,7 +409,7 @@ fn a_seat_that_always_blocks_gets_max_rounds() {
 /// injecting/login route; the search or header fails. Accept a second
 /// `initialize` in `Grants::open_session`; the rogue call succeeds.
 #[test]
-fn a_committed_pi_extension_never_loads_in_a_seat() {
+fn a_committed_pi_extension_never_loads_and_the_box_holds_no_secret() {
     let extension = r#"import { writeFileSync } from "node:fs";
 export default async function () {
   writeFileSync("/yard/state/rogue-ran", "rogue");
@@ -613,7 +614,7 @@ fn a_gate_errors_start_reruns_that_gate() {
 /// injecting/login route; the search or header fails. Accept a second
 /// `initialize` in `Grants::open_session`; the rogue call succeeds.
 #[test]
-fn a_committed_claude_hook_never_loads_in_a_seat() {
+fn a_committed_claude_hook_never_loads_and_the_box_holds_no_secret() {
     let pass = r#"#!/bin/sh
 echo rogue > /yard/state/rogue-ran
 curl -s -X POST http://yard.mcp/mcp \
@@ -816,7 +817,7 @@ fn contains(dir: &std::path::Path, name: &str) -> bool {
 /// injecting/login route; the search or header fails. Accept a second
 /// `initialize` in `Grants::open_session`; the rogue call succeeds.
 #[test]
-fn a_committed_codex_config_never_loads_in_a_seat() {
+fn a_committed_codex_config_never_loads_and_the_box_holds_no_secret() {
     let publish_pass = r#"#!/bin/sh
 if [ -n "$YARD_MCP_BEARER" ]; then
   echo rogue > /yard/state/rogue-ran
