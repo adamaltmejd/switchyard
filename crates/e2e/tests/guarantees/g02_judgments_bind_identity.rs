@@ -6,21 +6,35 @@ use std::io::Write;
 
 const GATE: &str = "[gates.check]\ncommand = \"test -f feature.txt\"\nstage = \"candidate\"\n";
 
-/// Seats publish no findings; the implementer commits feature.txt, or runs
-/// `repair` when its execution's prompt carries `key`.
-fn worker(key: &'static str, repair: ToolCall) -> impl Fn(&ModelRequest) -> Reply + Send + Sync {
-    let repair = std::sync::Mutex::new(Some(repair));
+/// Seats publish no findings; the implementer commits feature.txt and writes
+/// its proof, or runs a repair once when its execution's prompt carries that
+/// repair's key. Keys are tried in order, so the newest prompt's key comes
+/// first: a fresh session's brief repeats the ticket body.
+fn worker(repairs: Vec<(&'static str, ToolCall)>) -> impl Fn(&ModelRequest) -> Reply + Send + Sync {
+    let repairs = std::sync::Mutex::new(
+        repairs
+            .into_iter()
+            .map(|(key, call)| (key, Some(call)))
+            .collect::<Vec<_>>(),
+    );
     move |request| {
         if request.has_tool("yard_publish_review") {
             return act(request, vec![publish(json!([]))]);
         }
-        if request.opens() && request.last_user().contains(key) {
-            let call = repair.lock().unwrap().take().expect("one repair");
-            return Reply::Tools(vec![call]);
+        if request.opens() {
+            let prompt = request.last_user();
+            let mut repairs = repairs.lock().unwrap();
+            if let Some((_, call)) = repairs.iter_mut().find(|(key, _)| prompt.contains(key)) {
+                return Reply::Tools(vec![call.take().expect("one repair per key")]);
+            }
         }
         act(
             request,
-            vec![commit_file("feature.txt", "feature\n", "Add feature")],
+            vec![bash(
+                "cd /workspace && printf 'feature\\n' > feature.txt && git add -A \
+                 && git commit -q -m 'Add feature' && printf 'first' > /yard/proof/evidence.txt \
+                 && echo committed",
+            )],
         )
     }
 }
@@ -43,6 +57,10 @@ fn approval(watch: &mut Watch) -> Value {
 
 fn head(item: &Value) -> String {
     item["payload"]["head"].as_str().unwrap().to_string()
+}
+
+fn proof(item: &Value) -> String {
+    item["payload"]["proof"].as_str().unwrap().to_string()
 }
 
 /// Gate and review executions on `head`, in order: (kind, ticket revision).
@@ -76,85 +94,42 @@ fn last_seq(project: &Project) -> i64 {
         .unwrap()
 }
 
-/// A passed gate and review, then a new commit: the candidate is
-/// unverified. The new commit keeps the tree, so only the head tells the
-/// two candidates apart. A delayed approve names the old head and writes
-/// nothing; approving the current head succeeds.
+/// A passed gate and review, then a new commit, a ticket edit, two synced
+/// check changes and a proof-only repair in turn, each leaving the candidate
+/// unverified.
+///
+/// The new commit keeps the tree, so only the head tells the two candidates
+/// apart. The edit's implementer run makes no commit: the same head is
+/// judged afresh at the new revision, without `stopped:unchanged`, so the
+/// revision binding shows in the revision each judging execution records.
+/// A synced gate change reruns the gate and keeps the review; then a seat
+/// change reruns the review and keeps the new gate. The proof-only repair
+/// reruns the gate on the same head under the new proof digest, and the old
+/// check does not count. Delayed approves naming the old proof or the old
+/// head write nothing; approving the current head and proof succeeds.
 ///
 /// Sabotage: drop `head` from `checks::current`'s match; the empty commit
 /// reaches approval on the first commit's gate and review. Make
-/// admit::approval_item accept an old head; the stale approve writes.
-#[test]
-fn a_new_commit_leaves_the_candidate_unverified() {
-    let machine = Machine::new(
-        "g2-commit",
-        worker(
-            "Once more",
-            bash("cd /workspace && git commit -q --allow-empty -m Again && echo committed"),
-        ),
-    );
-    machine.start();
-    let project = Project::new(&machine, "p", &config(GATE));
-    let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Add feature"]);
-    let first = head(&approval(&mut watch));
-    project.json(&[
-        "attempt",
-        "reject",
-        "Y-1",
-        "--head",
-        &first,
-        "--text",
-        "Once more",
-    ]);
-    let second = approval(&mut watch);
-
-    let canonical = project.canonical();
-    let tree = |commit: &str| git(&canonical, &["rev-parse", &format!("{commit}^{{tree}}")]);
-    assert_ne!(head(&second), first);
-    assert_eq!(tree(&head(&second)), tree(&first));
-    let once = vec![("gate".to_string(), 1), ("review".to_string(), 1)];
-    assert_eq!(judged(&project, &first), once);
-    assert_eq!(judged(&project, &head(&second)), once);
-    let checks: Vec<i64> = project
-        .rows(&format!(
-            "SELECT c.id AS id FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE e.head = '{}' ORDER BY c.id",
-            head(&second)
-        ))
-        .iter()
-        .map(|row| row["id"].as_i64().unwrap())
-        .collect();
-    assert_eq!(second["payload"]["checks"], json!(checks));
-
-    let seq = last_seq(&project);
-    let refused = project.refused(&["attempt", "approve", "Y-1", "--head", &first]);
-    assert_eq!(refused["code"], "stale", "{refused}");
-    assert_eq!(refused["data"]["expected"], first.as_str());
-    assert_eq!(refused["data"]["current"], head(&second).as_str());
-    assert_eq!(last_seq(&project), seq);
-    assert!(project.rows("SELECT id FROM approval").is_empty());
-
-    project.json(&["attempt", "approve", "Y-1", "--head", &head(&second)]);
-    assert_eq!(
-        project.rows("SELECT head FROM approval"),
-        vec![json!({ "head": head(&second) })]
-    );
-}
-
-/// A passed gate and review, then a ticket edit whose implementer run makes no
-/// commit: the same head is judged afresh at the new revision, without
-/// `stopped:unchanged`. The head does not move, so the revision binding
-/// itself shows in the revision each judging execution records.
-///
-/// Sabotage: make `admit::steer` set nothing; no implementer runs and no
-/// second approval comes. Keep `stop("unchanged")` for edit runs; the attempt
+/// `admit::steer` set nothing; no implementer runs for the edit and no
+/// approval follows it. Keep `stop("unchanged")` for edit runs; the attempt
 /// stops. Record the old revision on the gate and review executions; `judged`
-/// no longer reads `revision + 1`.
+/// no longer reads `revision + 1`. Make admit::approval_item accept an old
+/// head; the stale approve writes.
 #[test]
-fn a_ticket_edit_leaves_the_candidate_unverified() {
+fn a_new_head_revision_check_config_or_proof_leaves_the_candidate_unverified() {
     let machine = Machine::new(
-        "g2-edit",
-        worker("nothing else", bash("cd /workspace && echo unchanged")),
+        "g2-identity",
+        worker(vec![
+            (
+                "Change the proof",
+                bash("printf 'second' > /yard/proof/evidence.txt"),
+            ),
+            ("nothing else", bash("cd /workspace && echo unchanged")),
+            (
+                "Once more",
+                bash("cd /workspace && git commit -q --allow-empty -m Again && echo committed"),
+            ),
+        ]),
     );
     machine.start();
     let project = Project::new(&machine, "p", &config(GATE));
@@ -167,11 +142,35 @@ fn a_ticket_edit_leaves_the_candidate_unverified() {
         "--body",
         "Create feature.txt",
     ]);
-    let first = approval(&mut watch);
+    let first_item = approval(&mut watch);
+    let first = head(&first_item);
+    project.json(&[
+        "attempt",
+        "reject",
+        "Y-1",
+        "--head",
+        &first,
+        "--proof",
+        &proof(&first_item),
+        "--text",
+        "Once more",
+    ]);
+    let second = approval(&mut watch);
+    let candidate = head(&second);
+
+    let canonical = project.canonical();
+    let tree = |commit: &str| git(&canonical, &["rev-parse", &format!("{commit}^{{tree}}")]);
+    assert_ne!(candidate, first);
+    assert_eq!(tree(&candidate), tree(&first));
+    let once = vec![("gate".to_string(), 1), ("review".to_string(), 1)];
+    assert_eq!(judged(&project, &first), once);
+    assert_eq!(judged(&project, &candidate), once);
+
+    // A ticket edit supersedes the approval and the implementer runs.
     let revision = project.json(&["ticket", "show", "Y-1"])["revision"]
         .as_i64()
         .unwrap();
-    assert_eq!(first["payload"]["revision"], revision);
+    assert_eq!(second["payload"]["revision"], revision);
     project.json(&[
         "ticket",
         "edit",
@@ -181,24 +180,18 @@ fn a_ticket_edit_leaves_the_candidate_unverified() {
         "--body",
         "Create feature.txt and nothing else",
     ]);
-    let second = approval(&mut watch);
+    let third = approval(&mut watch);
 
-    assert_eq!(head(&second), head(&first));
-    assert_eq!(second["payload"]["revision"], revision + 1);
+    assert_eq!(head(&third), candidate);
+    assert_eq!(third["payload"]["revision"], revision + 1);
     let superseded =
         project.rows("SELECT resolution FROM attention WHERE kind = 'approval' ORDER BY id");
-    assert_eq!(superseded[0]["resolution"], "superseded");
-    for id in first["payload"]["checks"].as_array().unwrap() {
-        assert!(
-            !second["payload"]["checks"].as_array().unwrap().contains(id),
-            "the new approval carries check {id} from the old revision"
-        );
-    }
+    assert_eq!(superseded[1]["resolution"], "superseded");
     let reasons =
         project.rows("SELECT reason FROM execution WHERE kind = 'implementation' ORDER BY id");
     assert_eq!(reasons.last().unwrap()["reason"], "edit");
     assert_eq!(
-        judged(&project, &head(&second)),
+        judged(&project, &candidate),
         vec![
             ("gate".to_string(), revision),
             ("review".to_string(), revision),
@@ -226,6 +219,93 @@ fn a_ticket_edit_leaves_the_candidate_unverified() {
     assert_eq!(
         project.json(&["ticket", "show", "Y-1"])["body"],
         "Create feature.txt and nothing else"
+    );
+
+    // A synced gate change reruns the gate and keeps the review.
+    // Sabotage: hash the gates into `review_digest` too; the review reruns.
+    let review = third["payload"]["checks"][1].clone();
+    project.reconfigure(&config(&GATE.replace("test -f", "test -s")));
+    let fourth = approval(&mut watch);
+    assert_eq!(head(&fourth), candidate);
+    assert_eq!(
+        kinds(&project),
+        ["gate", "review", "gate", "review", "gate", "review", "gate"]
+    );
+    let gate =
+        project.rows("SELECT id FROM \"check\" WHERE kind = 'gate' ORDER BY id")[3]["id"].clone();
+    assert_eq!(fourth["payload"]["checks"], json!([gate, review]));
+
+    // The reverse change retains this new gate and replaces only the review.
+    // Sabotage: hash the seats into gate_digest too; the gate reruns.
+    project.reconfigure(&config(&GATE.replace("test -f", "test -s")).replace(
+        "Review for correctness.",
+        "Review for correctness and naming.",
+    ));
+    let fifth = approval(&mut watch);
+    assert_eq!(head(&fifth), candidate);
+    assert_eq!(
+        kinds(&project),
+        [
+            "gate", "review", "gate", "review", "gate", "review", "gate", "review"
+        ]
+    );
+    let review =
+        project.rows("SELECT id FROM \"check\" WHERE kind = 'review' ORDER BY id")[3]["id"].clone();
+    assert_eq!(fifth["payload"]["checks"], json!([gate, review]));
+
+    // A repair that changes only `/yard/proof` is a new candidate.
+    // Sabotage: match only base and head in `checks::current`; the old gate
+    // counts for the new proof and no gate reruns.
+    let old_proof = proof(&fifth);
+    project.json(&[
+        "attempt",
+        "reject",
+        "Y-1",
+        "--head",
+        &candidate,
+        "--proof",
+        &old_proof,
+        "--text",
+        "Change the proof",
+    ]);
+    let sixth = approval(&mut watch);
+    assert_eq!(head(&sixth), candidate);
+    let gates = project.rows(
+        "SELECT c.id AS id, e.head AS head, e.proof AS proof FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE c.kind = 'gate' ORDER BY c.id DESC LIMIT 2",
+    );
+    assert_eq!(gates[0]["head"], candidate.as_str());
+    assert_eq!(gates[1]["head"], candidate.as_str());
+    assert_ne!(gates[0]["proof"], gates[1]["proof"]);
+    assert_eq!(sixth["payload"]["checks"][0], gates[0]["id"]);
+    assert_eq!(sixth["payload"]["proof"], gates[0]["proof"]);
+
+    // A delayed approve naming the old proof writes nothing.
+    // Sabotage: drop the proof comparison in `admit::approval_item`; the
+    // delayed approve names the old proof and is given anyway.
+    let seq = last_seq(&project);
+    let refused = project.refused(&[
+        "attempt", "approve", "Y-1", "--head", &candidate, "--proof", &old_proof,
+    ]);
+    assert_eq!(refused["code"], "stale", "{refused}");
+    assert_eq!(refused["data"]["expected"], old_proof.as_str());
+    assert_eq!(refused["data"]["current"], sixth["payload"]["proof"]);
+    assert_eq!(last_seq(&project), seq);
+    assert!(project.rows("SELECT id FROM approval").is_empty());
+
+    let refused = project.refused(&["attempt", "approve", "Y-1", "--head", &first]);
+    assert_eq!(refused["code"], "stale", "{refused}");
+    assert_eq!(refused["data"]["expected"], first.as_str());
+    assert_eq!(refused["data"]["current"], candidate.as_str());
+    assert_eq!(last_seq(&project), seq);
+    assert!(project.rows("SELECT id FROM approval").is_empty());
+
+    let new_proof = proof(&sixth);
+    project.json(&[
+        "attempt", "approve", "Y-1", "--head", &candidate, "--proof", &new_proof,
+    ]);
+    assert_eq!(
+        project.rows("SELECT head, proof FROM approval"),
+        vec![json!({ "head": candidate, "proof": new_proof })]
     );
 }
 
@@ -309,43 +389,6 @@ fn an_edit_stops_a_held_seat_and_costs_no_round() {
     hold.release();
 }
 
-/// A synced gate change reruns the gate and keeps the review; then a seat
-/// change reruns the review and keeps the new gate.
-///
-/// Sabotage: hash the gates into `review_digest` too; the review reruns.
-#[test]
-fn synced_gate_and_seat_changes_rerun_only_their_own_checks() {
-    let machine = Machine::new("g2-gate", worker("never", bash("true")));
-    machine.start();
-    let project = Project::new(&machine, "p", &config(GATE));
-    let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Add feature"]);
-    let first = approval(&mut watch);
-    assert_eq!(kinds(&project), ["gate", "review"]);
-    let review = first["payload"]["checks"][1].clone();
-
-    project.reconfigure(&config(&GATE.replace("test -f", "test -s")));
-    let second = approval(&mut watch);
-    assert_eq!(head(&second), head(&first));
-    assert_eq!(kinds(&project), ["gate", "review", "gate"]);
-    let gate =
-        project.rows("SELECT id FROM \"check\" WHERE kind = 'gate' ORDER BY id")[1]["id"].clone();
-    assert_eq!(second["payload"]["checks"], json!([gate, review]));
-
-    // The reverse change retains this new gate and replaces only the review.
-    // Sabotage: hash the seats into gate_digest too; the gate reruns.
-    project.reconfigure(&config(&GATE.replace("test -f", "test -s")).replace(
-        "Review for correctness.",
-        "Review for correctness and naming.",
-    ));
-    let third = approval(&mut watch);
-    assert_eq!(head(&third), head(&first));
-    assert_eq!(kinds(&project), ["gate", "review", "gate", "review"]);
-    let review =
-        project.rows("SELECT id FROM \"check\" WHERE kind = 'review' ORDER BY id")[1]["id"].clone();
-    assert_eq!(third["payload"]["checks"], json!([gate, review]));
-}
-
 /// Under `auto` a protected path still raises `approval`. The candidate
 /// renames `AGENTS.md` away, so only its old path is protected. Control: an
 /// unprotected candidate in the same project is approved automatically and
@@ -390,23 +433,26 @@ fn auto_approval_raises_approval_on_a_protected_path() {
     watch.find("Y-2 landed", |event| {
         event["event"] == "landing.recorded" && event["ticket"] == "Y-2"
     });
-    assert!(
-        project
-            .rows("SELECT approval.id FROM approval JOIN attempt ON attempt.id = approval.attempt WHERE attempt.ticket = 1")
-            .is_empty()
-    );
 }
 
 /// An automatic approval, a landing held in its host gate, and a sync that
-/// changes policy: the landing withdraws the approval when it records its
+/// protects its path: the landing withdraws the approval when it records its
 /// intent, raises `approval`, and reruns no check. Control: the operator's
 /// approval of the same head lands.
 ///
-/// Sabotage for "reruns no check": hash `approve` or `protected_paths` into
-/// the gate digest; the sync reruns the candidate gate.
-fn policy_change_withdraws(test: &str, change: impl Fn(String) -> String) {
-    let machine = notes_machine(test);
-    let (project, mut watch, mut release, head) = held_after_policy_change(&machine, change);
+/// Sabotage: make `queue::land` re-read the approval at its intent against
+/// the configuration it started with; the landing records an intent and
+/// retires on the moved target instead of withdrawing. Hash
+/// `protected_paths` into the gate digest; the sync reruns the candidate
+/// gate.
+#[test]
+fn a_sync_that_protects_an_auto_approved_path_withdraws_it() {
+    let machine = notes_machine("g2-protect");
+    let (project, mut watch, mut release, head) = held_after_policy_change(
+        &machine,
+        "[gates.check]\ncommand = \"test -f docs/notes.md\"\nstage = \"candidate\"\n\n",
+        |config| config.replace("\".pi/\"]", "\".pi/\", \"docs/\"]"),
+    );
     release.write_all(b"go\n").unwrap();
     let ended = watch.event("execution.ended", &[("kind", "landing")]);
     assert_eq!(ended["data"]["outcome"], "withdrawn", "{ended}");
@@ -441,11 +487,12 @@ fn notes_machine(test: &str) -> Machine {
 
 /// An automatic approval whose landing is held in its host gate, after a
 /// sync that changes policy: the project, its watch, the gate's release and
-/// the approved head.
-fn held_after_policy_change(
-    machine: &Machine,
+/// the approved head. `gates` goes before the held landing gate.
+fn held_after_policy_change<'m>(
+    machine: &'m Machine,
+    gates: &str,
     change: impl Fn(String) -> String,
-) -> (Project<'_>, Watch, std::fs::File, String) {
+) -> (Project<'m>, Watch, std::fs::File, String) {
     let hold = machine.root.join("hold");
     assert!(
         std::process::Command::new("mkfifo")
@@ -461,8 +508,7 @@ fn held_after_policy_change(
         .open(&hold)
         .unwrap();
     let gates = format!(
-        "[gates.check]\ncommand = \"test -f docs/notes.md\"\nstage = \"candidate\"\n\n\
-         [gates.held]\ncommand = \"read line < {}\"\nruns_in = \"host\"\n",
+        "{gates}[gates.held]\ncommand = \"read line < {}\"\nruns_in = \"host\"\n",
         hold.display()
     );
     machine.start();
@@ -478,42 +524,18 @@ fn held_after_policy_change(
     (project, watch, release, head)
 }
 
-/// An automatic approval, then a sync that protects its path: the landing
-/// withdraws it, raises `approval` and reruns no check.
-///
-/// Sabotage: make `queue::land` re-read the approval at its intent against
-/// the configuration it started with; the landing records an intent and
-/// retires on the moved target instead of withdrawing.
-#[test]
-fn a_sync_that_protects_an_auto_approved_path_withdraws_it() {
-    policy_change_withdraws("g2-protect", |config| {
-        config.replace("\".pi/\"]", "\".pi/\", \"docs/\"]")
-    });
-}
-
-/// An automatic approval, then a sync that sets `approve = "manual"`: the
-/// landing withdraws it, raises `approval` and reruns no check.
-///
-/// Sabotage: make `queue::holds` skip the `approve` check for an automatic
-/// approval; the retired landing re-queues and lands.
-#[test]
-fn a_sync_that_sets_manual_withdraws_an_auto_approval() {
-    policy_change_withdraws("g2-manual", |config| {
-        config.replace("approve = \"auto\"", "approve = \"manual\"")
-    });
-}
-
 /// An automatic approval, a sync that sets `approve = "manual"`, and the
 /// attempt abandoned while the landing reads the candidate's protected paths
 /// at its intent: the landing withdraws, and no `approval` is raised for the
-/// ended attempt. Control: `a_sync_that_sets_manual_withdraws_an_auto_approval`.
+/// ended attempt. Control: `a_sync_that_protects_an_auto_approved_path_withdraws_it`,
+/// whose attempt lives, raises `approval`.
 ///
 /// Sabotage: make `queue::lapsed` raise `approval` without re-reading the
 /// attempt; an approval item stays open for an attempt that ended.
 #[test]
 fn an_attempt_abandoned_while_its_landing_rereads_policy_raises_nothing() {
     let machine = notes_machine("g2-abandon");
-    let (project, mut watch, mut release, _) = held_after_policy_change(&machine, |config| {
+    let (project, mut watch, mut release, _) = held_after_policy_change(&machine, "", |config| {
         config.replace("approve = \"auto\"", "approve = \"manual\"")
     });
     let fifo = |name: &str| {
@@ -549,94 +571,5 @@ fn an_attempt_abandoned_while_its_landing_rereads_policy_raises_nothing() {
     assert_eq!(
         project.rows("SELECT kind FROM attention WHERE state = 'open'"),
         Vec::<Value>::new()
-    );
-}
-
-/// A passed candidate gate; a repair changes only `/yard/proof`; the gate
-/// reruns on the same head under the new proof digest and the old check does
-/// not count. An approve naming the old proof is stale and writes no row;
-/// the approve naming the new proof is given.
-///
-/// Sabotage: match only base and head in `checks::current`; the old gate
-/// counts for the new proof and no gate reruns. Drop the proof comparison in
-/// `admit::approval_item`; the delayed approve names the old proof and is
-/// given anyway.
-#[test]
-fn a_proof_only_change_is_a_new_candidate() {
-    let machine = Machine::new("g2-proof", |request| {
-        if request.opens() && request.last_user().contains("Change the proof") {
-            return Reply::Tools(vec![bash("printf 'second' > /yard/proof/evidence.txt")]);
-        }
-        act(
-            request,
-            vec![bash(
-                "cd /workspace && printf 'feature\\n' > feature.txt && git add -A \
-                 && git commit -q -m 'Add feature' && printf 'first' > /yard/proof/evidence.txt \
-                 && echo committed",
-            )],
-        )
-    });
-    machine.start();
-    let project = Project::new(&machine, "p", &unreviewed(GATE));
-    let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Add feature"]);
-    let first = approval(&mut watch);
-    let candidate_head = head(&first);
-    let first_proof = first["payload"]["proof"].as_str().unwrap().to_string();
-    let first_gate = first["payload"]["checks"][0].as_i64().unwrap();
-
-    project.json(&[
-        "attempt",
-        "reject",
-        "Y-1",
-        "--head",
-        &candidate_head,
-        "--proof",
-        &first_proof,
-        "--text",
-        "Change the proof",
-    ]);
-    let second = approval(&mut watch);
-
-    assert_eq!(head(&second), candidate_head);
-    let gates =
-        project.rows("SELECT c.id AS id, e.head AS head, e.proof AS proof FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE c.kind = 'gate' ORDER BY c.id");
-    assert_eq!(gates.len(), 2, "{gates:?}");
-    assert_eq!(gates[0]["head"], candidate_head.as_str());
-    assert_eq!(gates[1]["head"], candidate_head.as_str());
-    assert_ne!(gates[0]["proof"], gates[1]["proof"]);
-    assert_ne!(gates[1]["id"].as_i64().unwrap(), first_gate);
-    assert_eq!(second["payload"]["checks"], json!([gates[1]["id"]]));
-    assert_eq!(second["payload"]["proof"], gates[1]["proof"]);
-
-    let seq = last_seq(&project);
-    let refused = project.refused(&[
-        "attempt",
-        "approve",
-        "Y-1",
-        "--head",
-        &candidate_head,
-        "--proof",
-        &first_proof,
-    ]);
-    assert_eq!(refused["code"], "stale", "{refused}");
-    assert_eq!(refused["data"]["expected"], first_proof.as_str());
-    assert_eq!(refused["data"]["current"], second["payload"]["proof"]);
-    assert_eq!(last_seq(&project), seq);
-    assert!(project.rows("SELECT id FROM approval").is_empty());
-
-    let second_proof = second["payload"]["proof"].as_str().unwrap().to_string();
-    project.json(&[
-        "attempt",
-        "approve",
-        "Y-1",
-        "--head",
-        &candidate_head,
-        "--proof",
-        &second_proof,
-    ]);
-    assert_eq!(
-        project.rows("SELECT head, proof FROM approval"),
-        vec![json!({ "head": candidate_head, "proof": second_proof })]
     );
 }
