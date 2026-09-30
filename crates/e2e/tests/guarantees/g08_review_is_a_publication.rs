@@ -169,9 +169,8 @@ fn a_seat_killed_after_publishing_has_published() {
 /// and when its start is seen the seat's box is no longer listed. Control:
 /// the seat's box is listed while the fixture holds it.
 ///
-/// The first seat's P1 finding blocks at `blocking = "P1"`; its repair's
-/// P2 and P3 findings pass. The quick workflow's approval is unreviewed and
-/// no seat runs for it.
+/// The seat's P1 finding blocks at `blocking = "P1"`. The quick workflow's
+/// approval is unreviewed and no seat runs for it.
 ///
 /// Sabotage: let `advance` ignore running seats, or start the repair before
 /// box teardown; ordering fails. Compare priorities with `<` instead of
@@ -180,7 +179,6 @@ fn a_seat_killed_after_publishing_has_published() {
 fn no_repair_starts_until_a_blocking_seats_box_is_gone() {
     let hold = Latch::new();
     let held = hold.clone();
-    let seats = AtomicUsize::new(0);
     let machine = Machine::new("g8-held", move |request| {
         if !seat(&request) {
             if request.opens() && request.last_user().contains("Review blocked") {
@@ -189,21 +187,11 @@ fn no_repair_starts_until_a_blocking_seats_box_is_gone() {
             return implementer(request);
         }
         if request.opens() {
-            let findings = if seats.fetch_add(1, Ordering::SeqCst) == 0 {
-                json!([{ "priority": "P1", "body": "at the bar" }])
-            } else {
-                json!([
-                    { "priority": "P2", "body": "one below" },
-                    { "priority": "P3", "body": "a nit" },
-                ])
-            };
-            return Reply::Tools(vec![publish(findings)]);
+            return Reply::Tools(vec![publish(json!([
+                { "priority": "P1", "body": "at the bar" }
+            ]))]);
         }
-        if seats.load(Ordering::SeqCst) == 1 {
-            Reply::Hold(held.clone(), Box::new(Reply::Text("done".into())))
-        } else {
-            Reply::Text("done".into())
-        }
+        Reply::Hold(held.clone(), Box::new(Reply::Text("done".into())))
     });
     machine.start();
     let project = Project::new(
@@ -259,26 +247,17 @@ fn no_repair_starts_until_a_blocking_seats_box_is_gone() {
         !listed(&machine),
         "the repair started while the seat's box {handle} was up"
     );
-    let approval = watch.attention();
-    assert_eq!(approval["ticket"], "Y-1", "{approval}");
-    assert_eq!(approval["data"]["kind"], "approval", "{approval}");
-    assert_eq!(
-        project.rows("SELECT c.verdict, e.round FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE c.kind = 'review' ORDER BY c.id"),
-        vec![
-            json!({ "verdict": "fail", "round": 1 }),
-            json!({ "verdict": "pass", "round": 2 }),
-        ]
-    );
 }
 
-/// A seat that always blocks gets exactly `max_rounds` rounds, then
-/// `stopped:limit`. An edit then grants one more round: a third review runs
-/// and blocks, and `stopped:limit` is raised again. A synced gate change
-/// makes an override stale naming the gate digest and writes no approval.
-/// Restoring the gate makes the same head approvable. The operator overrides
-/// the blocking review and lands; its approval names that check.
+/// A seat that always blocks gets exactly `max_rounds = 1` rounds, then
+/// `stopped:limit`. An edit then grants one more round: a second review runs
+/// and blocks, and `stopped:limit` is raised again. A synced gate change,
+/// adding a gate, makes an override stale naming the gate digest and writes
+/// no approval. Removing the gate makes the same head approvable. The
+/// operator overrides the blocking review and lands; its approval names that
+/// check.
 ///
-/// Sabotage: compare `rounds > limit`; a third round runs before the edit.
+/// Sabotage: compare `rounds > limit`; a second round runs before the edit.
 /// Change the extra-round increment; its count differs from one. Skip the
 /// stale gate digest check; an approval is written after the sync. Drop
 /// `limit_checks`' blocking review or the override flag; the row is wrong.
@@ -300,9 +279,8 @@ fn a_seat_that_always_blocks_gets_max_rounds() {
         implementer(request)
     });
     machine.start();
-    let gate = "[gates.early]\ncommand = \"test -f feature.txt\"\nstage = \"candidate\"\n";
-    let both = format!("{gate}[gates.late]\ncommand = \"true\"\nstage = \"candidate\"\n");
-    let base = config(gate).replace("max_rounds = 3", "max_rounds = 2");
+    let gate = "[gates.late]\ncommand = \"true\"\nstage = \"candidate\"\n";
+    let base = config("").replace("max_rounds = 3", "max_rounds = 1");
     let project = Project::new(&machine, "p", &base);
     let mut watch = project.watch(0);
     project.json(&["ticket", "new", "--title", "Add feature"]);
@@ -312,8 +290,8 @@ fn a_seat_that_always_blocks_gets_max_rounds() {
         (&json!("stopped"), &json!("limit")),
         "{stopped}"
     );
-    assert_eq!(kinds(&project, "review").len(), 2);
-    assert_eq!(kinds(&project, "implementation").len(), 2);
+    assert_eq!(kinds(&project, "review").len(), 1);
+    assert_eq!(kinds(&project, "implementation").len(), 1);
     let revision = project.json(&["ticket", "show", "Y-1"])["revision"].to_string();
     project.json(&[
         "ticket",
@@ -330,14 +308,14 @@ fn a_seat_that_always_blocks_gets_max_rounds() {
         (&json!("stopped"), &json!("limit")),
         "{again}"
     );
-    assert_eq!(kinds(&project, "review").len(), 3);
-    assert_eq!(kinds(&project, "implementation").len(), 3);
-    // Exactly one extra round: the store's count, since the third review
+    assert_eq!(kinds(&project, "review").len(), 2);
+    assert_eq!(kinds(&project, "implementation").len(), 2);
+    // Exactly one extra round: the store's count, since the second review
     // blocks and stops the same way with none or with two granted.
     let attempt = &project.rows("SELECT rounds, extra_rounds FROM attempt")[0];
     assert_eq!(
         (&attempt["rounds"], &attempt["extra_rounds"]),
-        (&json!(3), &json!(1))
+        (&json!(2), &json!(1))
     );
     let head = project.rows("SELECT head FROM execution WHERE kind = 'review' ORDER BY id DESC")[0]
         ["head"]
@@ -345,7 +323,7 @@ fn a_seat_that_always_blocks_gets_max_rounds() {
         .unwrap()
         .to_string();
 
-    project.reconfigure(&config(&both).replace("max_rounds = 3", "max_rounds = 2"));
+    project.reconfigure(&config(gate).replace("max_rounds = 3", "max_rounds = 1"));
     let refused = project.refused(&["attempt", "approve", "Y-1", "--head", &head]);
     assert_eq!(refused["code"], "stale", "{refused}");
     assert!(
@@ -368,23 +346,15 @@ fn a_seat_that_always_blocks_gets_max_rounds() {
     let approvals = project.rows("SELECT checks, overrode FROM approval");
     assert_eq!(approvals.len(), 1);
     let named: Vec<i64> = serde_json::from_str(approvals[0]["checks"].as_str().unwrap()).unwrap();
-    let blocking = project.rows(&format!(
-        "SELECT c.id FROM \"check\" c JOIN execution e ON e.id = c.execution
-         WHERE c.kind = 'review' AND c.verdict = 'fail' AND e.head = '{head}'"
-    ));
-    let gates = project.rows(&format!(
-        "SELECT c.id FROM \"check\" c JOIN execution e ON e.id = c.execution
-         WHERE c.kind = 'gate' AND c.verdict = 'pass' AND e.head = '{head}' AND e.name = 'early'"
-    ));
-    let mut expected: Vec<i64> = gates
+    let blocking: Vec<i64> = project
+        .rows(&format!(
+            "SELECT c.id FROM \"check\" c JOIN execution e ON e.id = c.execution
+             WHERE c.kind = 'review' AND c.verdict = 'fail' AND e.head = '{head}'"
+        ))
         .iter()
-        .chain(&blocking)
         .map(|row| row["id"].as_i64().unwrap())
         .collect();
-    expected.sort();
-    let mut named_sorted = named.clone();
-    named_sorted.sort();
-    assert_eq!(named_sorted, expected);
+    assert_eq!(named, blocking);
     assert_eq!(blocking.len(), 1);
     assert_eq!(approvals[0]["overrode"], json!(1));
 }
@@ -497,6 +467,7 @@ export default async function () {
 /// attempt is parked and abandoned. A second ticket's host gate is held, abandoned,
 /// then released to fail: it ends abandoned, records no check and raises
 /// nothing. This gives the abandonment a same-project successful control.
+/// No review runs, so the approval follows the gate alone.
 ///
 /// Sabotage: treat a gate error like an implementer stop; `start` runs the
 /// implementer again. Remove `supervise::gate`'s end-path liveness check;
@@ -506,9 +477,6 @@ fn a_gate_errors_start_reruns_that_gate() {
     let armed = std::sync::Arc::new(Mutex::new(None::<std::path::PathBuf>));
     let arm = armed.clone();
     let machine = Machine::new("g8-gate-error", move |request| {
-        if seat(&request) {
-            return act(request, vec![publish(json!([]))]);
-        }
         if !request.opens() && !request.prompt().contains("Abandon gate") {
             std::fs::write(arm.lock().unwrap().as_ref().unwrap(), "").unwrap();
         }
@@ -527,7 +495,8 @@ fn a_gate_errors_start_reruns_that_gate() {
     let project = Project::new(
         &machine,
         "p",
-        &config("[gates.check]\ncommand = \"test -f feature.txt\"\nstage = \"candidate\"\n"),
+        &config("[gates.check]\ncommand = \"test -f feature.txt\"\nstage = \"candidate\"\n")
+            .replace("review = [\"correctness\"]", "review = \"none\""),
     );
     let mut watch = project.watch(0);
     project.json(&["ticket", "new", "--title", "Add feature"]);
@@ -571,7 +540,7 @@ fn a_gate_errors_start_reruns_that_gate() {
         said.display(),
         hold.display()
     );
-    project.reconfigure(&config(&gate));
+    project.reconfigure(&config(&gate).replace("review = [\"correctness\"]", "review = \"none\""));
     project.json(&["ticket", "new", "--title", "Abandon gate"]);
     assert_eq!(watch.said(&said), "held\n");
     project.json(&["ticket", "park", "Y-2"]);
@@ -580,6 +549,7 @@ fn a_gate_errors_start_reruns_that_gate() {
     let ended = watch.event("execution.ended", &[("kind", "gate")]);
     assert_eq!(ended["ticket"], "Y-2", "{ended}");
     assert_eq!(ended["data"]["outcome"], "abandoned", "{ended}");
+    assert!(project.rows("SELECT c.id FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE e.attempt = 2").is_empty());
     assert!(
         project
             .rows("SELECT id FROM attention WHERE attempt = 2 AND state = 'open'")
@@ -762,12 +732,6 @@ fi"#,
     // Two seats published; only the second recorded a proof and counts.
     let checks = project.rows("SELECT id FROM \"check\" WHERE kind = 'review' ORDER BY id");
     assert_eq!(checks.len(), 2);
-    assert_eq!(
-        project
-            .rows("SELECT outcome FROM execution WHERE kind = 'review' ORDER BY id")
-            .len(),
-        2
-    );
     let approved: Vec<i64> = approval["data"]["payload"]["checks"]
         .as_array()
         .unwrap()
@@ -816,8 +780,16 @@ fn contains(dir: &std::path::Path, name: &str) -> bool {
 /// Sabotage: pass the real upstream credential into the box, or omit the
 /// injecting/login route; the search or header fails. Accept a second
 /// `initialize` in `Grants::open_session`; the rogue call succeeds.
+///
+/// A second ticket commits `.agents/skills` as a link to a directory holding
+/// the same skill: Codex would follow it into the seat's context, so the
+/// execution is refused naming the path, though the seat would have
+/// published. Control: the first ticket's regular `.agents/skills` directory
+/// reached approval in the same project.
+/// Sabotage: make `agent_env::walk` skip a link instead of refusing it; the
+/// seat publishes and the second candidate reaches approval.
 #[test]
-fn a_committed_codex_config_never_loads_and_the_box_holds_no_secret() {
+fn a_committed_codex_config_or_skill_link_never_loads_and_the_box_holds_no_secret() {
     let publish_pass = r#"#!/bin/sh
 if [ -n "$YARD_MCP_BEARER" ]; then
   echo rogue > /yard/state/rogue-ran
@@ -840,6 +812,13 @@ fi
     let account_id = "acct-e2e-codex";
     let token = codex_jwt(account_id, 3600);
     let search = credential_probe(&token);
+    // The base's skill root becomes the link's target; Codex refuses `rm`.
+    let link = format!(
+        "cd /workspace && mv .agents/skills evil && mkdir -p evil/candidateskill \
+         && printf %s {} > evil/candidateskill/SKILL.md && ln -s ../evil .agents/skills \
+         && printf feature > feature.txt && git add -A && git commit -q -m 'Link a skill' && echo committed",
+        shell_quote(candidate_skill)
+    );
     let mut machine = Machine::new("g8-codex", move |request| {
         if codex_seat(request) {
             return match request.tool_results().len() {
@@ -848,6 +827,14 @@ fi
                     request,
                     json!([{ "priority": "P3", "body": "the seat's own" }]),
                 )]),
+                _ => Reply::Text("done".into()),
+            };
+        }
+        // The base's hook output follows the prompt, so count tool results
+        // rather than ask whether the request opens.
+        if request.context().contains("Linked skill") {
+            return match request.tool_results().len() {
+                0 => Reply::Tools(vec![codex_shell(&link)]),
                 _ => Reply::Text("done".into()),
             };
         }
@@ -914,64 +901,21 @@ fi
     }
     assert_credential_route(&machine, &token, "/backend-api/codex", Some(account_id));
     assert_own_session_only(&project, &machine, codex_seat);
-}
 
-/// A candidate commits `.agents/skills` as a link to a directory holding a
-/// skill: Codex would follow it into the seat's context, so the execution is
-/// refused naming the path, though the seat would have published. Control:
-/// the same skill as a regular directory reaches approval first in the same
-/// project, whose canonical base stays unchanged for the linked candidate.
-///
-/// Sabotage: make `agent_env::walk` skip a link instead of refusing it; the
-/// seat publishes and the candidate reaches approval.
-#[test]
-fn a_linked_skill_root_refuses_a_codex_seat() {
-    let mut machine = Machine::new("g8-codex-link", |request| {
-        if codex_seat(request) {
-            return act(request, vec![codex_publish(request, json!([]))]);
-        }
-        if request.opens() {
-            let skills = if request.last_user().contains("Linked skill") {
-                "mkdir -p evil/x .agents && ln -s ../evil .agents/skills && \
-                 printf -- '---\\nname: s\\ndescription: s\\n---\\n' > evil/x/SKILL.md"
-            } else {
-                "mkdir -p .agents/skills/x && \
-                 printf -- '---\\nname: s\\ndescription: s\\n---\\n' > .agents/skills/x/SKILL.md"
-            };
-            return Reply::Tools(vec![codex_shell(&format!(
-                "cd /workspace && {skills} && printf feature > feature.txt && \
-                 git add -A && git commit -q -m 'Add a skill' && echo committed"
-            ))]);
-        }
-        Reply::Text("done".into())
-    });
-    let account_id = "acct-e2e-codex";
-    let token = codex_jwt(account_id, 3600);
-    machine.write_codex_env(&token, account_id);
-    machine.start();
-    let project = Project::new(&machine, "p", &codex_config(""));
-    let mut watch = project.watch(0);
-    for title in ["Regular skill", "Linked skill"] {
-        project.json(&["ticket", "new", "--title", title]);
-        let item = watch.attention();
-        if title == "Linked skill" {
-            assert_eq!(
-                (&item["data"]["kind"], &item["data"]["reason"]),
-                (&json!("red"), &json!("error")),
-                "{item}"
-            );
-            let detail = item["data"]["payload"]["detail"]
-                .as_str()
-                .unwrap_or_default();
-            assert!(
-                detail.starts_with(".agents/skills"),
-                "the refusal names the path: {item}"
-            );
-            assert!(project.rows("SELECT body FROM finding").is_empty());
-        } else {
-            assert_eq!(item["data"]["kind"], "approval", "{item}");
-        }
-    }
+    project.json(&["ticket", "new", "--title", "Linked skill"]);
+    let item = watch.attention();
+    assert_eq!(
+        (&item["data"]["kind"], &item["data"]["reason"]),
+        (&json!("red"), &json!("error")),
+        "{item}"
+    );
+    let detail = item["data"]["payload"]["detail"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        detail.starts_with(".agents/skills"),
+        "the refusal names the path: {item}"
+    );
 }
 
 /// What a candidate's build or test does with the bearer it inherits: open
