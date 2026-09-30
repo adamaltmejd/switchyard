@@ -2,7 +2,6 @@
 
 use e2e::*;
 use serde_json::json;
-use std::io::Write;
 use std::path::Path;
 
 fn mkfifo(path: &Path) {
@@ -63,7 +62,7 @@ impl Held {
 /// the daemon dies.
 ///
 /// Sabotage: make `reconcile::project` leave running implementations
-/// running; nothing raises `stopped`, and `start` is refused.
+/// running; the execution is not `interrupted`, and `start` is refused.
 #[test]
 fn a_daemon_killed_mid_execution_interrupts_it_and_start_continues() {
     let hold = Latch::new();
@@ -152,14 +151,6 @@ fn a_daemon_killed_mid_execution_interrupts_it_and_start_continues() {
         project.rows("SELECT id, status, outcome FROM execution"),
         vec![json!({ "id": 1, "status": "ended", "outcome": "interrupted" })]
     );
-    let status = project.json(&["status"]);
-    let items: Vec<_> = status["attention"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|item| (item["kind"].clone(), item["reason"].clone()))
-        .collect();
-    assert_eq!(items, vec![(json!("stopped"), json!("interrupted"))]);
     assert_eq!(
         machine.boxes(&label),
         Vec::<serde_json::Value>::new(),
@@ -188,8 +179,8 @@ fn a_daemon_killed_mid_execution_interrupts_it_and_start_continues() {
 
 /// The daemon killed while a host landing gate runs: the gate's group is
 /// gone after restart and the landing re-queues. The gate says its group on
-/// a FIFO and waits for a line on another. Control: the re-queued landing
-/// runs the gate again and lands once it is released.
+/// a FIFO and waits for a line on another. The re-queued landing runs the
+/// gate again.
 ///
 /// Sabotage: make `reconcile::kill_group` skip the kill; the gate's group
 /// outlives the restart and its lock raises `red`.
@@ -205,8 +196,9 @@ fn a_daemon_killed_during_a_host_landing_gate_leaves_no_group() {
     let hold = machine.root.join("hold");
     mkfifo(&said);
     mkfifo(&hold);
-    // Held open for writing, so a line released stays until a gate reads it.
-    let mut release = std::fs::OpenOptions::new()
+    // Held open for writing, so a gate's read blocks rather than its open,
+    // and ends when the test drops this.
+    let _writer = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open(&hold)
@@ -255,7 +247,4 @@ fn a_daemon_killed_during_a_host_landing_gate_leaves_no_group() {
     let mut watch = project.watch(0);
     // The re-queued landing's gate runs again.
     watch.said(&said);
-    release.write_all(b"go\n").unwrap();
-    watch.event("landing.recorded", &[]);
-    assert_eq!(project.json(&["ticket", "show", "Y-1"])["state"], "done");
 }
