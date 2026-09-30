@@ -5,10 +5,10 @@ use serde_json::json;
 use std::sync::{Arc, Mutex};
 
 /// A worker with its MCP bearer and its clone: `git push` fails, no RPC
-/// lands, canonical is not reachable from the box. The worker commits, then
-/// pushes to canonical's host path, calls the daemon's socket and asks the
-/// MCP route for a daemon method. Control: the queue lands the same
-/// candidate.
+/// lands, canonical is not reachable from the box. In one model turn the
+/// worker commits, pushes to canonical's host path, calls the daemon's
+/// socket and asks the MCP route for a daemon method. Control: the queue
+/// lands the same candidate.
 ///
 /// Sabotage: mount the project's `.yard/local` into the worker box at its
 /// host path; the push to canonical lands the commit. Mount the daemon's
@@ -25,8 +25,10 @@ fn a_worker_cannot_land_by_push_rpc_or_canonical() {
     let script = Arc::new(Mutex::new(String::new()));
     let run = script.clone();
     let machine = Machine::new("g1", move |request| match request.tool_results().len() {
-        0 => Reply::Tools(vec![commit_file("feature.txt", "feature\n", "Add feature")]),
-        1 => Reply::Tools(vec![bash(&run.lock().unwrap())]),
+        0 => Reply::Tools(vec![
+            commit_file("feature.txt", "feature\n", "Add feature"),
+            bash(&run.lock().unwrap()),
+        ]),
         _ => {
             *seen.lock().unwrap() = request.last_tool_result().unwrap().1;
             Reply::Text("done".into())
@@ -41,7 +43,8 @@ fn a_worker_cannot_land_by_push_rpc_or_canonical() {
     let canonical = project.canonical();
     let socket = machine.state.join("yard/yard.sock");
     // A call on the MCP route with the worker's bearer; `pattern` is what
-    // its answer is searched for, printed after `name=`. The bearer alone has no\n    // MCP session, so the route answers nothing but a 404 status.
+    // its answer is searched for, printed after `name=`. The bearer alone has no
+    // MCP session, so the route answers nothing but a 404 status.
     let call = |name: &str, body: serde_json::Value, pattern: &str| {
         format!(
             "curl -s -H \"Authorization: Bearer $YARD_MCP_BEARER\" -H 'content-type: application/json' \
