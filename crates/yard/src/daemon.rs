@@ -370,7 +370,6 @@ async fn handle(daemon: &Arc<Daemon>, method: &str, params: Value) -> Result<Val
         "project.list" => Ok(json!(registry()?)),
         "project.forget" => {
             let path = PathBuf::from(params["path"].as_str().unwrap_or_default());
-            let path = std::fs::canonicalize(&path).unwrap_or(path);
             let roots: Vec<_> = registry()?
                 .into_iter()
                 .filter(|root| *root != path)
