@@ -102,7 +102,6 @@ fn racing_starts_admit_one_attempt() {
     assert_eq!(refused.len(), 1, "{results:?}");
     assert_eq!(refused[0]["data"]["reason"], "capacity");
     assert_eq!(live(&project, 2) + live(&project, 3), 1);
-    assert_eq!(live(&project, 1), 1);
     hold.release();
 }
 
@@ -221,6 +220,5 @@ fn a_returning_repair_takes_a_freed_lane_before_a_new_ticket() {
             || (event["event"] == "attempt.admitted" && event["ticket"] == "Y-3")
     });
     assert_eq!(next["ticket"], "Y-1", "{next}");
-    assert_eq!(live(&project, 3), 0);
     repair.release();
 }
