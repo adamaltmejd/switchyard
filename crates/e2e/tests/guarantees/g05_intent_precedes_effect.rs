@@ -225,6 +225,7 @@ fn a_daemon_killed_during_a_host_landing_gate_leaves_no_group() {
     let alive = |group: &str| {
         std::process::Command::new("kill")
             .args(["-0", "--", &format!("-{group}")])
+            .stderr(std::process::Stdio::null())
             .status()
             .unwrap()
             .success()
