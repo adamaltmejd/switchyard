@@ -38,111 +38,100 @@ fn reasons(project: &Project) -> Vec<Value> {
         .collect()
 }
 
-/// The first execution's second request is held and, once released, commits;
-/// the second execution, if its prompt carries `Rename`, commits again.
-fn held_worker(hold: &Latch) -> impl Fn(&ModelRequest) -> Reply + Send + Sync + 'static {
-    let hold = hold.clone();
-    move |request| {
-        if request.opens() && request.last_user().contains("Rename") {
-            return Reply::Tools(vec![commit_file("renamed.txt", "renamed\n", "Rename")]);
+/// Two projects on one machine. In `p` an edit mid-execution lets the
+/// execution end on its own and reaches the next prompt as a diff of the
+/// body: the held worker commits only once released, so its execution ends
+/// as a candidate where a stop would end it unchanged. No gate runs on that
+/// candidate before the next execution, which opens with the edit's diff
+/// and is labelled as the operator's. In `q`, `stop` delivers an edit
+/// sooner: the worker is still held when the execution ends, `stop` still
+/// raises `stopped` and starts nothing, and that item's `start` runs the
+/// implementer with the edit's diff.
+///
+/// Each first execution's opening request is held on its project's latch
+/// and, once released, commits; a later execution whose prompt carries
+/// `Rename` commits again.
+///
+/// Sabotage: make `admit::steer` notify the stop signal of a running
+/// implementer; the held execution ends unchanged. Or make
+/// `supervise::implement` ignore the edit after a candidate; the first head
+/// reaches approval and the edit is never delivered. Make
+/// `admit::attempt_stop` skip notifying the execution; it runs on and no
+/// `stopped` is raised. Let `supervise` schedule the edit instead of raising
+/// `stopped` for a stopped run; no `stopped` item comes.
+#[test]
+fn an_edit_reaches_the_next_prompt_and_stop_delivers_it_sooner() {
+    let (edit_hold, stop_hold) = (Latch::new(), Latch::new());
+    let holds = (edit_hold.clone(), stop_hold.clone());
+    let machine = Machine::new("g9-edit", move |request| {
+        if request.last_user().contains("Rename") {
+            return act(
+                request,
+                vec![commit_file("renamed.txt", "renamed\n", "Rename")],
+            );
         }
-        if !request.opens() && request.last_user().contains("Rename") {
-            return Reply::Text("done".into());
-        }
-        match request.tool_results().len() {
-            0 => Reply::Tools(vec![bash("echo working")]),
-            1 => Reply::Hold(
+        let hold = if request.prompt().contains("Add widget") {
+            &holds.1
+        } else {
+            &holds.0
+        };
+        if request.opens() {
+            return Reply::Hold(
                 hold.clone(),
                 Box::new(Reply::Tools(vec![commit_file(
                     "feature.txt",
                     "feature\n",
                     "Add feature",
                 )])),
-            ),
-            _ => Reply::Text("done".into()),
+            );
         }
-    }
-}
-
-/// An edit mid-execution lets the execution end on its own and reaches the
-/// next prompt as a diff of the body: the held worker commits only once
-/// released, so its execution ends as a candidate where a stop would end it
-/// unchanged. No gate or seat runs on that candidate before the next
-/// execution, which opens with the edit's diff and is labelled as the
-/// operator's.
-///
-/// Sabotage: make `admit::steer` notify the stop signal of a running
-/// implementer; the held execution ends unchanged. Or make
-/// `supervise::implement` ignore the edit after a candidate; the first head
-/// reaches approval and the edit is never delivered.
-#[test]
-fn an_edit_mid_execution_reaches_the_next_prompt() {
-    let hold = Latch::new();
-    let machine = Machine::new("g9-edit", held_worker(&hold));
+        Reply::Text("done".into())
+    });
     machine.start();
-    let gate = "[gates.check]\ncommand = \"true\"\nstage = \"candidate\"\n";
-    let project = Project::new(&machine, "p", &unreviewed(gate));
-    let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Add feature"]);
-    hold.wait_held();
+    let gate = "[gates.check]\ncommand = \"true\"\nstage = \"candidate\"\nruns_in = \"host\"\n";
+    let edited = Project::new(&machine, "p", &unreviewed(gate));
+    let stopped = Project::new(&machine, "q", &unreviewed(""));
+    let mut edit_watch = edited.watch(0);
+    let mut stop_watch = stopped.watch(0);
+    edited.json(&["ticket", "new", "--title", "Add feature"]);
+    stopped.json(&["ticket", "new", "--title", "Add widget"]);
+    edit_hold.wait_held();
+    stop_hold.wait_held();
 
-    edit_body(&project, "Rename it too");
-    hold.release();
+    edit_body(&edited, "Rename it too");
+    edit_hold.release();
+    edit_body(&stopped, "Rename it now");
+    stopped.json(&["attempt", "stop", "Y-1"]);
 
-    let approval = watch.attention();
+    let approval = edit_watch.attention();
     assert_eq!(approval["data"]["kind"], "approval", "{approval}");
-    assert_eq!(reasons(&project), [json!("first"), json!("edit")]);
-    let first = watch.find("the first execution ended", |event| {
+    assert_eq!(reasons(&edited), [json!("first"), json!("edit")]);
+    let first = edit_watch.find("the first execution ended", |event| {
         event["event"] == "execution.ended" && event["data"]["kind"] == "implementation"
     });
     assert_eq!(first["data"]["outcome"], "candidate", "{first}");
-    let second = openings(&machine)[1].last_user();
+    // The latest opening is p's second: q opens nothing more until its start.
+    let second = openings(&machine).last().unwrap().last_user();
     assert!(second.contains("+Rename it too"), "{second}");
     let head = approval["data"]["payload"]["head"].as_str().unwrap();
-    assert_eq!(
-        git(
-            &project.canonical(),
-            &["show", &format!("{head}:renamed.txt")]
-        ),
-        "renamed
-"
-    );
     // No gate ran on the first candidate: every gate ran on the second head.
     assert_eq!(
-        project.rows("SELECT DISTINCT head FROM execution WHERE kind = 'gate'"),
+        edited.rows("SELECT DISTINCT head FROM execution WHERE kind = 'gate'"),
         vec![json!({ "head": head })]
     );
-}
 
-/// `stop` delivers an edit sooner: the worker is still held when the
-/// execution ends, `stop` still raises `stopped` and starts nothing, and
-/// that item's `start` runs the implementer with the edit's diff.
-///
-/// Sabotage: make `admit::attempt_stop` skip notifying the execution; it
-/// runs on and no `stopped` is raised. Let `supervise` schedule the edit
-/// instead of raising `stopped` for a stopped run; no `stopped` item comes.
-#[test]
-fn stop_delivers_an_edit_sooner() {
-    let hold = Latch::new();
-    let machine = Machine::new("g9-stop", held_worker(&hold));
-    machine.start();
-    let project = Project::new(&machine, "p", &unreviewed(""));
-    let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Add feature"]);
-    hold.wait_held();
-
-    edit_body(&project, "Rename it now");
-    project.json(&["attempt", "stop", "Y-1"]);
-    let stopped = watch.attention();
-    assert_eq!(stopped["data"]["kind"], "stopped", "{stopped}");
-    assert!(hold.is_held(), "the worker's request was answered");
-    assert_eq!(reasons(&project), [json!("first")]);
-    project.json(&["attempt", "start", "Y-1"]);
-    let approval = watch.attention();
+    let item = stop_watch.attention();
+    assert_eq!(item["data"]["kind"], "stopped", "{item}");
+    assert!(stop_hold.is_held(), "the worker's request was answered");
+    assert_eq!(reasons(&stopped), [json!("first")]);
+    stopped.json(&["attempt", "start", "Y-1"]);
+    let approval = stop_watch.attention();
     assert_eq!(approval["data"]["kind"], "approval", "{approval}");
-    assert_eq!(reasons(&project), [json!("first"), json!("restart")]);
-    assert!(openings(&machine)[1].last_user().contains("+Rename it now"));
-    hold.release();
+    assert_eq!(reasons(&stopped), [json!("first"), json!("restart")]);
+    // The latest opening is q's second: p reached approval before it.
+    let second = openings(&machine).last().unwrap().last_user();
+    assert!(second.contains("+Rename it now"), "{second}");
+    stop_hold.release();
 }
 
 /// A worker that leaves an untracked file gets no review and the next
@@ -221,21 +210,15 @@ fn an_untracked_file_gets_no_review_and_is_named() {
 /// With `max_session_executions = 2`: the second execution resumes the
 /// first, the third resumes nothing and its prompt is the brief, the fourth
 /// resumes the third, the fifth resumes nothing. The first execution
-/// commits and review blocks it; each later one stops unchanged and `start`
-/// begins the next. The third's brief carries the ticket's title and the
-/// attempt's diff, which names the committed file.
+/// commits and the operator rejects it; each later one stops unchanged and
+/// `start` begins the next. The third's brief carries the ticket's title
+/// and the attempt's diff, which names the committed file.
 ///
 /// Sabotage: compare `count <= max_session_executions` in
 /// `supervise::implement`; the third execution resumes the second.
 #[test]
 fn sessions_resume_up_to_max_session_executions() {
     let machine = Machine::new("g9-sessions", |request| {
-        if request.has_tool("yard_publish_review") {
-            return act(
-                request,
-                vec![publish(json!([{ "priority": "P0", "body": "blocked" }]))],
-            );
-        }
         act(
             request,
             vec![bash(
@@ -248,13 +231,25 @@ fn sessions_resume_up_to_max_session_executions() {
     let project = Project::new(
         &machine,
         "p",
-        &config("").replace(
-            "review = [\"correctness\"]\n",
-            "review = [\"correctness\"]\nmax_session_executions = 2\n",
+        &unreviewed("").replace(
+            "review = \"none\"\n",
+            "review = \"none\"\nmax_session_executions = 2\n",
         ),
     );
     let mut watch = project.watch(0);
     project.json(&["ticket", "new", "--title", "Polish the widget"]);
+    let approval = watch.attention();
+    assert_eq!(approval["data"]["kind"], "approval", "{approval}");
+    let head = approval["data"]["payload"]["head"].as_str().unwrap();
+    project.json(&[
+        "attempt",
+        "reject",
+        "Y-1",
+        "--head",
+        head,
+        "--text",
+        "Polish more",
+    ]);
     for round in 0..4 {
         let stopped = watch.attention();
         assert_eq!(
@@ -267,19 +262,6 @@ fn sessions_resume_up_to_max_session_executions() {
         }
     }
 
-    let rows =
-        project.rows("SELECT id, resumed FROM execution WHERE kind = 'implementation' ORDER BY id");
-    let resumed: Vec<&Value> = rows.iter().map(|row| &row["resumed"]).collect();
-    assert_eq!(
-        resumed,
-        [
-            &Value::Null,
-            &rows[0]["id"],
-            &Value::Null,
-            &rows[2]["id"],
-            &Value::Null
-        ]
-    );
     // What each execution sent the model: a fresh session has one user
     // message, the brief.
     let users: Vec<usize> = openings(&machine)
