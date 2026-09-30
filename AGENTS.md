@@ -4,11 +4,6 @@
 `docs/archive/` is dated history, not a spec. This file holds the working
 rules for changing the repository.
 
-The previous implementation, TypeScript on Bun, is at `../switchyard`. It is
-reference material for how a mechanism was made to work and for the
-failures it learned from, never a source to port. Nothing from it is copied
-without a guarantee in ARCHITECTURE.md that needs it.
-
 ## Rules
 
 - Implement the spec. A design change updates ARCHITECTURE.md in the same

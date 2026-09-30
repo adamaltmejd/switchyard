@@ -15,7 +15,7 @@ is the binding spec.
 ## Install
 
 Download the binary for your target from the
-[release](https://github.com/adamaltmejd/switchyard-v3/releases), verify it
+[release](https://github.com/adamaltmejd/switchyard/releases), verify it
 against the release's `SHA256SUMS`, and put it on `PATH`.
 
 | Target | Role |
