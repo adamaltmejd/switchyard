@@ -39,14 +39,21 @@ fn depends_on(project: &Project, ticket: i64) -> Vec<i64> {
 /// The children are proposed parked and closed by hand. A later planning
 /// ticket runs to its end after the children are done, so a restart of the
 /// parent would have come first. The write probe first proves `/workspace`
-/// is the clone. Control: a worker on a writable workflow in the same
-/// project runs the same probe and its write succeeds.
+/// is the clone. Control: the dependent, a worker on a writable workflow in
+/// the same project, runs the same probe and its write succeeds.
+///
+/// The later plan also proposes A and B, B depending on A, as the first
+/// plan did: accepting both mints A first and B's edge names it. B accepted
+/// first is refused and changes nothing, though the first plan's A is
+/// already minted.
 ///
 /// Sabotage: make `admit::scheduled` start read-only tickets again; the
 /// parent is admitted once its children are done. Or mount the clone
 /// writable for `access = "read-only"`; the plan's write succeeds. Or
 /// accept an edit proposal at the ticket's current revision; the second
-/// edit applies and overwrites the plan.
+/// edit applies and overwrites the plan. Or make `admit::resolve_reference`
+/// resolve a key from any execution's proposals; the later B's edge names
+/// the first plan's A.
 #[test]
 fn a_plan_proposes_children_that_block_it() {
     let answers = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -65,8 +72,17 @@ fn a_plan_proposes_children_that_block_it() {
                 .push(request.tool_results()[0].1.clone());
             return Reply::Text("done".into());
         }
-        if !request.prompt().contains("Plan the release") {
-            return Reply::Text("nothing to plan".into());
+        if request.prompt().contains("Plan more") {
+            return match request.tool_results().len() {
+                0 => Reply::Tools(vec![
+                    propose(
+                        json!({ "kind": "ticket", "key": "a", "title": "More A", "parked": true }),
+                    ),
+                    propose(json!({ "kind": "ticket", "key": "b", "title": "More B",
+                                    "parked": true, "depends_on": ["a"] })),
+                ]),
+                _ => Reply::Text("planned".into()),
+            };
         }
         match request.tool_results().len() {
             0 => Reply::Tools(vec![
@@ -74,9 +90,8 @@ fn a_plan_proposes_children_that_block_it() {
                 propose(
                     json!({ "kind": "ticket", "key": "a", "title": "Child A", "parked": true }),
                 ),
-                propose(
-                    json!({ "kind": "ticket", "key": "b", "title": "Child B", "parked": true }),
-                ),
+                propose(json!({ "kind": "ticket", "key": "b", "title": "Child B",
+                                "parked": true, "depends_on": ["a"] })),
                 propose(json!({ "kind": "edit", "body": "The plan: A, then B." })),
                 propose(json!({ "kind": "edit", "body": "Stale: must not apply." })),
             ]),
@@ -107,9 +122,9 @@ fn a_plan_proposes_children_that_block_it() {
         "ticket",
         "new",
         "--title",
-        "After the release",
+        "Write here",
         "--workflow",
-        "plan",
+        "write",
         "--depends-on",
         "Y-1",
     ]);
@@ -144,13 +159,17 @@ fn a_plan_proposes_children_that_block_it() {
         .find(|(_, payload)| payload["body"] == "Stale: must not apply.")
         .unwrap()
         .0;
-    for (id, payload) in &pending {
+    for (_, payload) in &pending {
         if payload["kind"] == "edit" {
             assert_eq!(payload["revision"], 1, "{payload}");
         }
-        if *id != stale {
-            project.json(&["proposal", "accept", &id.to_string()]);
-        }
+    }
+    // The proposals are raised in any order; accept Child A before Child B,
+    // whose edge names it.
+    let mut accept: Vec<&(i64, Value)> = pending.iter().filter(|(id, _)| *id != stale).collect();
+    accept.sort_by_key(|(_, payload)| payload["title"].as_str().unwrap_or_default().to_owned());
+    for (id, _) in accept {
+        project.json(&["proposal", "accept", &id.to_string()]);
     }
     // The refusal changes no row. Cleanup executions for the ended plan
     // attempts land on their own schedule, so a `MAX(seq)` read would race
@@ -177,7 +196,6 @@ fn a_plan_proposes_children_that_block_it() {
     let parent = project.json(&["ticket", "show", "Y-1"]);
     assert_eq!(parent["body"], "The plan: A, then B.");
     for child in ["Y-3", "Y-4"] {
-        assert_eq!(project.json(&["ticket", "show", child])["parked"], true);
         project.json(&["ticket", "done", child, "--reason", "Done by hand"]);
     }
     project.json(&[
@@ -204,95 +222,11 @@ fn a_plan_proposes_children_that_block_it() {
             .is_empty()
     );
 
-    project.json(&["ticket", "done", "Y-1", "--reason", "Its children are done"]);
-    let admitted = watch.event("attempt.admitted", &[]);
-    assert_eq!(admitted["ticket"], "Y-2");
-
-    project.json(&[
-        "ticket",
-        "new",
-        "--title",
-        "Write here",
-        "--workflow",
-        "write",
-    ]);
-    let approval = watch.until("Y-6 approval", |event| {
-        event["event"] == "attention.raised" && event["ticket"] == "Y-6"
-    });
-    assert_eq!(approval["data"]["kind"], "approval", "{approval}");
-    let control = answers.lock().unwrap()[1].clone();
-    assert!(control.contains("mounted"), "{control}");
-    assert!(control.contains("write=0"), "{control}");
-
-    // A waiting attempt is live even with no execution running. Sabotage:
-    // key admit::ticket_close on running executions; this close succeeds.
-    // Control: abandon that attempt and the same close succeeds.
-    let attempt = project.rows("SELECT id FROM attempt WHERE ticket = 6")[0]["id"].clone();
-    assert!(
-        project
-            .rows(&format!(
-                "SELECT id FROM execution WHERE attempt = {attempt} AND status = 'running'"
-            ))
-            .is_empty()
-    );
-    let refused = project.refused(&["ticket", "done", "Y-6", "--reason", "Not needed"]);
-    assert_eq!(refused["code"], "refused", "{refused}");
-    assert_eq!(refused["data"]["attempt"], attempt);
-    assert_eq!(project.json(&["ticket", "show", "Y-6"])["state"], "open");
-    project.json(&["ticket", "park", "Y-6"]);
-    project.json(&["attempt", "abandon", "Y-6"]);
-    project.json(&["ticket", "done", "Y-6", "--reason", "Not needed"]);
-    assert_eq!(project.json(&["ticket", "show", "Y-6"])["state"], "done");
-}
-
-/// One execution proposing A and B, B depending on A: accepting both mints
-/// A first and B's edge names it. B accepted first is refused and changes
-/// nothing.
-///
-/// Sabotage: make `admit::resolve_reference` resolve a key from any
-/// execution's proposals; B's edge names the other execution's A.
-#[test]
-fn proposals_of_one_execution_mint_in_order() {
-    let machine = Machine::new("g15-siblings", |request| {
-        let prefix = if request.prompt().contains("First plan") {
-            "First"
-        } else {
-            "Second"
-        };
-        match request.tool_results().len() {
-            0 => Reply::Tools(vec![
-                propose(
-                    json!({ "kind": "ticket", "key": "a", "title": format!("{prefix} A"), "parked": true }),
-                ),
-                propose(
-                    json!({ "kind": "ticket", "key": "b", "title": format!("{prefix} B"),
-                                "parked": true, "depends_on": ["a"] }),
-                ),
-            ]),
-            _ => Reply::Text("planned".into()),
-        }
-    });
-    machine.start();
-    let project = Project::new(&machine, "p", &config(""));
-    let mut watch = project.watch(0);
-    project.json(&[
-        "ticket",
-        "new",
-        "--title",
-        "First plan",
-        "--workflow",
-        "plan",
-    ]);
-    watch.event("attempt.ended", &[("outcome", "planned")]);
-    project.json(&[
-        "ticket",
-        "new",
-        "--title",
-        "Second plan",
-        "--workflow",
-        "plan",
-    ]);
-    watch.event("attempt.ended", &[("outcome", "planned")]);
+    // The later plan's B, accepted before its own A, must not reach the
+    // first plan's A, already minted as Y-3. The refusal changes no row.
+    // Cleanup executions for the ended plan attempts land on their own
+    // schedule, so a `MAX(seq)` read would race them; observe the mint and
+    // the item the refused accept could touch.
     let raised = proposals(&project);
     let titled = |title: &str| {
         raised
@@ -301,31 +235,22 @@ fn proposals_of_one_execution_mint_in_order() {
             .unwrap()
             .0
     };
-    // The first execution's A, accepted first, is the key another
-    // execution's B must not reach.
-    let (first_a, second_a, second_b) = (titled("First A"), titled("Second A"), titled("Second B"));
-    project.json(&["proposal", "accept", &first_a.to_string()]);
-
-    // The refusal changes no row. Cleanup executions for the ended plan
-    // attempts land on their own schedule, so a `MAX(seq)` read would race
-    // them; observe the mint and the item the refused accept could touch.
-    let refused = project.refused(&["proposal", "accept", &second_b.to_string()]);
+    let (more_a, more_b) = (titled("More A"), titled("More B"));
+    let refused = project.refused(&["proposal", "accept", &more_b.to_string()]);
     assert_eq!(refused["code"], "refused", "{refused}");
     assert!(
         project
-            .rows("SELECT id FROM ticket WHERE title = 'Second B'")
+            .rows("SELECT id FROM ticket WHERE title = 'More B'")
             .is_empty(),
-        "the refused accept minted Second B"
+        "the refused accept minted More B"
     );
     assert_eq!(
-        project.rows(&format!(
-            "SELECT state FROM attention WHERE id = {second_b}"
-        )),
+        project.rows(&format!("SELECT state FROM attention WHERE id = {more_b}")),
         vec![json!({ "state": "open" })]
     );
 
-    let a = project.json(&["proposal", "accept", &second_a.to_string()]);
-    let b = project.json(&["proposal", "accept", &second_b.to_string()]);
+    let a = project.json(&["proposal", "accept", &more_a.to_string()]);
+    let b = project.json(&["proposal", "accept", &more_b.to_string()]);
     let name = |value: &Value| {
         value["ticket"]
             .as_str()
@@ -336,7 +261,39 @@ fn proposals_of_one_execution_mint_in_order() {
     };
     assert_eq!(
         project.json(&["ticket", "show", a["ticket"].as_str().unwrap()])["title"],
-        "Second A"
+        "More A"
     );
     assert_eq!(depends_on(&project, name(&b)), [name(&a)]);
+
+    project.json(&["ticket", "done", "Y-1", "--reason", "Its children are done"]);
+    let admitted = watch.event("attempt.admitted", &[]);
+    assert_eq!(admitted["ticket"], "Y-2");
+
+    let approval = watch.until("Y-2 approval", |event| {
+        event["event"] == "attention.raised" && event["ticket"] == "Y-2"
+    });
+    assert_eq!(approval["data"]["kind"], "approval", "{approval}");
+    let control = answers.lock().unwrap()[1].clone();
+    assert!(control.contains("mounted"), "{control}");
+    assert!(control.contains("write=0"), "{control}");
+
+    // A waiting attempt is live even with no execution running. Sabotage:
+    // key admit::ticket_close on running executions; this close succeeds.
+    // Control: abandon that attempt and the same close succeeds.
+    let attempt = project.rows("SELECT id FROM attempt WHERE ticket = 2")[0]["id"].clone();
+    assert!(
+        project
+            .rows(&format!(
+                "SELECT id FROM execution WHERE attempt = {attempt} AND status = 'running'"
+            ))
+            .is_empty()
+    );
+    let refused = project.refused(&["ticket", "done", "Y-2", "--reason", "Not needed"]);
+    assert_eq!(refused["code"], "refused", "{refused}");
+    assert_eq!(refused["data"]["attempt"], attempt);
+    assert_eq!(project.json(&["ticket", "show", "Y-2"])["state"], "open");
+    project.json(&["ticket", "park", "Y-2"]);
+    project.json(&["attempt", "abandon", "Y-2"]);
+    project.json(&["ticket", "done", "Y-2", "--reason", "Not needed"]);
+    assert_eq!(project.json(&["ticket", "show", "Y-2"])["state"], "done");
 }
