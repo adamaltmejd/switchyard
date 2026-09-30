@@ -24,31 +24,50 @@ fn write_failed(text: &str) -> bool {
         .is_some_and(|status| status != 0)
 }
 
-/// A gate and a seat read the candidate's proof but cannot write it. The
-/// seat cannot write its workspace; the gate receives neither worker route
-/// and no ignored worker file. Controls: the implementer writes both live
-/// directories and reaches the model route in the same project.
+/// A box gate, a host gate and a seat read the candidate's proof snapshot.
+/// The box gate and the seat cannot write it; the seat cannot write its
+/// workspace; the box gate receives neither worker route and no ignored
+/// worker file. The host candidate gate reads the head, base, only its named
+/// env and the snapshot `$YARD_PROOF` names before review, then reads it
+/// again at landing. Controls: the implementer writes both live directories
+/// and reaches the model route in the same project. While the seat is held
+/// the live proof changes, and the landing execution still reads the approved
+/// candidate's snapshot, not the changed live directory or the merged
+/// checkout's same-named file.
 ///
 /// Sabotage: mount the seat checkout or either proof mount writable; its
 /// write succeeds. Mount the live proof for the seat; it writes there. Give
-/// the gate the worker routes; its call reaches the fixture or MCP listener.
-/// Build the gate checkout from the clone; its ignored file survives.
+/// the box gate the worker routes; its call reaches the fixture or MCP
+/// listener. Build the box gate checkout from the clone; its ignored file
+/// survives. Set `YARD_PROOF` to the live proof directory in
+/// `supervise::host_gate`; the landing execution reads the changed live
+/// file. Or leave it unset; `proof=` names nothing. Inherit the daemon's
+/// environment; the unnamed variable reaches the host gate. Check out the
+/// base instead of the head; `head=` names the base. Run review alongside the
+/// candidate gates; the audit order changes. Omit `YARD_BASE`, or set it to
+/// the candidate head; `base=` names the wrong commit.
 #[test]
-fn a_gate_and_a_seat_read_the_proof_read_only() {
+fn gates_and_a_seat_judge_the_proof_snapshot_where_their_row_says() {
+    let hold = Latch::new();
+    let seat_hold = hold.clone();
     let seat_probe = Arc::new(Mutex::new(String::new()));
     let captured = seat_probe.clone();
     let committed = Arc::new(Mutex::new(String::new()));
     let head = committed.clone();
-    let machine = Machine::new("g13-boxes", move |request| {
+    let mut machine = Machine::new("g13-proof", move |request| {
         if seat(request) {
             return match request.tool_results().len() {
-                0 => Reply::Tools(vec![bash(
-                    "cd /workspace; touch planted 2>/dev/null; echo \"file=$?\"; \
-                     git commit -q --allow-empty -m planted 2>/dev/null; echo \"commit=$?\"; \
-                     git update-ref refs/heads/planted HEAD 2>/dev/null; echo \"ref=$?\"; \
-                     v=$(cat /yard/proof/x 2>/dev/null); echo \"read=$v\"; \
-                     echo seat > /yard/proof/seat 2>/dev/null; echo \"write=$?\"",
-                )]),
+                // Held on open, so the test changes the live proof first.
+                0 => Reply::Hold(
+                    seat_hold.clone(),
+                    Box::new(Reply::Tools(vec![bash(
+                        "cd /workspace; touch planted 2>/dev/null; echo \"file=$?\"; \
+                         git commit -q --allow-empty -m planted 2>/dev/null; echo \"commit=$?\"; \
+                         git update-ref refs/heads/planted HEAD 2>/dev/null; echo \"ref=$?\"; \
+                         v=$(cat /yard/proof/x 2>/dev/null); echo \"read=$v\"; \
+                         echo seat > /yard/proof/seat 2>/dev/null; echo \"write=$?\"",
+                    )])),
+                ),
                 1 => {
                     *captured.lock().unwrap() = request.last_tool_result().unwrap().1;
                     Reply::Tools(vec![publish(json!([]))])
@@ -61,6 +80,8 @@ fn a_gate_and_a_seat_read_the_proof_read_only() {
                 "cd /workspace && curl -s -m 5 -o /dev/null http://openrouter.yard/api/v1/from-worker; \
                  printf '*.log\\n' > .gitignore && echo left > ignored.log \
                  && printf 'snapshot-payload' > /yard/proof/x \
+                 && printf 'snapshot-evidence' > /yard/proof/evidence.txt \
+                 && printf 'checkout-evidence' > evidence.txt \
                  && printf 'feature\\n' > feature.txt && git add -A \
                  && git commit -q -m 'Add feature' && git rev-parse HEAD",
             )]);
@@ -68,16 +89,64 @@ fn a_gate_and_a_seat_read_the_proof_read_only() {
         *head.lock().unwrap() = request.last_tool_result().unwrap().1;
         Reply::Text("done".into())
     });
+    machine.env.push(("GATE_NAMED".into(), "named".into()));
+    machine.env.push(("GATE_UNNAMED".into(), "unnamed".into()));
     machine.start();
-    let gate = "[gates.probe]\ncommand = \"v=$(cat /yard/proof/x 2>/dev/null); echo read=$v; \
+    let gates = "[gates.boxed]\ncommand = \"v=$(cat /yard/proof/x 2>/dev/null); echo read=$v; \
                 echo gate > /yard/proof/gate 2>/dev/null; echo write=$?; \
                 curl -sf -m 5 http://openrouter.yard/api/v1/from-gate >/dev/null; \
                 echo mcp=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -X POST http://yard.mcp/mcp); \
                 echo none=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -X POST http://unrouted.invalid/mcp); \
-                test -e ignored.log; echo ignored=$?\"\nstage = \"candidate\"\n";
-    let project = Project::new(&machine, "p", &config(gate));
+                test -e ignored.log; echo ignored=$?\"\nstage = \"candidate\"\n\
+                [gates.hosted]\ncommand = \"echo head=$(git rev-parse HEAD); echo base=${YARD_BASE:-unset}; \
+                echo named=${GATE_NAMED:-unset}; echo unnamed=${GATE_UNNAMED:-unset}; \
+                echo proof=$(cat \\\"$YARD_PROOF/evidence.txt\\\" 2>/dev/null); \
+                echo checkout=$(cat evidence.txt 2>/dev/null)\"\nstage = \"candidate\"\nruns_in = \"host\"\nenv = [\"GATE_NAMED\"]\n";
+    let project = Project::new(&machine, "p", &config(gates));
+    let base = project.canonical_head();
     let mut watch = project.watch(0);
     project.json(&["ticket", "new", "--title", "Add feature"]);
+    // The candidate execution ends before the seat starts; the seat is held.
+    hold.wait_held();
+    let candidate = git(
+        &project.path.join(".yard/local/attempts/1/clone"),
+        &["rev-parse", "HEAD"],
+    )
+    .trim()
+    .to_string();
+    let gates = gate_details(&project);
+    assert_eq!(gates.len(), 2, "{gates:?}");
+    assert_eq!(gates[1]["name"], "hosted", "{gates:?}");
+    let detail = gates[1]["detail"].as_str().unwrap();
+    assert!(detail.contains(&format!("head={candidate}")), "{detail}");
+    assert!(detail.contains(&format!("base={base}")), "{detail}");
+    assert!(detail.contains("named=named"), "{detail}");
+    assert!(detail.contains("unnamed=unset"), "{detail}");
+    // Every gate, in declared order, before any review.
+    let order: Vec<Value> = project
+        .rows(
+            "SELECT audit.event, execution.kind FROM audit JOIN execution ON execution.id = audit.execution
+             WHERE audit.event IN ('execution.started', 'execution.ended')
+             AND execution.kind IN ('gate', 'review') ORDER BY audit.seq",
+        )
+        .into_iter()
+        .map(|row| json!([row["kind"], row["event"]]))
+        .collect();
+    assert_eq!(
+        order,
+        [
+            json!(["gate", "execution.started"]),
+            json!(["gate", "execution.ended"]),
+            json!(["gate", "execution.started"]),
+            json!(["gate", "execution.ended"]),
+            json!(["review", "execution.started"]),
+        ]
+    );
+    // The live proof changes after the snapshot; only the snapshot is judged.
+    let live = project.path.join(".yard/local/attempts/1/proof");
+    std::fs::write(live.join("evidence.txt"), "live-mutated").unwrap();
+    hold.release();
+
     let approval = watch.attention();
     assert_eq!(approval["data"]["kind"], "approval", "{approval}");
 
@@ -86,11 +155,12 @@ fn a_gate_and_a_seat_read_the_proof_read_only() {
     assert_eq!(git(&clone, &["rev-parse", "HEAD"]).trim(), committed);
     assert!(!clone.join("planted").exists());
     assert!(clone.join("ignored.log").is_file());
-    let live = project.path.join(".yard/local/attempts/1/proof/x");
-    assert_eq!(std::fs::read_to_string(&live).unwrap(), "snapshot-payload");
+    assert_eq!(
+        std::fs::read_to_string(live.join("x")).unwrap(),
+        "snapshot-payload"
+    );
 
-    let gates = gate_details(&project);
-    assert_eq!(gates.len(), 1);
+    assert_eq!(gates[0]["name"], "boxed", "{gates:?}");
     let detail = gates[0]["detail"].as_str().unwrap();
     assert!(detail.contains("read=snapshot-payload"), "{detail}");
     assert!(write_failed(detail), "{detail}");
@@ -125,6 +195,29 @@ fn a_gate_and_a_seat_read_the_proof_read_only() {
     }
     assert!(seat.contains("read=snapshot-payload"), "{seat}");
     assert!(write_failed(&seat), "{seat}");
+
+    let head = approval["data"]["payload"]["head"].as_str().unwrap();
+    let proof = approval["data"]["payload"]["proof"].as_str().unwrap();
+    project.json(&[
+        "attempt", "approve", "Y-1", "--head", head, "--proof", proof,
+    ]);
+    watch.event("landing.recorded", &[]);
+
+    // The host gate's candidate execution, then the same gate again on the
+    // merged ref.
+    let hosted: Vec<Value> = gate_details(&project)
+        .into_iter()
+        .filter(|gate| gate["name"] == "hosted")
+        .collect();
+    assert_eq!(hosted.len(), 2, "{hosted:?}");
+    assert_eq!(hosted[0]["reason"], "candidate", "{hosted:?}");
+    assert_eq!(hosted[1]["reason"], "landing", "{hosted:?}");
+    for gate in &hosted {
+        let detail = gate["detail"].as_str().unwrap();
+        assert!(detail.contains("proof=snapshot-evidence"), "{detail}");
+        // The checkout carries a same-named file with other content.
+        assert!(detail.contains("checkout=checkout-evidence"), "{detail}");
+    }
 }
 
 /// A host landing gate runs on the merged ref and never for a candidate
@@ -144,7 +237,8 @@ fn a_gate_and_a_seat_read_the_proof_read_only() {
 /// landing calls after the held merge, skip the reread by replacing `let
 /// lapse = holds(...).await?;` with `let lapse = None;` and `unchanged` with
 /// `true`; the superseded Y-2 goes on to a gate and the decisive-event
-/// assertion fails on `execution.started` instead of `attention.raised`.
+/// assertion fails on `execution.started` instead of the landing's
+/// `execution.ended`.
 #[test]
 fn a_host_landing_gate_runs_on_the_merged_ref_only_when_approved() {
     let machine = Machine::new("g13-host-landing", |request| {
@@ -236,16 +330,15 @@ fn a_host_landing_gate_runs_on_the_merged_ref_only_when_approved() {
         "Changed",
     ]);
     std::fs::write(&resume, "go\n").unwrap();
-    // The first Y-2 event that decides the outcome: approval again, or the
-    // landing going ahead on the superseded candidate.
-    let decided = watch.until("Y-2 approval again or landing", |event| {
+    // The first Y-2 event that decides the outcome: its landing ends with no
+    // gate, or goes ahead on the superseded candidate.
+    let decided = watch.until("Y-2 landing ended or a gate", |event| {
         event["ticket"] == "Y-2"
-            && (event["event"] == "attention.raised"
-                || event["event"] == "landing.recorded"
-                || (event["event"] == "execution.started" && event["data"]["kind"] == "gate"))
+            && (event["event"] == "landing.recorded"
+                || (event["event"] == "execution.started" && event["data"]["kind"] == "gate")
+                || (event["event"] == "execution.ended" && event["data"]["kind"] == "landing"))
     });
-    assert_eq!(decided["event"], "attention.raised", "{decided}");
-    assert_eq!(decided["data"]["kind"], "approval", "{decided}");
+    assert_eq!(decided["event"], "execution.ended", "{decided}");
 
     let gates = gate_details(&project);
     assert_eq!(gates.len(), 1, "{gates:?}");
@@ -276,113 +369,4 @@ fn a_host_landing_gate_runs_on_the_merged_ref_only_when_approved() {
         project.rows("SELECT state FROM approval WHERE attempt = 2"),
         vec![json!({ "state": "withdrawn" })]
     );
-}
-
-/// A host candidate gate reads the head, base, only its named env and the
-/// snapshot `$YARD_PROOF` names before review, then reads it again at
-/// landing. The implementer writes the live proof and
-/// commits a same-named file; while the review seat is held the live proof
-/// changes, and the landing execution still reads the approved candidate's
-/// snapshot, not the changed live directory or the merged checkout's file.
-///
-/// Sabotage: set `YARD_PROOF` to the live proof directory in
-/// `supervise::host_gate`; the landing execution reads the changed live
-/// file. Or leave it unset; `proof=` names nothing. Inherit the daemon's
-/// environment; the unnamed variable reaches the gate. Check out the base
-/// instead of the head; `head=` names the base. Run review alongside the
-/// candidate gate; the audit order changes. Omit `YARD_BASE`, or set it to
-/// the candidate head; `base=` names the wrong commit.
-#[test]
-fn a_host_gate_receives_yard_proof() {
-    let hold = Latch::new();
-    let seat_hold = hold.clone();
-    let mut machine = Machine::new("g13-host-proof", move |request| {
-        if seat(request) {
-            if request.opens() {
-                return Reply::Hold(
-                    seat_hold.clone(),
-                    Box::new(Reply::Tools(vec![publish(json!([]))])),
-                );
-            }
-            return Reply::Text("done".into());
-        }
-        if request.opens() {
-            return Reply::Tools(vec![bash(
-                "cd /workspace && printf 'snapshot-evidence' > /yard/proof/evidence.txt \
-                 && printf 'checkout-evidence' > evidence.txt \
-                 && git add -A && git commit -q -m 'Add evidence' && echo committed",
-            )]);
-        }
-        Reply::Text("done".into())
-    });
-    machine.env.push(("GATE_NAMED".into(), "named".into()));
-    machine.env.push(("GATE_UNNAMED".into(), "unnamed".into()));
-    machine.start();
-    let gate = "[gates.probe]\ncommand = \"echo head=$(git rev-parse HEAD); echo base=${YARD_BASE:-unset}; \
-                echo named=${GATE_NAMED:-unset}; echo unnamed=${GATE_UNNAMED:-unset}; \
-                echo proof=$(cat \\\"$YARD_PROOF/evidence.txt\\\" 2>/dev/null); \
-                echo checkout=$(cat evidence.txt 2>/dev/null)\"\nstage = \"candidate\"\nruns_in = \"host\"\nenv = [\"GATE_NAMED\"]\n";
-    let project = Project::new(&machine, "p", &config(gate));
-    let base = project.canonical_head();
-    let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Add feature"]);
-    // The candidate execution ends before the seat starts; the seat is held.
-    hold.wait_held();
-    let candidate = git(
-        &project.path.join(".yard/local/attempts/1/clone"),
-        &["rev-parse", "HEAD"],
-    )
-    .trim()
-    .to_string();
-    let gates = gate_details(&project);
-    assert_eq!(gates.len(), 1);
-    let detail = gates[0]["detail"].as_str().unwrap();
-    assert!(detail.contains(&format!("head={candidate}")), "{detail}");
-    assert!(detail.contains(&format!("base={base}")), "{detail}");
-    assert!(detail.contains("named=named"), "{detail}");
-    assert!(detail.contains("unnamed=unset"), "{detail}");
-    let order: Vec<Value> = project
-        .rows(
-            "SELECT audit.event, execution.kind FROM audit JOIN execution ON execution.id = audit.execution
-             WHERE audit.event IN ('execution.started', 'execution.ended')
-             AND execution.kind IN ('gate', 'review') ORDER BY audit.seq",
-        )
-        .into_iter()
-        .map(|row| json!([row["kind"], row["event"]]))
-        .collect();
-    assert_eq!(
-        order,
-        [
-            json!(["gate", "execution.started"]),
-            json!(["gate", "execution.ended"]),
-            json!(["review", "execution.started"]),
-        ]
-    );
-    // The live proof changes after the snapshot; only the snapshot is judged.
-    let live = project
-        .path
-        .join(".yard/local/attempts/1/proof/evidence.txt");
-    std::fs::write(&live, "live-mutated").unwrap();
-    hold.release();
-
-    let approval = watch.attention();
-    assert_eq!(approval["data"]["kind"], "approval", "{approval}");
-    let head = approval["data"]["payload"]["head"].as_str().unwrap();
-    let proof = approval["data"]["payload"]["proof"].as_str().unwrap();
-    project.json(&[
-        "attempt", "approve", "Y-1", "--head", head, "--proof", proof,
-    ]);
-    watch.event("landing.recorded", &[]);
-
-    // The candidate execution, then the same gate again on the merged ref.
-    let gates = gate_details(&project);
-    assert_eq!(gates.len(), 2, "{gates:?}");
-    assert_eq!(gates[0]["reason"], "candidate", "{gates:?}");
-    assert_eq!(gates[1]["reason"], "landing", "{gates:?}");
-    for gate in &gates {
-        let detail = gate["detail"].as_str().unwrap();
-        assert!(detail.contains("proof=snapshot-evidence"), "{detail}");
-        // The checkout carries a same-named file with other content.
-        assert!(detail.contains("checkout=checkout-evidence"), "{detail}");
-    }
 }
