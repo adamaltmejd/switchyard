@@ -9,13 +9,6 @@ fn seat(request: &ModelRequest) -> bool {
     request.has_tool("yard_publish_review")
 }
 
-fn implementer(request: &ModelRequest) -> Reply {
-    act(
-        request,
-        vec![commit_file("feature.txt", "feature\n", "Add feature")],
-    )
-}
-
 /// The detail each gate execution recorded: its output's tail.
 fn gate_details(project: &Project) -> Vec<Value> {
     project.rows(
@@ -31,78 +24,29 @@ fn write_failed(text: &str) -> bool {
         .is_some_and(|status| status != 0)
 }
 
-/// A seat that writes to `/workspace` fails and the head is unchanged: it
-/// tries a file, a commit and a ref, then publishes. The implementer's clone
-/// still holds, by git, the head the fixture's commit produced, and no
-/// planted file.
+/// A gate and a seat read the candidate's proof but cannot write it. The
+/// seat cannot write its workspace; the gate receives neither worker route
+/// and no ignored worker file. Controls: the implementer writes both live
+/// directories and reaches the model route in the same project.
 ///
-/// Sabotage: mount the seat's checkout writable in `review::run`; the
-/// writes succeed.
-#[test]
-fn a_seat_cannot_write_the_workspace() {
-    let answer = Arc::new(Mutex::new(String::new()));
-    let seen = answer.clone();
-    let committed = Arc::new(Mutex::new(String::new()));
-    let head = committed.clone();
-    let machine = Machine::new("g13-seat", move |request| {
-        if !seat(request) {
-            if request.opens() {
-                return Reply::Tools(vec![bash(
-                    "cd /workspace && printf 'feature\\n' > feature.txt && git add -A \
-                     && git commit -q -m 'Add feature' && git rev-parse HEAD",
-                )]);
-            }
-            *head.lock().unwrap() = request.last_tool_result().unwrap().1;
-            return Reply::Text("done".into());
-        }
-        match request.tool_results().len() {
-            0 => Reply::Tools(vec![bash(
-                "cd /workspace; touch planted 2>/dev/null; echo \"file=$?\"; \
-                 git commit -q --allow-empty -m planted 2>/dev/null; echo \"commit=$?\"; \
-                 git update-ref refs/heads/planted HEAD 2>/dev/null; echo \"ref=$?\"",
-            )]),
-            1 => {
-                *seen.lock().unwrap() = request.last_tool_result().unwrap().1;
-                Reply::Tools(vec![publish(json!([]))])
-            }
-            _ => Reply::Text("done".into()),
-        }
-    });
-    machine.start();
-    let project = Project::new(&machine, "p", &config(""));
-    let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Add feature"]);
-    let approval = watch.attention();
-    assert_eq!(approval["data"]["kind"], "approval", "{approval}");
-
-    let answer = answer.lock().unwrap().clone();
-    for probe in ["file=", "commit=", "ref="] {
-        assert!(answer.contains(probe), "{answer}");
-        assert!(!answer.contains(&format!("{probe}0")), "{answer}");
-    }
-    let clone = project.path.join(".yard/local/attempts/1/clone");
-    let committed = committed.lock().unwrap().trim().to_string();
-    assert_eq!(committed.len(), 40, "{committed}");
-    assert_eq!(git(&clone, &["rev-parse", "HEAD"]).trim(), committed);
-    assert!(!clone.join("planted").exists());
-}
-
-/// The implementer writes `/yard/proof/x`; a box candidate gate reads it and
-/// its write fails; a seat reads it and its write fails. Control: the
-/// implementer wrote it.
-///
-/// Sabotage: mount the snapshot writable in `supervise::box_gate`; the gate's
-/// write lands in the snapshot. Or mount the live directory in
-/// `review::run`; the seat reads and writes the implementer's live proof.
+/// Sabotage: mount the seat checkout or either proof mount writable; its
+/// write succeeds. Mount the live proof for the seat; it writes there. Give
+/// the gate the worker routes; its call reaches the fixture or MCP listener.
+/// Build the gate checkout from the clone; its ignored file survives.
 #[test]
 fn a_gate_and_a_seat_read_the_proof_read_only() {
     let seat_probe = Arc::new(Mutex::new(String::new()));
     let captured = seat_probe.clone();
-    let machine = Machine::new("g13-proof", move |request| {
+    let committed = Arc::new(Mutex::new(String::new()));
+    let head = committed.clone();
+    let machine = Machine::new("g13-boxes", move |request| {
         if seat(request) {
             return match request.tool_results().len() {
                 0 => Reply::Tools(vec![bash(
-                    "v=$(cat /yard/proof/x 2>/dev/null); echo \"read=$v\"; \
+                    "cd /workspace; touch planted 2>/dev/null; echo \"file=$?\"; \
+                     git commit -q --allow-empty -m planted 2>/dev/null; echo \"commit=$?\"; \
+                     git update-ref refs/heads/planted HEAD 2>/dev/null; echo \"ref=$?\"; \
+                     v=$(cat /yard/proof/x 2>/dev/null); echo \"read=$v\"; \
                      echo seat > /yard/proof/seat 2>/dev/null; echo \"write=$?\"",
                 )]),
                 1 => {
@@ -112,24 +56,36 @@ fn a_gate_and_a_seat_read_the_proof_read_only() {
                 _ => Reply::Text("done".into()),
             };
         }
-        act(
-            request,
-            vec![bash(
-                "cd /workspace && printf 'snapshot-payload' > /yard/proof/x \
-                 && printf 'feature\\n' > feature.txt \
-                 && git add -A && git commit -q -m 'Add feature' && echo committed",
-            )],
-        )
+        if request.opens() {
+            return Reply::Tools(vec![bash(
+                "cd /workspace && curl -s -m 5 -o /dev/null http://openrouter.yard/api/v1/from-worker; \
+                 printf '*.log\\n' > .gitignore && echo left > ignored.log \
+                 && printf 'snapshot-payload' > /yard/proof/x \
+                 && printf 'feature\\n' > feature.txt && git add -A \
+                 && git commit -q -m 'Add feature' && git rev-parse HEAD",
+            )]);
+        }
+        *head.lock().unwrap() = request.last_tool_result().unwrap().1;
+        Reply::Text("done".into())
     });
     machine.start();
-    let gate = "[gates.probe]\ncommand = \"v=$(cat /yard/proof/x 2>/dev/null); echo read=$v; echo gate > /yard/proof/gate 2>/dev/null; echo write=$?\"\nstage = \"candidate\"\n";
+    let gate = "[gates.probe]\ncommand = \"v=$(cat /yard/proof/x 2>/dev/null); echo read=$v; \
+                echo gate > /yard/proof/gate 2>/dev/null; echo write=$?; \
+                curl -sf -m 5 http://openrouter.yard/api/v1/from-gate >/dev/null; \
+                echo mcp=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -X POST http://yard.mcp/mcp); \
+                echo none=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -X POST http://unrouted.invalid/mcp); \
+                test -e ignored.log; echo ignored=$?\"\nstage = \"candidate\"\n";
     let project = Project::new(&machine, "p", &config(gate));
     let mut watch = project.watch(0);
     project.json(&["ticket", "new", "--title", "Add feature"]);
     let approval = watch.attention();
     assert_eq!(approval["data"]["kind"], "approval", "{approval}");
 
-    // Control: the implementer's live proof holds what it wrote.
+    let clone = project.path.join(".yard/local/attempts/1/clone");
+    let committed = committed.lock().unwrap().trim().to_string();
+    assert_eq!(git(&clone, &["rev-parse", "HEAD"]).trim(), committed);
+    assert!(!clone.join("planted").exists());
+    assert!(clone.join("ignored.log").is_file());
     let live = project.path.join(".yard/local/attempts/1/proof/x");
     assert_eq!(std::fs::read_to_string(&live).unwrap(), "snapshot-payload");
 
@@ -138,51 +94,6 @@ fn a_gate_and_a_seat_read_the_proof_read_only() {
     let detail = gates[0]["detail"].as_str().unwrap();
     assert!(detail.contains("read=snapshot-payload"), "{detail}");
     assert!(write_failed(detail), "{detail}");
-
-    let seat = seat_probe.lock().unwrap().clone();
-    assert!(seat.contains("read=snapshot-payload"), "{seat}");
-    assert!(write_failed(&seat), "{seat}");
-}
-
-/// A gate box that calls the model or MCP route gets nothing, and an
-/// ignored file the implementer left is absent from its checkout. Control:
-/// the worker box reaches the model route. The MCP host answers the gate
-/// exactly as a host with no route does; a route would bring Yard's 401.
-///
-/// Sabotage: give gate boxes the worker's routes in `supervise::box_gate`;
-/// the fixture receives the gate's call and the MCP host answers 401. Or
-/// build the gate checkout from the attempt's clone; the ignored file is in
-/// it.
-#[test]
-fn a_gate_box_reaches_no_route_and_no_ignored_file() {
-    let machine = Machine::new("g13-gate-box", |request| {
-        act(
-            request,
-            vec![bash(
-                "cd /workspace && curl -s -m 5 -o /dev/null http://openrouter.yard/api/v1/from-worker; \
-                 printf '*.log\\n' > .gitignore && echo left > ignored.log && printf 'feature\\n' > feature.txt \
-                 && git add -A && git commit -q -m 'Add feature' && echo committed",
-            )],
-        )
-    });
-    machine.start();
-    let gate = "[gates.probe]\ncommand = \"curl -sf -m 5 http://openrouter.yard/api/v1/from-gate >/dev/null; \
-                echo mcp=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -X POST http://yard.mcp/mcp); \
-                echo none=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -X POST http://unrouted.invalid/mcp); \
-                test -e ignored.log; echo ignored=$?\"\nstage = \"candidate\"\n";
-    let project = Project::new(
-        &machine,
-        "p",
-        &config(gate).replace("review = [\"correctness\"]", "review = \"none\""),
-    );
-    let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Add feature"]);
-    let approval = watch.attention();
-    assert_eq!(approval["data"]["kind"], "approval", "{approval}");
-
-    let gates = gate_details(&project);
-    assert_eq!(gates.len(), 1);
-    let detail = gates[0]["detail"].as_str().unwrap();
     let answer = |host: &str| {
         detail
             .lines()
@@ -206,73 +117,14 @@ fn a_gate_box_reaches_no_route_and_no_ignored_file() {
         !paths.iter().any(|path| path.ends_with("/from-gate")),
         "{paths:?}"
     );
-    assert!(
-        project
-            .path
-            .join(".yard/local/attempts/1/clone/ignored.log")
-            .is_file()
-    );
-}
 
-/// A host candidate gate runs on the head before any review and sees only
-/// the variables its `env` names: the daemon's environment has one it names
-/// and one it does not.
-///
-/// Sabotage: make `supervise::host_gate` inherit the daemon's environment;
-/// the unnamed variable reaches the gate. Or check out the base, not the
-/// head, for a host candidate gate; `head=` names the base. Or start the
-/// review round alongside the candidate gates; the seat starts before the
-/// gate ends. Or omit `YARD_BASE`, or set it to the head; `base=` names it.
-#[test]
-fn a_host_candidate_gate_sees_the_head_and_only_its_env() {
-    let mut machine = Machine::new("g13-host-candidate", |request| {
-        if seat(request) {
-            return act(request, vec![publish(json!([]))]);
-        }
-        implementer(request)
-    });
-    machine.env.push(("GATE_NAMED".into(), "named".into()));
-    machine.env.push(("GATE_UNNAMED".into(), "unnamed".into()));
-    machine.start();
-    let gate = "[gates.host]\ncommand = \"echo head=$(git rev-parse HEAD); echo base=${YARD_BASE:-unset}; \
-                echo named=${GATE_NAMED:-unset}; \
-                echo unnamed=${GATE_UNNAMED:-unset}\"\nstage = \"candidate\"\nruns_in = \"host\"\n\
-                env = [\"GATE_NAMED\"]\n";
-    let project = Project::new(&machine, "p", &config(gate));
-    let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Add feature"]);
-    let approval = watch.attention();
-    assert_eq!(approval["data"]["kind"], "approval", "{approval}");
-    let head = approval["data"]["payload"]["head"].as_str().unwrap();
-    // The fixture's canonical head is the base the candidate was built on.
-    let base = project.canonical_head();
-
-    let gates = gate_details(&project);
-    assert_eq!(gates.len(), 1);
-    let detail = gates[0]["detail"].as_str().unwrap();
-    assert!(detail.contains(&format!("head={head}")), "{detail}");
-    assert!(detail.contains(&format!("base={base}")), "{detail}");
-    assert!(detail.contains("named=named"), "{detail}");
-    assert!(detail.contains("unnamed=unset"), "{detail}");
-    // Before any review: the gate ended before the seat started.
-    let order: Vec<Value> = project
-        .rows(
-            "SELECT audit.event, execution.kind FROM audit JOIN execution ON execution.id = audit.execution
-             WHERE audit.event IN ('execution.started', 'execution.ended')
-             AND execution.kind IN ('gate', 'review') ORDER BY audit.seq",
-        )
-        .into_iter()
-        .map(|row| json!([row["kind"], row["event"]]))
-        .collect();
-    assert_eq!(
-        order,
-        [
-            json!(["gate", "execution.started"]),
-            json!(["gate", "execution.ended"]),
-            json!(["review", "execution.started"]),
-            json!(["review", "execution.ended"]),
-        ]
-    );
+    let seat = seat_probe.lock().unwrap().clone();
+    for probe in ["file=", "commit=", "ref="] {
+        assert!(seat.contains(probe), "{seat}");
+        assert!(!seat.contains(&format!("{probe}0")), "{seat}");
+    }
+    assert!(seat.contains("read=snapshot-payload"), "{seat}");
+    assert!(write_failed(&seat), "{seat}");
 }
 
 /// A host landing gate runs on the merged ref and never for a candidate
@@ -426,20 +278,25 @@ fn a_host_landing_gate_runs_on_the_merged_ref_only_when_approved() {
     );
 }
 
-/// A host gate reads the snapshot `$YARD_PROOF` names, at the candidate
-/// stage and again at landing. The implementer writes the live proof and
+/// A host candidate gate reads the head, base, only its named env and the
+/// snapshot `$YARD_PROOF` names before review, then reads it again at
+/// landing. The implementer writes the live proof and
 /// commits a same-named file; while the review seat is held the live proof
 /// changes, and the landing execution still reads the approved candidate's
 /// snapshot, not the changed live directory or the merged checkout's file.
 ///
 /// Sabotage: set `YARD_PROOF` to the live proof directory in
 /// `supervise::host_gate`; the landing execution reads the changed live
-/// file. Or leave it unset; `proof=` names nothing.
+/// file. Or leave it unset; `proof=` names nothing. Inherit the daemon's
+/// environment; the unnamed variable reaches the gate. Check out the base
+/// instead of the head; `head=` names the base. Run review alongside the
+/// candidate gate; the audit order changes. Omit `YARD_BASE`, or set it to
+/// the candidate head; `base=` names the wrong commit.
 #[test]
 fn a_host_gate_receives_yard_proof() {
     let hold = Latch::new();
     let seat_hold = hold.clone();
-    let machine = Machine::new("g13-host-proof", move |request| {
+    let mut machine = Machine::new("g13-host-proof", move |request| {
         if seat(request) {
             if request.opens() {
                 return Reply::Hold(
@@ -458,13 +315,49 @@ fn a_host_gate_receives_yard_proof() {
         }
         Reply::Text("done".into())
     });
+    machine.env.push(("GATE_NAMED".into(), "named".into()));
+    machine.env.push(("GATE_UNNAMED".into(), "unnamed".into()));
     machine.start();
-    let gate = "[gates.probe]\ncommand = \"echo proof=$(cat \\\"$YARD_PROOF/evidence.txt\\\" 2>/dev/null); echo checkout=$(cat evidence.txt 2>/dev/null)\"\nstage = \"candidate\"\nruns_in = \"host\"\n";
+    let gate = "[gates.probe]\ncommand = \"echo head=$(git rev-parse HEAD); echo base=${YARD_BASE:-unset}; \
+                echo named=${GATE_NAMED:-unset}; echo unnamed=${GATE_UNNAMED:-unset}; \
+                echo proof=$(cat \\\"$YARD_PROOF/evidence.txt\\\" 2>/dev/null); \
+                echo checkout=$(cat evidence.txt 2>/dev/null)\"\nstage = \"candidate\"\nruns_in = \"host\"\nenv = [\"GATE_NAMED\"]\n";
     let project = Project::new(&machine, "p", &config(gate));
+    let base = project.canonical_head();
     let mut watch = project.watch(0);
     project.json(&["ticket", "new", "--title", "Add feature"]);
     // The candidate execution ends before the seat starts; the seat is held.
     hold.wait_held();
+    let candidate = git(
+        &project.path.join(".yard/local/attempts/1/clone"),
+        &["rev-parse", "HEAD"],
+    )
+    .trim()
+    .to_string();
+    let gates = gate_details(&project);
+    assert_eq!(gates.len(), 1);
+    let detail = gates[0]["detail"].as_str().unwrap();
+    assert!(detail.contains(&format!("head={candidate}")), "{detail}");
+    assert!(detail.contains(&format!("base={base}")), "{detail}");
+    assert!(detail.contains("named=named"), "{detail}");
+    assert!(detail.contains("unnamed=unset"), "{detail}");
+    let order: Vec<Value> = project
+        .rows(
+            "SELECT audit.event, execution.kind FROM audit JOIN execution ON execution.id = audit.execution
+             WHERE audit.event IN ('execution.started', 'execution.ended')
+             AND execution.kind IN ('gate', 'review') ORDER BY audit.seq",
+        )
+        .into_iter()
+        .map(|row| json!([row["kind"], row["event"]]))
+        .collect();
+    assert_eq!(
+        order,
+        [
+            json!(["gate", "execution.started"]),
+            json!(["gate", "execution.ended"]),
+            json!(["review", "execution.started"]),
+        ]
+    );
     // The live proof changes after the snapshot; only the snapshot is judged.
     let live = project
         .path

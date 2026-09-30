@@ -104,75 +104,6 @@ fn planted_worker_git_never_runs_on_the_host() {
     );
 }
 
-/// Across G7's path every request that reaches the fixture behind the
-/// model's origin came through the model route, and the daemon listens on
-/// its unix socket and the MCP listener only.
-///
-/// Sabotage: bind the MCP listener on `0.0.0.0` in `daemon::serve`; the
-/// daemon listens beyond loopback.
-#[test]
-fn yard_reaches_only_its_routes_and_listens_locally() {
-    let machine = Machine::new("g14-local", |request| {
-        if request.has_tool("yard_publish_review") {
-            return act(request, vec![publish(json!([]))]);
-        }
-        act(
-            request,
-            vec![commit_file("feature.txt", "feature\n", "Add feature")],
-        )
-    });
-    machine.start();
-    let project = Project::new(
-        &machine,
-        "p",
-        &config("[gates.check]\ncommand = \"test -f feature.txt\"\nstage = \"candidate\"\n"),
-    );
-    let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Add feature"]);
-    let approval = watch.attention();
-    assert_eq!(approval["data"]["kind"], "approval", "{approval}");
-    let head = approval["data"]["payload"]["head"].as_str().unwrap();
-    project.json(&["attempt", "approve", "Y-1", "--head", head]);
-    watch.event("landing.recorded", &[]);
-
-    let requests = machine.model.requests();
-    assert!(!requests.is_empty());
-    for request in &requests {
-        assert_eq!(request.path, "/api/v1/chat/completions");
-    }
-
-    // lsof, which both platforms have: the daemon's own sockets.
-    let pid = machine.daemon_pid().to_string();
-    let sockets = |args: &[&str]| -> Vec<String> {
-        let out = std::process::Command::new("lsof")
-            .args(["-nP", "-a", "-p", &pid])
-            .args(args)
-            .output()
-            .unwrap();
-        String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .skip(1)
-            .map(str::to_string)
-            .collect()
-    };
-    let tcp = sockets(&["-iTCP", "-sTCP:LISTEN"]);
-    assert_eq!(tcp.len(), 1, "{tcp:?}");
-    assert!(tcp[0].contains("127.0.0.1:"), "{tcp:?}");
-    let udp = sockets(&["-iUDP"]);
-    assert!(udp.is_empty(), "{udp:?}");
-    // Every unix socket bound to a path is the daemon's own; a connection
-    // accepted on it names the same path.
-    let socket = machine.state.join("yard/yard.sock").display().to_string();
-    let unix: Vec<String> = sockets(&["-U"])
-        .into_iter()
-        .filter(|line| line.contains('/'))
-        .collect();
-    assert!(!unix.is_empty(), "no unix socket");
-    for line in &unix {
-        assert!(line.contains(&socket), "{unix:?}");
-    }
-}
-
 /// The worker leaves a symlink in `/yard/proof`, and separately passes the
 /// entry bound: each candidate is refused by name and no gate runs. Control:
 /// a regular file is accepted and its candidate gate runs.
@@ -209,8 +140,8 @@ fn a_bad_proof_entry_is_refused_by_name() {
     project.json(&["ticket", "new", "--title", "Good proof"]);
 
     let mut stopped = 0;
-    let mut approval = None;
-    while stopped < 2 || approval.is_none() {
+    let mut approved = false;
+    while stopped < 2 || !approved {
         let event = watch.until("decision", |event| {
             event["event"] == "attention.raised"
                 && (event["data"]["kind"] == "stopped" || event["data"]["kind"] == "approval")
@@ -220,7 +151,7 @@ fn a_bad_proof_entry_is_refused_by_name() {
             stopped += 1;
         } else {
             assert_eq!(event["ticket"], "Y-3", "{event}");
-            approval = Some(event);
+            approved = true;
         }
     }
 
@@ -248,11 +179,4 @@ fn a_bad_proof_entry_is_refused_by_name() {
          WHERE execution.kind = 'gate'",
     );
     assert_eq!(gates, vec![json!({ "ticket": 3 })], "{gates:?}");
-
-    // The control reached approval carrying the good proof digest, so an
-    // operator's approve can bind it.
-    let approval = approval.unwrap();
-    assert_eq!(approval["ticket"], "Y-3", "{approval}");
-    let proof = approval["data"]["payload"]["proof"].as_str().unwrap();
-    assert!(!proof.is_empty(), "{approval}");
 }

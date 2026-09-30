@@ -30,8 +30,8 @@ enum Command {
     /// The project's tickets, attempts and attention.
     #[command(group(clap::ArgGroup::new("stream").args(["watch", "history"])))]
     Status {
-        /// Return once an attention item is open (with --since, one raised
-        /// after it); print the open items and the seq.
+        /// Return on open attention or an idle board; with --since, wait
+        /// for a new item or a later attempt end. Print the items and seq.
         #[arg(long, conflicts_with = "history")]
         watch: bool,
         /// Follow the audit stream from --since, one line per event.
