@@ -32,16 +32,23 @@ fn kinds(project: &Project, kind: &str) -> Vec<Value> {
 
 /// A seat that exits 0 without publishing is a review error, raised as
 /// `red`, though it read its context first. Control: `start` reruns the
-/// seat on the same head, and its publication reaches approval.
+/// seat on the same head, and its publication reaches approval. A second
+/// ticket's seat is held, abandoned and released: it ends abandoned,
+/// records no check and raises nothing on the ended attempt.
 ///
-/// Sabotage: make `review::run` end a seat without a publication as a pass;
-/// no `red` is raised.
+/// Sabotage: let `review::run` pass an unpublished seat; no red is raised.
+/// Remove its end-path liveness check; the abandoned seat raises red.
 #[test]
 fn a_seat_that_exits_without_publishing_is_a_review_error() {
+    let hold = Latch::new();
+    let held = hold.clone();
     let seats = AtomicUsize::new(0);
     let machine = Machine::new("g8-silent", move |request| {
         if !seat(&request) {
             return implementer(request);
+        }
+        if request.prompt().contains("Abandon seat") {
+            return Reply::Hold(held.clone(), Box::new(Reply::Text("done".into())));
         }
         if request.opens() && seats.fetch_add(1, Ordering::SeqCst) > 0 {
             return Reply::Tools(vec![publish(json!([]))]);
@@ -77,14 +84,31 @@ fn a_seat_that_exits_without_publishing_is_a_review_error() {
     assert_eq!(reviews[1]["outcome"], "pass");
     assert!(reviews.iter().all(|row| row["head"] == head));
     assert_eq!(kinds(&project, "implementation").len(), 1);
+    project.json(&["ticket", "new", "--title", "Abandon seat"]);
+    hold.wait_held();
+    project.json(&["ticket", "park", "Y-2"]);
+    project.json(&["attempt", "abandon", "Y-2"]);
+    hold.release();
+    let ended = watch.event("execution.ended", &[("kind", "review")]);
+    assert_eq!(ended["ticket"], "Y-2", "{ended}");
+    assert_eq!(ended["data"]["outcome"], "abandoned", "{ended}");
+    assert!(project.rows("SELECT c.id FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE e.attempt = 2").is_empty());
+    assert!(
+        project
+            .rows("SELECT id FROM attention WHERE attempt = 2 AND state = 'open'")
+            .is_empty()
+    );
 }
 
 /// A seat killed after publishing has published: the daemon dies while the
 /// fixture holds the seat's next request, and on restart the publication
-/// reaches approval without a second review.
+/// reaches approval without a second review. Before the crash the seat
+/// publishes a pass, then a block: the second publication is refused and
+/// the first stands.
 ///
-/// Sabotage: make `review::publish` defer recording the check to the end
-/// of the execution; the restart reruns the seat.
+/// Sabotage: defer recording the check to the execution's end; restart
+/// reruns the seat. Drop `review::publish`'s already-published check; the
+/// second publication records its blocking finding.
 #[test]
 fn a_seat_killed_after_publishing_has_published() {
     let hold = Latch::new();
@@ -95,6 +119,9 @@ fn a_seat_killed_after_publishing_has_published() {
         }
         match request.tool_results().len() {
             0 => Reply::Tools(vec![publish(json!([]))]),
+            1 => Reply::Tools(vec![publish(json!([
+                { "priority": "P0", "body": "second thoughts" }
+            ]))]),
             _ => Reply::Hold(held.clone(), Box::new(Reply::Text("never".into()))),
         }
     });
@@ -102,6 +129,13 @@ fn a_seat_killed_after_publishing_has_published() {
     let project = Project::new(&machine, "p", &config(""));
     project.json(&["ticket", "new", "--title", "Add feature"]);
     hold.wait_held();
+    assert!(project.rows("SELECT id FROM finding").is_empty());
+    assert_eq!(
+        project
+            .rows("SELECT seq FROM audit WHERE event = 'tool.refused'")
+            .len(),
+        1
+    );
     machine.kill();
 
     assert_eq!(
@@ -126,117 +160,6 @@ fn a_seat_killed_after_publishing_has_published() {
     hold.release();
 }
 
-/// A second publication is refused, and the first stands: the seat
-/// publishes a pass, then a block.
-///
-/// Sabotage: drop the already-published check in `review::publish`; the
-/// block is recorded too and the candidate goes to repair.
-#[test]
-fn a_second_publication_is_refused() {
-    let machine = Machine::new("g8-twice", |request| {
-        if !seat(&request) {
-            return implementer(request);
-        }
-        match request.tool_results().len() {
-            0 => Reply::Tools(vec![publish(json!([]))]),
-            1 => Reply::Tools(vec![publish(json!([
-                { "priority": "P0", "body": "second thoughts" }
-            ]))]),
-            _ => Reply::Text("done".into()),
-        }
-    });
-    machine.start();
-    let project = Project::new(&machine, "p", &config(""));
-    let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Add feature"]);
-    let approval = watch.attention();
-    assert_eq!(approval["data"]["kind"], "approval", "{approval}");
-
-    assert_eq!(
-        project.rows("SELECT verdict FROM \"check\" WHERE kind = 'review'"),
-        vec![json!({ "verdict": "pass" })]
-    );
-    assert!(project.rows("SELECT id FROM finding").is_empty());
-    assert_eq!(
-        project
-            .rows("SELECT seq FROM audit WHERE event = 'tool.refused'")
-            .len(),
-        1
-    );
-}
-
-/// Findings below `blocking` pass. With `blocking = "P1"`, a P1 blocks and
-/// buys a repair; the next round's P2 and P3 pass and reach approval.
-///
-/// Sabotage: compare priorities with `<` instead of `<=` in
-/// `review::publish`; the P1 passes and there is one round.
-#[test]
-fn findings_below_blocking_pass() {
-    let seats = AtomicUsize::new(0);
-    let machine = Machine::new("g8-blocking", move |request| {
-        if !seat(&request) {
-            if request.opens()
-                && (request.last_user().contains("Review blocked")
-                    || request.last_user().contains("The operator edited"))
-            {
-                return Reply::Tools(vec![repair()]);
-            }
-            return implementer(request);
-        }
-        if !request.opens() {
-            return Reply::Text("published".into());
-        }
-        let findings = match seats.fetch_add(1, Ordering::SeqCst) {
-            0 => json!([{ "priority": "P1", "file": "feature.txt", "body": "at the bar" }]),
-            _ => json!([
-                { "priority": "P2", "file": "feature.txt", "body": "one below" },
-                { "priority": "P3", "body": "a nit" },
-            ]),
-        };
-        Reply::Tools(vec![publish(findings)])
-    });
-    machine.start();
-    let project = Project::new(&machine, "p", &config(""));
-    let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Add feature"]);
-    let approval = watch.attention();
-    assert_eq!(approval["data"]["kind"], "approval", "{approval}");
-
-    assert_eq!(
-        project.rows("SELECT c.verdict AS verdict, e.round AS round FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE c.kind = 'review' ORDER BY c.id"),
-        vec![
-            json!({ "verdict": "fail", "round": 1 }),
-            json!({ "verdict": "pass", "round": 2 }),
-        ]
-    );
-    let reasons: Vec<Value> = kinds(&project, "implementation")
-        .iter()
-        .map(|row| row["reason"].clone())
-        .collect();
-    assert_eq!(reasons, [json!("first"), json!("repair")]);
-}
-
-/// A panel of `none` reaches approval marked unreviewed, with no seat run.
-///
-/// Sabotage: make `advance` mark every candidate reviewed; the item says
-/// `unreviewed: false`.
-#[test]
-fn a_panel_of_none_reaches_approval_unreviewed() {
-    let machine = Machine::new("g8-none", implementer);
-    machine.start();
-    let project = Project::new(
-        &machine,
-        "p",
-        &config("").replace("review = [\"correctness\"]", "review = \"none\""),
-    );
-    let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Add feature"]);
-    let approval = watch.attention();
-    assert_eq!(approval["data"]["kind"], "approval", "{approval}");
-    assert_eq!(approval["data"]["payload"]["unreviewed"], true);
-    assert!(kinds(&project, "review").is_empty());
-}
-
 /// A seat that publishes a block and is then held by the fixture: no
 /// repair starts until its box is gone. A second ticket on a workflow with
 /// no review runs to approval meanwhile; the scheduler advances the first
@@ -245,22 +168,40 @@ fn a_panel_of_none_reaches_approval_unreviewed() {
 /// and when its start is seen the seat's box is no longer listed. Control:
 /// the seat's box is listed while the fixture holds it.
 ///
-/// Sabotage: make `advance` wait only on running implementations; the
-/// repair starts while the seat is held. Start the repair before the seat's
-/// box is down; the box is still listed when the repair starts.
+/// The first seat's P1 finding blocks at `blocking = "P1"`; its repair's
+/// P2 and P3 findings pass. The quick workflow's approval is unreviewed and
+/// no seat runs for it.
+///
+/// Sabotage: let `advance` ignore running seats, or start the repair before
+/// box teardown; ordering fails. Compare priorities with `<` instead of
+/// `<=`; P1 passes. Mark every approval reviewed; the quick item is wrong.
 #[test]
 fn no_repair_starts_until_a_blocking_seats_box_is_gone() {
     let hold = Latch::new();
     let held = hold.clone();
+    let seats = AtomicUsize::new(0);
     let machine = Machine::new("g8-held", move |request| {
         if !seat(&request) {
+            if request.opens() && request.last_user().contains("Review blocked") {
+                return Reply::Tools(vec![repair()]);
+            }
             return implementer(request);
         }
-        match request.tool_results().len() {
-            0 => Reply::Tools(vec![publish(json!([
-                { "priority": "P0", "body": "blocks" }
-            ]))]),
-            _ => Reply::Hold(held.clone(), Box::new(Reply::Text("done".into()))),
+        if request.opens() {
+            let findings = if seats.fetch_add(1, Ordering::SeqCst) == 0 {
+                json!([{ "priority": "P1", "body": "at the bar" }])
+            } else {
+                json!([
+                    { "priority": "P2", "body": "one below" },
+                    { "priority": "P3", "body": "a nit" },
+                ])
+            };
+            return Reply::Tools(vec![publish(findings)]);
+        }
+        if seats.load(Ordering::SeqCst) == 1 {
+            Reply::Hold(held.clone(), Box::new(Reply::Text("done".into())))
+        } else {
+            Reply::Text("done".into())
         }
     });
     machine.start();
@@ -290,9 +231,16 @@ fn no_repair_starts_until_a_blocking_seats_box_is_gone() {
     );
 
     project.json(&["ticket", "new", "--title", "Quick", "--workflow", "quick"]);
-    watch.until("Y-2 approval", |event| {
+    let quick = watch.until("Y-2 approval", |event| {
         event["event"] == "attention.raised" && event["ticket"] == "Y-2"
     });
+    assert_eq!(quick["data"]["kind"], "approval", "{quick}");
+    assert_eq!(quick["data"]["payload"]["unreviewed"], true);
+    assert!(
+        project
+            .rows("SELECT id FROM execution WHERE attempt = 2 AND kind = 'review'")
+            .is_empty()
+    );
     let repairs = |project: &Project| {
         project
             .rows("SELECT id FROM execution WHERE attempt = 1 AND kind = 'implementation'")
@@ -310,15 +258,29 @@ fn no_repair_starts_until_a_blocking_seats_box_is_gone() {
         !listed(&machine),
         "the repair started while the seat's box {handle} was up"
     );
+    let approval = watch.attention();
+    assert_eq!(approval["ticket"], "Y-1", "{approval}");
+    assert_eq!(approval["data"]["kind"], "approval", "{approval}");
+    assert_eq!(
+        project.rows("SELECT c.verdict, e.round FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE c.kind = 'review' ORDER BY c.id"),
+        vec![
+            json!({ "verdict": "fail", "round": 1 }),
+            json!({ "verdict": "pass", "round": 2 }),
+        ]
+    );
 }
 
 /// A seat that always blocks gets exactly `max_rounds` rounds, then
 /// `stopped:limit`. An edit then grants one more round: a third review runs
-/// and blocks, and `stopped:limit` is raised again.
+/// and blocks, and `stopped:limit` is raised again. A synced gate change
+/// makes an override stale naming the gate digest and writes no approval.
+/// Restoring the gate makes the same head approvable. The operator overrides
+/// the blocking review and lands; its approval names that check.
 ///
-/// Sabotage: compare `rounds > limit` in `review::blocked`; a third round
-/// runs before the edit. Drop the `extra_rounds` bump in `admit::steer`, or bump
-/// it by two; `extra_rounds` is not exactly 1.
+/// Sabotage: compare `rounds > limit`; a third round runs before the edit.
+/// Change the extra-round increment; its count differs from one. Skip the
+/// stale gate digest check; an approval is written after the sync. Drop
+/// `limit_checks`' blocking review or the override flag; the row is wrong.
 #[test]
 fn a_seat_that_always_blocks_gets_max_rounds() {
     let machine = Machine::new("g8-limit", |request| {
@@ -337,11 +299,10 @@ fn a_seat_that_always_blocks_gets_max_rounds() {
         implementer(request)
     });
     machine.start();
-    let project = Project::new(
-        &machine,
-        "p",
-        &config("").replace("max_rounds = 3", "max_rounds = 2"),
-    );
+    let gate = "[gates.early]\ncommand = \"test -f feature.txt\"\nstage = \"candidate\"\n";
+    let both = format!("{gate}[gates.late]\ncommand = \"true\"\nstage = \"candidate\"\n");
+    let base = config(gate).replace("max_rounds = 3", "max_rounds = 2");
+    let project = Project::new(&machine, "p", &base);
     let mut watch = project.watch(0);
     project.json(&["ticket", "new", "--title", "Add feature"]);
     let stopped = watch.attention();
@@ -377,48 +338,6 @@ fn a_seat_that_always_blocks_gets_max_rounds() {
         (&attempt["rounds"], &attempt["extra_rounds"]),
         (&json!(3), &json!(1))
     );
-}
-
-/// A seat that always blocks reaches `stopped:limit`; the operator approves
-/// the head over it and the candidate lands. The approval row names the
-/// blocking review check as overridden and says it overrode a review.
-/// Control, in the same project: after a synced gate change the head has no
-/// passing check at the new gate digest; approve is stale naming the gate
-/// digest and writes no approval, and removing the gate makes the same head
-/// approvable.
-///
-/// Sabotage: drop `gate_digest` from `jobs::stale_part`; the gate-change
-/// approve is not refused and an approval is written. Record no review
-/// check in `limit_checks`, or drop `overrode`; the row names no review or
-/// `overrode` is 0.
-#[test]
-fn the_operator_can_approve_over_a_blocking_review_at_the_limit() {
-    let machine = Machine::new("g8-override", |request| {
-        if seat(&request) {
-            return act(
-                request,
-                vec![publish(json!([{ "priority": "P0", "body": "never" }]))],
-            );
-        }
-        let prompt = request.last_user();
-        if request.opens() && prompt.contains("Review blocked") {
-            return Reply::Tools(vec![repair()]);
-        }
-        implementer(request)
-    });
-    machine.start();
-    let gate = "[gates.early]\ncommand = \"test -f feature.txt\"\nstage = \"candidate\"\n";
-    let both = format!("{gate}[gates.late]\ncommand = \"true\"\nstage = \"candidate\"\n");
-    let base = config(gate).replace("max_rounds = 3", "max_rounds = 2");
-    let project = Project::new(&machine, "p", &base);
-    let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Add feature"]);
-    let stopped = watch.attention();
-    assert_eq!(
-        (&stopped["data"]["kind"], &stopped["data"]["reason"]),
-        (&json!("stopped"), &json!("limit")),
-        "{stopped}"
-    );
     let head = project.rows("SELECT head FROM execution WHERE kind = 'review' ORDER BY id DESC")[0]
         ["head"]
         .as_str()
@@ -436,7 +355,10 @@ fn the_operator_can_approve_over_a_blocking_review_at_the_limit() {
 
     project.reconfigure(&base);
     project.json(&["attempt", "approve", "Y-1", "--head", &head]);
-    watch.event("landing.recorded", &[]);
+    let landed = watch.until("landing or refusal", |event| {
+        event["event"] == "landing.recorded" || event["event"] == "attention.raised"
+    });
+    assert_eq!(landed["event"], "landing.recorded", "{landed}");
     git(
         &project.canonical(),
         &["merge-base", "--is-ancestor", &head, "refs/heads/main"],
@@ -478,6 +400,13 @@ fn the_operator_can_approve_over_a_blocking_review_at_the_limit() {
 /// extension publishes first and the seat's publication is refused. Or pass
 /// `.pi/extensions` itself to `-e`; Pi refuses the directory and no worker
 /// runs.
+/// The same worker proves its upstream credential is absent from its
+/// environment and files, while the fixture receives it through the route.
+/// The seat first runs inherited-bearer `initialize` and publish calls:
+/// both get 404, then its own authenticated publication succeeds.
+/// Sabotage: pass the real upstream credential into the box, or omit the
+/// injecting/login route; the search or header fails. Accept a second
+/// `initialize` in `Grants::open_session`; the rogue call succeeds.
 #[test]
 fn a_committed_pi_extension_never_loads_in_a_seat() {
     let extension = r#"import { writeFileSync } from "node:fs";
@@ -510,14 +439,19 @@ export default async function () {
     let skill = |name: &str| format!("---\nname: {name}\ndescription: {name}marker\n---\nBody.\n");
     let machine = Machine::new("g8-extension", move |request| {
         if !seat(&request) {
-            return act(request, vec![bash(&write)]);
+            return match request.tool_results().len() {
+                0 => Reply::Tools(vec![bash(&credential_probe(SECRET))]),
+                1 => Reply::Tools(vec![bash(&write)]),
+                _ => Reply::Text("done".into()),
+            };
         }
-        act(
-            request,
-            vec![publish(
+        match request.tool_results().len() {
+            0 => Reply::Tools(vec![bash(ROGUE_SESSION)]),
+            1 => Reply::Tools(vec![publish(
                 json!([{ "priority": "P3", "body": "the seat's own" }]),
-            )],
-        )
+            )]),
+            _ => Reply::Text("done".into()),
+        }
     });
     machine.start();
     let project = Project::new(&machine, "p", &config(""));
@@ -532,15 +466,6 @@ export default async function () {
     let approval = watch.attention();
     assert_eq!(approval["data"]["kind"], "approval", "{approval}");
 
-    assert_eq!(
-        project.rows("SELECT body FROM finding"),
-        vec![json!({ "body": "the seat's own" })]
-    );
-    assert!(
-        project
-            .rows("SELECT seq FROM audit WHERE event = 'tool.refused'")
-            .is_empty()
-    );
     let requests = machine.model.requests();
     assert!(
         !contains(&project.path.join(".yard/local/attempts/1"), "rogue-ran"),
@@ -561,14 +486,20 @@ export default async function () {
             assert!(!system.contains(marker), "the candidate's {marker} loaded");
         }
     }
+    assert_credential_route(&machine, SECRET, "", None);
+    assert_own_session_only(&project, &machine, |request| seat(&request));
 }
 
 /// A gate error's `start` reruns that gate on the same head. The gate's box
 /// cannot come up while the pinfold wrapper refuses; the fixture arms the
-/// refusal as the worker finishes.
+/// refusal as the worker finishes. After the allowed retry, the first
+/// attempt is parked and abandoned. A second ticket's host gate is held, abandoned,
+/// then released to fail: it ends abandoned, records no check and raises
+/// nothing. This gives the abandonment a same-project successful control.
 ///
-/// Sabotage: make `admit::answer_start` treat a gate error like an
-/// implementer stop; `start` runs the implementer again.
+/// Sabotage: treat a gate error like an implementer stop; `start` runs the
+/// implementer again. Remove `supervise::gate`'s end-path liveness check;
+/// the abandoned gate records a failing check.
 #[test]
 fn a_gate_errors_start_reruns_that_gate() {
     let armed = std::sync::Arc::new(Mutex::new(None::<std::path::PathBuf>));
@@ -577,7 +508,7 @@ fn a_gate_errors_start_reruns_that_gate() {
         if seat(&request) {
             return act(request, vec![publish(json!([]))]);
         }
-        if !request.opens() {
+        if !request.opens() && !request.prompt().contains("Abandon gate") {
             std::fs::write(arm.lock().unwrap().as_ref().unwrap(), "").unwrap();
         }
         implementer(request)
@@ -616,6 +547,43 @@ fn a_gate_errors_start_reruns_that_gate() {
     assert_eq!(gates[1]["outcome"], "pass");
     assert_eq!(gates[0]["head"], gates[1]["head"]);
     assert_eq!(kinds(&project, "implementation").len(), 1);
+    project.json(&["ticket", "park", "Y-1"]);
+    project.json(&["attempt", "abandon", "Y-1"]);
+    let said = machine.root.join("said");
+    let hold = machine.root.join("hold");
+    for path in [&said, &hold] {
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(path)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    let mut release = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&hold)
+        .unwrap();
+    let gate = format!(
+        "[gates.held]\ncommand = \"echo held > {}; read line < {}; exit 1\"\nstage = \"candidate\"\nruns_in = \"host\"\n",
+        said.display(),
+        hold.display()
+    );
+    project.reconfigure(&config(&gate));
+    project.json(&["ticket", "new", "--title", "Abandon gate"]);
+    assert_eq!(watch.said(&said), "held\n");
+    project.json(&["ticket", "park", "Y-2"]);
+    project.json(&["attempt", "abandon", "Y-2"]);
+    release.write_all(b"go\n").unwrap();
+    let ended = watch.event("execution.ended", &[("kind", "gate")]);
+    assert_eq!(ended["ticket"], "Y-2", "{ended}");
+    assert_eq!(ended["data"]["outcome"], "abandoned", "{ended}");
+    assert!(
+        project
+            .rows("SELECT id FROM attention WHERE attempt = 2 AND state = 'open'")
+            .is_empty()
+    );
 }
 
 /// A candidate commits a Claude plugin, a settings hook and a `.mcp.json`
@@ -637,6 +605,13 @@ fn a_gate_errors_start_reruns_that_gate() {
 /// instead of the base; the candidate's rule and skill reach the seat. Or
 /// refuse a link in the base; every execution is refused. Or stage only
 /// `.claude/skills` for Claude; the `.agents/skills` skill is missing.
+/// The same worker proves its upstream credential is absent from its
+/// environment and files, while the fixture receives it through the route.
+/// The seat first runs inherited-bearer `initialize` and publish calls:
+/// both get 404, then its own authenticated publication succeeds.
+/// Sabotage: pass the real upstream credential into the box, or omit the
+/// injecting/login route; the search or header fails. Accept a second
+/// `initialize` in `Grants::open_session`; the rogue call succeeds.
 #[test]
 fn a_committed_claude_hook_never_loads_in_a_seat() {
     let pass = r#"#!/bin/sh
@@ -658,7 +633,10 @@ curl -s -X POST http://yard.mcp/mcp \
         "---\nname: candidateskill\ndescription: candidateskillmarker\n---\nBody.\n";
     let machine = Machine::new("g8-claude", move |request| {
         if !seat(&request) {
-            if request.opens() {
+            if request.tool_results().is_empty() {
+                return Reply::Tools(vec![claude_bash(&credential_probe(SECRET))]);
+            }
+            if request.tool_results().len() == 1 {
                 return Reply::Tools(vec![claude_files(
                     &[
                         (".claude/publish-pass.sh", pass),
@@ -685,12 +663,13 @@ curl -s -X POST http://yard.mcp/mcp \
             }
             return Reply::Text("done".into());
         }
-        act(
-            request,
-            vec![claude_publish(
+        match request.tool_results().len() {
+            0 => Reply::Tools(vec![claude_bash(ROGUE_SESSION)]),
+            1 => Reply::Tools(vec![claude_publish(
                 json!([{ "priority": "P3", "body": "the seat's own" }]),
-            )],
-        )
+            )]),
+            _ => Reply::Text("done".into()),
+        }
     });
     machine.write_claude_env();
     machine.start();
@@ -715,17 +694,6 @@ curl -s -X POST http://yard.mcp/mcp \
     let approval = watch.attention();
     assert_eq!(approval["data"]["kind"], "approval", "{approval}");
 
-    assert_eq!(
-        project.rows("SELECT body FROM finding"),
-        vec![json!({ "body": "the seat's own" })],
-        "the committed hook published"
-    );
-    assert!(
-        project
-            .rows("SELECT seq FROM audit WHERE event = 'tool.refused'")
-            .is_empty(),
-        "the committed hook published before the seat"
-    );
     assert!(
         !contains(&project.path.join(".yard/local/attempts/1"), "rogue-ran"),
         "a committed hook, plugin or server ran"
@@ -746,6 +714,8 @@ curl -s -X POST http://yard.mcp/mcp \
             assert!(!context.contains(marker), "the candidate's {marker} loaded");
         }
     }
+    assert_credential_route(&machine, SECRET, "/v1/messages", None);
+    assert_own_session_only(&project, &machine, |request| seat(&request));
 }
 
 /// A seat that publishes with no registration proof never counts: the
@@ -838,6 +808,13 @@ fn contains(dir: &std::path::Path, name: &str) -> bool {
 /// base's `mcp_servers`; its server runs and leaves its marker. Or drop the
 /// `skills.config` entries; the candidate's skill reaches the seat. Or drop
 /// `--dangerously-bypass-hook-trust`; the base hook never runs.
+/// The same worker proves its upstream credential is absent from its
+/// environment and files, while the fixture receives it through the route.
+/// The seat first runs inherited-bearer `initialize` and publish calls:
+/// both get 404, then its own authenticated publication succeeds.
+/// Sabotage: pass the real upstream credential into the box, or omit the
+/// injecting/login route; the search or header fails. Accept a second
+/// `initialize` in `Grants::open_session`; the rogue call succeeds.
 #[test]
 fn a_committed_codex_config_never_loads_in_a_seat() {
     let publish_pass = r#"#!/bin/sh
@@ -859,17 +836,24 @@ fi
     let base_skill = "---\nname: baseskill\ndescription: baseskillmarker\n---\nBody.\n";
     let candidate_skill =
         "---\nname: candidateskill\ndescription: candidateskillmarker\n---\nBody.\n";
+    let account_id = "acct-e2e-codex";
+    let token = codex_jwt(account_id, 3600);
+    let search = credential_probe(&token);
     let mut machine = Machine::new("g8-codex", move |request| {
-        // The base hook's output follows the prompt, so the opening request is
-        // the one no tool has answered yet.
-        if !request.tool_results().is_empty() {
-            return Reply::Text("done".into());
-        }
         if codex_seat(request) {
-            return Reply::Tools(vec![codex_publish(
-                request,
-                json!([{ "priority": "P3", "body": "the seat's own" }]),
-            )]);
+            return match request.tool_results().len() {
+                0 => Reply::Tools(vec![codex_shell(ROGUE_SESSION)]),
+                1 => Reply::Tools(vec![codex_publish(
+                    request,
+                    json!([{ "priority": "P3", "body": "the seat's own" }]),
+                )]),
+                _ => Reply::Text("done".into()),
+            };
+        }
+        match request.tool_results().len() {
+            0 => return Reply::Tools(vec![codex_shell(&search)]),
+            1 => {}
+            _ => return Reply::Text("done".into()),
         }
         Reply::Tools(vec![codex_files(
             &[
@@ -883,8 +867,6 @@ fi
             "Add a hook",
         )])
     });
-    let account_id = "acct-e2e-codex";
-    let token = codex_jwt(account_id, 3600);
     machine.write_codex_env(&token, account_id);
     machine.start();
     let project = Project::new(&machine, "p", &codex_config(""));
@@ -899,11 +881,6 @@ fi
     let approval = watch.attention();
     assert_eq!(approval["data"]["kind"], "approval", "{approval}");
 
-    assert_eq!(
-        project.rows("SELECT body FROM finding"),
-        vec![json!({ "body": "the seat's own" })],
-        "the committed codex config published"
-    );
     let attempt = project.path.join(".yard/local/attempts/1");
     assert!(
         !contains(&attempt, "rogue-ran"),
@@ -934,6 +911,8 @@ fi
             }
         }
     }
+    assert_credential_route(&machine, &token, "/backend-api/codex", Some(account_id));
+    assert_own_session_only(&project, &machine, codex_seat);
 }
 
 /// A candidate commits `.agents/skills` as a link to a directory holding a
@@ -998,6 +977,52 @@ fn a_linked_skill_root_refuses_a_codex_seat() {
 /// a session of its own, then publish a pass. Prints each HTTP status.
 const ROGUE_SESSION: &str = r#"for m in '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"rogue","version":"1"}}}' '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"yard_publish_review","arguments":{"findings":[]}}}'; do curl -s -o /dev/null -w 'status=%{http_code} ' -X POST http://yard.mcp/mcp -H 'content-type: application/json' -H "authorization: Bearer $YARD_MCP_BEARER" -d "$m"; done"#;
 
+/// Search the real worker's environment, mounted files and temporary files.
+/// Split the fixture secret so the command itself is not a search hit.
+fn credential_probe(secret: &str) -> String {
+    let (head, tail) = secret.split_at(8);
+    let key = format!("'{head}''{tail}'");
+    format!(
+        "echo PROBE-BEGIN; for f in /proc/self/environ /proc/$PPID/environ /proc/1/environ; do tr '\\0' '\\n' < $f | grep -c {key}; done; grep -rsl {key} /workspace /yard /tmp | wc -l; echo PROBE-END"
+    )
+}
+
+fn assert_credential_route(machine: &Machine, secret: &str, route: &str, account: Option<&str>) {
+    let requests = machine.model.requests();
+    let probe = requests
+        .iter()
+        .find_map(|request| {
+            request
+                .tool_results()
+                .into_iter()
+                .find_map(|(_, text)| text.contains("PROBE-BEGIN").then_some(text))
+        })
+        .expect("the worker's credential probe answered");
+    let counts: Vec<&str> = probe
+        .lines()
+        .skip_while(|line| !line.contains("PROBE-BEGIN"))
+        .skip(1)
+        .take_while(|line| !line.contains("PROBE-END"))
+        .map(str::trim)
+        .collect();
+    assert_eq!(counts, ["0", "0", "0", "0"], "{probe}");
+    let routed: Vec<_> = requests
+        .iter()
+        .filter(|request| request.path.starts_with(route))
+        .collect();
+    assert!(!routed.is_empty(), "the model route was never called");
+    let authorization = format!("Bearer {secret}");
+    for request in routed {
+        assert_eq!(
+            request.header("authorization"),
+            Some(authorization.as_str())
+        );
+        if let Some(account) = account {
+            assert_eq!(request.header("chatgpt-account-id"), Some(account));
+        }
+    }
+}
+
 /// The seat's own publication is the one recorded, the rogue calls were
 /// each refused with a 404, and no publication was ever refused as a second.
 fn assert_own_session_only(
@@ -1023,180 +1048,5 @@ fn assert_own_session_only(
             .iter()
             .any(|(_, text)| text.contains("status=404 status=404"))),
         "the rogue calls were not both refused with 404"
-    );
-}
-
-/// A process in a Pi seat that reads the inherited bearer and posts its own
-/// `initialize` then a publication: both are refused, and the seat's own
-/// publication through its session is the one recorded.
-///
-/// Sabotage: accept a second `initialize` in `Grants::open_session`.
-#[test]
-fn a_bearer_outside_the_harness_session_is_inert_in_a_pi_seat() {
-    let machine = Machine::new("g8-session-pi", |request| {
-        if !seat(&request) {
-            return implementer(request);
-        }
-        act(
-            request,
-            vec![
-                bash(ROGUE_SESSION),
-                publish(json!([{ "priority": "P3", "body": "the seat's own" }])),
-            ],
-        )
-    });
-    machine.start();
-    let project = Project::new(&machine, "p", &config(""));
-    let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Add feature"]);
-    let approval = watch.attention();
-    assert_eq!(approval["data"]["kind"], "approval", "{approval}");
-    assert_own_session_only(&project, &machine, |request| seat(&request));
-}
-
-/// The same in a Claude seat, whose client must keep one session through a
-/// normal run.
-///
-/// Sabotage: accept a second `initialize` in `Grants::open_session`.
-#[test]
-fn a_bearer_outside_the_harness_session_is_inert_in_a_claude_seat() {
-    let machine = Machine::new("g8-session-claude", |request| {
-        if !seat(&request) {
-            if request.opens() {
-                return Reply::Tools(vec![claude_commit_file("feature.txt", "feature\n", "Add")]);
-            }
-            return Reply::Text("done".into());
-        }
-        act(
-            request,
-            vec![
-                claude_bash(ROGUE_SESSION),
-                claude_publish(json!([{ "priority": "P3", "body": "the seat's own" }])),
-            ],
-        )
-    });
-    machine.write_claude_env();
-    machine.start();
-    let project = Project::new(&machine, "p", &claude_config(""));
-    let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Add feature"]);
-    let approval = watch.attention();
-    assert_eq!(approval["data"]["kind"], "approval", "{approval}");
-    assert_own_session_only(&project, &machine, |request| seat(&request));
-}
-
-/// The same in a Codex seat.
-///
-/// Sabotage: accept a second `initialize` in `Grants::open_session`.
-#[test]
-fn a_bearer_outside_the_harness_session_is_inert_in_a_codex_seat() {
-    let mut machine = Machine::new("g8-session-codex", |request| {
-        if codex_seat(request) {
-            return act(
-                request,
-                vec![
-                    codex_shell(ROGUE_SESSION),
-                    codex_publish(
-                        request,
-                        json!([{ "priority": "P3", "body": "the seat's own" }]),
-                    ),
-                ],
-            );
-        }
-        if request.opens() {
-            return Reply::Tools(vec![codex_commit_file("feature.txt", "feature\n", "Add")]);
-        }
-        Reply::Text("done".into())
-    });
-    let account_id = "acct-e2e-codex";
-    machine.write_codex_env(&codex_jwt(account_id, 3600), account_id);
-    machine.start();
-    let project = Project::new(&machine, "p", &codex_config(""));
-    let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Add feature"]);
-    let approval = watch.attention();
-    assert_eq!(approval["data"]["kind"], "approval", "{approval}");
-    assert_own_session_only(&project, &machine, codex_seat);
-}
-
-/// A seat held by the fixture while its attempt is abandoned, then released
-/// to end without publishing: its execution ends `abandoned` and no item is
-/// open. Control: `a_seat_that_exits_without_publishing_is_a_review_error`.
-///
-/// Sabotage: remove the liveness re-read in `review::run`'s end path; the
-/// seat ends `error` and a `red` item is open.
-#[test]
-fn a_seat_ended_by_an_abandon_is_abandoned() {
-    let hold = Latch::new();
-    let held = hold.clone();
-    let machine = Machine::new("g8-abandon", move |request| {
-        if !seat(&request) {
-            return implementer(request);
-        }
-        Reply::Hold(held.clone(), Box::new(Reply::Text("done".into())))
-    });
-    machine.start();
-    let project = Project::new(&machine, "p", &config(""));
-    let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Add feature"]);
-    hold.wait_held();
-    project.json(&["attempt", "abandon", "Y-1"]);
-    hold.release();
-    let ended = watch.event("execution.ended", &[("kind", "review")]);
-    assert_eq!(ended["data"]["outcome"], "abandoned", "{ended}");
-    assert_eq!(
-        project.rows("SELECT kind FROM attention WHERE state = 'open'"),
-        Vec::<Value>::new()
-    );
-}
-
-/// A candidate gate held in its host command while its attempt is abandoned,
-/// then released to fail: its execution ends `abandoned`, records no check
-/// and no item is open. Control: the gate rerun scenario's
-/// gate ends with a verdict on a live attempt.
-///
-/// Sabotage: remove the liveness re-read in `supervise::gate`'s end path; the
-/// gate ends `fail` and a check is recorded.
-#[test]
-fn a_gate_ended_by_an_abandon_is_abandoned() {
-    let machine = Machine::new("g8-gate-abandon", implementer);
-    let said = machine.root.join("said");
-    let hold = machine.root.join("hold");
-    for path in [&said, &hold] {
-        assert!(
-            std::process::Command::new("mkfifo")
-                .arg(path)
-                .status()
-                .unwrap()
-                .success()
-        );
-    }
-    let mut release = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&hold)
-        .unwrap();
-    let gate = format!(
-        "[gates.held]\ncommand = \"echo held > {}; read line < {}; exit 1\"\nstage = \"candidate\"\nruns_in = \"host\"\n",
-        said.display(),
-        hold.display()
-    );
-    machine.start();
-    let project = Project::new(&machine, "p", &config(&gate));
-    let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Add feature"]);
-    assert_eq!(watch.said(&said), "held\n");
-    project.json(&["attempt", "abandon", "Y-1"]);
-    release.write_all(b"go\n").unwrap();
-    let ended = watch.event("execution.ended", &[("kind", "gate")]);
-    assert_eq!(ended["data"]["outcome"], "abandoned", "{ended}");
-    assert!(
-        project
-            .rows("SELECT id FROM \"check\" WHERE kind = 'gate'")
-            .is_empty()
-    );
-    assert_eq!(
-        project.rows("SELECT kind FROM attention WHERE state = 'open'"),
-        Vec::<Value>::new()
     );
 }
