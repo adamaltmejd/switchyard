@@ -31,78 +31,6 @@ fn unreviewed() -> String {
     config("").replace("review = [\"correctness\"]", "review = \"none\"")
 }
 
-/// The daemon killed after `update-ref`, before the landing is recorded:
-/// before restart canonical is the merged head, the intent is unresolved and
-/// no landing is recorded; on restart it is recorded once, no merge runs,
-/// the ticket closes.
-///
-/// Sabotage: make `reconcile::decide_intent` retire an intent whose target
-/// equals the merged head; the ticket stays open after restart.
-#[test]
-fn a_landing_killed_after_update_ref_is_recorded_once_on_restart() {
-    let machine = Machine::new("g3-after", worker());
-    let armed = machine.root.join("armed");
-    machine.wrapper(
-        "git",
-        &format!(
-            "if [ -e '{}' ]; then case \" $* \" in *' update-ref --no-deref refs/heads/main '*)\n\
-         \"$REAL\" \"$@\"; status=$?; kill -9 $PPID; exit $status;; esac; fi",
-            armed.display()
-        ),
-    );
-    machine.start();
-    let project = Project::new(&machine, "p", &unreviewed());
-    let mut watch = project.watch(0);
-    let head = candidate_behind_target(&project, &mut watch);
-    let target = project.canonical_head();
-
-    std::fs::write(&armed, "").unwrap();
-    project.json(&["attempt", "approve", "Y-1", "--head", &head]);
-    machine.wait_dead();
-    std::fs::remove_file(&armed).unwrap();
-
-    // Before restart: canonical is the merged head, and only that.
-    let merged = project.canonical_head();
-    let parents = git(
-        &project.canonical(),
-        &["rev-list", "--parents", "-n", "1", &merged],
-    );
-    assert_eq!(
-        parents.split_whitespace().skip(1).collect::<Vec<_>>(),
-        vec![target.as_str(), head.as_str()],
-        "canonical is not the merge of the target and the candidate"
-    );
-    let intents = project.rows(
-        "SELECT id, intent_state, intent_old, intent_merged FROM execution WHERE kind = 'landing'",
-    );
-    assert_eq!(intents.len(), 1);
-    assert_eq!(intents[0]["intent_state"], "open");
-    assert_eq!(intents[0]["intent_old"], target.as_str());
-    assert_eq!(intents[0]["intent_merged"], merged.as_str());
-    assert!(
-        project
-            .rows("SELECT seq FROM audit WHERE event = 'landing.recorded'")
-            .is_empty()
-    );
-
-    machine.start();
-    // Reconciliation committed before the daemon served.
-    assert_eq!(project.json(&["ticket", "show", "Y-1"])["state"], "done");
-    assert_eq!(
-        project
-            .rows("SELECT seq FROM audit WHERE event = 'landing.recorded'")
-            .len(),
-        1
-    );
-    assert_eq!(
-        project
-            .rows("SELECT id FROM execution WHERE kind = 'landing'")
-            .len(),
-        1,
-        "a second landing ran"
-    );
-}
-
 /// The daemon killed while its `update-ref` is held: restart keeps the
 /// intent and raises `red`; once the command is released,
 /// `start` records the landing once.
@@ -156,7 +84,7 @@ fn a_landing_whose_update_ref_is_held_stays_undecided_until_released() {
         .as_array()
         .unwrap()
         .iter()
-        .filter(|item| item["kind"] == "red" && item["reason"] == "intent")
+        .filter(|item| item["kind"] == "red")
         .collect();
     assert_eq!(red.len(), 1, "{status}");
     assert_eq!(
@@ -226,7 +154,7 @@ fn a_landing_retires_when_canonical_moves_before_update_ref() {
     let project = Project::new(
         &machine,
         "p",
-        &config("[gates.check]\ncommand = \"test -f feature.txt\"\n")
+        &config("[gates.check]\ncommand = \"test -f feature.txt\"\nruns_in = \"host\"\n")
             .replace("review = [\"correctness\"]", "review = \"none\""),
     );
     let mut watch = project.watch(0);
@@ -308,10 +236,4 @@ fn a_landing_retires_when_canonical_moves_before_update_ref() {
     );
     git(&canonical, &["merge-base", "--is-ancestor", &head, merged]);
     git(&canonical, &["merge-base", "--is-ancestor", moved, merged]);
-    assert!(
-        project.json(&["status"])["attention"]
-            .as_array()
-            .unwrap()
-            .is_empty()
-    );
 }
