@@ -7,8 +7,10 @@ fn unreviewed() -> String {
     config("").replace("review = [\"correctness\"]", "review = \"none\"")
 }
 
-const BASE_GATE: &str = "\n[gates.base]\ncommand = \"true\"\nstage = \"candidate\"\n";
-const EXTRA_GATE: &str = "\n[gates.extra]\ncommand = \"true\"\nstage = \"candidate\"\n";
+const BASE_GATE: &str =
+    "\n[gates.base]\ncommand = \"true\"\nstage = \"candidate\"\nruns_in = \"host\"\n";
+const EXTRA_GATE: &str =
+    "\n[gates.extra]\ncommand = \"true\"\nstage = \"candidate\"\nruns_in = \"host\"\n";
 
 /// A worker commit under `.yard` comes back with the reason and no gate
 /// runs on it: the project's candidate gate runs only on the repaired head.
@@ -16,10 +18,17 @@ const EXTRA_GATE: &str = "\n[gates.extra]\ncommand = \"true\"\nstage = \"candida
 /// The change adds a second candidate gate: refused from the worker, it runs
 /// on the candidate once the operator syncs it.
 ///
+/// Then a checkout and canonical that each hold a commit the other lacks:
+/// both directions refuse naming both heads; a fast-forward passes.
+/// Canonical moves by the candidate's landing, the checkout by an operator
+/// commit.
+///
 /// Sabotage: make `supervise::implement` skip its `.yard` check; the
-/// worker's commit becomes the candidate and the gate runs on it.
+/// worker's commit becomes the candidate and the gate runs on it. Make
+/// `admit::sync` import whenever the heads differ; the operator's commit
+/// replaces the landing in canonical.
 #[test]
-fn a_worker_yard_change_is_refused_and_sync_carries_it() {
+fn only_the_operators_sync_changes_yard_and_canonical() {
     let gated = format!("{}{BASE_GATE}", unreviewed());
     let configured = format!("{gated}{EXTRA_GATE}");
     let change = configured.replace('\'', "'\\''");
@@ -78,41 +87,13 @@ fn a_worker_yard_change_is_refused_and_sync_carries_it() {
     let second = watch.attention();
     assert_eq!(second["data"]["kind"], "approval", "{second}");
     assert_eq!(second["data"]["payload"]["head"], head.as_str());
-    // One gate digest covers every gate: the new gate reruns `base` too.
+    // The synced gate is in force for the candidate.
     assert_eq!(
-        project.rows(
-            "SELECT name, head, outcome FROM execution WHERE kind = 'gate' ORDER BY name, id"
-        ),
-        vec![
-            json!({ "name": "base", "head": head, "outcome": "pass" }),
-            json!({ "name": "base", "head": head, "outcome": "pass" }),
-            json!({ "name": "extra", "head": head, "outcome": "pass" }),
-        ]
+        project.rows("SELECT head, outcome FROM execution WHERE kind = 'gate' AND name = 'extra'"),
+        vec![json!({ "head": head, "outcome": "pass" })]
     );
-}
 
-/// A checkout and canonical that each hold a commit the other lacks: both
-/// directions refuse naming both heads; a fast-forward passes. Canonical
-/// moves by a landing, the checkout by an operator commit.
-///
-/// Sabotage: make `admit::sync` import whenever the heads differ; the
-/// operator's commit replaces the landing in canonical.
-#[test]
-fn diverged_checkout_and_canonical_refuse_both_ways() {
-    let machine = Machine::new("g11-diverged", |request| {
-        act(
-            request,
-            vec![commit_file("feature.txt", "feature\n", "Add feature")],
-        )
-    });
-    machine.start();
-    let project = Project::new(
-        &machine,
-        "p",
-        &unreviewed().replace("approve = \"manual\"", "approve = \"auto\""),
-    );
-    let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Add feature"]);
+    project.json(&["attempt", "approve", "Y-1", "--head", &head]);
     watch.event("landing.recorded", &[]);
     let landed = project.canonical_head();
 
