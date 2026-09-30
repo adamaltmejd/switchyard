@@ -711,7 +711,9 @@ new daemon answers, with its `pid` and `boundary`.
 
 The daemon owns the project registry, a list of absolute project paths in
 `$XDG_STATE_HOME/yard/projects`. `yard init` registers a project and `yard
-project forget` removes one; a registered path that is gone is skipped and
+project forget` removes one and retires the project's image name
+(`pinfold image rm`; a box's image stays until the box goes, and running
+`forget` again retries); a registered path that is gone is skipped and
 reported by `doctor`. The CLI resolves its project from the working
 directory upward to the nearest `.yard/config.toml`, or from `--project`;
 a linked git worktree resolves to its main checkout when that is

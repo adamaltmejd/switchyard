@@ -323,10 +323,13 @@ fn write_registry(roots: &[PathBuf]) -> Result<(), String> {
     std::fs::rename(&temp, &path).map_err(|error| error.to_string())
 }
 
-fn open_project(root: &Path) -> Result<Arc<Project>, String> {
+fn project_key(root: &Path) -> String {
     use sha2::{Digest, Sha256};
-    let key =
-        crate::config::hex(&Sha256::digest(root.as_os_str().as_encoded_bytes()))[..10].to_string();
+    crate::config::hex(&Sha256::digest(root.as_os_str().as_encoded_bytes()))[..10].to_string()
+}
+
+fn open_project(root: &Path) -> Result<Arc<Project>, String> {
+    let key = project_key(root);
     let store = Store::open(&root.join(".yard/local"))?;
     Ok(Arc::new(Project {
         root: root.to_path_buf(),
@@ -374,7 +377,16 @@ async fn handle(daemon: &Arc<Daemon>, method: &str, params: Value) -> Result<Val
                 .collect();
             write_registry(&roots)?;
             daemon.projects.lock().expect("projects lock").remove(&path);
-            Ok(json!({ "forgotten": path }))
+            let key = project_key(&path);
+            let name = format!("yard-{key}");
+            let _building = daemon.image_build.lock().await;
+            daemon.images.lock().expect("images lock").remove(&key);
+            let image = daemon
+                .pinfold
+                .image_rm(&name)
+                .await
+                .map_err(|error| format!("retiring image {name}: {error}"))?;
+            Ok(json!({ "forgotten": path, "image": image }))
         }
         "events" => events(daemon, &params).await,
         "attention" => attention(daemon, &params).await,

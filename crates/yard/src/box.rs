@@ -357,6 +357,20 @@ impl Pinfold {
         names(checked(self.control(&["box", "prune"]).await?)?)
     }
 
+    /// Retires an image name: the `removed` ids, and the `in_use` ids kept for a box.
+    pub async fn image_rm(&self, name: &str) -> Result<Value, String> {
+        let out = checked(self.control(&["image", "rm", name]).await?)?;
+        let line: Value = lines(&out)
+            .next()
+            .and_then(|text| serde_json::from_str(text).ok())
+            .ok_or_else(|| format!("pinfold: {out}"))?;
+        Ok(serde_json::json!({
+            "name": name,
+            "removed": line["ids"],
+            "in_use": line["in_use"],
+        }))
+    }
+
     /// The build's own `ref`, unique to this build.
     pub async fn image_build(
         &self,
