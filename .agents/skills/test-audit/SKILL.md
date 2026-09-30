@@ -43,13 +43,17 @@ file paths and "Follow `.agents/skills/test-audit/sweep.md`."
    and name the survivor.
 2. Settle any doubted sabotage: apply it, run that test
    (`cargo test -p e2e --locked g03_`), and revert it.
-3. Send these to the operator as spec changes, and wait for the answer:
-   - a deletion that leaves a "Shown by" clause with no block;
-   - every unshown clause.
+3. Before removing or weakening a guarantee or a "Shown by" clause,
+   send the proposed change to the operator and wait for the answer. A
+   deletion that leaves a clause without coverage counts as weakening it,
+   even if the spec text is unchanged.
 
-   The answer is either to cut the clause or to write a block for it.
-4. Everything else: delete the block and the helpers it orphans, and edit
-   the row's "Shown by" to match. One commit per test file.
+   For an unshown existing clause, add focused coverage within the
+   authorized audit. Apply the Gate above; no operator approval is needed
+   to add coverage while preserving the existing promise.
+4. Delete invalid or duplicate blocks and the helpers they orphan. Keep
+   the row's "Shown by" accurate without weakening it. One commit per
+   test file.
 
 A kept block that fails on the branch is a product bug. Reproduce it
 through the CLI and ticket it; never delete it.
