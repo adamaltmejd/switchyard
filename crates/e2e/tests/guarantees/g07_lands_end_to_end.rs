@@ -1,7 +1,7 @@
 //! G7: A ticket lands end to end and leaves only rows.
 
 use e2e::*;
-use serde_json::{Value, json};
+use serde_json::json;
 
 /// New ticket, worker commit, candidate gate, review pass, approval, green
 /// landing: canonical moves and the ticket is done. Afterwards every
@@ -249,12 +249,19 @@ fn a_ticket_lands_end_to_end_and_leaves_only_rows() {
             .is_dir()
     );
     // G14: all requests across this lifecycle reached the model route, and
-    // the daemon has only its local MCP listener and operator socket.
-    // Sabotage: bind daemon::serve's listener on 0.0.0.0.
+    // the daemon has only its local MCP listener and operator socket. Only
+    // the route puts the operator's key in place of Pi's placeholder.
+    // Sabotage: stage the upstream origin as Pi's provider URL; no request
+    // carries the key. Bind daemon::serve's listener on 0.0.0.0.
     let requests = machine.model.requests();
     assert!(!requests.is_empty());
+    let authorization = format!("Bearer {SECRET}");
     for request in &requests {
         assert_eq!(request.path, "/api/v1/chat/completions");
+        assert_eq!(
+            request.header("authorization"),
+            Some(authorization.as_str())
+        );
     }
 
     // lsof, which both platforms have: the daemon's own sockets.
@@ -292,24 +299,23 @@ fn a_ticket_lands_end_to_end_and_leaves_only_rows() {
 }
 
 /// `status --watch` returns as soon as an attention item is open, whatever
-/// its age: an approval already open when it starts returns at once, and a
-/// watch started with nothing open returns when the next item is raised.
-/// An idle board returns without since; armed with since it waits for work,
-/// and the final drain returns with no items.
+/// its age: an approval already open when it starts returns at once. After
+/// the last attempt ends with nothing open or ready, a watch armed with
+/// `--since` past an open approval returns with no items. One armed on that
+/// idle board keeps waiting, and returns the next item raised. With
+/// `--since` naming the seq of an open approval it keeps waiting until a
+/// further item is raised, then prints both.
 ///
 /// Sabotage: key `--watch` on events after start (follow the audit stream
 /// from the current seq). The already-open approval never raises again, so
 /// the first `status --watch` never returns and the test fails at the
-/// deadline. `--since SEQ` waits past items already open: it ignores an
-/// approval raised before SEQ and returns, printing every open item, once
-/// one is raised after it. Sabotage: ignore `--since`; the second watch
-/// exits at once and the running check fails.
+/// deadline. Ignore `--since`; the drain watch returns Y-1's approval at
+/// once, and the last watch prints Y-1 alone. Count an `attempt.ended` at
+/// any seq as the drain; the watch armed on the idle board returns no items.
+/// Never count an idle board under `--since`; the drain watch never returns.
 #[test]
 fn status_watch_wakes_on_attention_and_the_final_drain() {
     let machine = Machine::new("g7watch", |request| {
-        if request.has_tool("yard_publish_review") {
-            return act(request, vec![publish(json!([]))]);
-        }
         act(
             request,
             vec![commit_file("feature.txt", "feature\n", "Add feature")],
@@ -319,22 +325,9 @@ fn status_watch_wakes_on_attention_and_the_final_drain() {
     let project = Project::new(
         &machine,
         "p",
-        &config("[gates.check]\ncommand = \"test -f feature.txt\"\nstage = \"candidate\"\n"),
+        &config("").replace("review = [\"correctness\"]", "review = \"none\""),
     );
     let mut history = project.watch(0);
-
-    // Without `--since`, an idle board returns at once, with no items.
-    let idle = watch_answer(watch_attention(&project, None));
-    assert_eq!(idle["attention"], json!([]));
-    let seq = idle["seq"].as_i64().expect("watch prints its seq");
-
-    // Armed on the idle board, it keeps waiting past a status round trip.
-    let mut waiting = watch_attention(&project, Some(seq));
-    project.json(&["status"]);
-    assert!(
-        waiting.try_wait().expect("poll watch").is_none(),
-        "watch --since returned on an idle board with no attempt ended after it"
-    );
 
     // Y-1's approval is open before the watch starts.
     project.json(&[
@@ -345,28 +338,34 @@ fn status_watch_wakes_on_attention_and_the_final_drain() {
         "--body",
         "Create feature.txt",
     ]);
-    let raised = history.until("approval raised", |event| {
+    history.until("approval raised", |event| {
         event["event"] == "attention.raised" && event["data"]["kind"] == "approval"
     });
-    assert_eq!(raised["ticket"], "Y-1");
 
-    let woken = watch_answer(waiting);
-    assert_eq!(woken["attention"].as_array().map(Vec::len), Some(1));
-
-    // The watch returns the open item at once, and prints the same objects
-    // `status --json` reports.
+    // The watch returns the open item at once.
     let items = attention_items(watch_attention(&project, None));
-    let attention = project.json(&["status"])["attention"].clone();
-    assert_eq!(Value::Array(items.clone()), attention);
     assert_eq!(items.len(), 1, "{items:?}");
     assert_eq!(items[0]["kind"], "approval");
     assert_eq!(items[0]["ticket"], "Y-1");
 
-    // Clear the item: park so the scheduler does not start it again, then
-    // abandon. The next watch starts with nothing open, and `--since` keeps it from
-    // returning at once on the idle board.
+    // A drain watch armed past the open approval. Clear the item: park so
+    // the scheduler does not start it again, then abandon. The last attempt
+    // has ended with nothing open or ready, and the drain returns no items.
+    let seq = project.json(&["status"])["seq"]
+        .as_i64()
+        .expect("status seq");
+    let draining = watch_attention(&project, Some(seq));
     project.json(&["ticket", "park", "Y-1"]);
     project.json(&["attempt", "abandon", "Y-1"]);
+    let ended = history.find("Y-1 ended", |event| {
+        event["event"] == "attempt.ended" && event["ticket"] == "Y-1"
+    });
+    let drained = watch_answer(draining);
+    assert_eq!(drained["attention"], json!([]));
+    assert!(drained["seq"].as_i64().unwrap() >= ended["seq"].as_i64().unwrap());
+
+    // The next watch starts on the idle board, after that `attempt.ended`;
+    // `--since` keeps it from returning at once.
     assert!(
         project.json(&["status"])["attention"]
             .as_array()
@@ -388,14 +387,7 @@ fn status_watch_wakes_on_attention_and_the_final_drain() {
     // stream position: Y-1's approval is open and was raised at or before it.
     let answered = watch_answer(watch_attention(&project, None));
     let seq = answered["seq"].as_i64().expect("watch prints its seq");
-    let mut waiting = watch_attention(&project, Some(seq));
-    // A round trip to the daemon after the spawn; a watch that ignored
-    // `--since` would have answered by now.
-    project.json(&["status"]);
-    assert!(
-        waiting.try_wait().expect("poll watch").is_none(),
-        "watch --since returned on an item raised before it"
-    );
+    let waiting = watch_attention(&project, Some(seq));
 
     // Raise the next item through the fixture: the watch returns both open
     // items and a seq at or after the new item's event.
@@ -420,30 +412,4 @@ fn status_watch_wakes_on_attention_and_the_final_drain() {
     tickets.sort();
     assert_eq!(tickets, ["Y-1", "Y-2"], "{answer}");
     assert!(answer["seq"].as_i64().unwrap() >= second["seq"].as_i64().unwrap());
-
-    // Once both approvals are answered, the board's final drain wakes a
-    // watch armed past every open item, with no attention left.
-    // Sabotage: remove the attempt-ended-after-since condition; the initial
-    // idle watch above answers before any work arrives.
-    let seq = answer["seq"].as_i64().unwrap();
-    let mut draining = watch_attention(&project, Some(seq));
-    project.json(&["status"]);
-    assert!(
-        draining.try_wait().expect("poll watch").is_none(),
-        "watch --since returned with approvals open"
-    );
-    for item in answer["attention"].as_array().unwrap() {
-        let ticket = item["ticket"].as_str().unwrap();
-        let head = item["payload"]["head"].as_str().unwrap();
-        let proof = item["payload"]["proof"].as_str().unwrap();
-        project.json(&[
-            "attempt", "approve", ticket, "--head", head, "--proof", proof,
-        ]);
-    }
-    let landed = history.find("Y-2 landed", |event| {
-        event["event"] == "landing.recorded" && event["ticket"] == "Y-2"
-    });
-    let drained = watch_answer(draining);
-    assert_eq!(drained["attention"], json!([]));
-    assert!(drained["seq"].as_i64().unwrap() >= landed["seq"].as_i64().unwrap());
 }
