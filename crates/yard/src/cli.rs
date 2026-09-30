@@ -269,7 +269,12 @@ async fn dispatch(cli: &Cli) -> Result<Option<Value>, Fail> {
             ("init".into(), json!({ "path": dir }))
         }
         Command::Project(command) => {
-            let (method, params) = method("project", command);
+            let (method, mut params) = method("project", command);
+            if let ProjectCommand::Forget { path } = command {
+                let absolute = std::path::absolute(path)
+                    .map_err(|error| Fail::invalid(format!("{}: {error}", path.display())))?;
+                params["path"] = json!(std::fs::canonicalize(&absolute).unwrap_or(absolute));
+            }
             return api::call(&socket, &method, params).await.map(Some);
         }
         Command::Status {
