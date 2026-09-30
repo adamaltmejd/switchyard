@@ -85,3 +85,7 @@ The rest is in the `yard-operator` skill
 
 The e2e suite (`cargo test -p e2e --locked`) runs on a host with the
 container runtime, not inside a box.
+
+On the operator's Mac:
+
+    cargo test -p e2e --locked -- --test-threads=4
