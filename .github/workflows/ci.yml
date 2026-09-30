@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 env:
-  PINFOLD_VERSION: 0.0.9
+  PINFOLD_VERSION: 0.1.0
 
 jobs:
   e2e:

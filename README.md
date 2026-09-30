@@ -7,7 +7,7 @@ is the binding spec.
 
 ## Requirements
 
-- pinfold 0.0.9 or newer, on the daemon's `PATH`
+- pinfold 0.1.0 or newer, on the daemon's `PATH`
 - a container runtime pinfold supports: rootless podman on Linux, Apple
   container on macOS
 - git, on the daemon's `PATH`
