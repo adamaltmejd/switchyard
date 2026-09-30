@@ -80,6 +80,15 @@ pub fn start_implementation(
 /// The project image, built from canonical's target head.
 pub async fn image(daemon: &Daemon, project: &Project, loaded: &Loaded) -> Result<String, Fail> {
     let _building = daemon.image_build.lock().await;
+    // `forget` retires the name under this lock; a build that queued behind it must not recreate it.
+    if !daemon
+        .projects
+        .lock()
+        .expect("projects lock")
+        .contains_key(&project.root)
+    {
+        return Err(Fail::new("image", "the project was forgotten"));
+    }
     if let Some((head, reference)) = daemon.images.lock().expect("images lock").get(&project.key)
         && *head == loaded.head
     {
