@@ -710,10 +710,17 @@ fn claude_api_credentials_stay_on_host_and_publication_requires_proof() {
                 _ => Reply::Text("done".into()),
             };
         }
-        act(
-            request,
-            vec![claude_commit_file("feature.txt", "feature\n", "Feature")],
-        )
+        // Drive Claude by completed tools, as in the login scenario,
+        // without requiring the request's last message to be a user.
+        if request.tool_results().is_empty() {
+            Reply::Tools(vec![claude_commit_file(
+                "feature.txt",
+                "feature\n",
+                "Feature",
+            )])
+        } else {
+            Reply::Text("done".into())
+        }
     });
     machine.write_operator_env(&format!(
         "ANTHROPIC_API_KEY={SECRET}\nYARD_ORIGIN_ANTHROPIC={}\nCLAUDE_CODE_OAUTH_TOKEN={SECRET}\nYARD_ORIGIN_CLAUDE={}\n",
