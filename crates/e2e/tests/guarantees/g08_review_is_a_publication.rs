@@ -689,6 +689,117 @@ curl -s -X POST http://yard.mcp/mcp \
     assert_own_session_only(&project, &machine, |request| seat(&request));
 }
 
+/// G6/G8/G12: direct Anthropic authentication stays on the host even when
+/// a Claude API seat publishes without its init proof. Only the fresh,
+/// proven seat counts. Login is a successful control in the same project.
+/// The fixture supplies the key, model and finding; the store and host
+/// requests observe them. Pi's stderr-proof test and Claude's login test
+/// do not exercise API-key auth with Claude's stdout registration proof.
+/// Sabotage: inject the literal key into Claude's env; the probe finds it.
+/// Drop checks::current's registered condition; the first seat counts.
+/// Accept provider and login together; the named refusal disappears.
+#[test]
+fn claude_api_credentials_stay_on_host_and_publication_requires_proof() {
+    let machine = Machine::new("g8-claude-api", |request| {
+        if seat(&request) {
+            return match request.tool_results().len() {
+                0 => Reply::Tools(vec![claude_bash(&credential_probe(SECRET))]),
+                1 => Reply::Tools(vec![claude_publish(json!([
+                    { "priority": "P3", "body": "API seat publication" }
+                ]))]),
+                _ => Reply::Text("done".into()),
+            };
+        }
+        act(
+            request,
+            vec![claude_commit_file("feature.txt", "feature\n", "Feature")],
+        )
+    });
+    machine.write_operator_env(&format!(
+        "ANTHROPIC_API_KEY={SECRET}\nYARD_ORIGIN_ANTHROPIC={}\nCLAUDE_CODE_OAUTH_TOKEN={SECRET}\nYARD_ORIGIN_CLAUDE={}\n",
+        machine.model.origin(), machine.model.origin()
+    ));
+    // Only the first API seat loses its real stdout init frame. No change
+    // to the harness, model, MCP session or publication reaches the box.
+    machine.wrapper("pinfold", r#"if [ "$1 $2" = 'box exec' ] && [ "${3%-2}" != "$3" ]; then
+  out=$(mktemp)
+  "$REAL" "$@" >"$out"
+  code=$?
+  sed '/"type"[[:space:]]*:[[:space:]]*"system"/{/"subtype"[[:space:]]*:[[:space:]]*"init"/d;}' "$out"
+  rm -f "$out"
+  exit $code
+fi"#);
+    machine.start();
+    let login = claude_config("");
+    let project = Project::new(&machine, "p", &login);
+    let api = login
+        .replace("login = true", "provider = \"anthropic\"")
+        .replace(
+            "model = \"claude-sonnet-4-5\"",
+            "model = \"claude-opus-5-5\"\neffort = \"medium\"",
+        );
+    let canonical = project.canonical_head();
+    let before = project.rows("SELECT seq FROM audit ORDER BY seq");
+    project.write(
+        ".yard/config.toml",
+        &api.replace(
+            "provider = \"anthropic\"",
+            "provider = \"anthropic\"\nlogin = true",
+        ),
+    );
+    project.git(&["commit", "--quiet", "-am", "Conflicting auth"]);
+    let refused = project.refused(&["sync"]);
+    assert_eq!(refused["code"], "invalid", "{refused}");
+    assert!(
+        refused["message"]
+            .as_str()
+            .unwrap()
+            .contains("agents.worker.provider_login_conflict"),
+        "{refused}"
+    );
+    assert_eq!(project.canonical_head(), canonical);
+    assert_eq!(project.rows("SELECT seq FROM audit ORDER BY seq"), before);
+    project.write(".yard/config.toml", &api);
+    project.git(&["commit", "--quiet", "-am", "Direct Anthropic"]);
+    project.json(&["sync"]);
+
+    let mut watch = project.watch(0);
+    project.json(&["ticket", "new", "--title", "API review"]);
+    let approval = watch.attention();
+    assert_eq!(approval["data"]["kind"], "approval", "{approval}");
+    let checks = project.rows("SELECT c.id, e.mcp FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE c.kind = 'review' ORDER BY c.id");
+    assert_eq!(checks.len(), 2, "{checks:?}");
+    assert_ne!(checks[0]["mcp"], "registered");
+    assert_eq!(checks[1]["mcp"], "registered");
+    assert_eq!(
+        approval["data"]["payload"]["checks"],
+        json!([checks[1]["id"]])
+    );
+    assert_eq!(project.rows("SELECT body FROM finding WHERE \"check\" = (SELECT MAX(id) FROM \"check\" WHERE kind = 'review')"), vec![json!({"body": "API seat publication"})]);
+    let requests = machine.model.requests();
+    assert_credential_absent(&requests);
+    for request in &requests {
+        assert_eq!(request.header("x-api-key"), Some(SECRET));
+        assert_eq!(request.header("anthropic-version"), Some("2023-06-01"));
+        assert!(request.path.starts_with("/v1/messages"), "{}", request.path);
+        assert_eq!(request.body["model"], "claude-opus-5-5");
+    }
+
+    project.json(&["ticket", "abandon", "Y-1", "--reason", "Login control"]);
+    project.reconfigure(&login);
+    project.json(&["ticket", "new", "--title", "Login review"]);
+    let approval = watch.attention();
+    assert_eq!(approval["data"]["kind"], "approval", "{approval}");
+    let login_requests = &machine.model.requests()[requests.len()..];
+    assert!(!login_requests.is_empty());
+    for request in login_requests {
+        assert_eq!(
+            request.header("authorization"),
+            Some(format!("Bearer {SECRET}").as_str())
+        );
+    }
+}
+
 /// A seat that publishes with no registration proof never counts: the
 /// scheduler runs a fresh seat rather than approving on the unproven
 /// publication. Its proof is the only durable eligibility.
@@ -934,6 +1045,25 @@ fn credential_probe(secret: &str) -> String {
 
 fn assert_credential_route(machine: &Machine, secret: &str, route: &str, account: Option<&str>) {
     let requests = machine.model.requests();
+    assert_credential_absent(&requests);
+    let routed: Vec<_> = requests
+        .iter()
+        .filter(|request| request.path.starts_with(route))
+        .collect();
+    assert!(!routed.is_empty(), "the model route was never called");
+    let authorization = format!("Bearer {secret}");
+    for request in routed {
+        assert_eq!(
+            request.header("authorization"),
+            Some(authorization.as_str())
+        );
+        if let Some(account) = account {
+            assert_eq!(request.header("chatgpt-account-id"), Some(account));
+        }
+    }
+}
+
+fn assert_credential_absent(requests: &[ModelRequest]) {
     let probe = requests
         .iter()
         .find_map(|request| {
@@ -951,21 +1081,6 @@ fn assert_credential_route(machine: &Machine, secret: &str, route: &str, account
         .map(str::trim)
         .collect();
     assert_eq!(counts, ["0", "0", "0", "0"], "{probe}");
-    let routed: Vec<_> = requests
-        .iter()
-        .filter(|request| request.path.starts_with(route))
-        .collect();
-    assert!(!routed.is_empty(), "the model route was never called");
-    let authorization = format!("Bearer {secret}");
-    for request in routed {
-        assert_eq!(
-            request.header("authorization"),
-            Some(authorization.as_str())
-        );
-        if let Some(account) = account {
-            assert_eq!(request.header("chatgpt-account-id"), Some(account));
-        }
-    }
 }
 
 /// The seat's own publication is the one recorded, the rogue calls were

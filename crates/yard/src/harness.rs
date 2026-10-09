@@ -39,6 +39,13 @@ pub struct Connection {
 
 pub const CONNECTIONS: &[Connection] = &[
     Connection {
+        name: "anthropic",
+        route: "anthropic.yard",
+        origin: "https://api.anthropic.com",
+        base_path: "",
+        key_var: "ANTHROPIC_API_KEY",
+    },
+    Connection {
         name: "openrouter",
         route: "openrouter.yard",
         origin: "https://openrouter.ai",

@@ -1,4 +1,4 @@
-//! Claude Code, the login harness: its launch argv, the files a launch
+//! Claude Code: its launch argv, the files a launch
 //! needs, and the normalisation of its stream-json frames.
 //!
 //! Measured against Claude Code 2.1.283 as pinfold carries it.
@@ -38,7 +38,7 @@ const MODEL_MAX_BYTES: usize = 256;
 /// level is refused at load.
 pub const EFFORTS: [&str; 4] = ["low", "medium", "high", "max"];
 
-/// The one login harness.
+/// The Claude harness, using a subscription login or direct Anthropic API.
 pub struct Claude;
 
 impl Harness for Claude {
@@ -54,11 +54,15 @@ impl Harness for Claude {
     }
 
     fn accepts(&self, agent: &Agent) -> Result<(), String> {
-        if agent.provider.is_some() {
-            return Err("provider is not accepted; set login = true".into());
-        }
-        if agent.login != Some(true) {
-            return Err("login = true is required".into());
+        match (agent.provider.as_deref(), agent.login) {
+            (Some(_), Some(_)) => return Err("provider_login_conflict".into()),
+            (Some("anthropic"), None) | (None, Some(true)) => {}
+            (Some(provider), None) => {
+                return Err(format!(
+                    "provider {provider:?} is not accepted; use anthropic"
+                ));
+            }
+            (None, _) => return Err("provider = anthropic or login = true is required".into()),
         }
         if let Some(effort) = &agent.effort
             && !EFFORTS.contains(&effort.as_str())
@@ -99,18 +103,50 @@ impl Harness for Claude {
         std::fs::write(st.input.join(SETTINGS_FILE), settings().to_string())
     }
 
-    fn env(&self, _st: &Stage) -> Vec<(String, String)> {
-        [
+    fn env(&self, st: &Stage) -> Vec<(String, String)> {
+        let mut env: Vec<_> = [
             ("HOME", HOME_GUEST),
             // The same pin pinfold sets for this harness, stated by Yard so a
             // run without pinfold's merge still makes no nonessential call.
             ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
         ]
         .map(|(name, value)| (name.to_string(), value.to_string()))
-        .into()
+        .into();
+        if let Some(connection) = st.connection {
+            env.extend([
+                (connection.key_var.into(), "yard-placeholder".into()),
+                (
+                    "ANTHROPIC_BASE_URL".into(),
+                    format!("http://{}", connection.route),
+                ),
+            ]);
+        }
+        env
     }
 
-    fn route(&self, _st: &Stage, machine: &Machine) -> Result<ModelRoute, String> {
+    fn route(&self, st: &Stage, machine: &Machine) -> Result<ModelRoute, String> {
+        if let Some(connection) = st.connection {
+            let key = machine.vars.get(connection.key_var).ok_or_else(|| {
+                format!(
+                    "operator.env holds no {} for connection {}",
+                    connection.key_var, connection.name
+                )
+            })?;
+            return Ok(ModelRoute {
+                name: connection.route.into(),
+                route: crate::r#box::Route::Inject {
+                    to: machine.origin(connection),
+                    headers: std::collections::BTreeMap::from([(
+                        "x-api-key".into(),
+                        crate::r#box::Header {
+                            from: connection.key_var.into(),
+                            prefix: String::new(),
+                        },
+                    )]),
+                },
+                secret: Some((connection.key_var.into(), key.clone())),
+            });
+        }
         let token = machine
             .vars
             .get(TOKEN_VAR)

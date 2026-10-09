@@ -60,6 +60,9 @@ impl Harness for Pi {
         if crate::harness::connection(provider).is_none() {
             return Err(format!("provider {provider:?} names no connection"));
         }
+        if provider == "anthropic" {
+            return Err("provider anthropic is only accepted by claude".into());
+        }
         if let Some(effort) = &agent.effort
             && !EFFORTS.contains(&effort.as_str())
         {
