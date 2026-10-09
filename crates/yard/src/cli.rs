@@ -346,9 +346,7 @@ async fn resolve_project(socket: &Path, start: &Path) -> Result<String, Fail> {
 
 /// The nearest directory at or above `start` holding `.yard/config.toml`.
 fn find_project(start: &Path) -> Result<String, Fail> {
-    let start = std::fs::canonicalize(start)
-        .map_err(|error| Fail::invalid(format!("{}: {error}", start.display())))?;
-    let mut dir = start.as_path();
+    let mut dir = start;
     loop {
         if dir.join(crate::config::CONFIG_PATH).is_file() {
             return Ok(dir.to_string_lossy().into_owned());
