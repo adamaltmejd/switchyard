@@ -792,6 +792,8 @@ fi"#);
         assert_eq!(request.body["model"], "claude-opus-5-5");
     }
 
+    project.json(&["ticket", "park", "Y-1"]);
+    project.json(&["attempt", "abandon", "Y-1"]);
     project.json(&["ticket", "abandon", "Y-1", "--reason", "Login control"]);
     project.reconfigure(&login);
     project.json(&["ticket", "new", "--title", "Login review"]);
