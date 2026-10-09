@@ -7,7 +7,7 @@ is the binding spec.
 
 ## Requirements
 
-- pinfold 0.1.0 or newer, on the daemon's `PATH`
+- pinfold 0.1.1 or newer, on the daemon's `PATH`
 - a container runtime pinfold supports: rootless podman on Linux, Apple
   container on macOS
 - git, on the daemon's `PATH`
@@ -34,6 +34,10 @@ Build pinfold's default image once per host; the scaffold's Dockerfile
 starts `FROM pinfold/profile-default:latest`:
 
     pinfold build --profile default
+
+To update pinfold, close its boxes, run `pinfold update`, then
+`yard daemon restart`. The daemon reads pinfold's harness versions at
+startup. Pinfold downloads the pinned harnesses when a box needs them.
 
 Write `$XDG_CONFIG_HOME/yard/operator.env` (`~/.config/yard/operator.env`
 when unset), mode 0600. It holds one credential per connection and the
@@ -85,6 +89,7 @@ The rest is in the `yard-operator` skill
 
 The e2e suite (`cargo test -p e2e --locked`) runs on a host with the
 container runtime, not inside a box.
+CI pins pinfold 0.2.2.
 
 On the operator's Mac:
 

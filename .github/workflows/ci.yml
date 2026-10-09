@@ -22,7 +22,7 @@ jobs:
       matrix:
         runner: [ubuntu-26.04, ubuntu-26.04-arm]
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Rootless podman
         run: |
@@ -49,6 +49,7 @@ jobs:
           curl -fsSL -o SHA256SUMS "$base/SHA256SUMS"
           sha256sum --ignore-missing -c SHA256SUMS
           sudo install -m 0755 "$asset" /usr/local/bin/pinfold
+          pinfold --version
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
