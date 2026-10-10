@@ -459,7 +459,9 @@ fn landing_gate_policy_reads_hold_the_shared_execution_slot() {
     );
     project.json(&["ticket", "new", "--title", "Feature"]);
     assert_eq!(watch.said(&initial), "initial\n");
-    let landing = watch.event("execution.started", &[("kind", "landing")]);
+    let landing = watch.find("landing started", |event| {
+        event["event"] == "execution.started" && event["data"]["kind"] == "landing"
+    });
     let initial_parent = landing["execution"].as_i64().unwrap();
     assert_eq!(
         project.rows("SELECT id, kind, status FROM execution WHERE reserved = 1"),
