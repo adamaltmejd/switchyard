@@ -291,16 +291,20 @@ fn check(project: &Project, id: i64, replies: usize, completeness: &str, cost_re
     };
     let reported = json!({"completeness": completeness, "provenance": "harness"});
     let unknown = json!({"completeness": "unknown", "provenance": "unreported"});
+    let mut observed = execution["usage"].clone();
     let cost = if cost_reported {
-        result.unwrap()["total_cost_usd"].clone()
+        // USD is a float value; integer 0 and float 0.0 are the same report.
+        // Both sides must be numeric, so null cannot become an observed zero.
+        let expected = result.unwrap()["total_cost_usd"]
+            .as_f64()
+            .expect("a numeric harness cost report");
+        observed["cost"] = json!(observed["cost"].as_f64().expect("a numeric execution cost"));
+        json!(expected)
     } else {
         Value::Null
     };
-    if cost_reported {
-        assert!(cost.is_number());
-    }
     assert_eq!(
-        execution["usage"],
+        observed,
         json!({
             "input": (PROMPT_TOKENS + 70 + 30) * replies as u64,
             "output": output, "cost": cost,
