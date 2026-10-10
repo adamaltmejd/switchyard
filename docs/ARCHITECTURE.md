@@ -88,6 +88,9 @@ touch the store. The CLI never opens the store. It uses read-only git metadata
 and `project.list` to resolve a linked worktree, then sends the command to
 the daemon; it never mutates a repository itself.
 
+Git's bounded output collection future is heap-pinned. The daemon uses the
+runtime's normal worker stack settings.
+
 ## Threat model
 
 An agent, or a prompt injection in one, lands code nobody approved, spends

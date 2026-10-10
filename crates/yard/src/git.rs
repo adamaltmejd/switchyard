@@ -134,7 +134,8 @@ impl Git {
             .map_err(|error| format!("spawn git: {error}"))?;
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr = child.stderr.take().expect("piped stderr");
-        let run = async {
+        // Keep the joined output-reader buffers out of every enclosing future.
+        let run = Box::pin(async {
             let ((stdout, out_over), (stderr, err_over)) = tokio::join!(
                 crate::r#box::read_capped_bytes(stdout, OUTPUT_MAX),
                 crate::r#box::read_capped(stderr, OUTPUT_MAX)
@@ -151,7 +152,7 @@ impl Git {
                 stdout,
                 stderr,
             })
-        };
+        });
         match tokio::time::timeout(TIMEOUT, run).await {
             Ok(result) => result,
             // Dropping the future drops the child, which kills it unless it
