@@ -419,14 +419,12 @@ pub async fn sync(daemon: &Daemon, project: &Project, params: &Value) -> Result<
     }
     let canonical = project.canonical_dir();
     let initial_default = daemon.git.head_branch(&canonical).await?;
-    let selected_branch = named.unwrap_or(&initial_default).to_string();
-    let branch = selected_branch.as_str();
-    let target = crate::git::target_ref(branch);
-    let refuse_intent = || {
+    let mut selected_branch = named.unwrap_or(&initial_default).to_string();
+    let refuse_intent = |branch: &str, target: &str| {
         project.read(|conn| {
             if let Some(intent) = executions::open_intents(conn)?
                 .into_iter()
-                .find(|row| row.intent_ref.as_deref() == Some(target.as_str()))
+                .find(|row| row.intent_ref.as_deref() == Some(target))
             {
                 return Err(
                     Fail::refused("a landing intent prevents sync of its target")
@@ -436,26 +434,41 @@ pub async fn sync(daemon: &Daemon, project: &Project, params: &Value) -> Result<
             Ok(())
         })
     };
-    refuse_intent()?;
-    let target_lock = project.target_lock(&target);
-    let held = target_lock.lock().await;
-    refuse_intent()?;
-    project.read(|conn| {
-        if let Some(owner) = executions::query(
-            conn,
-            "kind = 'landing' AND reserved = 1 AND intent_ref = ?1",
-            [&target],
-        )?
-        .first()
-        {
-            return Err(Fail::refused("a landing child still owns this target")
-                .with(json!({ "reason": "ownership", "branch": branch, "execution": owner.id })));
+    let mut target_lock = project.target_lock(&crate::git::target_ref(&selected_branch));
+    let (held, publication, default) = loop {
+        let target = crate::git::target_ref(&selected_branch);
+        if named.is_some() {
+            refuse_intent(&selected_branch, &target)?;
         }
-        Ok(())
-    })?;
-    let mut selection = Some(project.canonical.lock().await);
-    // Classification must follow both locks: selection may have changed HEAD.
-    let default = daemon.git.head_branch(&canonical).await?;
+        let held = target_lock.lock().await;
+        let publication = project.canonical.lock().await;
+        let default = daemon.git.head_branch(&canonical).await?;
+        if named.is_none() && selected_branch != default {
+            drop(publication);
+            drop(held);
+            selected_branch = default;
+            target_lock = project.target_lock(&crate::git::target_ref(&selected_branch));
+            continue;
+        }
+        refuse_intent(&selected_branch, &target)?;
+        project.read(|conn| {
+            if let Some(owner) = executions::query(
+                conn,
+                "kind = 'landing' AND reserved = 1 AND intent_ref = ?1",
+                [&target],
+            )?
+            .first()
+            {
+                return Err(Fail::refused("a landing child still owns this target")
+                    .with(json!({ "reason": "ownership", "branch": selected_branch, "execution": owner.id })));
+            }
+            Ok(())
+        })?;
+        break (held, publication, default);
+    };
+    let branch = selected_branch.as_str();
+    let target = crate::git::target_ref(branch);
+    let mut selection = Some(publication);
     if !select {
         drop(selection.take());
     }
@@ -1083,7 +1096,23 @@ pub async fn attempt_start(
             json!(items.iter().map(|item| item.id).collect::<Vec<_>>()),
         ));
     }
-    if let Some(item) = items.first()
+    let item = if let Some(expected) = params["attention"].as_i64() {
+        items.iter().find(|item| item.id == expected)
+    } else {
+        let mut recovery = None;
+        for item in &items {
+            if let Some(execution) = item.execution
+                && project.read(|conn| {
+                    Ok(executions::get(conn, execution)?.intent_state.as_deref() == Some("open"))
+                })?
+            {
+                recovery = Some(item);
+                break;
+            }
+        }
+        recovery.or_else(|| items.first())
+    };
+    if let Some(item) = item
         && let Some(execution) = item.execution
         && project.read(|conn| {
             Ok(executions::get(conn, execution)?.intent_state.as_deref() == Some("open"))
@@ -1103,7 +1132,7 @@ pub async fn attempt_start(
         .or(ticket.target_branch.as_deref())
         .unwrap_or(&default.branch);
     let loaded = super::load_target(daemon, project, branch).await?;
-    if let Some(item) = items.first() {
+    if let Some(item) = item {
         drop(canonical);
         return answer_start(daemon, project, item).await;
     }

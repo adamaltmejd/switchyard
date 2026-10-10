@@ -177,10 +177,14 @@ mutations publish while their target is held; unknown landing ownership
 requires the existing reconciliation proof before publication. Startup does
 not publish over an open default intent or its retained reservation.
 An intent's start exit can prove recovery while default input is unavailable.
+Start answers the named attention item; without a name it prefers an open
+intent's recovery item over other stopped or red items on that ticket.
 An unavailable validated default excludes new effects. Already-admitted
-executions wait on project events without reserving capacity; validated
-publication wakes them to reread the current default. They remain stoppable
-and abandonable through their existing execution. Unknown default mutation
+executions waiting for capacity reserve nothing. A landing whose policy
+check encounters unavailable publication after reservation waits on the
+same project events, retaining its existing reservation and host lock.
+Validated publication wakes waiters to reread the current default. Waiters
+remain eligible for their existing stop or abandon exits. Unknown default mutation
 ownership keeps that input unavailable until proved resolved. Selected-target cache
 reads do not replace the published default input.
 An attempt freezes its workflow's name and its
@@ -636,15 +640,18 @@ lock, so a held landing child cannot delay its named intent refusal.
 Default selection, admission, workflow edits and ticket-proposal acceptance
 serialize with project default configuration publication. Sync re-reads
 the default under that lock after taking its target lock and before import
-invalidation. An uncertain import or default-selection error does not
+invalidation. Unnamed sync resolves its branch under both locks; a changed
+default releases both locks and repeats selection with the current target.
+An uncertain import or default-selection error does not
 restore the input. Named sync also refuses a retained landing mutation owner
 after taking the target lock. Body, title and priority edits, proposal
 edit/link acceptance and rejection do not wait on canonical. Target edits
 also do not wait on canonical; admission rechecks the revision and branch.
 The existing queue is partitioned by frozen target, in approval order within
 each target. A running or reserved landing or child, or an unresolved intent,
-blocks only that target. Every landing effect uses the shared project execution
-cap; there is no separate queue limit or lifecycle. Landings, named sync and
+blocks only that target. A red-blocked approval is skipped without blocking
+later eligible approvals on that target. Every landing effect uses the shared
+project execution cap; there is no separate queue limit or lifecycle. Landings, named sync and
 intent recovery lock their target. Each landing policy re-read and the
 transaction it admits hold that same lock, so no sync falls between them.
 Canonical branch updates are compare-and-swap. Symbolic HEAD changes and

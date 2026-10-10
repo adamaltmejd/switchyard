@@ -35,9 +35,6 @@ pub async fn next(daemon: &Arc<Daemon>, project: &Arc<Project>) -> Result<(), Fa
     })?;
     for approval in project.read(checks::queue)? {
         let attempt = project.read(|conn| attempts::get(conn, approval.attempt))?;
-        if !busy.insert(crate::git::target_ref(attempt.target_branch()?)) {
-            continue;
-        }
         let ticket = project.read(|conn| tickets::get(conn, attempt.ticket))?;
         let blocked = project.read(|conn| {
             Ok(attempts::open_attention(conn)?
@@ -45,6 +42,9 @@ pub async fn next(daemon: &Arc<Daemon>, project: &Arc<Project>) -> Result<(), Fa
                 .any(|item| item.ticket == Some(ticket.id) && item.kind == "red"))
         })?;
         if blocked {
+            continue;
+        }
+        if busy.contains(&crate::git::target_ref(attempt.target_branch()?)) {
             continue;
         }
         let execution = project.tx(|tx| {
@@ -76,6 +76,7 @@ pub async fn next(daemon: &Arc<Daemon>, project: &Arc<Project>) -> Result<(), Fa
             .map(Some)
         })?;
         if let Some(execution) = execution {
+            busy.insert(crate::git::target_ref(attempt.target_branch()?));
             spawn(daemon, project, "landing", execution);
         }
     }
@@ -206,13 +207,14 @@ struct Current {
 async fn admit<T>(
     daemon: &Arc<Daemon>,
     project: &Arc<Project>,
-    _canonical: &tokio::sync::MutexGuard<'_, ()>,
+    _target: &tokio::sync::MutexGuard<'_, ()>,
     approval: i64,
-    attempt: i64,
+    execution: i64,
     then: impl FnOnce(&rusqlite::Transaction, &Current) -> Result<T, Fail>,
 ) -> Result<Result<T, (Current, Lapse)>, Fail> {
     let (approval, ticket, attempt) = project.read(|conn| {
-        let attempt = attempts::get(conn, attempt)?;
+        let row = executions::get(conn, execution)?;
+        let attempt = attempts::get(conn, row.attempt)?;
         Ok((
             checks::approval(conn, approval)?,
             tickets::get(conn, attempt.ticket)?,
@@ -227,19 +229,49 @@ async fn admit<T>(
         attempt,
         ticket,
     };
-    // Default selection must see an intent committed before it changes HEAD.
-    let _publication = project.canonical.lock().await;
-    if project
-        .loaded
-        .lock()
-        .expect("loaded lock")
-        .default
-        .is_none()
-    {
-        return Err(Fail::refused(
-            "the project default configuration is not loaded",
-        ));
-    }
+    // Keep the existing reservation and host lock while publication is absent.
+    // Register before reading so validated publication cannot lose its wakeup.
+    let mut announced = false;
+    let _publication = loop {
+        let changed = project.events.notified();
+        tokio::pin!(changed);
+        changed.as_mut().enable();
+        let publication = project.canonical.lock().await;
+        let row = project.read(|conn| executions::get(conn, execution))?;
+        if row.status != "running"
+            || project.read(|conn| Ok(attempts::get(conn, row.attempt)?.state != "live"))?
+        {
+            return Err(Fail::refused("execution no longer eligible to act"));
+        }
+        if project
+            .loaded
+            .lock()
+            .expect("loaded lock")
+            .default
+            .is_some()
+        {
+            break publication;
+        }
+        if !announced {
+            project.tx(|tx| {
+                store::audit(
+                    tx,
+                    "execution.waiting",
+                    store::Target {
+                        ticket: Some(now.ticket.id),
+                        attempt: Some(row.attempt),
+                        execution: Some(row.id),
+                        ..Default::default()
+                    },
+                    None,
+                    json!({ "reason": "capacity" }),
+                )
+            })?;
+            announced = true;
+        }
+        drop(publication);
+        changed.await;
+    };
     let admitted = project.tx(|tx| {
         let unchanged = checks::approval(tx, now.approval.id)?.state == now.approval.state
             && !attempts::superseded_by_edit(
@@ -274,7 +306,7 @@ pub async fn land(
 
     let prepared = super::capacity::effect(daemon, project, execution, async {
         let held = target_lock.lock().await;
-        let loaded = match admit(daemon, project, &held, approval.id, attempt.id, |_, now| {
+        let loaded = match admit(daemon, project, &held, approval.id, execution, |_, now| {
             Ok(now.loaded.clone())
         })
         .await?
@@ -352,32 +384,25 @@ pub async fn land(
     for gate in &loaded.config.gates {
         let admitted = super::capacity::effect(daemon, project, execution, async {
             let held = target_lock.lock().await;
-            admit(
-                daemon,
-                project,
-                &held,
-                approval.id,
-                attempt.id,
-                |tx, now| {
-                    executions::start(
-                        tx,
-                        executions::Start {
-                            attempt: attempt.id,
-                            parent: Some(execution),
-                            kind: "gate",
-                            reason: Some("landing"),
-                            base: Some(&target),
-                            head: Some(&merged),
-                            proof: Some(&now.approval.proof),
-                            ticket_revision: Some(now.ticket.revision),
-                            digest: Some(&now.loaded.gate_digest),
-                            name: Some(&gate.name),
-                            ticket: Some(ticket.id),
-                            ..Default::default()
-                        },
-                    )
-                },
-            )
+            admit(daemon, project, &held, approval.id, execution, |tx, now| {
+                executions::start(
+                    tx,
+                    executions::Start {
+                        attempt: attempt.id,
+                        parent: Some(execution),
+                        kind: "gate",
+                        reason: Some("landing"),
+                        base: Some(&target),
+                        head: Some(&merged),
+                        proof: Some(&now.approval.proof),
+                        ticket_revision: Some(now.ticket.revision),
+                        digest: Some(&now.loaded.gate_digest),
+                        name: Some(&gate.name),
+                        ticket: Some(ticket.id),
+                        ..Default::default()
+                    },
+                )
+            })
             .await
         })
         .await?;
@@ -494,29 +519,22 @@ pub async fn land(
 
     let held = target_lock.lock().await;
     let result = super::capacity::effect(daemon, project, execution, async {
-        let admitted = admit(
-            daemon,
-            project,
-            &held,
-            approval.id,
-            attempt.id,
-            |tx, now| {
-                executions::set_intent(
-                    tx,
-                    execution,
-                    &target_ref,
-                    &target,
-                    &merged,
-                    now.ticket.id,
-                    now.attempt.id,
-                )?;
-                let mut configs = project.loaded.lock().expect("loaded lock");
-                if configs.default.as_deref() == Some(now.loaded.branch.as_str()) {
-                    configs.default = None;
-                }
-                Ok(())
-            },
-        )
+        let admitted = admit(daemon, project, &held, approval.id, execution, |tx, now| {
+            executions::set_intent(
+                tx,
+                execution,
+                &target_ref,
+                &target,
+                &merged,
+                now.ticket.id,
+                now.attempt.id,
+            )?;
+            let mut configs = project.loaded.lock().expect("loaded lock");
+            if configs.default.as_deref() == Some(now.loaded.branch.as_str()) {
+                configs.default = None;
+            }
+            Ok(())
+        })
         .await?;
         if let Err((now, lapse)) = admitted {
             return withdraw(
