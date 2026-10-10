@@ -388,7 +388,9 @@ fn one_slot_lands_with_child_gates_and_excludes_a_worker() {
     );
 }
 
-/// G4: after an allowed first host gate, hold the auto-approval protected-path
+/// G4/G5: hold the first target read inheriting the landing's host lock. Its
+/// reservation precedes any prepared ref or child gate. Then, after an allowed
+/// first host gate, hold the auto-approval protected-path
 /// Git read before the second gate. The landing owns the only reservation;
 /// release permits the second gate and final landing at limit one.
 /// Expected gate names and landed bytes come from the fixture, and the parent
@@ -396,6 +398,8 @@ fn one_slot_lands_with_child_gates_and_excludes_a_worker() {
 /// Sabotage: omit the landing effect around gate-loop admission; the held
 /// Git child has no reserved owner. Keep the parent slot during the child;
 /// the second gate cannot complete at limit one.
+/// Move the initial load outside preparation: the first owned target read
+/// comes after the prepared ref, failing the initial-boundary observer.
 #[test]
 fn landing_gate_policy_reads_hold_the_shared_execution_slot() {
     let machine = Machine::new("g4-gate-policy-slot", |request| {
@@ -408,8 +412,13 @@ fn landing_gate_policy_reads_hold_the_shared_execution_slot() {
     let release = machine.root.join("release");
     let armed = machine.root.join("armed");
     let markers = machine.root.join("markers");
+    let initial = machine.root.join("initial");
+    let initial_release = machine.root.join("initial-release");
+    let initial_armed = machine.root.join("initial-armed");
     fifo(&said);
     fifo(&release);
+    fifo(&initial);
+    fifo(&initial_release);
     let gates = format!(
         "[gates.first]\nruns_in = \"host\"\ncommand = \"echo first > {}; read line < {}\"\n\
          [gates.second]\nruns_in = \"host\"\ncommand = \"echo second > {}\"\n",
@@ -427,11 +436,53 @@ fn landing_gate_policy_reads_hold_the_shared_execution_slot() {
             .replace("review = [\"correctness\"]", "review = \"none\""),
     );
     let mut watch = project.watch(0);
+    std::fs::write(&initial_armed, "").unwrap();
+    // Scheduler/config reads do not inherit the landing's ownership lock.
+    // Compare actual open file identities, not a fixed descriptor number.
+    machine.wrapper(
+        "git",
+        &format!(
+            "case \" $* \" in *' check-ref-format refs/heads/main '*)\n\
+         if [ -e '{}' ]; then\n\
+           for owner in '{}'/*/lock; do for descriptor in /dev/fd/*; do\n\
+             if [ \"$descriptor\" -ef \"$owner\" ] && rm '{}' 2>/dev/null; then\n\
+               echo initial > '{}'; read line < '{}';\n\
+             fi\n\
+           done; done\n\
+         fi;; esac",
+            initial_armed.display(),
+            project.path.join(".yard/local/landings").display(),
+            initial_armed.display(),
+            initial.display(),
+            initial_release.display()
+        ),
+    );
     project.json(&["ticket", "new", "--title", "Feature"]);
+    assert_eq!(watch.said(&initial), "initial\n");
+    let landing = watch.event("execution.started", &[("kind", "landing")]);
+    let initial_parent = landing["execution"].as_i64().unwrap();
+    assert_eq!(
+        project.rows("SELECT id, kind, status FROM execution WHERE reserved = 1"),
+        vec![json!({"id": initial_parent, "kind": "landing", "status": "running"})]
+    );
+    assert_eq!(
+        git(
+            &project.canonical(),
+            &["for-each-ref", "refs/yard/landings/"]
+        ),
+        ""
+    );
+    assert!(
+        project
+            .rows("SELECT id FROM execution WHERE kind = 'gate' AND reason = 'landing'")
+            .is_empty()
+    );
+    std::fs::write(&initial_release, "go\n").unwrap();
     assert_eq!(watch.said(&said), "first\n");
     let first = project.rows("SELECT parent FROM execution WHERE kind = 'gate' AND name = 'first'");
     assert_eq!(first.len(), 1);
     let parent = first[0]["parent"].as_i64().unwrap();
+    assert_eq!(parent, initial_parent);
     // Arm after the first gate acts: the next diff is the second gate's
     // live approval read, rather than initial approval or final admission.
     std::fs::write(&armed, "").unwrap();

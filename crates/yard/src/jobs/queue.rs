@@ -254,14 +254,14 @@ pub async fn land(
     let approval = project
         .read(|conn| checks::approval(conn, row.approval.expect("a landing binds an approval")))?;
     let attempt = project.read(|conn| attempts::get(conn, row.attempt))?;
-    let loaded = load_target(daemon, project, attempt.target_branch()?).await?;
     let ticket = project.read(|conn| tickets::get(conn, attempt.ticket))?;
     let canonical = project.canonical_dir();
-    let target_ref = crate::git::target_ref(&loaded.branch);
     let head = approval.head.clone();
 
     let prepared = super::capacity::effect(daemon, project, execution, async {
         let _canonical = project.canonical.lock().await;
+        let loaded = load_target(daemon, project, attempt.target_branch()?).await?;
+        let target_ref = crate::git::target_ref(&loaded.branch);
         let target = daemon
             .git
             .rev_parse(&canonical, &target_ref)
@@ -311,10 +311,10 @@ pub async fn land(
                 None,
             )
             .await?;
-        Ok(Some((target, merged)))
+        Ok(Some((loaded, target_ref, target, merged)))
     })
     .await?;
-    let Some((target, merged)) = prepared else {
+    let Some((loaded, target_ref, target, merged)) = prepared else {
         return Ok(());
     };
 
