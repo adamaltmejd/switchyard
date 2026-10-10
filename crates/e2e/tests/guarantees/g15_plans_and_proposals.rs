@@ -494,7 +494,8 @@ fn a_plan_proposes_children_that_block_it() {
 /// G5: a real pre-capacity binary dies with its clone Git child held before
 /// any box/handle exists. The fixture proves that PID survives SIGKILL.
 /// Upgrade retains the old row and capacity rather than guessing from an
-/// absent effects lock. A completed prior ticket is the allowed control.
+/// absent effects lock. A prior candidate reaching approval is the allowed
+/// control. Three attempt lanes admit a waiter beside both old attempts.
 /// Releasing the known fixture child does not invent a proof on the old
 /// row; a second startup reconsiders ownership after completion and keeps
 /// the ambiguous upgrade stopped for the Y80 rehearsal.
@@ -555,7 +556,7 @@ fn an_upgrade_retains_a_legacy_pre_box_child_without_an_ownership_proof() {
     assert_eq!(unknown["data"]["payload"]["lock_contract"], false);
     project.write(
         ".yard/config.toml",
-        &configured.replace("max_lanes = 2", "max_lanes = 2\nmax_executions = 1"),
+        &configured.replace("max_lanes = 2", "max_lanes = 3\nmax_executions = 1"),
     );
     git(&project.path, &["add", ".yard/config.toml"]);
     git(&project.path, &["commit", "-qm", "Set shared capacity"]);
@@ -563,6 +564,7 @@ fn an_upgrade_retains_a_legacy_pre_box_child_without_an_ownership_proof() {
     project.json(&["ticket", "new", "--title", "Waiter"]);
     let waiting = watch.event("execution.waiting", &[]);
     assert_eq!(waiting["ticket"], "Y-3");
+    assert_eq!(waiting["data"]["reason"], "capacity");
     std::fs::write(&release, "go\n").unwrap();
     assert_eq!(watch.said(&done), "done\n");
     drop(watch);
