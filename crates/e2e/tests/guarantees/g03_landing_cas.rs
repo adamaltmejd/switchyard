@@ -35,8 +35,9 @@ fn unreviewed() -> String {
 /// intent and raises `red`; once the command is released,
 /// `start` records the landing once.
 ///
-/// Sabotage: make `reconcile::decide_intent` skip its `lock_free` check; the
-/// restart reads canonical at the old head and retires the intent, so the
+/// Sabotage: omit the landing Git child's inherited host lock, so
+/// `capacity::release` sees a free lock and absent box despite the held child.
+/// Restart reads canonical at the old head and retires the intent, so the
 /// released `update-ref` lands a candidate the store never records.
 #[test]
 fn a_landing_whose_update_ref_is_held_stays_undecided_until_released() {

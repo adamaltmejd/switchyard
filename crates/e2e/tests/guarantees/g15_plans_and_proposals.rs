@@ -499,9 +499,14 @@ fn a_plan_proposes_children_that_block_it() {
 /// Releasing the known fixture child does not invent a proof on the old
 /// row; a second startup reconsiders ownership after completion and keeps
 /// the ambiguous upgrade stopped for the Y80 rehearsal.
+/// Stop refuses the retained owner without claiming an undeliverable action.
+/// Stopping an admitted waiter succeeds; deliberately starting it again must
+/// wait on capacity before the old child is released.
 /// Sabotage: backfill only reservations without their legacy lock contract,
 /// or accept absence of the new lock as proof for a legacy execution,
 /// including when reconciliation probes it after the old child finishes.
+/// Acknowledge stop without a live handle; the refusal and missing successful
+/// stop audit fail. End or release the retained owner on refusal; its rows change.
 #[test]
 fn an_upgrade_retains_a_legacy_pre_box_child_without_an_ownership_proof() {
     let machine = Machine::new("g5-legacy-child", |request| {
@@ -565,6 +570,28 @@ fn an_upgrade_retains_a_legacy_pre_box_child_without_an_ownership_proof() {
     let waiting = watch.event("execution.waiting", &[]);
     assert_eq!(waiting["ticket"], "Y-3");
     assert_eq!(waiting["data"]["reason"], "capacity");
+    let waiter = waiting["execution"].as_i64().unwrap();
+    assert_eq!(
+        project.json(&["attempt", "stop", "Y-3"])["stopping"],
+        waiter
+    );
+    let stopped = watch.find("waiter stopped", |event| {
+        event["event"] == "attention.raised" && event["execution"] == waiter
+    });
+    assert_eq!(stopped["data"]["kind"], "stopped");
+    assert_eq!(stopped["data"]["reason"], "unchanged");
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT status, reserved, outcome FROM execution WHERE id = {waiter}"
+        )),
+        vec![json!({"status": "ended", "reserved": 0, "outcome": "unchanged"})]
+    );
+    project.json(&["attempt", "start", "Y-3"]);
+    let renewed = watch.find("renewed capacity wait", |event| {
+        event["event"] == "execution.waiting" && event["execution"] != waiter
+    });
+    assert_eq!(renewed["ticket"], "Y-3");
+    assert_eq!(renewed["data"]["reason"], "capacity");
     std::fs::write(&release, "go\n").unwrap();
     assert_eq!(watch.said(&done), "done\n");
     drop(watch);
@@ -585,6 +612,25 @@ fn an_upgrade_retains_a_legacy_pre_box_child_without_an_ownership_proof() {
     assert_eq!(
         project.rows("SELECT status, reserved, lock_contract FROM execution WHERE id = 2"),
         vec![json!({"status": "running", "reserved": 1, "lock_contract": 0})]
+    );
+    let before = project.rows("SELECT * FROM execution WHERE id = 2");
+    let attempt_before = project.rows("SELECT * FROM attempt WHERE ticket = 2");
+    let refused = project.refused(&["attempt", "stop", "Y-2"]);
+    assert_eq!(refused["code"], "refused");
+    assert_eq!(refused["data"]["reason"], "ownership");
+    assert_eq!(refused["data"]["ticket"], "Y-2");
+    assert_eq!(refused["data"]["execution"], 2);
+    assert_eq!(refused["data"]["attempt"], attempt_before[0]["id"]);
+    assert_eq!(refused["data"]["attention"], retained["attention"]);
+    assert_eq!(project.rows("SELECT * FROM execution WHERE id = 2"), before);
+    assert_eq!(
+        project.rows("SELECT * FROM attempt WHERE ticket = 2"),
+        attempt_before
+    );
+    assert!(
+        project
+            .rows("SELECT seq FROM audit WHERE event = 'attempt.stopped' AND execution = 2")
+            .is_empty()
     );
     assert!(
         !machine

@@ -1129,12 +1129,29 @@ pub fn attempt_stop(daemon: &Daemon, project: &Project, params: &Value) -> Resul
             ticket_name(id)
         )));
     };
+    let stop = daemon
+        .stops
+        .lock()
+        .expect("stops lock")
+        .get(&(project.key.clone(), running.id))
+        .cloned();
     let stopped_waiter = project.tx(|tx| {
         let row = executions::get(tx, running.id)?;
         if row.status != "running" {
             return Err(Fail::refused("the implementer execution already ended"));
         }
         if row.reserved {
+            if stop.is_none() {
+                let attention = attempts::open_attention(tx)?
+                    .into_iter()
+                    .find(|item| item.execution == Some(row.id) && item.reason == "ownership");
+                return Err(Fail::refused("the retained execution has no current stop handle")
+                    .with(json!({
+                        "reason": "ownership", "ticket": ticket_name(id),
+                        "attempt": row.attempt, "execution": row.id,
+                        "attention": attention.map(|item| item.id),
+                    })));
+            }
             return Ok(false);
         }
         executions::end(tx, row.id, executions::End {
@@ -1148,11 +1165,7 @@ pub fn attempt_stop(daemon: &Daemon, project: &Project, params: &Value) -> Resul
         })?;
         Ok(true)
     })?;
-    if let Some(stop) = daemon
-        .stops
-        .lock()
-        .expect("stops lock")
-        .get(&(project.key.clone(), running.id))
+    if let Some(stop) = stop
         && !stopped_waiter
     {
         stop.notify_one();
