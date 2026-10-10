@@ -162,6 +162,7 @@ fn a_ticket_lands_end_to_end_and_leaves_only_rows() {
     let spec = [
         "sync.imported",
         "sync.consumed",
+        "sync.default",
         "ticket.new",
         "ticket.edited",
         "ticket.parked",
