@@ -154,6 +154,9 @@ fn the_queue_lands_in_order_and_rejudges_a_red_merge() {
 /// it from current templates on restart. No existing block observes immutable
 /// admission evidence while the candidate base and current templates change.
 /// Omit committed scaffold skills from capture: complete fixture equality fails.
+/// Substitute parser defaults for selected definitions: literal expectations
+/// fail against the explicit non-default limits, timeouts and instructions
+/// declared in configured(), independently of admission or inspection output.
 #[test]
 fn a_ticket_binds_feature_inputs_repairs_and_lands_on_its_target() {
     let hold = Latch::new();
@@ -188,10 +191,13 @@ fn a_ticket_binds_feature_inputs_repairs_and_lands_on_its_target() {
     let configured = |marker: &str| {
         let command = format!("printf '%s\\n' {marker} >> '{}'", counter.display());
         config(&format!(
-            "[gates.counter]\ncommand = {}\nstage = \"candidate\"\nruns_in = \"host\"\n\n\
-             [gates.image]\ncommand = \"test $(cat /target-input) = {marker}\"\nstage = \"candidate\"\n",
+            "[gates.counter]\ncommand = {}\ntimeout_minutes = 40\nstage = \"candidate\"\nruns_in = \"host\"\nenv = []\n\n\
+             [gates.image]\ncommand = \"test $(cat /target-input) = {marker}\"\ntimeout_minutes = 41\nstage = \"candidate\"\nruns_in = \"box\"\nenv = []\n",
             serde_json::to_string(&command).unwrap(),
-        )).replace("Review for correctness.", marker)
+        ))
+        .replace("[workflows.default]\n", "[workflows.default]\naccess = \"write\"\ninstructions = \"Implement the ticket.\"\nmax_session_executions = 7\ninactivity_timeout_minutes = 45\ntotal_work_timeout_minutes = 300\n")
+        .replace("[review]\n", "[review]\ntimeout_minutes = 35\n")
+        .replace("Review for correctness.", marker)
     };
     let project = Project::new(&machine, "p", &configured("main"));
     let dockerfile = project.git(&["show", "HEAD:.yard/Dockerfile"]);
@@ -292,9 +298,9 @@ fn a_ticket_binds_feature_inputs_repairs_and_lands_on_its_target() {
     assert_eq!(
         admission["workflow"],
         json!({
-            "implementer": "worker", "review": ["correctness"], "instructions": "",
-            "read_only": false, "max_session_executions": 5,
-            "inactivity_timeout_minutes": 30, "total_work_timeout_minutes": 240
+            "implementer": "worker", "review": ["correctness"], "instructions": "Implement the ticket.",
+            "read_only": false, "max_session_executions": 7,
+            "inactivity_timeout_minutes": 45, "total_work_timeout_minutes": 300
         })
     );
     assert_eq!(
@@ -311,15 +317,15 @@ fn a_ticket_binds_feature_inputs_repairs_and_lands_on_its_target() {
     );
     assert_eq!(
         admission["review"],
-        json!({"max_rounds": 3, "timeout_minutes": 30, "blocking": 1})
+        json!({"max_rounds": 3, "timeout_minutes": 35, "blocking": 1})
     );
     assert_eq!(
         admission["gates"],
         json!([
             {"name": "counter", "command": format!("printf '%s\\n' feature-v1 >> '{}'", counter.display()),
-             "timeout_minutes": 30, "stage": "candidate", "runs_in": "host", "env": []},
+             "timeout_minutes": 40, "stage": "candidate", "runs_in": "host", "env": []},
             {"name": "image", "command": "test $(cat /target-input) = feature-v1",
-             "timeout_minutes": 30, "stage": "candidate", "runs_in": "box", "env": []}
+             "timeout_minutes": 41, "stage": "candidate", "runs_in": "box", "env": []}
         ])
     );
     let artifacts = machine.pinfold(&["artifacts"]);
