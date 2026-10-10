@@ -65,6 +65,8 @@ fn pre_target_binary() -> PathBuf {
 /// supply the schema, expected edge and candidate identities.
 /// Sabotage: require target_branch() for an ended legacy proposer, or omit
 /// the limit attention target backfill; acceptance or override is refused.
+/// G6 sabotage: fabricate historical admission evidence from today's config
+/// or the recovered candidate base. Both real historical rows must stay unknown.
 #[test]
 fn an_upgrade_preserves_ended_planner_proposals_and_limit_overrides() {
     let machine = Machine::new("g15-upgrade", |request| {
@@ -134,6 +136,12 @@ fn an_upgrade_preserves_ended_planner_proposals_and_limit_overrides() {
     machine.kill();
     machine.use_binary(None);
     machine.start();
+    for ticket in ["Y-1", "Y-2"] {
+        assert_eq!(
+            project.json(&["attempt", "show", ticket])["attempt"]["admission"],
+            json!({"status": "unknown"})
+        );
+    }
     let child = project.json(&["proposal", "accept", &proposal.to_string()]);
     assert_eq!(depends_on(&project, 1), [3]);
     assert_eq!(

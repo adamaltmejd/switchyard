@@ -26,6 +26,7 @@ pub struct Loaded {
     pub branch: String,
     pub head: String,
     pub gate_digest: String,
+    pub admission_inputs: Value,
 }
 
 #[derive(Default)]
@@ -163,7 +164,39 @@ pub async fn read_config(
         .show(repo, commit, crate::config::DOCKERFILE_PATH)
         .await?
         .ok_or_else(|| Fail::invalid(format!("{commit} has no .yard/Dockerfile")))?;
+    let tree = daemon
+        .git
+        .rev_parse(repo, &format!("{commit}^{{tree}}"))
+        .await?
+        .ok_or_else(|| Fail::invalid("configuration commit has no tree"))?;
+    let entries = daemon
+        .git
+        .ls_tree(
+            repo,
+            commit,
+            &[crate::config::CONFIG_PATH, crate::config::DOCKERFILE_PATH],
+        )
+        .await?;
+    let objects: std::collections::BTreeMap<_, _> = entries
+        .into_iter()
+        .map(|entry| (entry.path, entry.oid))
+        .collect();
+    let staged: Vec<Value> = daemon
+        .git
+        .ls_tree(repo, commit, &crate::agent_env::PATHS)
+        .await?
+        .iter()
+        .filter(|entry| crate::agent_env::staged_input(entry))
+        .map(|entry| json!({"path": entry.path, "blob": entry.oid, "executable": entry.exec}))
+        .collect();
     Ok(Loaded {
+        admission_inputs: json!({
+            "source_commit": commit,
+            "build_context_tree": tree,
+            "config_blob": objects[crate::config::CONFIG_PATH],
+            "dockerfile_blob": objects[crate::config::DOCKERFILE_PATH],
+            "trusted_staged_sources": staged,
+        }),
         gate_digest: config.gate_digest(dockerfile.as_bytes()),
         config,
         branch: branch.to_string(),

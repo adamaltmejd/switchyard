@@ -24,6 +24,8 @@ fn call(operator: &mut Operator, project: &Project, tool: &str, mut args: Value)
 /// set with the native candidate and landing executions.
 /// Skip the native second candidate-stage gate at landing, or check out the
 /// candidate in its box: the instances or boxed git identities differ.
+/// Omit admission plan expansion or its initial revision: the admitted record
+/// differs from the literal fixture chain below, even if inspection is right.
 #[test]
 fn typed_plans_inspect_without_admission_and_refuse_unsupported_runtime() {
     let machine = Machine::new("g6plans", |request| {
@@ -215,6 +217,9 @@ selected = [{ to = "choose", repeat = 2 }]
     project.json(&["ticket", "new", "--title", "Feature"]);
     let approval = history.attention();
     assert_eq!(approval["data"]["kind"], "approval");
+    let admission = project.json(&["attempt", "show", "Y-1"])["attempt"]["admission"].clone();
+    assert_eq!(admission["plan"], legacy_expected);
+    assert_eq!(admission["revision"], 1);
     let candidate = git(
         &project.path.join(".yard/local/attempts/1/clone"),
         &["rev-parse", "HEAD"],

@@ -8,7 +8,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 /// Every path staged for any harness. Anything else in the base stays out.
-const PATHS: [&str; 10] = [
+pub(crate) const PATHS: [&str; 10] = [
     "AGENTS.md",
     "CLAUDE.md",
     ".agents/skills",
@@ -66,14 +66,7 @@ impl AgentEnv {
         let mut files = Vec::new();
         let mut total = 0;
         for entry in git.ls_tree(canonical, base, &PATHS).await? {
-            let named = PATHS.iter().any(|path| {
-                if FILES.contains(path) {
-                    entry.path == *path
-                } else {
-                    entry.path.starts_with(&format!("{path}/"))
-                }
-            });
-            if !entry.regular || !named {
+            if !staged_input(&entry) {
                 continue;
             }
             let max = if GUIDANCE.contains(&entry.path.as_str()) {
@@ -218,6 +211,18 @@ impl AgentEnv {
             None => Ok(()),
         }
     }
+}
+
+/// The regular source inputs admitted to the trusted staging allowlist.
+pub(crate) fn staged_input(entry: &crate::git::TreeEntry) -> bool {
+    entry.regular
+        && PATHS.iter().any(|path| {
+            if FILES.contains(path) {
+                entry.path == *path
+            } else {
+                entry.path.starts_with(&format!("{path}/"))
+            }
+        })
 }
 
 /// Clear `rel` under `state` and return its path, with every parent a real

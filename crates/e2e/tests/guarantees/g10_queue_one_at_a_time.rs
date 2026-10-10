@@ -149,6 +149,10 @@ fn the_queue_lands_in_order_and_rejudges_a_red_merge() {
 /// same-head approval naming main. Keep the old base, omit conflict paths,
 /// or carry the retired approval into the repair. Existing G11 covers default switching
 /// under a held default-bound execution and named sync's isolation.
+/// G6 admission evidence uses literal selected definitions and host Git
+/// objects. Sabotage: overwrite it from the changed repair base or regenerate
+/// it from current templates on restart. No existing block observes immutable
+/// admission evidence while the candidate base and current templates change.
 #[test]
 fn a_ticket_binds_feature_inputs_repairs_and_lands_on_its_target() {
     let hold = Latch::new();
@@ -208,6 +212,10 @@ fn a_ticket_binds_feature_inputs_repairs_and_lands_on_its_target() {
 
     project.git(&["checkout", "--quiet", "-b", "feature/a"]);
     project.write("shared.txt", "base\n");
+    project.write(
+        ".agents/skills/admission/SKILL.md",
+        "---\nname: admission\ndescription: Admission skill v1.\n---\nBody.\n",
+    );
     project.write(".yard/config.toml", &configured("feature-v1"));
     project.write(
         ".yard/Dockerfile",
@@ -216,6 +224,18 @@ fn a_ticket_binds_feature_inputs_repairs_and_lands_on_its_target() {
     project.git(&["add", "-A"]);
     project.git(&["commit", "--quiet", "-m", "Feature inputs"]);
     let base = project.git(&["rev-parse", "HEAD"]).trim().to_string();
+    let object = |revision: &str| project.git(&["rev-parse", revision]).trim().to_string();
+    let expected_inputs = json!({
+        "source_commit": base,
+        "build_context_tree": object(&format!("{base}^{{tree}}")),
+        "config_blob": object(&format!("{base}:.yard/config.toml")),
+        "dockerfile_blob": object(&format!("{base}:.yard/Dockerfile")),
+        "trusted_staged_sources": [
+            {"path": ".agents/skills/admission/SKILL.md",
+             "blob": object(&format!("{base}:.agents/skills/admission/SKILL.md")), "executable": false},
+            {"path": "AGENTS.md", "blob": object(&format!("{base}:AGENTS.md")), "executable": false}
+        ]
+    });
     project.json(&["sync", "feature/a"]);
     project.json(&[
         "ticket",
@@ -257,6 +277,78 @@ fn a_ticket_binds_feature_inputs_repairs_and_lands_on_its_target() {
         "feature/a",
     ]);
     hold.wait_held();
+    let admission = project.json(&["attempt", "show", "Y-2"])["attempt"]["admission"].clone();
+    assert_eq!(admission["status"], "recorded");
+    assert_eq!(admission["target"], "feature/a");
+    assert_eq!(admission["config_head"], base);
+    assert_eq!(admission["inputs"], expected_inputs);
+    assert_eq!(
+        admission["workflow"],
+        json!({
+            "implementer": "worker", "review": ["correctness"], "instructions": "",
+            "read_only": false, "max_session_executions": 5,
+            "inactivity_timeout_minutes": 30, "total_work_timeout_minutes": 240
+        })
+    );
+    assert_eq!(
+        admission["seats"],
+        json!({
+            "correctness": {"agent": "worker", "instructions": "feature-v1"}
+        })
+    );
+    assert_eq!(
+        admission["plan"]["nodes"]["review-0"]["runner"],
+        json!({
+            "kind": "agent", "agent": "worker", "instructions": "feature-v1"
+        })
+    );
+    assert_eq!(
+        admission["review"],
+        json!({"max_rounds": 3, "timeout_minutes": 30, "blocking": 1})
+    );
+    assert_eq!(
+        admission["gates"],
+        json!([
+            {"name": "counter", "command": format!("printf '%s\\n' feature-v1 >> '{}'", counter.display()),
+             "timeout_minutes": 30, "stage": "candidate", "runs_in": "host", "env": []},
+            {"name": "image", "command": "test $(cat /target-input) = feature-v1",
+             "timeout_minutes": 30, "stage": "candidate", "runs_in": "box", "env": []}
+        ])
+    );
+    let artifacts = machine.pinfold(&["artifacts"]);
+    assert!(artifacts.status.success());
+    let artifacts: Value = serde_json::from_slice(&artifacts.stdout).unwrap();
+    let pi = artifacts
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["name"] == "pi")
+        .unwrap();
+    assert_eq!(
+        admission["agents"],
+        json!({"worker": {
+            "settings": {"harness": "pi", "provider": "openrouter", "model": "fake-model"},
+            "runner": {"name": "pi", "version": pi["version"]}, "login_name": null
+        }})
+    );
+    let binary_hash = if cfg!(target_os = "macos") {
+        std::process::Command::new("shasum")
+            .args(["-a", "256"])
+            .arg(yard())
+            .output()
+            .unwrap()
+    } else {
+        std::process::Command::new("sha256sum")
+            .arg(yard())
+            .output()
+            .unwrap()
+    };
+    assert!(binary_hash.status.success());
+    let hash = String::from_utf8(binary_hash.stdout).unwrap();
+    assert_eq!(
+        admission["yard_runner"]["sha256"],
+        hash.split_whitespace().next().unwrap()
+    );
     assert_eq!(
         project.rows("SELECT target_branch, base FROM attempt WHERE ticket = 2"),
         vec![json!({ "target_branch": "feature/a", "base": base })]
@@ -299,6 +391,10 @@ fn a_ticket_binds_feature_inputs_repairs_and_lands_on_its_target() {
 
     // The synced inputs supersede judgments before the conflict is attempted.
     project.write("shared.txt", "operator\n");
+    project.write(
+        ".agents/skills/admission/SKILL.md",
+        "---\nname: admission\ndescription: Admission skill v2.\n---\nBody.\n",
+    );
     project.write(".yard/config.toml", &configured("feature-v2"));
     project.write(
         ".yard/Dockerfile",
@@ -330,6 +426,26 @@ fn a_ticket_binds_feature_inputs_repairs_and_lands_on_its_target() {
     assert_eq!(
         project.rows("SELECT target_branch, base, head FROM attempt WHERE ticket = 2"),
         vec![json!({ "target_branch": "feature/a", "base": target, "head": repaired })]
+    );
+    assert_eq!(
+        project.json(&["attempt", "show", "Y-2"])["attempt"]["admission"],
+        admission
+    );
+    // Restart at rest, after the repair's boxes have ended. Today's templates
+    // and the mutable candidate base both differ from recorded admission inputs.
+    assert!(
+        project
+            .rows("SELECT id FROM execution WHERE status = 'running'")
+            .is_empty()
+    );
+    let seq = project.json(&["status"])["seq"].as_i64().unwrap();
+    drop(watch);
+    machine.kill();
+    machine.start();
+    let mut watch = project.watch(seq);
+    assert_eq!(
+        project.json(&["attempt", "show", "Y-2"])["attempt"]["admission"],
+        admission
     );
     assert_eq!(
         project.rows("SELECT state FROM approval WHERE attempt = 2"),

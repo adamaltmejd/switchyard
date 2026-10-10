@@ -146,8 +146,8 @@ pub async fn scheduled(
     Ok(())
 }
 
-/// Create the attempt, freeze its workflow and implementer, and record its
-/// first execution, in one transaction.
+/// Record admission evidence, workflow name, implementer and first execution
+/// in one transaction.
 fn admit(
     tx: &rusqlite::Connection,
     loaded: &Loaded,
@@ -157,6 +157,38 @@ fn admit(
     let agent = &loaded.config.agents[&workflow.implementer];
     let mut implementer = serde_json::to_value(agent).expect("agent serializes");
     implementer["name"] = json!(workflow.implementer);
+    let plan = loaded.config.workflow_plan(&ticket.workflow)?;
+    let mut agents = std::collections::BTreeMap::new();
+    let mut seats = std::collections::BTreeMap::new();
+    for name in workflow.review.iter().filter(|_| !workflow.read_only) {
+        seats.insert(name, &loaded.config.seats[name]);
+    }
+    for node in plan.nodes.values() {
+        if let crate::plan::Runner::Agent { agent, .. } = &node.runner {
+            let settings = &loaded.config.agents[agent];
+            let harness = crate::harness::get(&settings.harness)
+                .ok_or_else(|| Fail::invalid("selected agent has no harness"))?;
+            agents.insert(agent, json!({
+                "settings": settings,
+                "runner": {"name": settings.harness, "version": harness.version()},
+                "login_name": settings.login.and_then(|_| harness.login().map(|login| login.name)),
+            }));
+        }
+    }
+    let admission = json!({
+        "status": "recorded",
+        "revision": 1,
+        "target": loaded.branch,
+        "config_head": loaded.head,
+        "workflow": workflow,
+        "plan": plan,
+        "agents": agents,
+        "seats": seats,
+        "review": if workflow.read_only { None } else { Some(&loaded.config.review) },
+        "gates": if workflow.read_only { &[][..] } else { &loaded.config.gates[..] },
+        "inputs": loaded.admission_inputs,
+        "yard_runner": {"version": env!("CARGO_PKG_VERSION"), "sha256": runner_identity()?},
+    });
     let attempt = attempts::insert(
         tx,
         ticket.id,
@@ -164,6 +196,7 @@ fn admit(
         &implementer,
         &loaded.head,
         &loaded.branch,
+        &admission,
     )?;
     let row = attempts::get(tx, attempt)?;
     super::audit_attempt(
@@ -174,6 +207,19 @@ fn admit(
         json!({ "target": loaded.branch, "base": loaded.head, "workflow": ticket.workflow, "implementer": implementer }),
     )?;
     super::supervise::start_implementation(tx, &row, "first")
+}
+
+/// The admission daemon's tool implementation identity, read once per process.
+fn runner_identity() -> Result<&'static str, Fail> {
+    use sha2::{Digest, Sha256};
+    static ID: std::sync::OnceLock<Result<String, String>> = std::sync::OnceLock::new();
+    ID.get_or_init(|| {
+        let path = std::env::current_exe().map_err(|error| error.to_string())?;
+        let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
+        Ok(crate::config::hex(&Sha256::digest(bytes)))
+    })
+    .as_deref()
+    .map_err(|error| Fail::invalid(error.clone()))
 }
 
 pub async fn status(daemon: &Daemon, project: &Project) -> Result<Value, Fail> {

@@ -12,6 +12,7 @@ pub struct Attempt {
     /// The implementer frozen at admission: `{name, harness, provider login,
     /// model, effort}`.
     pub implementer: Value,
+    pub admission: Option<Value>,
     pub base: String,
     pub head: Option<String>,
     /// The digest of the candidate's proof snapshot.
@@ -32,7 +33,7 @@ pub struct Attempt {
 
 const COLUMNS: &str =
     "id, ticket, workflow, implementer, base, head, proof, target, state, outcome,
-    lane, lane_since, work_ms, next, rounds, extra_rounds, landing_reds, target_branch";
+    lane, lane_since, work_ms, next, rounds, extra_rounds, landing_reds, target_branch, admission";
 
 fn row(row: &Row) -> rusqlite::Result<Attempt> {
     let implementer: String = row.get(3)?;
@@ -56,6 +57,18 @@ fn row(row: &Row) -> rusqlite::Result<Attempt> {
         extra_rounds: row.get(15)?,
         landing_reds: row.get(16)?,
         target_branch: row.get(17)?,
+        admission: row
+            .get::<_, Option<String>>(18)?
+            .map(|text| {
+                serde_json::from_str(&text).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        18,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })
+            })
+            .transpose()?,
     })
 }
 
@@ -66,6 +79,7 @@ impl Attempt {
             "ticket": ticket_name(self.ticket),
             "workflow": self.workflow,
             "implementer": self.implementer,
+            "admission": self.admission.clone().unwrap_or_else(|| json!({"status": "unknown"})),
             "branch": self.branch(),
             "target": self.target_branch,
             "base": self.base,
@@ -162,10 +176,11 @@ pub fn insert(
     implementer: &Value,
     base: &str,
     target_branch: &str,
+    admission: &Value,
 ) -> Result<i64, Fail> {
     tx.execute(
-        "INSERT INTO attempt (ticket, workflow, implementer, base, state, lane, lane_since, created_at, target_branch)
-         VALUES (?1, ?2, ?3, ?4, 'live', 1, ?5, ?6, ?7)",
+        "INSERT INTO attempt (ticket, workflow, implementer, base, state, lane, lane_since, created_at, target_branch, admission)
+         VALUES (?1, ?2, ?3, ?4, 'live', 1, ?5, ?6, ?7, ?8)",
         params![
             ticket,
             workflow,
@@ -173,7 +188,8 @@ pub fn insert(
             base,
             super::now_ms(),
             now(),
-            target_branch
+            target_branch,
+            admission.to_string()
         ],
     )?;
     Ok(tx.last_insert_rowid())

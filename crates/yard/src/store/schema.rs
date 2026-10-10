@@ -207,4 +207,6 @@ ALTER TABLE attempt ADD COLUMN body_read TEXT;
         OR (kind = 'landing' AND outcome IN ('red', 'conflict'));",
     "ALTER TABLE execution ADD COLUMN intent_ref TEXT;
      UPDATE execution SET intent_ref = 'refs/heads/' || (SELECT target_branch FROM attempt WHERE attempt.id = execution.attempt) WHERE intent_state IS NOT NULL;",
+    // Historical admission evidence cannot be recovered from mutable bases.
+    "ALTER TABLE attempt ADD COLUMN admission TEXT;",
 ];
