@@ -56,6 +56,8 @@ enum Command {
     Attempt(AttemptCommand),
     #[command(subcommand)]
     Proposal(ProposalCommand),
+    /// Serve trusted operator MCP on stdin and stdout.
+    Mcp,
     /// Print the version.
     Version,
 }
@@ -240,6 +242,19 @@ pub fn main(cli: Cli) -> i32 {
         .build()
         .expect("tokio runtime");
     let json = cli.json;
+    if matches!(cli.command, Command::Mcp) {
+        let result = runtime.block_on(crate::operator_mcp::serve());
+        // Stdin's blocking reader may still await bytes after stdout failed.
+        // All accepted forwards have drained before the runtime is shut down.
+        runtime.shutdown_background();
+        return match result {
+            Ok(()) => 0,
+            Err(error) => {
+                eprintln!("yard mcp: {error}");
+                1
+            }
+        };
+    }
     match runtime.block_on(dispatch(&cli)) {
         Ok(Some(result)) => {
             let text = if json {
@@ -282,7 +297,9 @@ async fn dispatch(cli: &Cli) -> Result<Option<Value>, Fail> {
         Command::Daemon(DaemonCommand::Install) => return crate::daemon::install().await.map(Some),
         Command::Daemon(DaemonCommand::Uninstall) => return crate::daemon::uninstall().map(Some),
         Command::Daemon(DaemonCommand::Restart) => return crate::daemon::restart().await.map(Some),
-        Command::Daemon(DaemonCommand::Run) | Command::Version => unreachable!("handled above"),
+        Command::Daemon(DaemonCommand::Run) | Command::Version | Command::Mcp => {
+            unreachable!("handled above")
+        }
         Command::Init => {
             let dir = std::fs::canonicalize(&start)
                 .map_err(|error| Fail::invalid(format!("{}: {error}", start.display())))?;

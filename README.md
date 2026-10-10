@@ -101,6 +101,14 @@ review, repair and landing use the frozen branch and its trusted inputs.
 The rest is in the `yard-operator` skill
 (`.agents/skills/yard-operator/SKILL.md`).
 
+`yard mcp` serves trusted operator MCP on stdio through the existing daemon
+socket. Tools cover the operations above, projects, tickets, proposals,
+attempt inspection and decisions, and bounded history and attention polls.
+Pass an absolute registered `project` path. Status omits ticket bodies;
+use `yard_ticket_show`, `yard_attempt_tail` and `yard_attempt_stats` for
+drilldowns. Cancelling a wait releases the request while work continues.
+Workers keep their separate execution-scoped HTTP grants.
+
 ## Development
 
     cargo fmt --check

@@ -424,67 +424,74 @@ async fn events(daemon: &Daemon, params: &Value) -> Result<Value, Fail> {
 async fn attention(daemon: &Daemon, params: &Value) -> Result<Value, Fail> {
     let project = project(daemon, params)?;
     let since = params["since"].as_i64();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
-    loop {
-        let notified = project.events.notified();
-        tokio::pin!(notified);
-        notified.as_mut().enable();
-        let loaded = crate::jobs::load(daemon, &project).await.ok();
-        let selected = match &loaded {
-            Some(loaded) => crate::jobs::admit::ready_configs(daemon, &project, loaded).await?,
-            None => Vec::new(),
-        };
-        let (seq, items, fresh, idle) = project.read(|conn| {
-            let seq = crate::store::last_seq(conn)?;
-            let items = crate::store::attempts::open_attention(conn)?;
-            let fresh = match since {
-                None => !items.is_empty(),
-                Some(since) => {
-                    let mut fresh = false;
-                    for item in &items {
-                        fresh |= conn.query_row(
-                            "SELECT EXISTS(SELECT 1 FROM audit WHERE event = 'attention.raised'
-                             AND attention = ?1 AND seq > ?2)",
-                            rusqlite::params![item.id, since],
-                            |row| row.get::<_, bool>(0),
-                        )?;
-                    }
-                    fresh
-                }
+    // Readiness may run git children; the poll bound covers those too.
+    let poll = async {
+        loop {
+            let notified = project.events.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let loaded = crate::jobs::load(daemon, &project).await.ok();
+            let selected = match &loaded {
+                Some(loaded) => crate::jobs::admit::ready_configs(daemon, &project, loaded).await?,
+                None => Vec::new(),
             };
-            let mut idle = items.is_empty() && crate::store::attempts::live(conn)?.is_empty();
-            if idle {
-                let Some(_) = &loaded else {
-                    return Ok((seq, items, fresh, false));
+            let (seq, items, fresh, idle) = project.read(|conn| {
+                let seq = crate::store::last_seq(conn)?;
+                let items = crate::store::attempts::open_attention(conn)?;
+                let fresh = match since {
+                    None => !items.is_empty(),
+                    Some(since) => {
+                        let mut fresh = false;
+                        for item in &items {
+                            fresh |= conn.query_row(
+                                "SELECT EXISTS(SELECT 1 FROM audit WHERE event = 'attention.raised'
+                             AND attention = ?1 AND seq > ?2)",
+                                rusqlite::params![item.id, since],
+                                |row| row.get::<_, bool>(0),
+                            )?;
+                        }
+                        fresh
+                    }
                 };
-                for ticket in crate::store::tickets::ready(conn)? {
-                    idle &= !selected
-                        .iter()
-                        .find(|(t, _)| t.id == ticket.id)
-                        .map(|(_, config)| crate::jobs::admit::admissible(conn, config, &ticket))
-                        .transpose()?
-                        .unwrap_or(false);
+                let mut idle = items.is_empty() && crate::store::attempts::live(conn)?.is_empty();
+                if idle {
+                    let Some(_) = &loaded else {
+                        return Ok((seq, items, fresh, false));
+                    };
+                    for ticket in crate::store::tickets::ready(conn)? {
+                        idle &= !selected
+                            .iter()
+                            .find(|(t, _)| t.id == ticket.id)
+                            .map(|(_, config)| {
+                                crate::jobs::admit::admissible(conn, config, &ticket)
+                            })
+                            .transpose()?
+                            .unwrap_or(false);
+                    }
                 }
-            }
-            if idle && let Some(since) = since {
-                idle = conn.query_row(
+                if idle && let Some(since) = since {
+                    idle = conn.query_row(
                     "SELECT EXISTS(SELECT 1 FROM audit WHERE event = 'attempt.ended' AND seq > ?1)",
                     [since],
                     |row| row.get::<_, bool>(0),
                 )?;
+                }
+                Ok((seq, items, fresh, idle))
+            })?;
+            if fresh || idle {
+                let items: Vec<Value> = items
+                    .iter()
+                    .map(crate::store::attempts::Attention::to_json)
+                    .collect();
+                return Ok(json!({ "seq": seq, "attention": items, "idle": idle }));
             }
-            Ok((seq, items, fresh, idle))
-        })?;
-        if fresh || idle {
-            let items: Vec<Value> = items
-                .iter()
-                .map(crate::store::attempts::Attention::to_json)
-                .collect();
-            return Ok(json!({ "seq": seq, "attention": items, "idle": idle }));
+            notified.await;
         }
-        if tokio::time::timeout_at(deadline, notified).await.is_err() {
-            return Ok(json!({ "seq": seq, "attention": [], "idle": false }));
-        }
+    };
+    match tokio::time::timeout(Duration::from_secs(25), poll).await {
+        Ok(result) => result,
+        // Incomplete reads cannot advance past attention we have not returned.
+        Err(_) => Ok(json!({"seq": since.unwrap_or(0), "attention": [], "idle": false})),
     }
 }
 

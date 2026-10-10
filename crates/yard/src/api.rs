@@ -161,7 +161,9 @@ pub async fn call(socket: &Path, method: &str, params: Value) -> Result<Value, F
     let (mut sender, connection) = hyper::client::conn::http1::handshake(io)
         .await
         .map_err(|error| Fail::new("daemon", format!("handshake: {error}")))?;
-    tokio::spawn(connection);
+    // Cancelling the caller closes its connection, including a long poll.
+    let mut connections = tokio::task::JoinSet::new();
+    connections.spawn(connection);
     let body = json!({ "method": method, "params": params }).to_string();
     let request = Request::post("/rpc")
         .header("host", "yard")
@@ -184,10 +186,19 @@ pub async fn call(socket: &Path, method: &str, params: Value) -> Result<Value, F
         Ok(envelope["result"].clone())
     } else {
         let error = &envelope["error"];
-        let code = ["refused", "invalid", "not_found", "stale", "boundary"]
-            .into_iter()
-            .find(|code| error["code"] == *code)
-            .unwrap_or("internal");
+        let code = [
+            "refused",
+            "invalid",
+            "not_found",
+            "stale",
+            "boundary",
+            "daemon",
+            "image",
+            "internal",
+        ]
+        .into_iter()
+        .find(|code| error["code"] == *code)
+        .unwrap_or("internal");
         Err(Fail {
             code,
             message: error["message"].as_str().unwrap_or_default().to_string(),

@@ -9,7 +9,7 @@
 pub mod model;
 
 pub use model::*;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -254,6 +254,25 @@ impl Machine {
             .stdin(Stdio::null())
             .output()
             .expect("run yard")
+    }
+
+    /// A real trusted stdio MCP process, using this machine's isolated socket.
+    pub fn operator(&self) -> Operator {
+        let mut child = self
+            .command()
+            .arg("mcp")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let input = child.stdin.take().unwrap();
+        let output = lines(child.stdout.take().unwrap());
+        Operator {
+            child,
+            input: Some(input),
+            output,
+            next: 0,
+        }
     }
 
     /// Run `yard ARGS --json` in `dir`, assert it succeeded and parse it.
@@ -943,4 +962,97 @@ fn lines(stdout: std::process::ChildStdout) -> mpsc::Receiver<String> {
         }
     });
     receive
+}
+
+/// Newline JSON-RPC over the real operator process's pipes.
+pub struct Operator {
+    child: Child,
+    input: Option<std::process::ChildStdin>,
+    output: mpsc::Receiver<String>,
+    next: i64,
+}
+
+impl Operator {
+    pub fn send(&mut self, method: &str, params: Value) -> i64 {
+        self.next += 1;
+        self.notify_value(json!({"jsonrpc": "2.0", "id": self.next,
+                                 "method": method, "params": params}));
+        self.next
+    }
+
+    pub fn notify(&mut self, method: &str, params: Value) {
+        self.notify_value(json!({"jsonrpc": "2.0", "method": method, "params": params}));
+    }
+
+    fn notify_value(&mut self, value: Value) {
+        use std::io::Write;
+        let input = self.input.as_mut().expect("operator input open");
+        writeln!(input, "{value}").unwrap();
+        input.flush().unwrap();
+    }
+
+    pub fn receive(&mut self, id: i64) -> Value {
+        let response = self.receive_frame();
+        assert_eq!(response["id"], id, "{response}");
+        response
+    }
+
+    pub fn receive_frame(&mut self) -> Value {
+        let line = self
+            .output
+            .recv_timeout(DEADLINE)
+            .expect("operator response");
+        let response: Value = serde_json::from_str(&line).unwrap();
+        response
+    }
+
+    pub fn call(&mut self, name: &str, arguments: Value) -> Value {
+        let id = self.send("tools/call", json!({"name": name, "arguments": arguments}));
+        let response = self.receive(id);
+        assert!(response.get("error").is_none(), "{response}");
+        response["result"]["structuredContent"].clone()
+    }
+
+    pub fn initialize(&mut self) {
+        let id = self.send(
+            "initialize",
+            json!({"protocolVersion": "2025-06-18",
+            "capabilities": {}, "clientInfo": {"name": "e2e", "version": "1"}}),
+        );
+        let response = self.receive(id);
+        assert!(response.get("error").is_none(), "{response}");
+        self.notify("notifications/initialized", json!({}));
+    }
+
+    /// Close only stdin and observe process exit; the deadline is a failure.
+    pub fn close_input(&mut self) -> std::process::ExitStatus {
+        self.input.take();
+        loop {
+            match self.output.recv_timeout(DEADLINE) {
+                Ok(_) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    panic!("operator did not exit after stdin EOF")
+                }
+            }
+        }
+        self.child.wait().expect("wait for operator")
+    }
+
+    /// A malformed transport frame, through the same real input pipe.
+    pub fn oversized_frame(&mut self) {
+        use std::io::Write;
+        self.input
+            .as_mut()
+            .expect("operator input open")
+            .write_all(&vec![b'x'; 1024 * 1024 + 1])
+            .unwrap();
+    }
+}
+
+impl Drop for Operator {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
