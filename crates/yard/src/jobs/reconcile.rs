@@ -17,6 +17,21 @@ pub async fn project(daemon: &Daemon, project: &Project) -> Result<(), Fail> {
             "UPDATE attempt SET target_branch = ?1 WHERE target_branch IS NULL AND state = 'live'",
             [&branch],
         )?;
+        // Legacy candidate items must keep their override exit after backfill.
+        for attempt in attempts::live(tx)? {
+            for item in attempts::open_for_attempt(tx, attempt.id)? {
+                if (item.kind == "approval" || (item.kind == "stopped" && item.reason == "limit"))
+                    && item.payload.get("target").is_none()
+                {
+                    let mut payload = item.payload;
+                    payload["target"] = json!(attempt.target_branch()?);
+                    tx.execute(
+                        "UPDATE attention SET payload = ?2 WHERE id = ?1",
+                        rusqlite::params![item.id, payload.to_string()],
+                    )?;
+                }
+            }
+        }
         Ok(())
     })?;
     // The old daemon's boxes: their `up` lost its stdin with the daemon.

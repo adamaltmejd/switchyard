@@ -54,6 +54,10 @@ fn depends_on(project: &Project, ticket: i64) -> Vec<i64> {
 /// edit applies and overwrites the plan. Or make `admit::resolve_reference`
 /// resolve a key from any execution's proposals; the later B's edge names
 /// the first plan's A.
+/// Or classify proposals with the default config: main's plan is writable
+/// and write is read-only, the reverse of feature/a. The planner loses its
+/// child edges or the writable worker gains one.
+/// Or copy the parent target to a proposed child; its override is not absent.
 #[test]
 fn a_plan_proposes_children_that_block_it() {
     let answers = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -63,9 +67,12 @@ fn a_plan_proposes_children_that_block_it() {
     let machine = Machine::new("g15-plan", move |request| {
         if request.prompt().contains("Write here") {
             if request.opens() {
-                return Reply::Tools(vec![bash(&format!(
-                    "{probe}; git add -A && git commit -q -m 'Add planted' && echo committed"
-                ))]);
+                return Reply::Tools(vec![
+                    bash(&format!(
+                        "{probe}; git add -A && git commit -q -m 'Add planted' && echo committed"
+                    )),
+                    propose(json!({ "kind": "ticket", "title": "Writable child", "parked": true })),
+                ]);
             }
             seen.lock()
                 .unwrap()
@@ -104,17 +111,26 @@ fn a_plan_proposes_children_that_block_it() {
         }
     });
     machine.start();
-    let project = Project::new(
-        &machine,
-        "p",
-        &config("[workflows.write]\nreview = \"none\"\n"),
-    );
+    let feature = config("[workflows.write]\nreview = \"none\"\n");
+    let main = feature
+        .replace("access = \"read-only\"", "access = \"write\"")
+        .replace(
+            "[workflows.write]",
+            "[workflows.write]\naccess = \"read-only\"",
+        );
+    let project = Project::new(&machine, "p", &main);
+    project.git(&["checkout", "--quiet", "-b", "feature/a"]);
+    project.write(".yard/config.toml", &feature);
+    project.git(&["commit", "--quiet", "-am", "Feature workflows"]);
+    project.json(&["sync", "feature/a"]);
     let mut watch = project.watch(0);
     project.json(&[
         "ticket",
         "new",
         "--title",
         "Plan the release",
+        "--target",
+        "feature/a",
         "--workflow",
         "plan",
     ]);
@@ -123,6 +139,8 @@ fn a_plan_proposes_children_that_block_it() {
         "new",
         "--title",
         "Write here",
+        "--target",
+        "feature/a",
         "--workflow",
         "write",
         "--depends-on",
@@ -203,6 +221,8 @@ fn a_plan_proposes_children_that_block_it() {
         "new",
         "--title",
         "Plan more",
+        "--target",
+        "feature/a",
         "--workflow",
         "plan",
     ]);
@@ -270,12 +290,25 @@ fn a_plan_proposes_children_that_block_it() {
     assert_eq!(admitted["ticket"], "Y-2");
 
     let approval = watch.until("Y-2 approval", |event| {
-        event["event"] == "attention.raised" && event["ticket"] == "Y-2"
+        event["event"] == "attention.raised"
+            && event["ticket"] == "Y-2"
+            && event["data"]["kind"] == "approval"
     });
     assert_eq!(approval["data"]["kind"], "approval", "{approval}");
     let control = answers.lock().unwrap()[1].clone();
     assert!(control.contains("mounted"), "{control}");
     assert!(control.contains("write=0"), "{control}");
+
+    let writable = proposals(&project)
+        .into_iter()
+        .find(|(_, payload)| payload["title"] == "Writable child")
+        .unwrap()
+        .0;
+    let child = project.json(&["proposal", "accept", &writable.to_string()]);
+    assert_eq!(depends_on(&project, 2), [1]);
+    assert!(
+        project.json(&["ticket", "show", child["ticket"].as_str().unwrap()])["target"].is_null()
+    );
 
     // A waiting attempt is live even with no execution running. Sabotage:
     // key admit::ticket_close on running executions; this close succeeds.

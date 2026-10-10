@@ -1510,6 +1510,22 @@ pub async fn proposal_answer(
     } else {
         None
     };
+    let proposing_config = if needs_config {
+        let attempt = project.read(|conn| {
+            attempts::attention(conn, id)?
+                .attempt
+                .map(|id| attempts::get(conn, id))
+                .transpose()
+        })?;
+        match attempt {
+            Some(attempt) => {
+                Some(super::load_target(daemon, project, attempt.target_branch()?).await?)
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
     let mut stops = Vec::new();
     let minted = project.tx(|tx| {
         let item = attempts::attention(tx, id)?;
@@ -1560,7 +1576,9 @@ pub async fn proposal_answer(
                     .map(|attempt| attempts::get(tx, attempt))
                     .transpose()?
                     .is_some_and(|attempt| {
-                        loaded
+                        proposing_config
+                            .as_ref()
+                            .expect("a proposing attempt reads its target configuration")
                             .config
                             .workflow(&attempt.workflow)
                             .is_ok_and(|workflow| workflow.read_only)

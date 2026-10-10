@@ -259,7 +259,10 @@ it has no live attempt, and no open proposal blocks it.
 **Planning** is a workflow, not a kind: a ticket on a workflow whose
 `access` is `read-only` (the scaffold names one `plan`) runs a worker that
 changes no code and instead proposes child tickets and an edit to its own
-body. Accepting a child adds the `parent depends_on child` edge; accepting
+body. Acceptance classifies the proposing attempt through its frozen
+target's current config. A new child's omitted target uses the project
+default at admission. Accepting a planner's child adds the
+`parent depends_on child` edge; accepting
 the edit makes the body the plan. Once the children are done the operator
 either closes the ticket with `yard ticket done` or moves it to an
 implementing workflow and starts it. An execution on a read-only workflow
@@ -480,7 +483,11 @@ The events, each naming its ticket, attempt, execution or attention target:
 Tables: `ticket`, `dependency`, `attempt`, `execution`, `check`, `finding`,
 `approval`, `attention`, `audit`. Findings, proposals and decision text are
 rows and survive cleanup. Forward
-migrations only; a store from a newer schema is refused.
+migrations only; a store from a newer schema is refused. Reconciliation
+backfills an old live attempt's target from the former single-target HEAD
+and adds that known target to its open approval and stopped-limit candidate
+identities when absent. Other identity fields stay unchanged. Unknown ended
+history keeps no target.
 
 Files live outside the clone while an attempt is live, under
 `.yard/local/attempts/<id>/`: transcripts, gate logs, harness state, the
@@ -831,7 +838,7 @@ G15. Each is shown by one or more end-to-end scenarios; testing policy is in
 | 12 | Boxes hold nothing secret | The key is absent from the box's environment and clone; the fixture behind the injecting route receives it. The direct Anthropic Claude API key is absent from the seat environment, files and clone; the host fixture receives `x-api-key` and `anthropic-version: 2023-06-01` on messages for `claude-opus-5-5`. The claude token is absent from the box's environment, files and clone; the fixture behind the login route receives it as `Authorization: Bearer`. The codex host login is absent from the box's environment, files and clone; the fixture behind the login route receives it as `Authorization: Bearer` with `ChatGPT-Account-ID`. |
 | 13 | Every gate and seat runs where its row says | A seat that writes to `/workspace` fails and the head is unchanged. A gate box and a seat read the candidate's proof snapshot at `/yard/proof` and their writes there fail; control: the implementer wrote the live proof. A gate box that calls the model or MCP route gets nothing, and an ignored file the implementer left is absent from its checkout; control: the worker box reaches the route. A host candidate gate runs on the head before any review and sees `YARD_BASE`, `YARD_PROOF`, the snapshot it judges, and only the variables its `env` names; a host landing gate runs on the merged ref, reads the approved candidate's proof snapshot and never for a candidate whose approval was superseded, even by an edit while its landing merges. |
 | 14 | Worker git is untrusted, and Yard stays local | A worker that plants `core.fsmonitor`, a hook, a clean filter and a remote in its clone, corrupts an object and links its harness's models file to a host path: none of them acts on the host, canonical's objects are intact, the candidate is refused by name. A worker that leaves a symlink in `/yard/proof` is refused by name and no gate runs; a regular file is accepted. Across G7's path every request the model's fixture receives came through the model route, and the daemon listens on its unix socket and the MCP listener only. |
-| 15 | Plans and proposals resolve | A ticket on `plan`: its clone refuses writes, it proposes children and a body edit, and the attempt ends with nothing raised; accepting them blocks the parent, which the scheduler does not start once they are done; `yard ticket done` then closes it and its dependents become ready. Closing a ticket with a live attempt is refused. One execution proposing A and B, B depending on A: accepting both mints A first and B's edge names it. |
+| 15 | Plans and proposals resolve | Main and feature/a declare opposite access for the same workflow names. A feature/a ticket on `plan`: its clone refuses writes, it proposes children and a body edit, and the attempt ends with nothing raised; accepting them blocks the parent, which the scheduler does not start once they are done; `yard ticket done` then closes it and its dependents become ready. A writable feature/a parent gains no automatic child edge despite the default's read-only workflow; its accepted child keeps an omitted target for future default resolution. Closing a ticket with a live attempt is refused. One execution proposing A and B, B depending on A: accepting both mints A first and B's edge names it. |
 
 ## Code
 
