@@ -24,6 +24,8 @@ pub fn dir(project: &Project, row: &executions::Execution) -> PathBuf {
     }
 }
 
+// Callers acquire target locks inside work, after reserving capacity. Holding
+// a target while waiting for a slot can deadlock a reserved box launch.
 pub async fn effect<T>(
     daemon: &Daemon,
     project: &Project,

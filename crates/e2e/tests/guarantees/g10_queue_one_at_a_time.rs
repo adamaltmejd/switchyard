@@ -675,10 +675,10 @@ impl Drop for HeldModel {
     }
 }
 
-fn hold_feature_a(machine: &Machine) -> HeldTarget {
-    let armed = machine.root.join("armed");
-    let said = machine.root.join("said");
-    let release = machine.root.join("release");
+fn held_effect(machine: &Machine, name: &str) -> HeldTarget {
+    let armed = machine.root.join(format!("{name}-armed"));
+    let said = machine.root.join(format!("{name}-said"));
+    let release = machine.root.join(format!("{name}-release"));
     for path in [&said, &release] {
         assert!(
             std::process::Command::new("mkfifo")
@@ -688,10 +688,6 @@ fn hold_feature_a(machine: &Machine) -> HeldTarget {
                 .success()
         );
     }
-    machine.wrapper("git", &format!(
-        "case \" $* \" in *' update-ref --no-deref refs/heads/feature/a '*) if [ -e '{}' ]; then echo held > '{}'; read line < '{}'; fi;; esac",
-        armed.display(), said.display(), release.display()
-    ));
     let release = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -702,6 +698,15 @@ fn hold_feature_a(machine: &Machine) -> HeldTarget {
         said,
         release,
     }
+}
+
+fn hold_feature_a(machine: &Machine) -> HeldTarget {
+    let held = held_effect(machine, "target");
+    machine.wrapper("git", &format!(
+        "case \" $* \" in *' update-ref --no-deref refs/heads/feature/a '*) if [ -e '{}' ]; then echo held > '{}'; read line < '{}'; fi;; esac",
+        held.armed.display(), held.said.display(), machine.root.join("target-release").display()
+    ));
+    held
 }
 
 /// G10/G3: hold feature/a after intent, while b lands and the second a waits.
@@ -874,7 +879,9 @@ fn independent_target_landings_share_the_project_execution_cap() {
         vec![json!({"kind": "landing", "intent_ref": "refs/heads/feature/a"})]
     );
     assert!(machine.boxes(&label).is_empty());
-    // Cancel the new worker so only the three approved targets compete next.
+    // Park before abandonment so this ticket cannot be readmitted. The
+    // same-target worker/landing overlap is held explicitly in the next case.
+    project.json(&["ticket", "park", "Y-4"]);
     project.json(&["attempt", "abandon", "Y-4"]);
     held.release();
     for id in 1..=3 {
@@ -882,5 +889,144 @@ fn independent_target_landings_share_the_project_execution_cap() {
             event["event"] == "landing.recorded" && event["ticket"] == format!("Y-{id}")
         });
         assert_eq!(target_head(&project, branches[id - 1]), heads[id - 1]);
+    }
+}
+
+/// G4/G10: two real held effects drain after the live cap is lowered to one.
+/// A landing gate holds one slot; a same-target worker's clone holds the other.
+/// Releasing the gate makes final landing wait for capacity. Releasing the
+/// clone must let the worker launch, finish and free the slot for landing.
+/// Sabotage: take the final landing target lock before capacity::effect;
+/// the reserved worker cannot launch and neither positive control completes.
+/// Git supplies the target heads; the fixture supplies held-child identities
+/// and model actions. This forces the lock cycle instead of racing admission.
+#[test]
+fn same_target_worker_and_landing_drain_at_one_slot() {
+    let model_hold = Latch::new();
+    let worker_hold = model_hold.clone();
+    let machine = Machine::new("g4-target-drain", move |request| {
+        let reply = target_worker(request);
+        if request.opens() && request.prompt().contains("Candidate 1") {
+            Reply::Hold(worker_hold.clone(), Box::new(reply))
+        } else {
+            reply
+        }
+    });
+    let gate = held_effect(&machine, "gate");
+    let clone = held_effect(&machine, "clone");
+    machine.wrapper("git", &format!(
+        "case \" $* \" in *' clone '*) if [ -e '{}' ]; then echo held > '{}'; read line < '{}'; fi;; esac",
+        clone.armed.display(), clone.said.display(), machine.root.join("clone-release").display()
+    ));
+    let gates = format!(
+        "[gates.held]\nstage = \"landing\"\nruns_in = \"host\"\ncommand = \"if [ -e '{}' ]; then echo held > '{}'; read line < '{}'; fi\"\n",
+        gate.armed.display(),
+        gate.said.display(),
+        machine.root.join("gate-release").display()
+    );
+    let configured =
+        unreviewed(&gates).replace("max_lanes = 2", "max_lanes = 2\nmax_executions = 2");
+    machine.start();
+    let project = Project::new(&machine, "p", &configured);
+    let mut watch = project.watch(0);
+    let head = target_candidates(&project, &mut watch, &["feature/a"]).remove(0);
+    let old = target_head(&project, "feature/a");
+    std::fs::write(&gate.armed, "").unwrap();
+    project.json(&[
+        "attempt",
+        "approve",
+        "--target",
+        "feature/a",
+        "Y-1",
+        "--head",
+        &head,
+    ]);
+    assert_eq!(watch.said(&gate.said), "held\n");
+    std::fs::write(&clone.armed, "").unwrap();
+    project.json(&[
+        "ticket",
+        "new",
+        "--title",
+        "Candidate 1",
+        "--target",
+        "feature/a",
+    ]);
+    assert_eq!(watch.said(&clone.said), "held\n");
+    let owners = project.rows(
+        "SELECT execution.kind, attempt.target_branch, execution.handle FROM execution JOIN attempt ON attempt.id = execution.attempt WHERE reserved = 1 ORDER BY execution.kind",
+    );
+    assert_eq!(owners.len(), 2, "{owners:?}");
+    assert_eq!(owners[0]["kind"], "gate");
+    assert_eq!(
+        owners[1],
+        json!({"kind": "implementation", "target_branch": "feature/a", "handle": null})
+    );
+    assert_eq!(owners[0]["target_branch"], "feature/a");
+    project.reconfigure(&configured.replace("max_executions = 2", "max_executions = 1"));
+    gate.release();
+    let waiting = watch.find("final landing waits for the worker slot", |event| {
+        event["event"] == "execution.waiting" && event["ticket"] == "Y-1"
+    });
+    assert_eq!(waiting["data"]["reason"], "capacity");
+    assert_eq!(target_head(&project, "feature/a"), old);
+    assert_eq!(
+        project.rows("SELECT intent_ref FROM execution WHERE kind = 'landing'"),
+        vec![json!({"intent_ref": null})]
+    );
+    let _release = HeldModel(model_hold.clone());
+    clone.release();
+    model_hold.wait_held();
+    let owners = project.rows(
+        "SELECT execution.kind, attempt.ticket, execution.handle FROM execution JOIN attempt ON attempt.id = execution.attempt WHERE reserved = 1",
+    );
+    assert_eq!(owners.len(), 1, "{owners:?}");
+    assert_eq!(owners[0]["kind"], "implementation");
+    assert_eq!(owners[0]["ticket"], 2);
+    assert!(
+        machine
+            .boxes("dev.yard.project")
+            .iter()
+            .any(|listed| listed["name"] == owners[0]["handle"])
+    );
+    assert_eq!(target_head(&project, "feature/a"), old);
+    model_hold.release();
+    approval_of(&mut watch, "Y-2");
+    let attempt = project.rows("SELECT id FROM attempt WHERE ticket = 2")[0]["id"]
+        .as_i64()
+        .unwrap();
+    let second = git(
+        &project
+            .path
+            .join(format!(".yard/local/attempts/{attempt}/clone")),
+        &["rev-parse", "HEAD"],
+    )
+    .trim()
+    .to_string();
+    watch.find("first target lands after worker drainage", |event| {
+        event["event"] == "landing.recorded" && event["ticket"] == "Y-1"
+    });
+    assert_eq!(target_head(&project, "feature/a"), head);
+    project.json(&[
+        "attempt",
+        "approve",
+        "--target",
+        "feature/a",
+        "Y-2",
+        "--head",
+        &second,
+    ]);
+    watch.find("same-target worker candidate lands", |event| {
+        event["event"] == "landing.recorded" && event["ticket"] == "Y-2"
+    });
+    for candidate in [&head, &second] {
+        git(
+            &project.canonical(),
+            &[
+                "merge-base",
+                "--is-ancestor",
+                candidate,
+                "refs/heads/feature/a",
+            ],
+        );
     }
 }

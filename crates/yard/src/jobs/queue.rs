@@ -526,9 +526,12 @@ pub async fn land(
         }
     }
 
-    let held = target_lock.lock().await;
+    // Keep target serialization through the effect's ownership proof, but
+    // never hold the target while waiting for an execution slot.
+    let mut held = None;
     let result = super::capacity::effect(daemon, project, execution, async {
-        let admitted = admit(daemon, project, &held, approval.id, execution, |tx, now| {
+        let held = held.insert(target_lock.lock().await);
+        let admitted = admit(daemon, project, held, approval.id, execution, |tx, now| {
             executions::set_intent(
                 tx,
                 execution,
@@ -562,8 +565,8 @@ pub async fn land(
         match moved {
             Ok(false) => {
                 let published = project.canonical.lock().await;
-                let _ = super::publish_default(daemon, project, &published, &loaded.branch, &held)
-                    .await;
+                let _ =
+                    super::publish_default(daemon, project, &published, &loaded.branch, held).await;
                 // The target moved under the landing: retired silently, re-queued.
                 return project.tx(|tx| {
                     executions::resolve_intent(tx, execution)?;
@@ -595,7 +598,7 @@ pub async fn land(
             ));
         }
         let published = project.canonical.lock().await;
-        let _ = super::publish_default(daemon, project, &published, &loaded.branch, &held).await;
+        let _ = super::publish_default(daemon, project, &published, &loaded.branch, held).await;
         project.tx(|tx| record_landing(tx, execution))
     })
     .await;
