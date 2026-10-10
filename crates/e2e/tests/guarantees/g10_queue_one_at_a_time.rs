@@ -32,15 +32,6 @@ fn next_approval_of(watch: &mut Watch, ticket: &str) -> String {
     head(watch.until(ticket, |event| is_approval(event, ticket)))
 }
 
-/// Merge the target from the repair's bundle, keeping this side of any
-/// conflict.
-fn merge_target() -> ToolCall {
-    bash(
-        "cd /workspace && git fetch -q /yard/input/target.bundle refs/heads/main \
-         && git merge -q -X ours --no-edit FETCH_HEAD && echo merged",
-    )
-}
-
 /// Two approved candidates, the second red on its merged ref: the first
 /// lands, the second gets one repair and a second red raises `red`. No two
 /// landings overlap.
@@ -81,11 +72,15 @@ fn the_queue_lands_in_order_and_rejudges_a_red_merge() {
         .map(|ticket| approval_of(&mut watch, ticket))
         .collect();
     for (ticket, head) in ["Y-1", "Y-2"].iter().zip(&heads) {
-        project.json(&["attempt", "approve", ticket, "--head", head]);
+        project.json(&[
+            "attempt", "approve", "--target", "main", ticket, "--head", head,
+        ]);
     }
 
     let again = next_approval_of(&mut watch, "Y-2");
-    project.json(&["attempt", "approve", "Y-2", "--head", &again]);
+    project.json(&[
+        "attempt", "approve", "--target", "main", "Y-2", "--head", &again,
+    ]);
     // The second red raises `red` before anything else starts on Y-2.
     let red = watch.until("Y-2 red or a repair", |event| {
         event["ticket"] == "Y-2"
@@ -139,67 +134,190 @@ fn the_queue_lands_in_order_and_rejudges_a_red_merge() {
     }
 }
 
-/// A conflict against a target that changed `.yard/config.toml`, in a clone
-/// made before it: the worker fetches the target from its bundle, merges,
-/// and the new candidate's base is the target, so it passes the `.yard`
-/// refusal and lands with the operator's configuration intact. The repair
-/// names the conflicting path and takes fresh gates, review and approval.
-/// The old approval is retired; the repair cannot land before its new
-/// approval, whose successful landing is the control for G2.
+/// G2/G9/G10: main first warms the default inputs. A feature attempt then
+/// starts at feature/a, despite its config declaring main. A missing target
+/// creates no attempt; a revision-bound inactive edit supplies the control.
+/// While the feature worker is held, target edits are refused by identity.
+/// After approval, a conflicting operator commit supplies new feature gates
+/// and image bytes. Repair must fetch feature/a's bundle, rebase its candidate
+/// identity and take fresh branch judgments before it lands there.
 ///
-/// Sabotage: keep the old base after the target becomes an ancestor; the
-/// merged candidate touches `.yard` and is refused. Drop conflicting paths
-/// from `queue::land`'s detail; the prompt omits `shared.txt`. Keep the old
-/// approval active in `queue::returned`; the retirement assertion fails.
+/// Git commits, image marker files and host gate counters supply expected
+/// values. Sabotage: use canonical HEAD for admission/landing, default
+/// config/image inputs for the feature, main's repair bundle, or accept a
+/// same-head approval naming main. Keep the old base, omit conflict paths,
+/// or carry the retired approval into the repair. Existing G11 covers default switching
+/// under a held default-bound execution and named sync's isolation.
 #[test]
-fn a_conflict_with_a_config_change_merges_from_the_bundle() {
-    let machine = Machine::new("g10-config", |request| {
+fn a_ticket_binds_feature_inputs_repairs_and_lands_on_its_target() {
+    let hold = Latch::new();
+    let held = hold.clone();
+    let machine = Machine::new("g10-target", move |request| {
         if request.has_tool("yard_publish_review") {
             return act(request, vec![publish(json!([]))]);
         }
         if request.opens() && request.last_user().contains("failed to land") {
-            return Reply::Tools(vec![merge_target()]);
+            return Reply::Tools(vec![bash(
+                "cd /workspace && git fetch -q /yard/input/target.bundle refs/heads/feature/a \
+                 && git merge -q -X ours --no-edit FETCH_HEAD && echo merged",
+            )]);
+        }
+        if request.opens() && request.prompt().contains("Feature target") {
+            return Reply::Hold(
+                held.clone(),
+                Box::new(Reply::Tools(vec![commit_file(
+                    "shared.txt",
+                    "worker\n",
+                    "Feature work",
+                )])),
+            );
         }
         act(
             request,
-            vec![commit_file("shared.txt", "worker\n", "Write shared")],
+            vec![commit_file("main.txt", "main work\n", "Main work")],
         )
     });
     machine.start();
-    let base = config(
-        "[gates.check]\ncommand = \"test -f shared.txt\"\nstage = \"candidate\"\nruns_in = \"host\"\n",
+    let counter = machine.root.join("gate-inputs");
+    let configured = |marker: &str| {
+        let command = format!("printf '%s\\n' {marker} >> '{}'", counter.display());
+        config(&format!(
+            "[gates.counter]\ncommand = {}\nstage = \"candidate\"\nruns_in = \"host\"\n\n\
+             [gates.image]\ncommand = \"test $(cat /target-input) = {marker}\"\nstage = \"candidate\"\n",
+            serde_json::to_string(&command).unwrap(),
+        )).replace("Review for correctness.", marker)
+    };
+    let project = Project::new(&machine, "p", &configured("main"));
+    let dockerfile = project.git(&["show", "HEAD:.yard/Dockerfile"]);
+    project.write(
+        ".yard/Dockerfile",
+        &format!("{dockerfile}RUN echo main > /target-input\n"),
     );
-    let project = Project::new(&machine, "p", &base);
-    let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Write shared"]);
-    let head = approval_of(&mut watch, "Y-1");
-
-    // The operator's conflicting change, with a configuration change beside it.
-    let configured = base.replace("max_rounds = 3", "max_rounds = 4");
-    project.write("shared.txt", "operator\n");
-    project.write(".yard/config.toml", &configured);
-    project.git(&["add", "-A"]);
-    project.git(&["commit", "--quiet", "-m", "Operator change"]);
+    project.git(&["commit", "--quiet", "-am", "Main image"]);
     project.json(&["sync"]);
-    let target = project.canonical_head();
+    let mut watch = project.watch(0);
+    project.json(&["ticket", "new", "--title", "Main target"]);
+    let main_head = approval_of(&mut watch, "Y-1");
+    project.json(&[
+        "attempt", "approve", "Y-1", "--target", "main", "--head", &main_head,
+    ]);
+    watch.event("landing.recorded", &[]);
+    let main = project.canonical_head();
+    project.json(&["sync"]);
 
-    project.json(&["attempt", "approve", "Y-1", "--head", &head]);
-    let repair = watch.until("Y-1's repair ended", |event| {
-        event["event"] == "execution.ended"
-            && event["ticket"] == "Y-1"
-            && event["data"]["kind"] == "implementation"
-    });
-    assert_eq!(repair["data"]["outcome"], "candidate", "{repair}");
-    let repaired = next_approval_of(&mut watch, "Y-1");
-    assert_ne!(repaired, head);
-    assert_eq!(
-        git(
-            &project.canonical(),
-            &["rev-parse", &format!("{repaired}^")]
-        )
-        .trim(),
-        head
+    project.git(&["checkout", "--quiet", "-b", "feature/a"]);
+    project.write("shared.txt", "base\n");
+    project.write(".yard/config.toml", &configured("feature-v1"));
+    project.write(
+        ".yard/Dockerfile",
+        &format!("{dockerfile}RUN echo feature-v1 > /target-input\n"),
     );
+    project.git(&["add", "-A"]);
+    project.git(&["commit", "--quiet", "-m", "Feature inputs"]);
+    let base = project.git(&["rev-parse", "HEAD"]).trim().to_string();
+    project.json(&["sync", "feature/a"]);
+    project.json(&[
+        "ticket",
+        "new",
+        "--title",
+        "Feature target",
+        "--target",
+        "missing",
+    ]);
+    let missing = project.refused(&["attempt", "start", "Y-2"]);
+    assert_eq!(missing["code"], "refused");
+    assert_eq!(
+        missing["data"],
+        json!({ "reason": "missing_target", "target": "missing" })
+    );
+    assert!(
+        project
+            .rows("SELECT id FROM attempt WHERE ticket = 2")
+            .is_empty()
+    );
+    let stale = project.refused(&[
+        "ticket",
+        "edit",
+        "Y-2",
+        "--revision",
+        "0",
+        "--target",
+        "feature/a",
+    ]);
+    assert_eq!(stale["code"], "stale");
+    assert_eq!(stale["data"], json!({ "expected": 0, "current": 1 }));
+    project.json(&[
+        "ticket",
+        "edit",
+        "Y-2",
+        "--revision",
+        "1",
+        "--target",
+        "feature/a",
+    ]);
+    hold.wait_held();
+    assert_eq!(
+        project.rows("SELECT target_branch, base FROM attempt WHERE ticket = 2"),
+        vec![json!({ "target_branch": "feature/a", "base": base })]
+    );
+    let live = project.refused(&[
+        "ticket",
+        "edit",
+        "Y-2",
+        "--revision",
+        "2",
+        "--target",
+        "main",
+    ]);
+    assert_eq!(live["code"], "refused");
+    let attempt_id = project.rows("SELECT id FROM attempt WHERE ticket = 2")[0]["id"].clone();
+    assert_eq!(
+        live["data"],
+        json!({ "reason": "live_target", "attempt": attempt_id, "target": "feature/a" })
+    );
+    assert_eq!(
+        project.rows("SELECT revision, target_branch FROM ticket WHERE id = 2"),
+        vec![json!({ "revision": 2, "target_branch": "feature/a" })]
+    );
+    hold.release();
+    let first = approval_of(&mut watch, "Y-2");
+    assert_eq!(
+        git(&project.canonical(), &["rev-parse", &format!("{first}^")]).trim(),
+        base
+    );
+    let approvals = project.rows("SELECT * FROM approval");
+    let stale = project.refused(&[
+        "attempt", "approve", "Y-2", "--target", "main", "--head", &first,
+    ]);
+    assert_eq!(stale["code"], "stale");
+    assert_eq!(
+        stale["data"],
+        json!({ "expected": "main", "current": "feature/a" })
+    );
+    assert_eq!(project.rows("SELECT * FROM approval"), approvals);
+
+    // The synced inputs supersede judgments before the conflict is attempted.
+    project.write("shared.txt", "operator\n");
+    project.write(".yard/config.toml", &configured("feature-v2"));
+    project.write(
+        ".yard/Dockerfile",
+        &format!("{dockerfile}RUN echo feature-v2 > /target-input\n"),
+    );
+    project.git(&["commit", "--quiet", "-am", "Conflict and feature inputs"]);
+    let target = project.git(&["rev-parse", "HEAD"]).trim().to_string();
+    project.json(&["sync", "feature/a"]);
+    assert_eq!(next_approval_of(&mut watch, "Y-2"), first);
+    project.json(&[
+        "attempt",
+        "approve",
+        "Y-2",
+        "--target",
+        "feature/a",
+        "--head",
+        &first,
+    ]);
+    let repaired = next_approval_of(&mut watch, "Y-2");
+    assert_ne!(repaired, first);
     let repair_prompt = machine
         .model
         .requests()
@@ -209,41 +327,78 @@ fn a_conflict_with_a_config_change_merges_from_the_bundle() {
         .last_user();
     assert!(repair_prompt.contains("shared.txt"), "{repair_prompt}");
     assert_eq!(
-        project.rows(&format!("SELECT kind FROM execution WHERE head = '{repaired}' AND kind IN ('gate', 'review') ORDER BY id")),
-        vec![json!({ "kind": "gate" }), json!({ "kind": "review" })]
-    );
-    // The old approval cannot carry to the repaired commit; the renewed
-    // approval item has not been answered and nothing has landed.
-    assert_eq!(
-        project.rows("SELECT head, state FROM approval ORDER BY id"),
-        vec![json!({ "head": head, "state": "retired" })]
+        project.rows("SELECT target_branch, base, head FROM attempt WHERE ticket = 2"),
+        vec![json!({ "target_branch": "feature/a", "base": target, "head": repaired })]
     );
     assert_eq!(
-        project.rows("SELECT head, outcome FROM execution WHERE kind = 'landing' ORDER BY id"),
-        vec![json!({ "head": head, "outcome": "conflict" })]
+        project.rows("SELECT state FROM approval WHERE attempt = 2"),
+        vec![json!({ "state": "retired" })]
     );
-    assert_eq!(project.canonical_head(), target);
-    let attempt = project.json(&["attempt", "show", "Y-1"]);
-    assert_eq!(attempt["attempt"]["base"], target.as_str(), "{attempt}");
-
-    project.json(&["attempt", "approve", "Y-1", "--head", &repaired]);
-    let landed = watch.until("Y-1 landing or refusal", |event| {
-        event["ticket"] == "Y-1"
-            && (event["event"] == "landing.recorded" || event["event"] == "attention.raised")
+    // The repair alone cannot land; its new exact candidate still awaits approval.
+    assert_eq!(
+        git(&project.canonical(), &["rev-parse", "refs/heads/feature/a"]).trim(),
+        target
+    );
+    project.json(&[
+        "attempt",
+        "approve",
+        "Y-2",
+        "--target",
+        "feature/a",
+        "--head",
+        &repaired,
+    ]);
+    let landed = watch.until("feature landing", |event| {
+        event["event"] == "landing.recorded" && event["ticket"] == "Y-2"
     });
-    assert_eq!(landed["event"], "landing.recorded", "{landed}");
+    assert_eq!(landed["data"]["target"], "feature/a");
     assert_eq!(
-        git(
-            &project.canonical(),
-            &["show", "refs/heads/main:.yard/config.toml"]
-        ),
-        configured
+        git(&project.canonical(), &["rev-parse", "refs/heads/feature/a"]).trim(),
+        repaired
     );
+    assert_eq!(project.canonical_head(), main);
     assert_eq!(
         git(
             &project.canonical(),
-            &["show", "refs/heads/main:shared.txt"]
+            &["show", "refs/heads/feature/a:shared.txt"]
         ),
         "worker\n"
     );
+    assert_eq!(
+        git(
+            &project.canonical(),
+            &["show", "refs/heads/feature/a:.yard/config.toml"]
+        ),
+        configured("feature-v2")
+    );
+    assert_eq!(project.json(&["ticket", "show", "Y-2"])["state"], "done");
+    assert_eq!(
+        std::fs::read_to_string(&counter).unwrap(),
+        "main\nmain\nfeature-v1\nfeature-v2\nfeature-v2\nfeature-v2\n"
+    );
+    let images = project
+        .rows("SELECT DISTINCT image_id FROM execution WHERE name = 'image' ORDER BY image_id");
+    assert_eq!(images.len(), 3, "{images:?}");
+    assert!(
+        images
+            .iter()
+            .all(|row| row["image_id"].as_str().is_some_and(|id| !id.is_empty()))
+    );
+    let digests =
+        project.rows("SELECT DISTINCT digest FROM execution WHERE name = 'image' ORDER BY digest");
+    assert_eq!(digests.len(), 3, "{digests:?}");
+    let reviews: Vec<_> = machine
+        .model
+        .requests()
+        .into_iter()
+        .filter(|request| request.opens() && request.has_tool("yard_publish_review"))
+        .map(|request| request.prompt())
+        .collect();
+    for (prompt, marker) in reviews
+        .iter()
+        .zip(["main", "feature-v1", "feature-v2", "feature-v2"])
+    {
+        assert!(prompt.contains(marker), "{prompt}");
+    }
+    assert_eq!(reviews.len(), 4);
 }

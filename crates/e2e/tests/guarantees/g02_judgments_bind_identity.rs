@@ -147,6 +147,8 @@ fn a_new_head_revision_check_config_or_proof_leaves_the_candidate_unverified() {
     project.json(&[
         "attempt",
         "reject",
+        "--target",
+        "main",
         "Y-1",
         "--head",
         &first,
@@ -260,6 +262,8 @@ fn a_new_head_revision_check_config_or_proof_leaves_the_candidate_unverified() {
     project.json(&[
         "attempt",
         "reject",
+        "--target",
+        "main",
         "Y-1",
         "--head",
         &candidate,
@@ -284,7 +288,8 @@ fn a_new_head_revision_check_config_or_proof_leaves_the_candidate_unverified() {
     // delayed approve names the old proof and is given anyway.
     let seq = last_seq(&project);
     let refused = project.refused(&[
-        "attempt", "approve", "Y-1", "--head", &candidate, "--proof", &old_proof,
+        "attempt", "approve", "--target", "main", "Y-1", "--head", &candidate, "--proof",
+        &old_proof,
     ]);
     assert_eq!(refused["code"], "stale", "{refused}");
     assert_eq!(refused["data"]["expected"], old_proof.as_str());
@@ -292,7 +297,9 @@ fn a_new_head_revision_check_config_or_proof_leaves_the_candidate_unverified() {
     assert_eq!(last_seq(&project), seq);
     assert!(project.rows("SELECT id FROM approval").is_empty());
 
-    let refused = project.refused(&["attempt", "approve", "Y-1", "--head", &first]);
+    let refused = project.refused(&[
+        "attempt", "approve", "--target", "main", "Y-1", "--head", &first,
+    ]);
     assert_eq!(refused["code"], "stale", "{refused}");
     assert_eq!(refused["data"]["expected"], first.as_str());
     assert_eq!(refused["data"]["current"], candidate.as_str());
@@ -301,7 +308,8 @@ fn a_new_head_revision_check_config_or_proof_leaves_the_candidate_unverified() {
 
     let new_proof = proof(&sixth);
     project.json(&[
-        "attempt", "approve", "Y-1", "--head", &candidate, "--proof", &new_proof,
+        "attempt", "approve", "--target", "main", "Y-1", "--head", &candidate, "--proof",
+        &new_proof,
     ]);
     assert_eq!(
         project.rows("SELECT head, proof FROM approval"),
@@ -470,7 +478,9 @@ fn a_sync_that_protects_an_auto_approved_path_withdraws_it() {
         "a check reran"
     );
 
-    project.json(&["attempt", "approve", "Y-1", "--head", &head]);
+    project.json(&[
+        "attempt", "approve", "--target", "main", "Y-1", "--head", &head,
+    ]);
     release.write_all(b"go\n").unwrap();
     watch.event("landing.recorded", &[]);
     assert_eq!(project.json(&["ticket", "show", "Y-1"])["state"], "done");

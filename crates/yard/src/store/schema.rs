@@ -195,4 +195,6 @@ ALTER TABLE attempt ADD COLUMN body_read TEXT;
     "ALTER TABLE attempt DROP COLUMN body_read;",
     // An approval given over a blocking review at the round limit says so.
     "ALTER TABLE approval ADD COLUMN overrode INTEGER NOT NULL DEFAULT 0;",
+    "ALTER TABLE ticket ADD COLUMN target_branch TEXT;
+     ALTER TABLE attempt ADD COLUMN target_branch TEXT;",
 ];

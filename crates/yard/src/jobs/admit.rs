@@ -32,6 +32,14 @@ fn text_param(params: &Value, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+fn target_param(params: &Value) -> Result<Option<&str>, Fail> {
+    match &params["target"] {
+        Value::Null => Ok(None),
+        Value::String(target) => Ok(Some(target)),
+        _ => Err(Fail::invalid("target must be a local branch name")),
+    }
+}
+
 /// Free lanes for one more attempt in a project.
 fn free_lanes(conn: &rusqlite::Connection, loaded: &Loaded) -> Result<i64, Fail> {
     Ok(i64::from(loaded.config.max_lanes) - attempts::lanes_held(conn)?)
@@ -40,10 +48,19 @@ fn free_lanes(conn: &rusqlite::Connection, loaded: &Loaded) -> Result<i64, Fail>
 /// Lanes a ready ticket may take: free lanes less those owed to live
 /// attempts of this project waiting to reacquire one, on one connection so
 /// both are one reading.
-fn spare_lanes(conn: &rusqlite::Connection, loaded: &Loaded) -> Result<i64, Fail> {
+fn spare_lanes(
+    conn: &rusqlite::Connection,
+    project: &Project,
+    loaded: &Loaded,
+) -> Result<i64, Fail> {
     let mut waiting = 0;
     for attempt in attempts::live(conn)? {
-        if !attempt.lane && super::runnable(conn, loaded, &attempt)?.is_some() {
+        let configs = project.loaded.lock().expect("loaded lock");
+        let selected = configs
+            .get(attempt.target_branch()?)
+            .map(Arc::as_ref)
+            .ok_or_else(|| Fail::refused("the attempt configuration is not loaded"))?;
+        if !attempt.lane && super::runnable(conn, selected, &attempt)?.is_some() {
             waiting += 1;
         }
     }
@@ -79,25 +96,44 @@ pub fn admissible(
     Ok(!(workflow.read_only && attempts::latest_for(conn, ticket.id)?.is_some()))
 }
 
+pub async fn ready_configs(
+    daemon: &Daemon,
+    project: &Project,
+    loaded: &Loaded,
+) -> Result<Vec<(tickets::Ticket, Arc<Loaded>)>, Fail> {
+    let mut selected = Vec::new();
+    for ticket in project.read(tickets::ready)? {
+        let branch = ticket.target_branch.as_deref().unwrap_or(&loaded.branch);
+        if let Ok(config) = super::load_target(daemon, project, branch).await {
+            selected.push((ticket, config));
+        }
+    }
+    Ok(selected)
+}
+
 /// The scheduler's admissions: ready tickets in priority order.
-pub fn scheduled(
+pub async fn scheduled(
     daemon: &Arc<Daemon>,
     project: &Arc<Project>,
     loaded: &Loaded,
 ) -> Result<(), Fail> {
+    let selected = ready_configs(daemon, project, loaded).await?;
     let admitted = {
         let _admission = daemon.admission.lock().expect("admission lock");
         project.tx(|tx| {
             let mut admitted = Vec::new();
-            let mut free = spare_lanes(tx, loaded)?;
-            for ticket in tickets::ready(tx)? {
+            let mut free = spare_lanes(tx, project, loaded)?;
+            for (ticket, selected) in &selected {
                 if free <= 0 {
                     break;
                 }
-                if !admissible(tx, loaded, &ticket)? {
+                if tickets::get(tx, ticket.id)?.revision != ticket.revision
+                    || tickets::blocker(tx, ticket.id)?.is_some()
+                    || !admissible(tx, selected, ticket)?
+                {
                     continue;
                 }
-                admitted.push(admit(tx, loaded, &ticket)?);
+                admitted.push(admit(tx, selected, ticket)?);
                 free -= 1;
             }
             Ok(admitted)
@@ -120,22 +156,36 @@ fn admit(
     let agent = &loaded.config.agents[&workflow.implementer];
     let mut implementer = serde_json::to_value(agent).expect("agent serializes");
     implementer["name"] = json!(workflow.implementer);
-    let attempt = attempts::insert(tx, ticket.id, &ticket.workflow, &implementer, &loaded.head)?;
+    let attempt = attempts::insert(
+        tx,
+        ticket.id,
+        &ticket.workflow,
+        &implementer,
+        &loaded.head,
+        &loaded.branch,
+    )?;
     let row = attempts::get(tx, attempt)?;
     super::audit_attempt(
         tx,
         "attempt.admitted",
         &row,
         None,
-        json!({ "base": loaded.head, "workflow": ticket.workflow, "implementer": implementer }),
+        json!({ "target": loaded.branch, "base": loaded.head, "workflow": ticket.workflow, "implementer": implementer }),
     )?;
     super::supervise::start_implementation(tx, &row, "first")
 }
 
 pub async fn status(daemon: &Daemon, project: &Project) -> Result<Value, Fail> {
     let loaded = load(daemon, project).await.ok();
+    for attempt in project.read(attempts::live)? {
+        super::load_target(daemon, project, attempt.target_branch()?).await?;
+    }
+    let selected = match &loaded {
+        Some(loaded) => ready_configs(daemon, project, loaded).await?,
+        None => Vec::new(),
+    };
     let no_lane = match &loaded {
-        Some(loaded) => project.read(|conn| spare_lanes(conn, loaded))? <= 0,
+        Some(loaded) => project.read(|conn| spare_lanes(conn, project, loaded))? <= 0,
         None => false,
     };
     let now = store::now_ms();
@@ -156,9 +206,12 @@ pub async fn status(daemon: &Daemon, project: &Project) -> Result<Value, Fail> {
                     json!(edges.iter().map(|on| ticket_name(*on)).collect::<Vec<_>>());
                 value["waiting_on"] = json!(unfinished);
                 let no_lane = match &loaded {
-                    Some(loaded) if no_lane && tickets::blocker(conn, ticket.id)?.is_none() => {
-                        admissible(conn, loaded, ticket)?
-                    }
+                    Some(_) if no_lane && tickets::blocker(conn, ticket.id)?.is_none() => selected
+                        .iter()
+                        .find(|(t, _)| t.id == ticket.id)
+                        .map(|(_, config)| admissible(conn, config, ticket))
+                        .transpose()?
+                        .unwrap_or(false),
                     _ => false,
                 };
                 value["no_lane"] = json!(no_lane);
@@ -182,14 +235,15 @@ pub async fn status(daemon: &Daemon, project: &Project) -> Result<Value, Fail> {
         let queue: Vec<Value> = checks::queue(conn)?
             .iter()
             .map(|approval| {
-                let ticket = attempts::get(conn, approval.attempt)?.ticket;
+                let attempt = attempts::get(conn, approval.attempt)?;
+                let ticket = attempt.ticket;
                 let edges: Vec<String> = tickets::dependencies(conn, ticket)?
                     .into_iter()
                     .map(ticket_name)
                     .collect();
                 Ok(
                     json!({ "approval": approval.id, "attempt": approval.attempt,
-                           "ticket": ticket_name(ticket),
+                           "ticket": ticket_name(ticket), "target": attempt.target_branch,
                            "depends_on": edges,
                            "head": approval.head, "actor": approval.actor }),
                 )
@@ -274,7 +328,7 @@ pub async fn doctor(daemon: &Daemon, project: &Project) -> Result<Value, Fail> {
             Ok(loaded) => json!({ "target": loaded.branch, "head": loaded.head }),
             Err(fail) => json!({ "error": fail.message }),
         },
-        "image": daemon.images.lock().expect("images lock").get(&project.key).map(|(head, id)| json!({ "head": head, "id": id })),
+        "image": daemon.images.lock().expect("images lock").get(&project.key).map(|(branch, head, id)| json!({ "target": branch, "head": head, "id": id })),
         "connections": connections,
         "logins": logins,
         "missing_projects": missing,
@@ -319,9 +373,9 @@ fn refuse_default_switch(project: &Project, default: &str, branch: &str) -> Resu
     project.read(|conn| {
         let live = attempts::live(conn)?;
         let intents = executions::open_intents(conn)?;
-        if !live.is_empty() || !intents.is_empty() {
+        if !intents.is_empty() {
             return Err(
-                Fail::refused("live single-target work prevents changing the default").with(
+                Fail::refused("a landing intent prevents changing the default").with(
                     json!({ "reason": "live_target", "default": default, "branch": branch,
                     "attempts": live.iter().map(|a| a.id).collect::<Vec<_>>(),
                     "intents": intents.iter().map(|e| e.id).collect::<Vec<_>>() }),
@@ -412,7 +466,7 @@ pub async fn sync(daemon: &Daemon, project: &Project, params: &Value) -> Result<
                 daemon,
                 &canonical,
                 branch,
-                if select { branch } else { &default },
+                Some(if select { branch } else { &default }),
                 incoming,
             )
             .await?,
@@ -420,18 +474,29 @@ pub async fn sync(daemon: &Daemon, project: &Project, params: &Value) -> Result<
     } else {
         None
     };
-    if let Some(loaded) = &loaded
-        && (branch == default || select)
-    {
+    if let Some(loaded) = &loaded {
         let orphaned = project.read(|conn| {
-            Ok(tickets::list(conn)?
+            let mut orphaned = Vec::new();
+            for ticket in tickets::list(conn)?
                 .into_iter()
-                .filter(|ticket| {
-                    ticket.state == "open"
-                        && !loaded.config.workflows.contains_key(&ticket.workflow)
-                })
-                .map(|ticket| ticket_name(ticket.id))
-                .collect::<Vec<_>>())
+                .filter(|t| t.state == "open")
+            {
+                let future = ticket.target_branch.as_deref().unwrap_or(if select {
+                    branch
+                } else {
+                    &default
+                });
+                let removed =
+                    future == branch && !loaded.config.workflows.contains_key(&ticket.workflow);
+                let live_removed = attempts::live_for(conn, ticket.id)?.is_some_and(|attempt| {
+                    attempt.target_branch.as_deref() == Some(branch)
+                        && !loaded.config.workflows.contains_key(&attempt.workflow)
+                });
+                if removed || live_removed {
+                    orphaned.push(ticket_name(ticket.id));
+                }
+            }
+            Ok(orphaned)
         })?;
         if !orphaned.is_empty() {
             return Err(Fail::refused(format!(
@@ -485,7 +550,7 @@ pub async fn sync(daemon: &Daemon, project: &Project, params: &Value) -> Result<
     };
     if select && branch != default {
         daemon.git.select_default(&canonical, branch).await?;
-        *project.loaded.lock().expect("loaded lock") = None;
+        project.loaded.lock().expect("loaded lock").remove(branch);
         project.tx(|tx| {
             store::audit(
                 tx,
@@ -504,6 +569,30 @@ pub async fn sync(daemon: &Daemon, project: &Project, params: &Value) -> Result<
 pub async fn ticket_new(daemon: &Daemon, project: &Project, params: &Value) -> Result<Value, Fail> {
     let _canonical = project.canonical.lock().await;
     let loaded = load(daemon, project).await?;
+    let target = target_param(params)?;
+    if let Some(target) = target {
+        daemon
+            .git
+            .valid_branch(&project.canonical_dir(), target)
+            .await?
+            .then_some(())
+            .ok_or_else(|| Fail::invalid("target requires a local branch name"))?;
+    }
+    let loaded = if let Some(target) = target {
+        // Missing branches may be filed; admission refuses them without an attempt.
+        if daemon
+            .git
+            .rev_parse(&project.canonical_dir(), &crate::git::target_ref(target))
+            .await?
+            .is_some()
+        {
+            super::load_target(daemon, project, target).await?
+        } else {
+            loaded
+        }
+    } else {
+        loaded
+    };
     let workflow = params["workflow"].as_str().unwrap_or("default");
     loaded.config.workflow(workflow).map_err(Fail::invalid)?;
     let priority = priority_param(&params["priority"])?.unwrap_or(2);
@@ -525,6 +614,7 @@ pub async fn ticket_new(daemon: &Daemon, project: &Project, params: &Value) -> R
                 depends_on: &depends_on,
                 parked: params["parked"].as_bool().unwrap_or(false),
                 origin: "operator",
+                target_branch: target,
             },
         )
     })?;
@@ -585,6 +675,27 @@ pub async fn ticket_edit(
     let revision = params["revision"]
         .as_i64()
         .ok_or_else(|| Fail::invalid("an edit names the revision it was written against"))?;
+    let target = target_param(params)?;
+    let clear_target = match &params["default_target"] {
+        Value::Null => false,
+        Value::Bool(clear) => *clear,
+        _ => return Err(Fail::invalid("default_target must be a boolean")),
+    };
+    let target_edit = target.is_some() || clear_target;
+    if target.is_some() && clear_target {
+        return Err(Fail::invalid("target and default_target are exclusive"));
+    }
+    if target_edit {
+        project.read(|conn| target_editable(conn, id, revision))?;
+    }
+    if let Some(target) = target
+        && !daemon
+            .git
+            .valid_branch(&project.canonical_dir(), target)
+            .await?
+    {
+        return Err(Fail::invalid("target requires a local branch name"));
+    }
     let workflow = text_param(params, "workflow");
     let _canonical = if workflow.is_some() {
         project.read(|conn| refuse_during_intent(conn, id))?;
@@ -593,14 +704,30 @@ pub async fn ticket_edit(
         None
     };
     if let Some(workflow) = &workflow {
-        load(daemon, project)
-            .await?
-            .config
-            .workflow(workflow)
-            .map_err(Fail::invalid)?;
+        let ticket = project.read(|conn| tickets::get(conn, id))?;
+        let branch = if clear_target {
+            None
+        } else {
+            target.or(ticket.target_branch.as_deref())
+        };
+        let loaded = if let Some(branch) = branch {
+            super::load_target(daemon, project, branch).await?
+        } else {
+            load(daemon, project).await?
+        };
+        loaded.config.workflow(workflow).map_err(Fail::invalid)?;
     }
     let priority = priority_param(&params["priority"])?;
     let stops = project.tx(|tx| {
+        if target_edit {
+            target_editable(tx, id, revision)?;
+        }
+        if target_edit {
+            tx.execute(
+                "UPDATE ticket SET target_branch = ?2 WHERE id = ?1",
+                rusqlite::params![id, target],
+            )?;
+        }
         let stops = edit(
             tx,
             id,
@@ -621,6 +748,25 @@ pub async fn ticket_edit(
     })?;
     stop_executions(daemon, project, &stops);
     project.read(|conn| Ok(tickets::get(conn, id)?.to_json()))
+}
+
+fn target_editable(conn: &rusqlite::Connection, id: i64, revision: i64) -> Result<(), Fail> {
+    let ticket = tickets::get(conn, id)?;
+    if ticket.revision != revision {
+        return Err(Fail::stale(
+            "the ticket revision changed",
+            json!(revision),
+            json!(ticket.revision),
+        ));
+    }
+    refuse_during_intent(conn, id)?;
+    if let Some(attempt) = attempts::live_for(conn, id)? {
+        return Err(Fail::refused("a live attempt freezes its target").with(json!({ "reason": "live_target", "attempt": attempt.id, "target": attempt.target_branch })));
+    }
+    if ticket.state != "open" {
+        return Err(Fail::refused("only an open ticket can change target"));
+    }
+    Ok(())
 }
 
 /// One ticket edit: bumps the revision, which supersedes every check and
@@ -663,7 +809,7 @@ fn edit(
         },
         None,
         json!({ "revision": revision + 1, "title": title, "body_bytes": body.map(str::len),
-                "priority": priority, "workflow": workflow }),
+                "priority": priority, "workflow": workflow, "target": tickets::get(tx, id)?.target_branch }),
     )?;
     steer(tx, id)
 }
@@ -840,8 +986,16 @@ pub async fn attempt_start(
 ) -> Result<Value, Fail> {
     let id = ticket_param(params)?;
     let canonical = project.canonical.lock().await;
-    let loaded = load(daemon, project).await?;
+    let default = load(daemon, project).await?;
     let live = project.read(|conn| attempts::live_for(conn, id))?;
+    let ticket = project.read(|conn| tickets::get(conn, id))?;
+    let branch = live
+        .as_ref()
+        .map(attempts::Attempt::target_branch)
+        .transpose()?
+        .or(ticket.target_branch.as_deref())
+        .unwrap_or(&default.branch);
+    let loaded = super::load_target(daemon, project, branch).await?;
     let items = project.read(|conn| {
         let mut items = attempts::open_attention(conn)?;
         items.retain(|item| {
@@ -868,6 +1022,9 @@ pub async fn attempt_start(
             ticket_name(id)
         )));
     }
+    for attempt in project.read(attempts::live)? {
+        super::load_target(daemon, project, attempt.target_branch()?).await?;
+    }
     let execution = {
         let _admission = daemon.admission.lock().expect("admission lock");
         project.tx(|tx| {
@@ -879,7 +1036,14 @@ pub async fn attempt_start(
                     blocker.unwrap_or_default()
                 )));
             };
-            if spare_lanes(tx, &loaded)? <= 0 {
+            if ticket.target_branch.as_deref().unwrap_or(&default.branch) != loaded.branch {
+                return Err(Fail::stale(
+                    "the ticket target changed",
+                    json!(loaded.branch),
+                    json!(ticket.target_branch),
+                ));
+            }
+            if spare_lanes(tx, project, &default)? <= 0 {
                 return Err(Fail::refused("no lane is free").with(json!({ "reason": "capacity" })));
             }
             admit(tx, &loaded, &ticket)
@@ -998,11 +1162,19 @@ fn approval_item(
     tx: &rusqlite::Connection,
     id: i64,
     head: &str,
+    target: &str,
     proof_digest: Option<&str>,
     over_limit: bool,
 ) -> Result<(attempts::Attempt, attempts::Attention), Fail> {
     let attempt = attempts::live_for(tx, id)?
         .ok_or_else(|| Fail::refused(format!("{} has no live attempt", ticket_name(id))))?;
+    if attempt.target_branch.as_deref() != Some(target) {
+        return Err(Fail::stale(
+            "the approval target changed",
+            json!(target),
+            json!(attempt.target_branch),
+        ));
+    }
     let item = attempts::open_for_attempt(tx, attempt.id)?
         .into_iter()
         .find(|item| {
@@ -1098,9 +1270,21 @@ pub async fn attempt_approve(
         .ok_or_else(|| Fail::invalid("approve names the head it binds"))?;
     let proof_digest = params["proof"].as_str();
     let text = text_param(params, "text");
-    let loaded = load(daemon, project).await?;
+    let attempt = project
+        .read(|conn| attempts::live_for(conn, id))?
+        .ok_or_else(|| Fail::refused("no live attempt"))?;
+    let loaded = super::load_target(daemon, project, attempt.target_branch()?).await?;
     let approval = project.tx(|tx| {
-        let (attempt, item) = approval_item(tx, id, head, proof_digest, true)?;
+        let (attempt, item) = approval_item(
+            tx,
+            id,
+            head,
+            params["target"]
+                .as_str()
+                .ok_or_else(|| Fail::invalid("a judgment names its target"))?,
+            proof_digest,
+            true,
+        )?;
         let ticket = tickets::get(tx, id)?;
         if attempts::edit_pending(tx, attempt.id)? {
             return Err(Fail::stale(
@@ -1177,7 +1361,16 @@ pub fn attempt_reject(project: &Project, params: &Value) -> Result<Value, Fail> 
         return Err(Fail::invalid("a reject carries notes"));
     }
     project.tx(|tx| {
-        let (attempt, item) = approval_item(tx, id, head, proof_digest, false)?;
+        let (attempt, item) = approval_item(
+            tx,
+            id,
+            head,
+            params["target"]
+                .as_str()
+                .ok_or_else(|| Fail::invalid("a judgment names its target"))?,
+            proof_digest,
+            false,
+        )?;
         refuse_during_intent(tx, id)?;
         attempts::resolve(tx, &item, "reject", Some(text))?;
         attempts::set_next(
@@ -1359,6 +1552,7 @@ pub async fn proposal_answer(
                         depends_on: &depends_on,
                         parked: payload["parked"].as_bool().unwrap_or(false),
                         origin: "proposal",
+                        target_branch: None,
                     },
                 )?;
                 let planning = item

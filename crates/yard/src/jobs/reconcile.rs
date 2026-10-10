@@ -9,6 +9,16 @@ use crate::store::{attempts, executions};
 use serde_json::{Value, json};
 
 pub async fn project(daemon: &Daemon, project: &Project) -> Result<(), Fail> {
+    // Old live attempts used HEAD; Y-82 refused switching it under them.
+    // Ended history has no recorded branch, so it stays unknown.
+    let branch = daemon.git.head_branch(&project.canonical_dir()).await?;
+    project.tx(|tx| {
+        tx.execute(
+            "UPDATE attempt SET target_branch = ?1 WHERE target_branch IS NULL AND state = 'live'",
+            [&branch],
+        )?;
+        Ok(())
+    })?;
     // The old daemon's boxes: their `up` lost its stdin with the daemon.
     let label = format!("dev.yard.project={}", project.key);
     for name in daemon.pinfold.list(&label).await? {
@@ -143,8 +153,15 @@ pub async fn decide_intent(
         return undecided("a git child of the landing still holds its lock");
     }
     let canonical = project.canonical_dir();
-    let target = daemon.git.target_head(&canonical).await;
-    let (Ok((_, Some(target))), Some(old), Some(merged)) = (
+    let attempt = project.read(|conn| attempts::get(conn, row.attempt))?;
+    let target = daemon
+        .git
+        .rev_parse(
+            &canonical,
+            &crate::git::target_ref(attempt.target_branch()?),
+        )
+        .await;
+    let (Ok(Some(target)), Some(old), Some(merged)) = (
         target,
         row.intent_old.as_deref(),
         row.intent_merged.as_deref(),

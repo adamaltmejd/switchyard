@@ -33,21 +33,43 @@ impl Loaded {
 }
 
 pub async fn load(daemon: &Daemon, project: &Project) -> Result<Arc<Loaded>, Fail> {
+    let branch = daemon.git.head_branch(&project.canonical_dir()).await?;
+    load_target(daemon, project, &branch).await
+}
+
+pub async fn load_target(
+    daemon: &Daemon,
+    project: &Project,
+    branch: &str,
+) -> Result<Arc<Loaded>, Fail> {
     let canonical = project.canonical_dir();
-    let (branch, head) = daemon.git.target_head(&canonical).await?;
+    if !daemon.git.valid_branch(&canonical, branch).await? {
+        return Err(
+            Fail::invalid("target requires a local branch name").with(json!({ "target": branch }))
+        );
+    }
+    let head = daemon
+        .git
+        .rev_parse(&canonical, &crate::git::target_ref(branch))
+        .await?;
     let head = head.ok_or_else(|| {
         Fail::refused(format!(
-            "canonical has no {branch} yet; commit .yard in the checkout and run `yard sync`"
+            "canonical has no target {branch}; run `yard sync {branch}`"
         ))
+        .with(json!({ "reason": "missing_target", "target": branch }))
     })?;
-    if let Some(loaded) = project.loaded.lock().expect("loaded lock").as_ref()
+    if let Some(loaded) = project.loaded.lock().expect("loaded lock").get(branch)
         && loaded.head == head
         && loaded.branch == branch
     {
         return Ok(loaded.clone());
     }
-    let loaded = Arc::new(read_config(daemon, &canonical, &branch, &branch, &head).await?);
-    *project.loaded.lock().expect("loaded lock") = Some(loaded.clone());
+    let loaded = Arc::new(read_config(daemon, &canonical, branch, None, &head).await?);
+    project
+        .loaded
+        .lock()
+        .expect("loaded lock")
+        .insert(branch.to_string(), loaded.clone());
     Ok(loaded)
 }
 
@@ -56,7 +78,7 @@ pub async fn read_config(
     daemon: &Daemon,
     repo: &std::path::Path,
     branch: &str,
-    default: &str,
+    default: Option<&str>,
     commit: &str,
 ) -> Result<Loaded, Fail> {
     let text = daemon
@@ -67,7 +89,9 @@ pub async fn read_config(
     let config = Config::parse(&text).map_err(|message| {
         Fail::invalid(format!(".yard/config.toml: {message}")).with(json!({ "config": message }))
     })?;
-    if config.target.branch != default {
+    if let Some(default) = default
+        && config.target.branch != default
+    {
         return Err(Fail::invalid(format!(
             ".yard/config.toml names target {:?}; this project's default is {default:?}",
             config.target.branch
@@ -96,11 +120,12 @@ pub async fn step(daemon: &Arc<Daemon>, project: &Arc<Project>) -> Result<(), Fa
     // so a repair returning from the queue never starves behind admissions.
     let live = project.read(attempts::live)?;
     for attempt in live {
-        advance(daemon, project, &loaded, &attempt).await?;
+        let selected = load_target(daemon, project, attempt.target_branch()?).await?;
+        advance(daemon, project, &selected, &attempt).await?;
     }
-    admit::scheduled(daemon, project, &loaded)?;
+    admit::scheduled(daemon, project, &loaded).await?;
     drop(canonical);
-    queue::next(daemon, project, &loaded).await?;
+    queue::next(daemon, project).await?;
     cleanup::next(daemon, project)?;
     Ok(())
 }
@@ -232,7 +257,14 @@ async fn advance(
     let executions = project.read(|conn| executions::for_attempt(conn, attempt.id))?;
     let edited = project.read(|conn| attempts::edit_pending(conn, attempt.id))?;
     let ticket = project.read(|conn| tickets::get(conn, attempt.ticket))?;
-    if !attempt.lane && !admit::take_lane(daemon, project, loaded, attempt.id)? {
+    if !attempt.lane
+        && !admit::take_lane(
+            daemon,
+            project,
+            (load(daemon, project).await?).as_ref(),
+            attempt.id,
+        )?
+    {
         return Ok(());
     }
     if let Some(next) = &attempt.next {
@@ -381,7 +413,7 @@ async fn advance(
 
     let protected = protected_paths(daemon, project, loaded, base, head).await?;
     let payload = json!({
-        "base": base, "head": head, "proof": attempt.proof.clone().unwrap_or_default(),
+        "target": attempt.target_branch, "base": base, "head": head, "proof": attempt.proof.clone().unwrap_or_default(),
         "revision": ticket.revision,
         "gate_digest": loaded.gate_digest, "review_digest": review_digest,
         "checks": passed, "protected": protected, "unreviewed": workflow.review.is_empty(),
@@ -455,6 +487,7 @@ pub fn stale_part(
 ) -> Result<Option<(&'static str, Value, Value)>, Fail> {
     let (base, head) = attempt.candidate().unwrap_or_default();
     for (key, current) in [
+        ("target", json!(attempt.target_branch)),
         ("base", json!(base)),
         ("head", json!(head)),
         ("proof", json!(attempt.proof.clone().unwrap_or_default())),

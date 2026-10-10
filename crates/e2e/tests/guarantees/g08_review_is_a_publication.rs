@@ -324,7 +324,9 @@ fn a_seat_that_always_blocks_gets_max_rounds() {
         .to_string();
 
     project.reconfigure(&config(gate).replace("max_rounds = 3", "max_rounds = 1"));
-    let refused = project.refused(&["attempt", "approve", "Y-1", "--head", &head]);
+    let refused = project.refused(&[
+        "attempt", "approve", "--target", "main", "Y-1", "--head", &head,
+    ]);
     assert_eq!(refused["code"], "stale", "{refused}");
     assert!(
         refused["message"].as_str().unwrap().contains("gate_digest"),
@@ -333,7 +335,9 @@ fn a_seat_that_always_blocks_gets_max_rounds() {
     assert!(project.rows("SELECT id FROM approval").is_empty());
 
     project.reconfigure(&base);
-    project.json(&["attempt", "approve", "Y-1", "--head", &head]);
+    project.json(&[
+        "attempt", "approve", "--target", "main", "Y-1", "--head", &head,
+    ]);
     let landed = watch.until("landing or refusal", |event| {
         event["event"] == "landing.recorded" || event["event"] == "attention.raised"
     });

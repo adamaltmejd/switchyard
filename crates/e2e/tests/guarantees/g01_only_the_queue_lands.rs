@@ -81,7 +81,9 @@ fn a_worker_cannot_land_by_push_rpc_or_canonical() {
     assert_eq!(project.canonical_head(), target);
 
     let head = approval["data"]["payload"]["head"].as_str().unwrap();
-    project.json(&["attempt", "approve", "Y-1", "--head", head]);
+    project.json(&[
+        "attempt", "approve", "--target", "main", "Y-1", "--head", head,
+    ]);
     watch.event("landing.recorded", &[]);
     git(
         &canonical,

@@ -14,9 +14,11 @@ pub struct Ticket {
     pub parked: bool,
     pub revision: i64,
     pub origin: String,
+    pub target_branch: Option<String>,
 }
 
-const COLUMNS: &str = "id, title, body, priority, workflow, state, parked, revision, origin";
+const COLUMNS: &str =
+    "id, title, body, priority, workflow, state, parked, revision, origin, target_branch";
 
 fn row(row: &Row) -> rusqlite::Result<Ticket> {
     Ok(Ticket {
@@ -29,6 +31,7 @@ fn row(row: &Row) -> rusqlite::Result<Ticket> {
         parked: row.get(6)?,
         revision: row.get(7)?,
         origin: row.get(8)?,
+        target_branch: row.get(9)?,
     })
 }
 
@@ -44,6 +47,7 @@ impl Ticket {
             "parked": self.parked,
             "revision": self.revision,
             "origin": self.origin,
+            "target": self.target_branch,
         })
     }
 }
@@ -84,6 +88,7 @@ pub struct NewTicket<'a> {
     pub depends_on: &'a [i64],
     pub parked: bool,
     pub origin: &'a str,
+    pub target_branch: Option<&'a str>,
 }
 
 pub fn create(tx: &Connection, new: &NewTicket) -> Result<i64, Fail> {
@@ -91,8 +96,8 @@ pub fn create(tx: &Connection, new: &NewTicket) -> Result<i64, Fail> {
         return Err(Fail::invalid("a ticket needs a title"));
     }
     tx.execute(
-        "INSERT INTO ticket (title, body, priority, workflow, state, parked, origin, created_at)
-         VALUES (?1, ?2, ?3, ?4, 'open', ?5, ?6, ?7)",
+        "INSERT INTO ticket (title, body, priority, workflow, state, parked, origin, created_at, target_branch)
+         VALUES (?1, ?2, ?3, ?4, 'open', ?5, ?6, ?7, ?8)",
         params![
             new.title,
             new.body,
@@ -100,7 +105,8 @@ pub fn create(tx: &Connection, new: &NewTicket) -> Result<i64, Fail> {
             new.workflow,
             new.parked,
             new.origin,
-            now()
+            now(),
+            new.target_branch
         ],
     )?;
     let id = tx.last_insert_rowid();
@@ -121,7 +127,7 @@ pub fn create(tx: &Connection, new: &NewTicket) -> Result<i64, Fail> {
         None,
         json!({ "title": new.title, "workflow": new.workflow, "origin": new.origin,
                 "depends_on": new.depends_on.iter().map(|id| ticket_name(*id)).collect::<Vec<_>>(),
-                "body_bytes": new.body.len(), "parked": new.parked }),
+                "target": new.target_branch, "body_bytes": new.body.len(), "parked": new.parked }),
     )?;
     Ok(id)
 }

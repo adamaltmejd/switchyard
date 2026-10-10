@@ -2,7 +2,6 @@
 //! checkout of the head. A seat publishes once; the publication is the
 //! decision.
 
-use super::load;
 use super::proof;
 use super::supervise::{self, Worker};
 use crate::api::Fail;
@@ -13,9 +12,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -> Result<(), Fail> {
-    let loaded = load(daemon, project).await?;
     let row = project.read(|conn| executions::get(conn, execution))?;
     let attempt = project.read(|conn| attempts::get(conn, row.attempt))?;
+    let loaded = super::load_target(daemon, project, attempt.target_branch()?).await?;
     let ticket = project.read(|conn| tickets::get(conn, attempt.ticket))?;
     let seat_name = row.name.clone().unwrap_or_default();
     let seat = loaded
@@ -238,11 +237,18 @@ pub fn publish(grant: &crate::mcp::Grant, arguments: &Value) -> Result<Value, Fa
         _ => return Err(Fail::invalid("findings is a list")),
     };
     let project = &grant.project;
+    let branch = project.read(|conn| {
+        let row = executions::get(conn, grant.execution)?;
+        Ok(attempts::get(conn, row.attempt)?
+            .target_branch()?
+            .to_string())
+    })?;
     let loaded = project
         .loaded
         .lock()
         .expect("loaded lock")
-        .clone()
+        .get(&branch)
+        .cloned()
         .ok_or_else(|| Fail::refused("the configuration is not loaded"))?;
     let blocking = loaded.config.review.blocking;
     let check = project.tx(|tx| {
@@ -321,7 +327,7 @@ pub fn blocked(
                     execution: blocked.last().map(|check| check.execution),
                     payload: json!({
                         "rounds": rounds, "findings": findings,
-                        "base": base, "head": head,
+                        "target": attempt.target_branch, "base": base, "head": head,
                         "proof": current.proof.clone().unwrap_or_default(),
                         "revision": ticket.revision,
                         "gate_digest": loaded.gate_digest,

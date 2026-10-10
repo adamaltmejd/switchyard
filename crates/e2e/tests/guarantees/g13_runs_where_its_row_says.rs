@@ -199,7 +199,7 @@ fn gates_and_a_seat_judge_the_proof_snapshot_where_their_row_says() {
     let head = approval["data"]["payload"]["head"].as_str().unwrap();
     let proof = approval["data"]["payload"]["proof"].as_str().unwrap();
     project.json(&[
-        "attempt", "approve", "Y-1", "--head", head, "--proof", proof,
+        "attempt", "approve", "--target", "main", "Y-1", "--head", head, "--proof", proof,
     ]);
     watch.event("landing.recorded", &[]);
 
@@ -309,9 +309,13 @@ fn a_host_landing_gate_runs_on_the_merged_ref_only_when_approved() {
         ),
     );
 
-    project.json(&["attempt", "approve", "Y-1", "--head", &first]);
+    project.json(&[
+        "attempt", "approve", "--target", "main", "Y-1", "--head", &first,
+    ]);
     watch.event("execution.started", &[("name", "held")]);
-    project.json(&["attempt", "approve", "Y-2", "--head", &second]);
+    project.json(&[
+        "attempt", "approve", "--target", "main", "Y-2", "--head", &second,
+    ]);
     // One line per landing gate that could run, so a second gate never
     // blocks and the count below is what fails.
     release.write_all(b"go\ngo\n").unwrap();

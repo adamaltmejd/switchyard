@@ -32,16 +32,16 @@ item's exit names.
 `attempt` and `exits`. Answer with an exit the item names.
 
 - `approval` — first read `yard attempt show Y-n` and `yard attempt diff
-  Y-n`, then `yard attempt approve Y-n --head SHA`, `yard attempt reject
-  Y-n --head SHA --text T`, or `yard attempt abandon Y-n`. Add the
+  Y-n`, then `yard attempt approve Y-n --target BRANCH --head SHA`, `yard attempt reject
+  Y-n --target BRANCH --head SHA --text T`, or `yard attempt abandon Y-n`. Add the
   `--proof DIGEST` the item's exit names when the candidate has a proof
-  snapshot. Approval binds the exact `--head` and proof; a reject sends its
+  snapshot. Approval binds the frozen target, exact `--head` and proof; a reject sends its
   notes back as a repair.
 - `proposal` — `yard proposal accept ID` or `yard proposal reject ID`,
   where `ID` is the attention id.
 - `stopped` — `yard attempt start Y-n`, `yard ticket edit Y-n`, or abandon.
   On `timeout` only edit and abandon; on `limit` also `yard attempt approve
-  Y-n --head SHA`, over the blocking findings. The edit reaches the next
+  Y-n --target BRANCH --head SHA`, over the blocking findings. The edit reaches the next
   execution as a diff.
 - `red` — `start`, `yard ticket edit Y-n` or abandon, except a landing's item (no `attempt`) exits only
   `yard attempt start Y-n`.

@@ -75,7 +75,7 @@ the branch into canonical:
 history. Consume requires a clean checkout of the selected branch. Named
 import keeps the project default. `yard sync feature/a --default` selects
 it explicitly after its committed `target.ref` names `feature/a`, with no
-live attempt or landing intent. Omitted sync uses canonical's symbolic HEAD.
+landing intent. Live attempts keep their admitted targets. Omitted sync uses canonical's symbolic HEAD.
 Selection uses an imported canonical head when the checkout branch is absent
 or behind, without changing the checkout. Its clean matching checkout rule
 applies only to consume.
@@ -87,11 +87,16 @@ and registered project paths that are gone:
 
 ## The loop
 
-    yard ticket new --title T --body B
+    yard ticket new --title T --body B [--target BRANCH]
     yard status --watch
     yard attempt diff Y-n
-    yard attempt approve Y-n --head SHA [--proof DIGEST]
+    yard attempt approve Y-n --target BRANCH --head SHA [--proof DIGEST]
     yard sync
+
+A ticket freezes its effective target at admission; omission uses the project
+default. An inactive open ticket can change its override with revision-bound
+`ticket edit --target BRANCH`, or clear it with `--default-target`. Gates,
+review, repair and landing use the frozen branch and its trusted inputs.
 
 The rest is in the `yard-operator` skill
 (`.agents/skills/yard-operator/SKILL.md`).

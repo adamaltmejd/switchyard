@@ -96,6 +96,9 @@ enum TicketCommand {
         priority: String,
         #[arg(long, default_value = "default")]
         workflow: String,
+        /// Target override; omission resolves the default at admission.
+        #[arg(long)]
+        target: Option<String>,
         #[arg(long = "depends-on")]
         depends_on: Vec<String>,
         #[arg(long)]
@@ -117,6 +120,11 @@ enum TicketCommand {
         priority: Option<String>,
         #[arg(long)]
         workflow: Option<String>,
+        #[arg(long, conflicts_with = "default_target")]
+        target: Option<String>,
+        /// Clear the target override.
+        #[arg(long)]
+        default_target: bool,
     },
     Park {
         ticket: String,
@@ -160,6 +168,9 @@ enum AttemptCommand {
         /// The candidate head this approval binds.
         #[arg(long)]
         head: String,
+        /// The frozen target branch.
+        #[arg(long)]
+        target: String,
         /// The candidate proof digest this approval binds, when it has one.
         #[arg(long)]
         proof: Option<String>,
@@ -170,6 +181,9 @@ enum AttemptCommand {
         ticket: String,
         #[arg(long)]
         head: String,
+        /// The frozen target branch.
+        #[arg(long)]
+        target: String,
         /// The candidate proof digest this reject answers, when it has one.
         #[arg(long)]
         proof: Option<String>,
@@ -488,7 +502,10 @@ fn render_status(status: &Value) -> String {
 
     let row = |ticket: &Value| {
         let (phase, clocks) = match attempt_of(ticket) {
-            Some(attempt) => attempt_line(status, attempt),
+            Some(attempt) => {
+                let (phase, clocks) = attempt_line(status, attempt);
+                (format!("{phase} on {}", field(attempt, "target")), clocks)
+            }
             None => (idle_reason(ticket), String::new()),
         };
         let edges = if phase.starts_with("waiting on") {
@@ -543,8 +560,9 @@ fn render_status(status: &Value) -> String {
         for item in queue {
             let head: String = field(item, "head").chars().take(7).collect();
             let line = format!(
-                "  {:<5} {head}  {}  {}",
+                "  {:<5} {head} on {}  {}  {}",
                 field(item, "ticket"),
+                field(item, "target"),
                 landing_phase(status, item["attempt"].as_i64()).unwrap_or_default(),
                 depends_on(item),
             );
@@ -717,7 +735,8 @@ fn exit_bindings(item: &Value) -> Option<String> {
     }
     let head = item["payload"]["head"].as_str().unwrap_or("-");
     let digest = item["payload"]["proof"].as_str().unwrap_or_default();
-    let mut line = format!("--head {head}");
+    let target = item["payload"]["target"].as_str().unwrap_or("-");
+    let mut line = format!("--head {head} --target {target}");
     if crate::jobs::proof::required(digest) {
         line.push_str(&format!(" --proof {digest}"));
     }

@@ -31,7 +31,7 @@ Answer each item with one of its `exits`. Nothing else.
 - `start` retries from where the item stopped. It is never a fresh attempt.
 - `edit` (`yard ticket edit`) resolves a `stopped` item and runs the
   implementer next. On `timeout` it renews the clock; on `limit` it allows
-  one more review round. On `limit`, `yard attempt approve Y-n --head SHA`
+  one more review round. On `limit`, `yard attempt approve Y-n --target BRANCH --head SHA`
   lands the candidate over the blocking findings at the round limit; read
   them first.
 - If no exit seems to fit, read the item's `reason`, `yard attempt show`,
@@ -47,7 +47,7 @@ unknown, do not act on a guess.
 1. `yard attempt show Y-n`: the checks and the review's findings.
 2. `yard attempt diff Y-n`: read the change against the ticket body. It
    should do what the ticket asks and nothing more.
-3. `yard attempt approve Y-n --head SHA` (add `--proof DIGEST` when the
+3. `yard attempt approve Y-n --target BRANCH --head SHA` (add `--proof DIGEST` when the
    item names it): use the head and proof you read.
 
 What the worker says about its own work is not evidence. Neither are its
@@ -56,7 +56,7 @@ decision; they do not make it. A `protected` item touches guidance that
 every future worker reads, so read those hunks with care.
 
 If the change is not right, run
-`yard attempt reject Y-n --head SHA --text "what to change"` (again add
+`yard attempt reject Y-n --target BRANCH --head SHA --text "what to change"` (again add
 `--proof DIGEST` when the item names it). The text becomes the repair's
 prompt.
 

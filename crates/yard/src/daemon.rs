@@ -32,7 +32,7 @@ pub struct Daemon {
     /// Serialises admission, so capacity is counted once per decision.
     pub admission: Mutex<()>,
     /// Image ids built per target head, by project key.
-    pub images: Mutex<HashMap<String, (String, String)>>,
+    pub images: Mutex<HashMap<String, (String, String, String)>>,
     pub image_build: tokio::sync::Mutex<()>,
     /// Held for the daemon's life: one daemon per machine.
     _lock: nix::fcntl::Flock<File>,
@@ -69,7 +69,7 @@ pub struct Project {
     /// Wakes `status --history` and `status --watch` readers after a write.
     pub events: Notify,
     /// The configuration at the target head it was read from.
-    pub loaded: Mutex<Option<Arc<crate::jobs::Loaded>>>,
+    pub loaded: Mutex<HashMap<String, Arc<crate::jobs::Loaded>>>,
 }
 
 impl Project {
@@ -337,7 +337,7 @@ fn open_project(root: &Path) -> Result<Arc<Project>, String> {
         store: Mutex::new(store),
         canonical: tokio::sync::Mutex::new(()),
         events: Notify::new(),
-        loaded: Mutex::new(None),
+        loaded: Mutex::new(HashMap::new()),
     }))
 }
 
@@ -430,6 +430,10 @@ async fn attention(daemon: &Daemon, params: &Value) -> Result<Value, Fail> {
         tokio::pin!(notified);
         notified.as_mut().enable();
         let loaded = crate::jobs::load(daemon, &project).await.ok();
+        let selected = match &loaded {
+            Some(loaded) => crate::jobs::admit::ready_configs(daemon, &project, loaded).await?,
+            None => Vec::new(),
+        };
         let (seq, items, fresh, idle) = project.read(|conn| {
             let seq = crate::store::last_seq(conn)?;
             let items = crate::store::attempts::open_attention(conn)?;
@@ -450,11 +454,16 @@ async fn attention(daemon: &Daemon, params: &Value) -> Result<Value, Fail> {
             };
             let mut idle = items.is_empty() && crate::store::attempts::live(conn)?.is_empty();
             if idle {
-                let Some(loaded) = &loaded else {
+                let Some(_) = &loaded else {
                     return Ok((seq, items, fresh, false));
                 };
                 for ticket in crate::store::tickets::ready(conn)? {
-                    idle &= !crate::jobs::admit::admissible(conn, loaded, &ticket)?;
+                    idle &= !selected
+                        .iter()
+                        .find(|(t, _)| t.id == ticket.id)
+                        .map(|(_, config)| crate::jobs::admit::admissible(conn, config, &ticket))
+                        .transpose()?
+                        .unwrap_or(false);
                 }
             }
             if idle && let Some(since) = since {

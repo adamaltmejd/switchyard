@@ -8,6 +8,7 @@ pub struct Attempt {
     pub id: i64,
     pub ticket: i64,
     pub workflow: String,
+    pub target_branch: Option<String>,
     /// The implementer frozen at admission: `{name, harness, provider login,
     /// model, effort}`.
     pub implementer: Value,
@@ -31,7 +32,7 @@ pub struct Attempt {
 
 const COLUMNS: &str =
     "id, ticket, workflow, implementer, base, head, proof, target, state, outcome,
-    lane, lane_since, work_ms, next, rounds, extra_rounds, landing_reds";
+    lane, lane_since, work_ms, next, rounds, extra_rounds, landing_reds, target_branch";
 
 fn row(row: &Row) -> rusqlite::Result<Attempt> {
     let implementer: String = row.get(3)?;
@@ -54,6 +55,7 @@ fn row(row: &Row) -> rusqlite::Result<Attempt> {
         rounds: row.get(14)?,
         extra_rounds: row.get(15)?,
         landing_reds: row.get(16)?,
+        target_branch: row.get(17)?,
     })
 }
 
@@ -65,6 +67,7 @@ impl Attempt {
             "workflow": self.workflow,
             "implementer": self.implementer,
             "branch": self.branch(),
+            "target": self.target_branch,
             "base": self.base,
             "head": self.head,
             "proof": self.proof,
@@ -77,7 +80,13 @@ impl Attempt {
         })
     }
 
-    /// The attempt's branch in its clone.
+    pub fn target_branch(&self) -> Result<&str, Fail> {
+        self.target_branch
+            .as_deref()
+            .ok_or_else(|| Fail::refused("the attempt has no frozen target"))
+    }
+
+    /// The attempt\'s branch in its clone.
     pub fn branch(&self) -> String {
         format!("yard/{}/{}", ticket_name(self.ticket), self.id)
     }
@@ -152,17 +161,19 @@ pub fn insert(
     workflow: &str,
     implementer: &Value,
     base: &str,
+    target_branch: &str,
 ) -> Result<i64, Fail> {
     tx.execute(
-        "INSERT INTO attempt (ticket, workflow, implementer, base, state, lane, lane_since, created_at)
-         VALUES (?1, ?2, ?3, ?4, 'live', 1, ?5, ?6)",
+        "INSERT INTO attempt (ticket, workflow, implementer, base, state, lane, lane_since, created_at, target_branch)
+         VALUES (?1, ?2, ?3, ?4, 'live', 1, ?5, ?6, ?7)",
         params![
             ticket,
             workflow,
             implementer.to_string(),
             base,
             super::now_ms(),
-            now()
+            now(),
+            target_branch
         ],
     )?;
     Ok(tx.last_insert_rowid())

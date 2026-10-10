@@ -190,7 +190,9 @@ fn a_returning_repair_takes_a_freed_lane_before_a_new_ticket() {
     project.json(&["ticket", "new", "--title", "Repair"]);
     let head = approval_of(&mut watch, "Y-1");
     project.json(&["ticket", "new", "--title", "Holder"]);
-    project.json(&["attempt", "approve", "Y-1", "--head", &head]);
+    project.json(&[
+        "attempt", "approve", "--target", "main", "Y-1", "--head", &head,
+    ]);
 
     // The holder takes the lane as the approved candidate starts landing.
     watch.until("Y-2 admitted", |event| {

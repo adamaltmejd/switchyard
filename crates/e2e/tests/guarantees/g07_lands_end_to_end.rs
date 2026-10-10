@@ -93,7 +93,8 @@ fn a_ticket_lands_end_to_end_and_leaves_only_rows() {
     assert_eq!(std::fs::read(&snapshot).unwrap(), b"evidence");
 
     project.json(&[
-        "attempt", "approve", "Y-1", "--head", &head, "--proof", proof, "--text", "ship it",
+        "attempt", "approve", "--target", "main", "Y-1", "--head", &head, "--proof", proof,
+        "--text", "ship it",
     ]);
     watch.event("landing.recorded", &[]);
     watch.until("cleanup", |event| {

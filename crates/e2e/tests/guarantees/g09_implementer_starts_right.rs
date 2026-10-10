@@ -248,6 +248,8 @@ fn sessions_resume_up_to_max_session_executions() {
     project.json(&[
         "attempt",
         "reject",
+        "--target",
+        "main",
         "Y-1",
         "--head",
         head,

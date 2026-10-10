@@ -93,7 +93,9 @@ fn only_the_operators_sync_changes_yard_and_canonical() {
         vec![json!({ "head": head, "outcome": "pass" })]
     );
 
-    project.json(&["attempt", "approve", "Y-1", "--head", &head]);
+    project.json(&[
+        "attempt", "approve", "--target", "main", "Y-1", "--head", &head,
+    ]);
     watch.event("landing.recorded", &[]);
     let landed = project.canonical_head();
 
@@ -273,15 +275,15 @@ fn named_sync_moves_only_committed_selected_history() {
 
 /// G6/G11: a feature config may declare main, but selecting a new default
 /// requires its committed config to declare that branch. A held real worker
-/// keeps its old single-target attempt live while the selection is refused.
-/// Control: retire that work and select the same branch. Omitted sync then
-/// resolves the new symbolic HEAD. Git and the held fixture supply identities.
+/// keeps its admitted main target while selection succeeds.
+/// Omitted sync and the next admission use the new symbolic HEAD.
+/// Git and the held fixture supply identities.
 /// Sabotage: change HEAD on named import, skip default/config validation,
-/// allow switching under the old attempt, or keep resolving omission to main.
+/// retarget the held attempt, or keep resolving omission to main.
 /// Revalidate an old imported config during consume, or require a matching
 /// clean local branch for default selection: the subsequent operations fail.
 #[test]
-fn default_selection_is_explicit_validated_and_has_no_live_work() {
+fn default_selection_is_explicit_validated_and_preserves_admitted_work() {
     let hold = Latch::new();
     let held = hold.clone();
     let machine = Machine::new("g11-default", move |_| {
@@ -306,7 +308,6 @@ fn default_selection_is_explicit_validated_and_has_no_live_work() {
     project.write("a.txt", "feature\n");
     project.git(&["add", "a.txt"]);
     project.git(&["commit", "--quiet", "-m", "Feature"]);
-    let imported = project.git(&["rev-parse", "HEAD"]).trim().to_string();
     project.json(&["sync", "feature/a"]);
     assert_eq!(default_branch(&project), "main");
     let mismatch = project.refused(&["sync", "feature/a", "--default"]);
@@ -327,24 +328,22 @@ fn default_selection_is_explicit_validated_and_has_no_live_work() {
         "plan",
     ]);
     hold.wait_held();
-    let attempt = project.rows("SELECT id FROM attempt WHERE state = 'live'")[0]["id"].clone();
+
     project.write(
         ".yard/config.toml",
         &config("").replace("ref = \"main\"", "ref = \"feature/a\""),
     );
     project.git(&["commit", "--quiet", "-am", "Select default"]);
     let selected = project.git(&["rev-parse", "HEAD"]).trim().to_string();
-    let live = project.refused(&["sync", "feature/a", "--default"]);
-    assert_eq!(live["code"], "refused");
+    project.json(&["sync", "feature/a", "--default"]);
+    assert_eq!(default_branch(&project), "feature/a");
+    assert_eq!(branch_head(&project, "feature/a"), selected);
     assert_eq!(
-        live["data"],
-        json!({ "reason": "live_target", "default": "main", "branch": "feature/a", "attempts": [attempt], "intents": [] })
+        project.rows("SELECT target_branch, base FROM attempt WHERE state = 'live'"),
+        vec![json!({ "target_branch": "main", "base": main })]
     );
-    assert_eq!(default_branch(&project), "main");
-    assert_eq!(branch_head(&project, "feature/a"), imported);
 
     project.json(&["ticket", "park", "Y-1"]);
-    project.json(&["attempt", "abandon", "Y-1"]);
     hold.release();
     watch.until("the old attempt was removed", |event| {
         event["event"] == "execution.ended" && event["data"]["kind"] == "cleanup"
@@ -353,6 +352,10 @@ fn default_selection_is_explicit_validated_and_has_no_live_work() {
         project
             .rows("SELECT id FROM attempt WHERE state = 'live'")
             .is_empty()
+    );
+    assert_eq!(
+        project.rows("SELECT target_branch, outcome FROM attempt WHERE ticket = 1"),
+        vec![json!({ "target_branch": "main", "outcome": "planned" })]
     );
     project.json(&["sync", "feature/a", "--default"]);
     assert_eq!(default_branch(&project), "feature/a");
@@ -364,6 +367,21 @@ fn default_selection_is_explicit_validated_and_has_no_live_work() {
     project.json(&["sync"]);
     assert_eq!(branch_head(&project, "feature/a"), next);
     assert_eq!(project.canonical_head(), main);
+    project.json(&[
+        "ticket",
+        "new",
+        "--title",
+        "New default plan",
+        "--workflow",
+        "plan",
+    ]);
+    watch.until("new default plan ended", |event| {
+        event["event"] == "attempt.ended" && event["ticket"] == "Y-2"
+    });
+    assert_eq!(
+        project.rows("SELECT target_branch, base FROM attempt WHERE ticket = 2"),
+        vec![json!({ "target_branch": "feature/a", "base": next })]
+    );
 
     // Already imported history can be consumed even though its config
     // declares the former default. It is not an incoming configuration.
@@ -470,7 +488,9 @@ fn default_selection_names_a_held_landing_intent_then_succeeds() {
         .unwrap()
         .to_string();
     std::fs::write(&armed, "").unwrap();
-    project.json(&["attempt", "approve", "Y-1", "--head", &head]);
+    project.json(&[
+        "attempt", "approve", "--target", "main", "Y-1", "--head", &head,
+    ]);
     assert_eq!(watch.said(&said), "held\n");
     std::fs::remove_file(&armed).unwrap();
     let intent = project

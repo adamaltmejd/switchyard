@@ -202,12 +202,6 @@ impl Git {
     }
 
     /// Canonical's target branch and its head, if it has one yet.
-    pub async fn target_head(&self, canonical: &Path) -> Result<(String, Option<String>), String> {
-        let branch = self.head_branch(canonical).await?;
-        let head = self.rev_parse(canonical, &target_ref(&branch)).await?;
-        Ok((branch, head))
-    }
-
     pub async fn valid_branch(&self, repo: &Path, branch: &str) -> Result<bool, String> {
         if branch.is_empty() || branch.starts_with('-') {
             return Ok(false);

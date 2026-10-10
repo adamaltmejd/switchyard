@@ -1,7 +1,7 @@
 //! Box-backed work: the implementer execution, gates in a box or on the
 //! host, the project image, and the worker's `yard_context`.
 
-use super::{Loaded, load, proof};
+use super::{Loaded, proof};
 use crate::api::Fail;
 use crate::r#box::{BoxSpec, Egress, EnvValue, Mount, Route};
 use crate::config::RunsIn;
@@ -89,8 +89,10 @@ pub async fn image(daemon: &Daemon, project: &Project, loaded: &Loaded) -> Resul
     {
         return Err(Fail::new("image", "the project was forgotten"));
     }
-    if let Some((head, reference)) = daemon.images.lock().expect("images lock").get(&project.key)
+    if let Some((branch, head, reference)) =
+        daemon.images.lock().expect("images lock").get(&project.key)
         && *head == loaded.head
+        && *branch == loaded.branch
     {
         return Ok(reference.clone());
     }
@@ -113,11 +115,10 @@ pub async fn image(daemon: &Daemon, project: &Project, loaded: &Loaded) -> Resul
     let _ = std::fs::remove_dir_all(&context);
     let built = built
         .map_err(|error| Fail::new("image", format!("the project image did not build: {error}")))?;
-    daemon
-        .images
-        .lock()
-        .expect("images lock")
-        .insert(project.key.clone(), (loaded.head.clone(), built.clone()));
+    daemon.images.lock().expect("images lock").insert(
+        project.key.clone(),
+        (loaded.branch.clone(), loaded.head.clone(), built.clone()),
+    );
     Ok(built)
 }
 
@@ -128,7 +129,7 @@ fn forget_image(daemon: &Daemon, reference: &str) {
         .images
         .lock()
         .expect("images lock")
-        .retain(|_, (_, cached)| cached != reference);
+        .retain(|_, (_, _, cached)| cached != reference);
 }
 
 /// Bring a worker's box up and record its handle. A box that does not come
@@ -431,9 +432,9 @@ pub async fn implement(
     project: &Arc<Project>,
     execution: i64,
 ) -> Result<(), Fail> {
-    let loaded = load(daemon, project).await?;
     let row = project.read(|conn| executions::get(conn, execution))?;
     let attempt = project.read(|conn| attempts::get(conn, row.attempt))?;
+    let loaded = super::load_target(daemon, project, attempt.target_branch()?).await?;
     // The prompt carries the body the start transaction recorded; a later edit
     // stays pending for the next execution.
     let mut ticket = project.read(|conn| tickets::get(conn, attempt.ticket))?;
@@ -931,6 +932,7 @@ async fn implementer_prompt(
             prompt.push_str(&workflow.instructions);
             prompt.push_str("\n\n");
         }
+        prompt.push_str(&format!("Target branch: {}.\n\n", attempt.target_branch()?));
         if workflow.read_only {
             prompt.push_str("Your workspace is read-only. Plan the work: propose child tickets and an edit of this ticket's body with yard_propose, then stop.\n\n");
         } else {
@@ -1042,9 +1044,9 @@ pub async fn gate(
     execution: i64,
     lock: Option<&Lock>,
 ) -> Result<(), Fail> {
-    let loaded = load(daemon, project).await?;
     let row = project.read(|conn| executions::get(conn, execution))?;
     let attempt = project.read(|conn| attempts::get(conn, row.attempt))?;
+    let loaded = super::load_target(daemon, project, attempt.target_branch()?).await?;
     let name = row.name.clone().unwrap_or_default();
     let commit = row.head.clone().unwrap_or_default();
     let base = row.base.clone().unwrap_or_default();
@@ -1492,6 +1494,7 @@ pub async fn context(daemon: &Arc<Daemon>, grant: &crate::mcp::Grant) -> Result<
         "title": ticket.title,
         "body": ticket.body,
         "revision": ticket.revision,
+        "target": attempt.target_branch,
         "base": base,
         "head": head,
         "brief": stat,

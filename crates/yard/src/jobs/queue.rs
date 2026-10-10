@@ -1,7 +1,7 @@
 //! The merge queue: approved candidates in approval order, landed one at a
 //! time on their own full gate run.
 
-use super::{Loaded, load, spawn};
+use super::{Loaded, load_target, spawn};
 use crate::api::Fail;
 use crate::config::Approve;
 use crate::daemon::{Daemon, Project};
@@ -17,11 +17,7 @@ pub fn landing_dir(project: &Project, landing: i64) -> PathBuf {
 }
 
 /// Start the next landing, if the queue is free.
-pub async fn next(
-    daemon: &Arc<Daemon>,
-    project: &Arc<Project>,
-    loaded: &Loaded,
-) -> Result<(), Fail> {
+pub async fn next(daemon: &Arc<Daemon>, project: &Arc<Project>) -> Result<(), Fail> {
     let busy = project.read(|conn| {
         Ok(
             !executions::query(conn, "kind = 'landing' AND status = 'running'", [])?.is_empty()
@@ -33,9 +29,10 @@ pub async fn next(
     }
     for approval in project.read(checks::queue)? {
         let attempt = project.read(|conn| attempts::get(conn, approval.attempt))?;
+        let loaded = load_target(daemon, project, attempt.target_branch()?).await?;
         let ticket = project.read(|conn| tickets::get(conn, attempt.ticket))?;
-        if let Some(lapse) = holds(daemon, project, loaded, &approval, &attempt, &ticket).await? {
-            project.tx(|tx| lapsed(tx, loaded, &approval, &attempt, &lapse))?;
+        if let Some(lapse) = holds(daemon, project, &loaded, &approval, &attempt, &ticket).await? {
+            project.tx(|tx| lapsed(tx, &loaded, &approval, &attempt, &lapse))?;
             continue;
         }
         let blocked = project.read(|conn| {
@@ -112,6 +109,8 @@ async fn holds(
         Some("the approval was withdrawn")
     } else if attempt.state != "live" {
         Some("the attempt ended")
+    } else if attempt.target_branch.as_deref() != Some(loaded.branch.as_str()) {
+        Some("the target changed")
     } else if attempt.candidate() != Some((approval.base.as_str(), approval.head.as_str()))
         || attempt.proof.clone().unwrap_or_default() != approval.proof
     {
@@ -172,7 +171,7 @@ fn lapsed(
     };
     let workflow = loaded.config.workflow(&attempt.workflow)?;
     let payload = json!({
-        "base": approval.base, "head": approval.head, "proof": approval.proof,
+        "target": attempt.target_branch, "base": approval.base, "head": approval.head, "proof": approval.proof,
         "revision": approval.ticket_revision,
         "gate_digest": approval.gate_digest, "review_digest": approval.review_digest,
         "checks": approval.checks, "protected": protected,
@@ -209,7 +208,6 @@ async fn admit<T>(
     attempt: i64,
     then: impl FnOnce(&rusqlite::Transaction, &Current) -> Result<T, Fail>,
 ) -> Result<Result<T, (Current, Lapse)>, Fail> {
-    let loaded = load(daemon, project).await?;
     let (approval, ticket, attempt) = project.read(|conn| {
         let attempt = attempts::get(conn, attempt)?;
         Ok((
@@ -218,6 +216,7 @@ async fn admit<T>(
             attempt,
         ))
     })?;
+    let loaded = load_target(daemon, project, attempt.target_branch()?).await?;
     let lapse = holds(daemon, project, &loaded, &approval, &attempt, &ticket).await?;
     let now = Current {
         loaded,
@@ -248,11 +247,11 @@ pub async fn land(
     project: &Arc<Project>,
     execution: i64,
 ) -> Result<(), Fail> {
-    let loaded = load(daemon, project).await?;
     let row = project.read(|conn| executions::get(conn, execution))?;
     let approval = project
         .read(|conn| checks::approval(conn, row.approval.expect("a landing binds an approval")))?;
     let attempt = project.read(|conn| attempts::get(conn, row.attempt))?;
+    let loaded = load_target(daemon, project, attempt.target_branch()?).await?;
     let ticket = project.read(|conn| tickets::get(conn, attempt.ticket))?;
     let canonical = project.canonical_dir();
     let target_ref = crate::git::target_ref(&loaded.branch);
@@ -532,7 +531,7 @@ pub fn record_landing(tx: &rusqlite::Connection, execution: i64) -> Result<(), F
             attention: None,
         },
         None,
-        json!({ "old": row.intent_old, "merged": row.intent_merged, "head": row.head }),
+        json!({ "target": attempt.target_branch, "old": row.intent_old, "merged": row.intent_merged, "head": row.head }),
     )?;
     store::audit(
         tx,

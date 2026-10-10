@@ -67,7 +67,9 @@ fn a_landing_whose_update_ref_is_held_stays_undecided_until_released() {
     let target = project.canonical_head();
 
     std::fs::write(&armed, "").unwrap();
-    project.json(&["attempt", "approve", "Y-1", "--head", &head]);
+    project.json(&[
+        "attempt", "approve", "--target", "main", "Y-1", "--head", &head,
+    ]);
     machine.wait_dead();
     std::fs::remove_file(&armed).unwrap();
 
@@ -168,7 +170,9 @@ fn a_landing_retires_when_canonical_moves_before_update_ref() {
     project.json(&["ticket", "new", "--title", "Other", "--parked"]);
 
     std::fs::write(&armed, "").unwrap();
-    project.json(&["attempt", "approve", "Y-1", "--head", &head]);
+    project.json(&[
+        "attempt", "approve", "--target", "main", "Y-1", "--head", &head,
+    ]);
     assert_eq!(watch.said(&said), "held\n");
     std::fs::remove_file(&armed).unwrap();
     // An edit on the intent is refused; the other ticket can be edited.
@@ -189,6 +193,20 @@ fn a_landing_retires_when_canonical_moves_before_update_ref() {
     assert_eq!(refused["code"], "refused", "{refused}");
     assert_eq!(refused["data"]["intent"], intent[0]["id"]);
     assert_eq!(project.json(&["ticket", "show", "Y-1"])["body"], "");
+    // G9: target edits also refuse the intent before waiting on canonical.
+    // Sabotage: take canonical before the target guard; this call cannot
+    // answer while the fixture holds update-ref. Y-2 supplies the control.
+    let target_edit = project.refused(&[
+        "ticket",
+        "edit",
+        "Y-1",
+        "--revision",
+        &revision,
+        "--target",
+        "main",
+    ]);
+    assert_eq!(target_edit["code"], "refused");
+    assert_eq!(target_edit["data"]["intent"], intent[0]["id"]);
     project.json(&[
         "ticket",
         "edit",
@@ -199,6 +217,16 @@ fn a_landing_retires_when_canonical_moves_before_update_ref() {
         "Changed",
     ]);
     assert_eq!(project.json(&["ticket", "show", "Y-2"])["body"], "Changed");
+    project.json(&[
+        "ticket",
+        "edit",
+        "Y-2",
+        "--revision",
+        "2",
+        "--target",
+        "main",
+    ]);
+    assert_eq!(project.json(&["ticket", "show", "Y-2"])["target"], "main");
 
     // The operator moves canonical by hand while the landing is held.
     let canonical = project.canonical();

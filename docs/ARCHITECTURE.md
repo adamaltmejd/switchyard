@@ -17,7 +17,7 @@ accidents, not a hostile process running as the same user.
 ## Terms
 
 **Ticket**: one piece of work: title, body, priority, workflow name,
-dependencies. `Y-<n>`. Its body is its plan.
+dependencies and an optional local target branch. `Y-<n>`. Its body is its plan.
 _Avoid_: issue, task, story
 
 **Attempt**: one try at a ticket: a clone of canonical on its own branch, a
@@ -45,8 +45,8 @@ _Avoid_: generation, call, task, run, step
 execution and holds it for exactly that long.
 
 **Landing**: an execution that merges one approved candidate onto
-canonical's head, verifies the merged ref with the full gate set, and moves
-canonical to it; its gate runs are its child executions. The queue is the
+the attempt's frozen canonical target branch, verifies the merged ref with
+the full gate set, and moves that branch to it; its gate runs are its child executions. The queue is the
 approved candidates in approval order, landed one at a time.
 _Avoid_: batch
 
@@ -145,24 +145,27 @@ cross-reference resolves at load; an unknown name is a load error.
 | `[review]` | `max_rounds`, `timeout_minutes`, `blocking` (P0–P3) |
 | `[review.seats.<name>]` | `agent`, `instructions` |
 
-Canonical's symbolic HEAD names the project default. There is one execution
-configuration: that branch head's. A feature branch's configuration declares
-the project default in `target.ref`, not its own branch. Every execution
-reads it when it starts. An attempt freezes its workflow's name and its
+Canonical's symbolic HEAD names the project default. Every execution reads
+configuration and Dockerfile from its attempt's frozen target branch head.
+A feature config may declare the project default in `target.ref`; execution
+does not require that declaration to name the attempt's branch. Import and
+explicit default selection validate it under the sync rules. Config caches
+bind branch and head. Image reuse binds branch and the whole build-context
+commit. Project capacity still reads the default's `max_lanes`. An attempt freezes its workflow's name and its
 implementer's settings at admission, for session continuity; every other
 workflow key is read current. A sync that removes a workflow an open ticket
 names is refused, naming the tickets. Two digests bind verification: the
 **gate digest** over the Dockerfile and every gate with its `stage`, `runs_in` and `env` names, and the
 **review digest** over the workflow's panel, each seat's agent settings and
-instructions, and `review.blocking`. A sync that changes a digest
-supersedes every in-flight check taken under the old one, and only those: a
+instructions, and `review.blocking`. A sync that changes a target's digest
+supersedes its in-flight checks taken under the old one, and only those: a
 new seat re-reviews queued candidates and reruns no gate; a Dockerfile bump
 reruns gates and no review (G2).
 
 **Verification identity.** What a judgment binds is written as data:
 
 ```
-candidate     = attempt, base, head, proof
+candidate     = attempt, frozen target branch, base, head, proof
 gate input    = candidate, ticket revision, gate digest
 review input  = candidate, ticket revision, review digest
 check         = its kind's input, verdict, image id
@@ -233,8 +236,16 @@ refusal.
 
 ## Tickets
 
+`ticket new --target BRANCH` sets an override. Omission resolves the current
+project default at admission. `ticket edit --target BRANCH` changes it;
+`--default-target` clears it. Target edits require the expected revision,
+an open ticket, no live attempt and no landing intent. Branch names are
+validated local refs. Admission refuses `missing_target`, naming the branch,
+without creating an attempt; named sync supplies the ref.
+
 A ticket is `open`, `done` or `abandoned`, and may be `parked`. It becomes
-`done` when its candidate lands, or when the operator closes it with `yard
+`done` when its candidate lands on the frozen target, even if that branch
+never reaches main, or when the operator closes it with `yard
 ticket done` and a reason, which is recorded like every decision. Closing is
 refused while the ticket has a live attempt or a landing intent; abandon the
 attempt first. A done ticket satisfies its dependents either way. It carries
@@ -274,7 +285,7 @@ split and stops.
    proposes children and the body; the operator decides before paying for
    implementation.
 3. **Start.** The scheduler admits ready tickets in priority order up to
-   `max_lanes`. Admission creates the attempt, freezes its workflow and
+   `max_lanes`. Admission creates the attempt, freezes its effective target branch, workflow and
    implementer, and records the first execution before anything external
    runs, in one transaction (G4). `yard attempt start` is the same
    admission for one named ticket, now: refused, naming the reason, when
@@ -437,7 +448,7 @@ the operator has repaired canonical by hand; while canonical still decides
 nothing the item stays. On `timeout` an edit renews the total-work clock; on
 `limit` it allows one more review round; either way the implementer runs
 next. On `limit`, `approve` answers the item while the attempt is at its round
-limit. It binds the head, proof, ticket revision and both digests like an
+limit. It binds the frozen target branch, head, proof, ticket revision and both digests like an
 `approval` item, so a changed gate digest is stale; the gates passed at the
 digest that raised the item. It names the gate checks and the blocking
 review checks it overrides, and records that it overrode a review. The
@@ -496,7 +507,7 @@ authority, and refuses a malformed clone by name. Workers commit;
 they cannot push.
 
 **A repair sees its target.** A repair after a red or conflicting landing
-names the target it failed on. The daemon writes a bundle of that target
+names the frozen branch and target commit it failed on. The daemon writes a bundle of that branch
 into the attempt's files, mounted read-only in the implementer's box, and
 the worker fetches from it; canonical itself is never mounted. A
 candidate's base is the daemon's: the head at admission, then the latest
@@ -522,20 +533,22 @@ divergent history is refused. If canonical is ahead or the checkout branch
 is absent, selection uses canonical's imported head and does not consume,
 create or switch a checkout branch. Selection alone requires no clean or
 matching checkout. Only consume has those preconditions. Validation precedes
-mutations. A live single-target attempt
-or unresolved landing intent refuses the switch, naming their identities.
+mutations. An unresolved landing intent refuses the switch, naming its identity.
+Live attempts keep their frozen branches; default changes affect future
+admissions only.
 The refusal reads live work before waiting for canonical and again under its
 lock, so a held landing child cannot delay its named intent refusal.
 Default selection, admission, workflow edits and ticket-proposal acceptance
 serialise with canonical mutations. Body, title and priority edits, proposal
-edit/link acceptance and rejection do not wait on canonical. Attempts
-and the landing queue still use the one project default; tickets have no
-target override. All canonical mutations serialise on
+edit/link acceptance and rejection do not wait on canonical. Target edits
+also do not wait on canonical; admission rechecks the revision and branch.
+The project keeps one serial landing queue across all targets.
+All canonical mutations serialise on
 one queue, and so does each re-read of a landing's policy with what it
 admits, so no sync falls between them. Canonical branch updates are compare-and-swap;
 symbolic HEAD changes under the same canonical lock.
 
-**Landing.** Merge the candidate onto canonical's head (a merge commit,
+**Landing.** Merge the candidate onto its frozen target branch head (a merge commit,
 or a fast-forward when it already sits there) and verify. Then, in one
 store transaction that is serialised with every command that could
 invalidate it (ticket edit, abandon, reject), re-read the approval
@@ -548,7 +561,7 @@ intent. Yard never force-updates a ref and never reads command success as
 a landing.
 
 On restart, once the landing's lock proves its git children are over, an
-unresolved landing intent is decided by canonical alone:
+unresolved landing intent is decided by its frozen canonical branch alone:
 
 | Canonical's target | Meaning | Action |
 |---|---|---|
@@ -717,7 +730,7 @@ the grant. Four tools, granted by execution kind:
 
 | Tool | Kinds |
 |---|---|
-| `yard_context` — ticket, brief, base, head | implementation, review |
+| `yard_context` — ticket, brief, target, base, head | implementation, review |
 | `yard_progress` — one bounded note | implementation, review |
 | `yard_propose` — a ticket, an edit, a link | implementation |
 | `yard_publish_review` — findings; once | review |
@@ -788,7 +801,9 @@ item (none on an idle return); `--json` prints
 `status --history` follows
 the audit stream from a sequence and prints one line per event; it is the
 only history view. `attempt tail` prints the live transcript file as the
-harness wrote it. Every
+harness wrote it. Approve and reject require `--target BRANCH` as well as `--head SHA`.
+A different target is stale and writes nothing. Status names the frozen
+target of each live attempt and queued candidate. Every
 command runs without a terminal and answers `--json`. `doctor` reports what
 pinfold says of itself, the service, the project image, which connections
 have a credential, and each configured login's pin and, where Yard holds its
@@ -803,16 +818,16 @@ G15. Each is shown by one or more end-to-end scenarios; testing policy is in
 | # | Guarantee | Shown by |
 |---|---|---|
 | 1 | Only the queue lands | A worker with its MCP bearer and its clone: `git push` fails, no RPC lands, canonical is not reachable from the box. Control: the queue lands the same candidate. |
-| 2 | Judgments bind exact identity | A passed gate and review, then a new commit and a ticket edit each leave the candidate unverified (an edit supersedes the approval and the implementer runs; when it makes no commit, the same head gets fresh gate and review checks at the new revision, with no `stopped:unchanged`); an edit while a seat is held stops that seat, its box is gone before the implementer runs, and the round count is unchanged; a synced gate change reruns the gate and keeps the review, a synced seat change the reverse. A repair that changes only the proof snapshot, with an unchanged head, is a new candidate: its gate reruns and the old check does not count. An approve or reject names the head and, when the candidate has a proof snapshot, its digest; a delayed answer naming the old digest is stale and writes no row, and the new digest answers. An approval given with `--head`, then a repair commit: the approval does not carry and `approval` is raised again; under `auto` a protected path still raises it. An automatic approval, then a sync that protects its path: the landing withdraws it, raises `approval` and reruns no check. An automatic approval, then a sync that sets `approve = "manual"` and the attempt abandoned while the landing re-reads it: the landing withdraws it and nothing is raised. An approve naming an old candidate, an edit naming an old revision, and an accepted edit proposal whose ticket moved each get a stale result and change no row. |
-| 3 | Landing is compare-and-swap and proved | Canonical moved by hand between verify and land: the landing retires and re-queues. On green, canonical is the verified ref and contains the head. The daemon killed while its `update-ref` is held: restart keeps the intent and raises `red`; once the command is released, `start` records the landing once. A ticket edit racing the landing intent is refused naming the intent. |
+| 2 | Judgments bind exact identity, including the frozen target branch | A passed gate and review, then a new commit and a ticket edit each leave the candidate unverified (an edit supersedes the approval and the implementer runs; when it makes no commit, the same head gets fresh gate and review checks at the new revision, with no `stopped:unchanged`); an edit while a seat is held stops that seat, its box is gone before the implementer runs, and the round count is unchanged; a synced gate change reruns the gate and keeps the review, a synced seat change the reverse. A repair that changes only the proof snapshot, with an unchanged head, is a new candidate: its gate reruns and the old check does not count. An approve or reject names the frozen target branch, head and, when the candidate has a proof snapshot, its digest; a delayed answer naming the old digest is stale and writes no row, and the new digest answers. A same-head approval naming main for feature/a is stale and writes no row; its feature/a answer controls it. An approval given with `--head`, then a repair commit: the approval does not carry and `approval` is raised again; under `auto` a protected path still raises it. An automatic approval, then a sync that protects its path: the landing withdraws it, raises `approval` and reruns no check. An automatic approval, then a sync that sets `approve = "manual"` and the attempt abandoned while the landing re-reads it: the landing withdraws it and nothing is raised. An approve naming an old candidate, an edit naming an old revision, and an accepted edit proposal whose ticket moved each get a stale result and change no row. |
+| 3 | Landing is compare-and-swap and proved | Canonical moved by hand between verify and land: the landing retires and re-queues. On green, canonical is the verified ref and contains the head. The daemon killed while its `update-ref` is held: restart keeps the intent and raises `red`; once the command is released, `start` records the landing once. Body and target edits racing the landing intent are refused naming the intent before the held git child is released; another inactive ticket accepts both edits. |
 | 4 | Capacity holds | Two `attempt start`s race for the last lane: one wins and a ticket never has two live attempts. Two registered projects each keep their own store; an execution ending in one leaves the other's execution of the same id its bearer. A candidate returned from the queue for repair takes a freed lane before a ready ticket is admitted. |
 | 5 | Intent precedes effect, and a restart loses only the turn | With `box up` held before invocation, the execution row and its audit event already exist. The daemon killed mid-execution: on restart the execution is `interrupted`, no second box exists, the tree is kept, and `start` continues. The daemon killed while a host landing gate runs: the gate's group is gone after restart and the landing re-queues. No command is answered before reconciliation has committed. |
 | 6 | Inputs are validated at the boundary | A Claude agent selecting both provider and login is refused as `provider_login_conflict`, naming the agent; corrected API and login selections work in the same project. A malformed tool payload, a TOML with an unknown key, an unknown workflow name, a sync that removes a workflow an open ticket names: refused by name, nothing written. Named import refuses a missing checkout branch or missing committed Dockerfile without creating a canonical branch; restored committed inputs import. Default selection refuses a config declaring another default, naming both branches; corrected selection succeeds. |
 | 7 | A ticket lands end to end and leaves only rows | New ticket, worker commit, candidate gate, review pass, approval, green landing: canonical moves and the ticket is done. The proof snapshot on the host holds what the worker wrote before landing. Afterwards every decision has one audit event naming its target and text, the execution rows carry tokens, cost, model and start reason, every event is one the Store section names, the attempt directory with its proof snapshot, boxes and proof copies are gone, the approval row and each check's execution carry the proof digest, and another live attempt's directory and canonical are untouched. A `status --watch` returns an approval already open when it starts at once, and one started with `--since` and nothing open returns when the next item is raised; with `--since` naming the seq of an open approval it keeps waiting until a further item is raised, then prints both. After the last attempt ends with nothing open or ready, a `--watch --since` returns with no items, and one armed on an idle board keeps waiting. |
 | 8 | Review is a publication, and bounded | A seat that exits 0 without publishing is a review error; a seat killed after publishing has published; a second publication is refused; findings below `blocking` pass; a panel of `none` reaches approval marked unreviewed; a seat that publishes a block and is then held by the fixture: no repair starts until its box is gone; a seat that always blocks gets exactly `max_rounds` rounds, then `stopped:limit`, and an edit then grants one more round; the operator's approve at the limit lands the head, its approval row naming the blocking review check as overridden, and control, in the same project: after a synced gate change, approve is stale naming the gate digest and writes nothing. A candidate that commits a `.pi` extension which publishes a pass, a skill and a new `AGENTS.md` rule: none loads, and the seat's own publication is the one recorded; control: the base's directory extension, its skills from `.pi/skills/` and `.agents/skills/` and its `AGENTS.md` rule are in every implementer and seat request. A candidate that commits a Claude plugin, settings hook and `.mcp.json` server which publish a pass, a skill and a new `CLAUDE.md` rule: none loads, and the seat's own publication is the one recorded; control: the base's `CLAUDE.md` rule, skill and hook output are in every implementer and seat request, and so is its `.agents/skills/` skill, which the base also links into `.claude/skills/`. A candidate that commits a `.codex/config.toml` naming an MCP server that publishes a pass, a `hooks.json` hook, a skill and a new `AGENTS.md` rule, on a base whose staged config trusts `/workspace` and names its own server: nothing of the candidate's loads, the seat's own publication is the one recorded, and neither server leaves a marker; control: the base's `AGENTS.md` rule, skill and `hooks.json` hook output are in every implementer and seat request. A candidate that commits `.agents/skills` as a link: the execution is refused naming the path, though the seat would publish; control: the same skill as a regular directory reaches approval. A seat that publishes with no registration proof does not count, and a fresh seat runs. A direct Anthropic Claude seat whose stdout init proof is removed publishes but does not count; only the fresh proven seat reaches approval, and subscription login works in the same project. A gate error's `start` reruns that gate on the same head. A seat or gate that ends after its attempt was abandoned ends `abandoned`, records no check and raises no item. A process in a seat that reads the inherited bearer and posts its own `initialize` then a publication, in each of Pi, Claude and Codex: both are refused with 404 and the seat's own publication is the one recorded. |
-| 9 | Each implementer execution starts from the right place | An edit mid-execution lets the execution end on its own and reaches the next prompt as a diff, with no gate run between; `stop` delivers it sooner. A worker that leaves an untracked file gets no review and the next prompt lists the file; left again, `stopped:dirty`. With `max_session_executions = 2`: the second execution resumes the first, the third resumes nothing and its prompt is the brief, the fourth resumes the third, the fifth resumes nothing. |
-| 10 | The queue lands one at a time and re-judges what does not merge | Two approved candidates, the second red on its merged ref: the first lands, the second gets one repair and a second red raises `red`. A red's detail is the end of the gate's output in the order written: a gate that writes over 8000 bytes to stderr and then a marker to stdout leaves a detail ending with the marker. A candidate that does not merge gets a repair naming the paths, and its next head takes gates, review and approval again. A conflict against a target that changed `.yard/config.toml`, in a clone made before it: the worker fetches the target from its bundle, merges, and the new candidate's base is the target, so it passes the `.yard` refusal and lands with the operator's configuration intact. |
-| 11 | Only the operator's sync changes `.yard` and canonical from outside | A worker commit under `.yard` comes back with the reason and no gate runs; the same change through `yard sync` is in force for the next execution. A checkout and canonical that each hold a commit the other lacks: both directions refuse naming both heads; a fast-forward passes. Named feature/a import and consume move its committed history while main and feature/b stay fixed; named divergence refuses both heads and a clean fast-forward controls it. Dirty or different checked-out destinations refuse by identity and preserve their heads and host files; the clean matching checkout consumes. Named import leaves symbolic HEAD unchanged. Explicit validated default selection refuses a held old single-target attempt by identity; with no live work it succeeds, and omitted sync then uses the selected default. An open intent held at its real update-ref refuses selection naming its execution before the child is released; after the landing completes, selection succeeds. Selection from a different or dirty checkout uses imported canonical history, including with a behind or absent checkout branch, without moving the checkout. Consuming an imported branch whose config names a former default still fast-forwards the clean matching checkout. |
+| 9 | Each implementer execution starts from its frozen target and the right candidate | Main first warms the default config and image; feature/a starts from its own git head and uses different gates and Dockerfile despite declaring main. Image ids, gate digests and host counters distinguish those inputs. Missing-target admission creates no attempt; a revision-bound inactive target edit supplies the control. A live target edit is refused by attempt and branch identity. An edit mid-execution lets the execution end on its own and reaches the next prompt as a diff, with no gate run between; `stop` delivers it sooner. A worker that leaves an untracked file gets no review and the next prompt lists the file; left again, `stopped:dirty`. With `max_session_executions = 2`: the second execution resumes the first, the third resumes nothing and its prompt is the brief, the fourth resumes the third, the fifth resumes nothing. |
+| 10 | The queue lands one at a time and re-judges what does not merge | Two approved candidates, the second red on its merged ref: the first lands, the second gets one repair and a second red raises `red`. A red's detail is the end of the gate's output in the order written: a gate that writes over 8000 bytes to stderr and then a marker to stdout leaves a detail ending with the marker. A candidate that does not merge gets a repair naming the paths, and its next head takes gates, review and approval again. A feature/a conflict against a target that changed `.yard/config.toml` and its Dockerfile, in a clone made before it: the worker fetches the target from its feature/a bundle, merges, and the new candidate's base is the target; fresh feature gates, image and review judge it before approval and landing on feature/a while main stays fixed, so it passes the `.yard` refusal and lands with the operator's configuration intact. |
+| 11 | Only the operator's sync changes `.yard` and canonical from outside | A worker commit under `.yard` comes back with the reason and no gate runs; the same change through `yard sync` is in force for the next execution. A checkout and canonical that each hold a commit the other lacks: both directions refuse naming both heads; a fast-forward passes. Named feature/a import and consume move its committed history while main and feature/b stay fixed; named divergence refuses both heads and a clean fast-forward controls it. Dirty or different checked-out destinations refuse by identity and preserve their heads and host files; the clean matching checkout consumes. Named import leaves symbolic HEAD unchanged. Explicit validated default selection succeeds while a real default-bound worker is held; its admitted main base and frozen branch stay unchanged, the held attempt finishes on main, a future admission starts from feature/a, and omitted sync uses the selected default. An open intent held at its real update-ref refuses selection naming its execution before the child is released; after the landing completes, selection succeeds. Selection from a different or dirty checkout uses imported canonical history, including with a behind or absent checkout branch, without moving the checkout. Consuming an imported branch whose config names a former default still fast-forwards the clean matching checkout. |
 | 12 | Boxes hold nothing secret | The key is absent from the box's environment and clone; the fixture behind the injecting route receives it. The direct Anthropic Claude API key is absent from the seat environment, files and clone; the host fixture receives `x-api-key` and `anthropic-version: 2023-06-01` on messages for `claude-opus-5-5`. The claude token is absent from the box's environment, files and clone; the fixture behind the login route receives it as `Authorization: Bearer`. The codex host login is absent from the box's environment, files and clone; the fixture behind the login route receives it as `Authorization: Bearer` with `ChatGPT-Account-ID`. |
 | 13 | Every gate and seat runs where its row says | A seat that writes to `/workspace` fails and the head is unchanged. A gate box and a seat read the candidate's proof snapshot at `/yard/proof` and their writes there fail; control: the implementer wrote the live proof. A gate box that calls the model or MCP route gets nothing, and an ignored file the implementer left is absent from its checkout; control: the worker box reaches the route. A host candidate gate runs on the head before any review and sees `YARD_BASE`, `YARD_PROOF`, the snapshot it judges, and only the variables its `env` names; a host landing gate runs on the merged ref, reads the approved candidate's proof snapshot and never for a candidate whose approval was superseded, even by an edit while its landing merges. |
 | 14 | Worker git is untrusted, and Yard stays local | A worker that plants `core.fsmonitor`, a hook, a clean filter and a remote in its clone, corrupts an object and links its harness's models file to a host path: none of them acts on the host, canonical's objects are intact, the candidate is refused by name. A worker that leaves a symlink in `/yard/proof` is refused by name and no gate runs; a regular file is accepted. Across G7's path every request the model's fixture receives came through the model route, and the daemon listens on its unix socket and the MCP listener only. |
