@@ -282,7 +282,7 @@ pub async fn run_harness(
     if kind == crate::mcp::Kind::Review {
         notify_if_edited(project, execution, &stop);
     }
-    if take_stop(daemon, project, execution).await {
+    if harness_stopped(daemon, project, execution).await? {
         return Ok(Run {
             stopped: true,
             ..Default::default()
@@ -293,7 +293,7 @@ pub async fn run_harness(
     let mut file = tokio::fs::File::create(transcript)
         .await
         .map_err(|error| error.to_string())?;
-    if take_stop(daemon, project, execution).await {
+    if harness_stopped(daemon, project, execution).await? {
         return Ok(Run {
             stopped: true,
             ..Default::default()
@@ -924,6 +924,14 @@ async fn take_stop(daemon: &Daemon, project: &Project, execution: i64) -> bool {
     }
 }
 
+async fn harness_stopped(daemon: &Daemon, project: &Project, execution: i64) -> Result<bool, Fail> {
+    let stopped = take_stop(daemon, project, execution).await;
+    project.read(|conn| {
+        let row = executions::get(conn, execution)?;
+        Ok(stopped || row.status != "running" || attempts::get(conn, row.attempt)?.state != "live")
+    })
+}
+
 // A preparation child finishes under the effect lock before this row ends.
 // capacity::effect still requires ownership proof before releasing its slot.
 async fn stop_preparation(
@@ -931,12 +939,22 @@ async fn stop_preparation(
     project: &Project,
     execution: i64,
 ) -> Result<bool, Fail> {
-    if !take_stop(daemon, project, execution).await {
-        return Ok(false);
-    }
+    let stopped = take_stop(daemon, project, execution).await;
     project.tx(|tx| {
         let row = executions::get(tx, execution)?;
+        if row.status != "running" {
+            return Ok(true);
+        }
         let attempt = attempts::get(tx, row.attempt)?;
+        if attempt.state != "live" {
+            executions::end(tx, execution, executions::End {
+                outcome: "abandoned", ticket: Some(attempt.ticket), ..Default::default()
+            })?;
+            return Ok(true);
+        }
+        if !stopped {
+            return Ok(false);
+        }
         executions::end(tx, execution, executions::End {
             outcome: "unchanged", ticket: Some(attempt.ticket), ..Default::default()
         })?;

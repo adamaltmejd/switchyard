@@ -158,11 +158,21 @@ pub async fn decide_intent(
     project: &Project,
     row: &executions::Execution,
 ) -> Result<bool, Fail> {
+    if project
+        .read(|conn| Ok(executions::get(conn, row.id)?.intent_state))?
+        .as_deref()
+        != Some("open")
+    {
+        return Ok(true);
+    }
     if row.reserved && !super::capacity::release(daemon, project, row).await? {
         return Ok(false);
     }
     let undecided = |detail: &str| -> Result<bool, Fail> {
         project.tx(|tx| {
+            if executions::get(tx, row.id)?.intent_state.as_deref() != Some("open") {
+                return Ok(true);
+            }
             let open = attempts::open_attention(tx)?
                 .into_iter()
                 .any(|item| item.execution == Some(row.id) && item.kind == "red");
@@ -202,8 +212,12 @@ pub async fn decide_intent(
     };
     if target == old {
         project.tx(|tx| {
+            let current = executions::get(tx, row.id)?;
+            if current.intent_state.as_deref() != Some("open") {
+                return Ok(());
+            }
             executions::resolve_intent(tx, row.id)?;
-            if executions::get(tx, row.id)?.status == "running" {
+            if current.status == "running" {
                 executions::end(
                     tx,
                     row.id,

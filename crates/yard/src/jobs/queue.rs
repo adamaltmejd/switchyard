@@ -539,6 +539,11 @@ pub async fn land(
 /// intent.
 pub fn record_landing(tx: &rusqlite::Connection, execution: i64) -> Result<(), Fail> {
     let row = executions::get(tx, execution)?;
+    // Recovery and the live controller may both finish external probes.
+    // Only the transaction that still sees the open intent records it.
+    if row.intent_state.as_deref() != Some("open") {
+        return Ok(());
+    }
     let attempt = attempts::get(tx, row.attempt)?;
     let approval = checks::approval(tx, row.approval.expect("a landing binds an approval"))?;
     executions::resolve_intent(tx, execution)?;
