@@ -299,24 +299,54 @@ impl Config {
                         ));
                     }
                 }
-                for gate in self.gates.iter().filter(|g| g.stage == stage) {
+                for gate in self
+                    .gates
+                    .iter()
+                    .filter(|g| stage == Stage::Landing || g.stage == Stage::Candidate)
+                {
                     chain.push((
-                        format!("gate-{}", gate.name),
+                        format!(
+                            "{}-gate-{}",
+                            if stage == Stage::Candidate {
+                                "candidate"
+                            } else {
+                                "landing"
+                            },
+                            gate.name
+                        ),
                         Node {
                             runner: Runner::Command {
                                 gate: gate.name.clone(),
                             },
-                            access: Access::ReadOnly,
-                            inputs: BTreeMap::new(),
+                            access: Access::WriteAllowed,
+                            inputs: if stage == Stage::Landing {
+                                BTreeMap::from([(
+                                    "merged".into(),
+                                    Input {
+                                        node: None,
+                                        output: "merged".into(),
+                                        kind: Output::Candidate,
+                                    },
+                                )])
+                            } else {
+                                BTreeMap::new()
+                            },
                             outputs: BTreeMap::from([("result".into(), Output::Verdict)]),
                             outcomes: vec!["complete".into()],
                             routes: BTreeMap::new(),
-                            requires: Vec::new(),
+                            requires: if stage == Stage::Landing {
+                                vec!["merged".into()]
+                            } else {
+                                Vec::new()
+                            },
                         },
                     ));
                 }
             }
             for (_, node) in chain.iter_mut().skip(1) {
+                if !node.inputs.is_empty() {
+                    continue;
+                }
                 node.inputs.insert(
                     "candidate".into(),
                     Input {
@@ -336,7 +366,11 @@ impl Config {
                 .insert("complete".into(), vec![Route { to, repeat: None }]);
         }
         Ok(Plan {
-            inputs: BTreeMap::new(),
+            inputs: if !workflow.read_only && !self.gates.is_empty() {
+                BTreeMap::from([("merged".into(), Output::Candidate)])
+            } else {
+                BTreeMap::new()
+            },
             nodes: chain.into_iter().collect(),
         })
     }

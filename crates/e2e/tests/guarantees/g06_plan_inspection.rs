@@ -17,6 +17,13 @@ fn call(operator: &mut Operator, project: &Project, tool: &str, mut args: Value)
 /// passes runnable validation. Read the default config for a named target;
 /// feature/a's different agent instructions disappear. Admit on inspection;
 /// the externally read store contains an attempt or execution.
+/// Filter landing checks by configured stage in workflow_plan, or bind
+/// their input to implementer.result: the literal full-chain fixture differs.
+/// Native boxed check inputs are observed after a target advance forces a
+/// distinct merged ref. No existing block compares the inspected full gate
+/// set with the native candidate and landing executions.
+/// Skip the native second candidate-stage gate at landing, or check out the
+/// candidate in its box: the instances or boxed git identities differ.
 #[test]
 fn typed_plans_inspect_without_admission_and_refuse_unsupported_runtime() {
     let machine = Machine::new("g6plans", |request| {
@@ -29,8 +36,12 @@ fn typed_plans_inspect_without_admission_and_refuse_unsupported_runtime() {
     let fixture = config(
         r#"
 [gates.check]
-command = "test -f feature.txt"
+command = "test -f feature.txt && git rev-parse HEAD"
 stage = "candidate"
+
+[gates.final]
+command = "test -f target.txt && git rev-parse HEAD"
+stage = "landing"
 
 [profiles.choose]
 access = "read-only"
@@ -171,13 +182,21 @@ selected = [{ to = "choose", repeat = 2 }]
         "yard_plan_validate",
         json!({"target": "main"}),
     );
-    let legacy_expected = json!({"inputs": {}, "nodes": {
+    let legacy_expected = json!({"inputs": {"merged": "candidate"}, "nodes": {
         "implementer": {"runner": {"kind": "agent", "agent": "worker", "instructions": ""},
             "access": "write-allowed", "inputs": {}, "outputs": {"result": "candidate"},
-            "outcomes": ["complete"], "routes": {"complete": [{"to": "gate-check", "repeat": null}]}, "requires": []},
-        "gate-check": {"runner": {"kind": "command", "gate": "check"}, "access": "read-only",
+            "outcomes": ["complete"], "routes": {"complete": [{"to": "candidate-gate-check", "repeat": null}]}, "requires": []},
+        "candidate-gate-check": {"runner": {"kind": "command", "gate": "check"}, "access": "write-allowed",
             "inputs": {"candidate": {"node": "implementer", "output": "result", "kind": "candidate"}},
-            "outputs": {"result": "verdict"}, "outcomes": ["complete"], "routes": {}, "requires": ["candidate"]}
+            "outputs": {"result": "verdict"}, "outcomes": ["complete"],
+            "routes": {"complete": [{"to": "landing-gate-check", "repeat": null}]}, "requires": ["candidate"]},
+        "landing-gate-check": {"runner": {"kind": "command", "gate": "check"}, "access": "write-allowed",
+            "inputs": {"merged": {"node": null, "output": "merged", "kind": "candidate"}},
+            "outputs": {"result": "verdict"}, "outcomes": ["complete"],
+            "routes": {"complete": [{"to": "landing-gate-final", "repeat": null}]}, "requires": ["merged"]},
+        "landing-gate-final": {"runner": {"kind": "command", "gate": "final"}, "access": "write-allowed",
+            "inputs": {"merged": {"node": null, "output": "merged", "kind": "candidate"}},
+            "outputs": {"result": "verdict"}, "outcomes": ["complete"], "routes": {}, "requires": ["merged"]}
     }});
     assert_eq!(legacy["result"]["plan"], legacy_expected);
     assert_eq!(legacy["result"]["runnable"], true);
@@ -196,17 +215,49 @@ selected = [{ to = "choose", repeat = 2 }]
     project.json(&["ticket", "new", "--title", "Feature"]);
     let approval = history.attention();
     assert_eq!(approval["data"]["kind"], "approval");
-    assert_eq!(
-        git(
-            &project.canonical(),
-            &[
-                "show",
-                &format!(
-                    "{}:feature.txt",
-                    approval["data"]["payload"]["head"].as_str().unwrap()
-                )
-            ]
-        ),
-        "feature\n"
+    let candidate = git(
+        &project.path.join(".yard/local/attempts/1/clone"),
+        &["rev-parse", "HEAD"],
+    )
+    .trim()
+    .to_string();
+    // Advance only target history, preserving gate and approval policy. The
+    // landing ref must then differ from implementer.result.
+    project.git(&["checkout", "-q", "main"]);
+    project.write("target.txt", "target advance\n");
+    project.git(&["add", "target.txt"]);
+    project.git(&["commit", "-qm", "Advance target before landing"]);
+    project.json(&["sync", "main"]);
+    let approved = call(
+        &mut operator,
+        &project,
+        "yard_attempt_approve",
+        json!({
+            "ticket": "Y-1", "target": "main", "head": candidate,
+            "proof": approval["data"]["payload"]["proof"]
+        }),
     );
+    assert!(approved.get("error").is_none(), "{approved}");
+    history.event("landing.recorded", &[]);
+    let merged = project.canonical_head();
+    assert_ne!(candidate, merged);
+    // These three instances come from the fixture's declared phase controls,
+    // not from walking the resolver's graph. Box git output establishes the
+    // actual checkout identity as well as the externally observed row head.
+    let checks = project
+        .rows("SELECT name, reason, head, detail FROM execution WHERE kind = 'gate' ORDER BY id");
+    assert_eq!(
+        checks
+            .iter()
+            .map(|row| json!({"name": row["name"], "reason": row["reason"], "head": row["head"]}))
+            .collect::<Vec<_>>(),
+        vec![
+            json!({"name": "check", "reason": "candidate", "head": candidate}),
+            json!({"name": "check", "reason": "landing", "head": merged}),
+            json!({"name": "final", "reason": "landing", "head": merged}),
+        ]
+    );
+    for (row, head) in checks.iter().zip([&candidate, &merged, &merged]) {
+        assert!(row["detail"].as_str().unwrap().contains(head), "{row}");
+    }
 }
