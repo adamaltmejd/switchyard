@@ -496,9 +496,11 @@ fn a_plan_proposes_children_that_block_it() {
 /// Upgrade retains the old row and capacity rather than guessing from an
 /// absent effects lock. A completed prior ticket is the allowed control.
 /// Releasing the known fixture child does not invent a proof on the old
-/// row; the ambiguous upgrade stays stopped for the Y80 rehearsal.
+/// row; a second startup reconsiders ownership after completion and keeps
+/// the ambiguous upgrade stopped for the Y80 rehearsal.
 /// Sabotage: backfill only reservations without their legacy lock contract,
-/// or accept absence of the new lock as proof for a legacy execution.
+/// or accept absence of the new lock as proof for a legacy execution,
+/// including when reconciliation probes it after the old child finishes.
 #[test]
 fn an_upgrade_retains_a_legacy_pre_box_child_without_an_ownership_proof() {
     let machine = Machine::new("g5-legacy-child", |request| {
@@ -563,6 +565,21 @@ fn an_upgrade_retains_a_legacy_pre_box_child_without_an_ownership_proof() {
     assert_eq!(waiting["ticket"], "Y-3");
     std::fs::write(&release, "go\n").unwrap();
     assert_eq!(watch.said(&done), "done\n");
+    drop(watch);
+    machine.kill();
+    machine.start();
+    // Serving and this supported read occur after startup reconciliation.
+    // Historical ownership attention alone cannot prove reconsideration.
+    let status = project.json(&["status"]);
+    let retained = status["attention"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["execution"] == 2 && item["reason"] == "ownership")
+        .expect("the legacy owner still needs attention after reconciliation");
+    assert_eq!(retained["kind"], "red");
+    assert_eq!(retained["execution"], 2);
+    assert_eq!(retained["reason"], "ownership");
     assert_eq!(
         project.rows("SELECT status, reserved, lock_contract FROM execution WHERE id = 2"),
         vec![json!({"status": "running", "reserved": 1, "lock_contract": 0})]
