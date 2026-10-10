@@ -336,24 +336,22 @@ pub async fn doctor(daemon: &Daemon, project: &Project) -> Result<Value, Fail> {
     }))
 }
 
-/// Import a validated fast-forward under the canonical lock.
+/// Import a validated fast-forward under its target lock.
 async fn import(
     daemon: &Daemon,
     project: &Project,
-    held: &tokio::sync::MutexGuard<'_, ()>,
+    _held: &tokio::sync::MutexGuard<'_, ()>,
     branch: &str,
     ours: Option<&str>,
     theirs: &str,
 ) -> Result<Value, Fail> {
     let canonical = project.canonical_dir();
     let target = crate::git::target_ref(branch);
-    project.loaded.lock().expect("loaded lock").default = None;
     let moved = daemon
         .git
         .update_ref(&canonical, &target, theirs, ours, None)
         .await?;
     if !moved {
-        super::refresh_default(daemon, project, held).await?;
         return Err(Fail::refused(
             "canonical moved during the sync; run it again",
         ));
@@ -409,16 +407,38 @@ pub async fn sync(daemon: &Daemon, project: &Project, params: &Value) -> Result<
         let default = daemon.git.head_branch(&project.canonical_dir()).await?;
         refuse_default_switch(project, &default, named.expect("selection names a branch"))?;
     }
-    let held = project.canonical.lock().await;
     let canonical = project.canonical_dir();
     let default = daemon.git.head_branch(&canonical).await?;
     let branch = named.unwrap_or(&default);
+    let target = crate::git::target_ref(branch);
+    let refuse_intent = || {
+        project.read(|conn| {
+            if let Some(intent) = executions::open_intents(conn)?
+                .into_iter()
+                .find(|row| row.intent_ref.as_deref() == Some(target.as_str()))
+            {
+                return Err(
+                    Fail::refused("a landing intent prevents sync of its target")
+                        .with(json!({ "reason": "intent", "branch": branch, "intent": intent.id })),
+                );
+            }
+            Ok(())
+        })
+    };
+    refuse_intent()?;
+    let target_lock = project.target_lock(&target);
+    let held = target_lock.lock().await;
+    refuse_intent()?;
+    let selection = if select || branch == default {
+        Some(project.canonical.lock().await)
+    } else {
+        None
+    };
     if !daemon.git.valid_branch(&canonical, branch).await? {
         return Err(
             Fail::invalid("sync requires a local branch name").with(json!({ "branch": branch }))
         );
     }
-    let target = crate::git::target_ref(branch);
     let ours = daemon.git.rev_parse(&canonical, &target).await?;
     let checkout_head = daemon.git.rev_parse(&project.root, &target).await?;
     // Selection can use history already imported into canonical without
@@ -515,7 +535,16 @@ pub async fn sync(daemon: &Daemon, project: &Project, params: &Value) -> Result<
     } else if ours.as_deref() == Some(theirs.as_str()) {
         json!({ "sync": "current", "head": theirs })
     } else if importing {
-        import(daemon, project, &held, branch, ours.as_deref(), &theirs).await?
+        if branch == default {
+            project.loaded.lock().expect("loaded lock").default = None;
+        }
+        let imported = import(daemon, project, &held, branch, ours.as_deref(), &theirs).await;
+        if imported.is_err()
+            && let Some(published) = selection.as_ref()
+        {
+            let _ = super::refresh_default(daemon, project, published).await;
+        }
+        imported?
     } else {
         let ours = ours.as_deref().expect("a consumed canonical has a head");
         let checked_out = daemon.git.current_branch(&project.root).await?;
@@ -567,7 +596,11 @@ pub async fn sync(daemon: &Daemon, project: &Project, params: &Value) -> Result<
     }
     result["branch"] = json!(branch);
     result["default"] = json!(if select { branch } else { &default });
-    super::refresh_default(daemon, project, &held).await?;
+    let published = match selection {
+        Some(held) => held,
+        None => project.canonical.lock().await,
+    };
+    super::refresh_default(daemon, project, &published).await?;
     Ok(result)
 }
 

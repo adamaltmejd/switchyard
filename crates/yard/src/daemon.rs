@@ -64,8 +64,9 @@ pub struct Project {
     /// Short and stable: names boxes and images host-wide.
     pub key: String,
     pub store: Mutex<Store>,
-    /// Every canonical mutation serialises here.
+    /// Default configuration publication and project admission serialise here.
     pub canonical: tokio::sync::Mutex<()>,
+    targets: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Wakes `status --history` and `status --watch` readers after a write.
     pub events: Notify,
     /// The configuration at the target head it was read from.
@@ -73,6 +74,15 @@ pub struct Project {
 }
 
 impl Project {
+    pub fn target_lock(&self, target_ref: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.targets
+            .lock()
+            .expect("target locks")
+            .entry(target_ref.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
     pub fn local(&self) -> PathBuf {
         self.root.join(".yard/local")
     }
@@ -340,6 +350,7 @@ fn open_project(root: &Path) -> Result<Arc<Project>, String> {
         key,
         store: Mutex::new(store),
         canonical: tokio::sync::Mutex::new(()),
+        targets: Mutex::new(HashMap::new()),
         events: Notify::new(),
         loaded: Mutex::new(crate::jobs::Configurations::default()),
     }))

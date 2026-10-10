@@ -1,5 +1,5 @@
 //! The merge queue: approved candidates in approval order, landed one at a
-//! time on their own full gate run.
+//! time per target on their own full gate run.
 
 use super::{Loaded, load_target, spawn};
 use crate::api::Fail;
@@ -15,23 +15,29 @@ pub fn landing_dir(project: &Project, landing: i64) -> PathBuf {
     project.local().join("landings").join(landing.to_string())
 }
 
-/// Start the next landing, if the queue is free.
+/// Start the next landing for each free target.
 pub async fn next(daemon: &Arc<Daemon>, project: &Arc<Project>) -> Result<(), Fail> {
-    let busy = project.read(|conn| {
-        Ok(!executions::query(
+    let mut busy = project.read(|conn| {
+        let mut targets = std::collections::HashSet::new();
+        for row in executions::query(
             conn,
-            "(kind = 'landing' OR parent IN (SELECT id FROM execution WHERE kind = 'landing'))
-             AND (status = 'running' OR reserved = 1)",
+            "((kind = 'landing' OR parent IN (SELECT id FROM execution WHERE kind = 'landing'))
+             AND (status = 'running' OR reserved = 1)) OR intent_state = 'open'",
             [],
-        )?
-        .is_empty()
-            || !executions::open_intents(conn)?.is_empty())
+        )? {
+            let target = match row.intent_ref {
+                Some(target) => target,
+                None => crate::git::target_ref(attempts::get(conn, row.attempt)?.target_branch()?),
+            };
+            targets.insert(target);
+        }
+        Ok(targets)
     })?;
-    if busy {
-        return Ok(());
-    }
     for approval in project.read(checks::queue)? {
         let attempt = project.read(|conn| attempts::get(conn, approval.attempt))?;
+        if !busy.insert(crate::git::target_ref(attempt.target_branch()?)) {
+            continue;
+        }
         let ticket = project.read(|conn| tickets::get(conn, attempt.ticket))?;
         let blocked = project.read(|conn| {
             Ok(attempts::open_attention(conn)?
@@ -72,7 +78,6 @@ pub async fn next(daemon: &Arc<Daemon>, project: &Arc<Project>) -> Result<(), Fa
         if let Some(execution) = execution {
             spawn(daemon, project, "landing", execution);
         }
-        return Ok(());
     }
     Ok(())
 }
@@ -197,7 +202,7 @@ struct Current {
 /// Re-read the approval against current rows and the current policy, then
 /// run `then` in a transaction that sees the same rows. A lapse, or a row
 /// that changed after the read, runs nothing. The caller holds the canonical
-/// lock, so no sync changes the policy between the read and `then`.
+/// target lock, so no sync changes the policy between the read and `then`.
 async fn admit<T>(
     daemon: &Arc<Daemon>,
     project: &Arc<Project>,
@@ -222,6 +227,8 @@ async fn admit<T>(
         attempt,
         ticket,
     };
+    // Default selection must see an intent committed before it changes HEAD.
+    let _publication = project.canonical.lock().await;
     let admitted = project.tx(|tx| {
         let unchanged = checks::approval(tx, now.approval.id)?.state == now.approval.state
             && !attempts::superseded_by_edit(
@@ -252,9 +259,10 @@ pub async fn land(
     let ticket = project.read(|conn| tickets::get(conn, attempt.ticket))?;
     let canonical = project.canonical_dir();
     let head = approval.head.clone();
+    let target_lock = project.target_lock(&crate::git::target_ref(attempt.target_branch()?));
 
     let prepared = super::capacity::effect(daemon, project, execution, async {
-        let held = project.canonical.lock().await;
+        let held = target_lock.lock().await;
         let loaded = match admit(daemon, project, &held, approval.id, attempt.id, |_, now| {
             Ok(now.loaded.clone())
         })
@@ -332,7 +340,7 @@ pub async fn land(
 
     for gate in &loaded.config.gates {
         let admitted = super::capacity::effect(daemon, project, execution, async {
-            let held = project.canonical.lock().await;
+            let held = target_lock.lock().await;
             admit(
                 daemon,
                 project,
@@ -474,7 +482,7 @@ pub async fn land(
     }
 
     let result = super::capacity::effect(daemon, project, execution, async {
-        let held = project.canonical.lock().await;
+        let held = target_lock.lock().await;
         let admitted = admit(
             daemon,
             project,
@@ -485,6 +493,7 @@ pub async fn land(
                 executions::set_intent(
                     tx,
                     execution,
+                    &target_ref,
                     &target,
                     &merged,
                     now.ticket.id,
@@ -503,14 +512,14 @@ pub async fn land(
                 &lapse,
             );
         }
-        project.loaded.lock().expect("loaded lock").default = None;
         let moved = daemon
             .git
             .update_ref(&canonical, &target_ref, &merged, Some(&target), None)
             .await;
         match moved {
             Ok(false) => {
-                let _ = super::refresh_default(daemon, project, &held).await;
+                let published = project.canonical.lock().await;
+                let _ = super::refresh_default(daemon, project, &published).await;
                 // The target moved under the landing: retired silently, re-queued.
                 return project.tx(|tx| {
                     executions::resolve_intent(tx, execution)?;
@@ -541,7 +550,8 @@ pub async fn land(
                 format!("canonical does not contain {head} after the landing"),
             ));
         }
-        let _ = super::refresh_default(daemon, project, &held).await;
+        let published = project.canonical.lock().await;
+        let _ = super::refresh_default(daemon, project, &published).await;
         project.tx(|tx| record_landing(tx, execution))
     })
     .await;

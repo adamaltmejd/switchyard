@@ -17,6 +17,7 @@ pub async fn project(daemon: &Daemon, project: &Project) -> Result<(), Fail> {
             "UPDATE attempt SET target_branch = ?1 WHERE target_branch IS NULL AND state = 'live'",
             [&branch],
         )?;
+        tx.execute("UPDATE execution SET intent_ref = 'refs/heads/' || (SELECT target_branch FROM attempt WHERE attempt.id = execution.attempt) WHERE intent_state IS NOT NULL AND intent_ref IS NULL", [])?;
         // Legacy candidate items must keep their override exit after backfill.
         for attempt in attempts::live(tx)? {
             for item in attempts::open_for_attempt(tx, attempt.id)? {
@@ -151,7 +152,7 @@ async fn kill_group(handle: &Value) {
 
 /// Decide an unresolved landing intent by canonical alone, once the
 /// landing's lock proves its git children are over. `Ok(false)` when
-/// nothing can be decided: the intent stays, the queue is refused, and
+/// nothing can be decided: the intent stays, its target queue is refused, and
 /// `red` is raised.
 pub async fn decide_intent(
     daemon: &Daemon,
@@ -184,7 +185,7 @@ pub async fn decide_intent(
                     ticket: Some(attempt.ticket),
                     attempt: None,
                     execution: Some(row.id),
-                    payload: json!({ "detail": detail, "old": row.intent_old, "merged": row.intent_merged }),
+                    payload: json!({ "detail": detail, "target_ref": row.intent_ref, "old": row.intent_old, "merged": row.intent_merged }),
                     text: Some(detail),
                 })?;
             }
@@ -195,14 +196,12 @@ pub async fn decide_intent(
         return undecided("a git child of the landing still holds its lock");
     }
     let canonical = project.canonical_dir();
-    let attempt = project.read(|conn| attempts::get(conn, row.attempt))?;
-    let target = daemon
-        .git
-        .rev_parse(
-            &canonical,
-            &crate::git::target_ref(attempt.target_branch()?),
-        )
-        .await;
+    let Some(target_ref) = row.intent_ref.as_deref() else {
+        return undecided("the landing intent has no recorded target ref");
+    };
+    let target_lock = project.target_lock(target_ref);
+    let _held = target_lock.lock().await;
+    let target = daemon.git.rev_parse(&canonical, target_ref).await;
     let (Ok(Some(target)), Some(old), Some(merged)) = (
         target,
         row.intent_old.as_deref(),

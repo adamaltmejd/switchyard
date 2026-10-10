@@ -23,6 +23,7 @@ pub struct Execution {
     pub session_id: Option<String>,
     pub approval: Option<i64>,
     pub intent_old: Option<String>,
+    pub intent_ref: Option<String>,
     pub intent_merged: Option<String>,
     pub intent_state: Option<String>,
     pub progress: Option<String>,
@@ -34,7 +35,7 @@ pub struct Execution {
 
 const COLUMNS: &str = "id, attempt, parent, kind, reason, status, outcome, detail, base, head,
     proof, ticket_revision, name, round, handle, session_id, approval, intent_old, intent_merged,
-    intent_state, progress, harness_version, resumed, reserved, lock_contract";
+    intent_state, progress, harness_version, resumed, reserved, lock_contract, intent_ref";
 
 fn row(row: &Row) -> rusqlite::Result<Execution> {
     Ok(Execution {
@@ -63,6 +64,7 @@ fn row(row: &Row) -> rusqlite::Result<Execution> {
         resumed: row.get(22)?,
         reserved: row.get(23)?,
         lock_contract: row.get(24)?,
+        intent_ref: row.get(25)?,
     })
 }
 
@@ -84,7 +86,7 @@ impl Execution {
             "name": self.name,
             "round": self.round,
             "intent": self.intent_state.as_ref().map(|state| json!({
-                "state": state, "old": self.intent_old, "merged": self.intent_merged,
+                "state": state, "target_ref": self.intent_ref, "old": self.intent_old, "merged": self.intent_merged,
             })),
         })
     }
@@ -347,14 +349,15 @@ pub fn end(tx: &Connection, id: i64, end: End) -> Result<(), Fail> {
 pub fn set_intent(
     tx: &Connection,
     id: i64,
+    target_ref: &str,
     old: &str,
     merged: &str,
     ticket: i64,
     attempt: i64,
 ) -> Result<(), Fail> {
     tx.execute(
-        "UPDATE execution SET intent_old = ?2, intent_merged = ?3, intent_state = 'open' WHERE id = ?1",
-        params![id, old, merged],
+        "UPDATE execution SET intent_old = ?2, intent_merged = ?3, intent_state = 'open', intent_ref = ?4 WHERE id = ?1",
+        params![id, old, merged, target_ref],
     )?;
     audit(
         tx,
@@ -366,7 +369,7 @@ pub fn set_intent(
             attention: None,
         },
         None,
-        json!({ "old": old, "merged": merged }),
+        json!({ "target_ref": target_ref, "old": old, "merged": merged }),
     )?;
     Ok(())
 }

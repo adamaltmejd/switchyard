@@ -402,3 +402,242 @@ fn a_ticket_binds_feature_inputs_repairs_and_lands_on_its_target() {
     }
     assert_eq!(reviews.len(), 4);
 }
+
+fn target_head(project: &Project, branch: &str) -> String {
+    git(
+        &project.canonical(),
+        &["rev-parse", &format!("refs/heads/{branch}")],
+    )
+    .trim()
+    .to_string()
+}
+
+fn target_candidates(project: &Project, watch: &mut Watch, branches: &[&str]) -> Vec<String> {
+    for (index, branch) in branches.iter().enumerate() {
+        if project.git(&["branch", "--list", branch]).trim().is_empty() {
+            project.git(&["branch", branch]);
+            project.json(&["sync", branch]);
+        }
+        project.json(&[
+            "ticket",
+            "new",
+            "--title",
+            &format!("Candidate {index}"),
+            "--target",
+            branch,
+        ]);
+    }
+    (1..=branches.len())
+        .map(|id| {
+            approval_of(watch, &format!("Y-{id}"));
+            let attempt =
+                project.rows(&format!("SELECT id FROM attempt WHERE ticket = {id}"))[0]["id"]
+                    .as_i64()
+                    .unwrap();
+            git(
+                &project
+                    .path
+                    .join(format!(".yard/local/attempts/{attempt}/clone")),
+                &["rev-parse", "HEAD"],
+            )
+            .trim()
+            .to_string()
+        })
+        .collect()
+}
+
+fn target_worker(request: &ModelRequest) -> Reply {
+    // Each ticket has independent bytes, including the second feature/a.
+    let prompt = request.prompt();
+    let file = if prompt.contains("Candidate 0") {
+        "first.txt"
+    } else if prompt.contains("Candidate 1") {
+        "second.txt"
+    } else {
+        "third.txt"
+    };
+    act(request, vec![commit_file(file, "feature\n", "Feature")])
+}
+
+fn hold_feature_a(
+    machine: &Machine,
+) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+    let armed = machine.root.join("armed");
+    let said = machine.root.join("said");
+    let release = machine.root.join("release");
+    for path in [&said, &release] {
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(path)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    machine.wrapper("git", &format!(
+        "case \" $* \" in *' update-ref --no-deref refs/heads/feature/a '*) if [ -e '{}' ]; then echo held > '{}'; read line < '{}'; fi;; esac",
+        armed.display(), said.display(), release.display()
+    ));
+    (armed, said, release)
+}
+
+/// G10/G3: hold feature/a after intent, while b lands and the second a waits.
+/// Expected heads and ancestry come from git and the fixture's approved heads.
+/// Sabotage: use a project-global busy predicate or canonical mutation lock;
+/// b cannot land. Remove target serialization; the second a starts while held.
+#[test]
+fn unrelated_targets_land_while_the_same_target_waits() {
+    let machine = Machine::new("g10-targets", target_worker);
+    let (armed, said, release) = hold_feature_a(&machine);
+    machine.start();
+    let project = Project::new(
+        &machine,
+        "p",
+        &unreviewed("").replace("max_lanes = 2", "max_lanes = 2\nmax_executions = 2"),
+    );
+    let mut watch = project.watch(0);
+    let branches = ["feature/a", "feature/b", "feature/a"];
+    let heads = target_candidates(&project, &mut watch, &branches);
+    let old = target_head(&project, "feature/a");
+    let main = project.canonical_head();
+    std::fs::write(&armed, "").unwrap();
+    project.json(&[
+        "attempt",
+        "approve",
+        "--target",
+        "feature/a",
+        "Y-1",
+        "--head",
+        &heads[0],
+    ]);
+    assert_eq!(watch.said(&said), "held\n");
+    for id in [3, 2] {
+        project.json(&[
+            "attempt",
+            "approve",
+            "--target",
+            branches[id - 1],
+            &format!("Y-{id}"),
+            "--head",
+            &heads[id - 1],
+        ]);
+    }
+    watch.find("b lands while a is held", |event| {
+        event["event"] == "landing.recorded" && event["ticket"] == "Y-2"
+    });
+    assert_eq!(target_head(&project, "feature/b"), heads[1]);
+    assert_eq!(target_head(&project, "feature/a"), old);
+    assert!(project.rows("SELECT execution.id FROM execution JOIN attempt ON attempt.id = execution.attempt WHERE kind = 'landing' AND attempt.ticket = 3").is_empty());
+    let intent = project.rows("SELECT id, intent_ref FROM execution WHERE intent_state = 'open'");
+    assert_eq!(intent.len(), 1);
+    assert_eq!(intent[0]["intent_ref"], "refs/heads/feature/a");
+    // Named sync refuses the unresolved target by identity; b remains usable.
+    let refused = project.refused(&["sync", "feature/a"]);
+    assert_eq!(refused["code"], "refused");
+    assert_eq!(refused["data"]["intent"], intent[0]["id"]);
+    project.git(&["checkout", "--quiet", "feature/b"]);
+    project.json(&["sync", "feature/b"]);
+    std::fs::remove_file(&armed).unwrap();
+    std::fs::write(&release, "go\n").unwrap();
+    for ticket in ["Y-1", "Y-3"] {
+        watch.find(ticket, |event| {
+            event["event"] == "landing.recorded" && event["ticket"] == ticket
+        });
+    }
+    for head in [&heads[0], &heads[2]] {
+        git(
+            &project.canonical(),
+            &["merge-base", "--is-ancestor", head, "refs/heads/feature/a"],
+        );
+    }
+    assert_eq!(project.rows("SELECT ticket FROM audit WHERE event = 'landing.recorded' AND ticket IN (1, 3) ORDER BY seq"),
+        vec![json!({"ticket": 1}), json!({"ticket": 3})]);
+    assert_eq!(project.canonical_head(), main);
+}
+
+/// G4: at cap one, a held target Git effect excludes two other approved
+/// targets and a new real worker. Release lets all waiting targets succeed.
+/// The FIFO holds the actual child; pinfold supplies box absence, and the
+/// model fixture supplies absence of worker actions. No elapsed-time assertion.
+/// Sabotage: bypass capacity::effect for independent-target landing, or count
+/// boxes alone; the waiting targets act instead of reporting capacity waits.
+#[test]
+fn independent_target_landings_share_the_project_execution_cap() {
+    let machine = Machine::new("g4-targets", target_worker);
+    let (armed, said, release) = hold_feature_a(&machine);
+    machine.start();
+    let project = Project::new(
+        &machine,
+        "p",
+        &unreviewed("").replace("max_lanes = 2", "max_lanes = 2\nmax_executions = 1"),
+    );
+    let mut watch = project.watch(0);
+    let branches = ["feature/a", "feature/b", "feature/c"];
+    let heads = target_candidates(&project, &mut watch, &branches);
+    std::fs::write(&armed, "").unwrap();
+    project.json(&[
+        "attempt",
+        "approve",
+        "--target",
+        branches[0],
+        "Y-1",
+        "--head",
+        &heads[0],
+    ]);
+    assert_eq!(watch.said(&said), "held\n");
+    for id in [2, 3] {
+        project.json(&[
+            "attempt",
+            "approve",
+            "--target",
+            branches[id - 1],
+            &format!("Y-{id}"),
+            "--head",
+            &heads[id - 1],
+        ]);
+        let waiting = watch.find("target waits for capacity", |event| {
+            event["event"] == "execution.waiting" && event["ticket"] == format!("Y-{id}")
+        });
+        assert_eq!(waiting["data"]["reason"], "capacity");
+        assert_eq!(
+            target_head(&project, branches[id - 1]),
+            project.canonical_head()
+        );
+    }
+    let turns = machine.model.requests().len();
+    project.json(&[
+        "ticket",
+        "new",
+        "--title",
+        "Candidate 4",
+        "--target",
+        "feature/c",
+    ]);
+    let waiting = watch.find("worker waits for the host slot", |event| {
+        event["event"] == "execution.waiting" && event["ticket"] == "Y-4"
+    });
+    assert_eq!(waiting["data"]["reason"], "capacity");
+    assert_eq!(machine.model.requests().len(), turns);
+    let owners = project.rows("SELECT kind, intent_ref FROM execution WHERE reserved = 1");
+    assert_eq!(
+        owners,
+        vec![json!({"kind": "landing", "intent_ref": "refs/heads/feature/a"})]
+    );
+    let handles = project.rows("SELECT handle FROM execution WHERE handle IS NOT NULL");
+    assert!(
+        machine
+            .boxes("dev.yard.project")
+            .iter()
+            .all(|listed| !handles.iter().any(|row| row["handle"] == listed["name"]))
+    );
+    // Cancel the new worker so only the three approved targets compete next.
+    project.json(&["attempt", "abandon", "Y-4"]);
+    std::fs::remove_file(&armed).unwrap();
+    std::fs::write(&release, "go\n").unwrap();
+    for id in 1..=3 {
+        watch.find("waiting target lands", |event| {
+            event["event"] == "landing.recorded" && event["ticket"] == format!("Y-{id}")
+        });
+        assert_eq!(target_head(&project, branches[id - 1]), heads[id - 1]);
+    }
+}

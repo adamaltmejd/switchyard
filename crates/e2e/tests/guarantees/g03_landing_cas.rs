@@ -13,14 +13,21 @@ fn worker() -> impl Fn(&ModelRequest) -> Reply + Send + Sync + 'static {
 /// A candidate awaiting approval, with canonical moved past its base by the
 /// operator, so its landing is a real merge. Returns the candidate head.
 fn candidate_behind_target(project: &Project, watch: &mut Watch) -> String {
-    project.json(&["ticket", "new", "--title", "Add feature"]);
+    project.json(&[
+        "ticket",
+        "new",
+        "--title",
+        "Add feature",
+        "--target",
+        "feature/a",
+    ]);
     let raised = watch.until("approval raised", |event| {
         event["event"] == "attention.raised" && event["data"]["kind"] == "approval"
     });
     project.write("other.txt", "other\n");
     project.git(&["add", "other.txt"]);
     project.git(&["commit", "--quiet", "-m", "Operator change"]);
-    project.json(&["sync"]);
+    project.json(&["sync", "feature/a"]);
     raised["data"]["payload"]["head"]
         .as_str()
         .unwrap()
@@ -39,6 +46,8 @@ fn unreviewed() -> String {
 /// `capacity::release` sees a free lock and absent box despite the held child.
 /// Restart reads canonical at the old head and retires the intent, so the
 /// released `update-ref` lands a candidate the store never records.
+/// Recover through the default ref instead of intent_ref: main contains
+/// neither recorded head, so start cannot resolve the feature/a landing.
 #[test]
 fn a_landing_whose_update_ref_is_held_stays_undecided_until_released() {
     let machine = Machine::new("g3-held", worker());
@@ -55,7 +64,7 @@ fn a_landing_whose_update_ref_is_held_stays_undecided_until_released() {
         );
     }
     machine.wrapper("git", &format!(
-        "if [ -e '{}' ]; then case \" $* \" in *' update-ref --no-deref refs/heads/main '*)\n\
+        "if [ -e '{}' ]; then case \" $* \" in *' update-ref --no-deref refs/heads/feature/a '*)\n\
          kill -9 $PPID; read line < '{}'; \"$REAL\" \"$@\"; status=$?; echo done > '{}'; exit $status;;\n esac; fi",
         armed.display(),
         release.display(),
@@ -63,22 +72,39 @@ fn a_landing_whose_update_ref_is_held_stays_undecided_until_released() {
     ));
     machine.start();
     let project = Project::new(&machine, "p", &unreviewed());
+    let main = project.canonical_head();
+    project.git(&["checkout", "--quiet", "-b", "feature/a"]);
+    project.json(&["sync", "feature/a"]);
     let mut watch = project.watch(0);
     let head = candidate_behind_target(&project, &mut watch);
-    let target = project.canonical_head();
+    let target = git(&project.canonical(), &["rev-parse", "refs/heads/feature/a"])
+        .trim()
+        .to_string();
 
     std::fs::write(&armed, "").unwrap();
     project.json(&[
-        "attempt", "approve", "--target", "main", "Y-1", "--head", &head,
+        "attempt",
+        "approve",
+        "--target",
+        "feature/a",
+        "Y-1",
+        "--head",
+        &head,
     ]);
     machine.wait_dead();
     std::fs::remove_file(&armed).unwrap();
 
     // Before restart: nothing moved, the intent is open.
-    assert_eq!(project.canonical_head(), target);
-    let intent = &project
-        .rows("SELECT id, intent_state, intent_merged FROM execution WHERE kind = 'landing'")[0];
+    assert_eq!(
+        git(&project.canonical(), &["rev-parse", "refs/heads/feature/a"]).trim(),
+        target
+    );
+    assert_eq!(project.canonical_head(), main);
+    let intent = &project.rows(
+        "SELECT id, intent_state, intent_ref, intent_merged FROM execution WHERE kind = 'landing'",
+    )[0];
     assert_eq!(intent["intent_state"], "open");
+    assert_eq!(intent["intent_ref"], "refs/heads/feature/a");
     let merged = intent["intent_merged"].as_str().unwrap().to_string();
 
     machine.start();
@@ -97,7 +123,11 @@ fn a_landing_whose_update_ref_is_held_stays_undecided_until_released() {
     // Release the held command: it moves canonical, and `start` records it.
     std::fs::write(&release, "go\n").unwrap();
     std::fs::read_to_string(&done).unwrap();
-    assert_eq!(project.canonical_head(), merged);
+    assert_eq!(
+        git(&project.canonical(), &["rev-parse", "refs/heads/feature/a"]).trim(),
+        merged
+    );
+    assert_eq!(project.canonical_head(), main);
     project.json(&["attempt", "start", "Y-1"]);
     assert_eq!(project.json(&["ticket", "show", "Y-1"])["state"], "done");
     assert_eq!(
