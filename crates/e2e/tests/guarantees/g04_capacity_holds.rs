@@ -266,7 +266,18 @@ fn racing_workers_share_one_execution_slot() {
     assert_eq!(waiting["data"]["reason"], "capacity");
     let owners = project.rows("SELECT id, handle FROM execution WHERE reserved = 1");
     assert_eq!(owners.len(), 1, "{owners:?}");
-    let boxes = machine.boxes("dev.yard.project");
+    // Pinfold supplies the project label on this fixture's held worker.
+    // The presence-only label also includes unrelated host projects.
+    let worker = machine
+        .boxes("dev.yard.project")
+        .into_iter()
+        .find(|listed| listed["name"] == owners[0]["handle"])
+        .expect("the held worker has a box");
+    let label = format!(
+        "dev.yard.project={}",
+        worker["labels"]["dev.yard.project"].as_str().unwrap()
+    );
+    let boxes = machine.boxes(&label);
     assert_eq!(boxes.len(), 1, "{boxes:?}");
     assert_eq!(boxes[0]["name"], owners[0]["handle"]);
     assert_ne!(owners[0]["id"], waiting["execution"]);
