@@ -388,6 +388,76 @@ fn one_slot_lands_with_child_gates_and_excludes_a_worker() {
     );
 }
 
+/// G4: after an allowed first host gate, hold the auto-approval protected-path
+/// Git read before the second gate. The landing owns the only reservation;
+/// release permits the second gate and final landing at limit one.
+/// Expected gate names and landed bytes come from the fixture, and the parent
+/// identity from the externally observed first child row.
+/// Sabotage: omit the landing effect around gate-loop admission; the held
+/// Git child has no reserved owner. Keep the parent slot during the child;
+/// the second gate cannot complete at limit one.
+#[test]
+fn landing_gate_policy_reads_hold_the_shared_execution_slot() {
+    let machine = Machine::new("g4-gate-policy-slot", |request| {
+        act(
+            request,
+            vec![commit_file("feature.txt", "feature\n", "Feature")],
+        )
+    });
+    let said = machine.root.join("said");
+    let release = machine.root.join("release");
+    let armed = machine.root.join("armed");
+    let markers = machine.root.join("markers");
+    fifo(&said);
+    fifo(&release);
+    let gates = format!(
+        "[gates.first]\nruns_in = \"host\"\ncommand = \"echo first > {}; read line < {}\"\n\
+         [gates.second]\nruns_in = \"host\"\ncommand = \"echo second > {}\"\n",
+        said.display(),
+        release.display(),
+        markers.display()
+    );
+    machine.start();
+    let project = Project::new(
+        &machine,
+        "p",
+        &config(&gates)
+            .replace("max_lanes = 2", "max_lanes = 2\nmax_executions = 1")
+            .replace("approve = \"manual\"", "approve = \"auto\"")
+            .replace("review = [\"correctness\"]", "review = \"none\""),
+    );
+    let mut watch = project.watch(0);
+    project.json(&["ticket", "new", "--title", "Feature"]);
+    assert_eq!(watch.said(&said), "first\n");
+    let first = project.rows("SELECT parent FROM execution WHERE kind = 'gate' AND name = 'first'");
+    assert_eq!(first.len(), 1);
+    let parent = first[0]["parent"].as_i64().unwrap();
+    // Arm after the first gate acts: the next diff is the second gate's
+    // live approval read, rather than initial approval or final admission.
+    std::fs::write(&armed, "").unwrap();
+    machine.wrapper("git", &format!(
+        "case \" $* \" in *' diff --name-only '*) if rm '{}' 2>/dev/null; then echo held > '{}'; read line < '{}'; fi;; esac",
+        armed.display(), said.display(), release.display()));
+    std::fs::write(&release, "go\n").unwrap();
+    assert_eq!(watch.said(&said), "held\n");
+    assert_eq!(
+        project.rows("SELECT id, kind, status FROM execution WHERE reserved = 1"),
+        vec![json!({"id": parent, "kind": "landing", "status": "running"})]
+    );
+    assert!(
+        project
+            .rows("SELECT id FROM execution WHERE kind = 'gate' AND name = 'second'")
+            .is_empty()
+    );
+    std::fs::write(&release, "go\n").unwrap();
+    watch.event("landing.recorded", &[]);
+    assert_eq!(std::fs::read_to_string(markers).unwrap(), "second\n");
+    assert_eq!(
+        git(&project.canonical(), &["show", "main:feature.txt"]),
+        "feature\n"
+    );
+}
+
 /// G4/G5: an old Git child is held in clone before any worker starts.
 /// Killing the daemon leaves the inherited lock and reservation. A second
 /// ticket is admitted after restart but cannot act until that exact child

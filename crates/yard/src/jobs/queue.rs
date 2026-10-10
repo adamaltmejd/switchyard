@@ -319,35 +319,37 @@ pub async fn land(
     };
 
     for gate in &loaded.config.gates {
-        let held = project.canonical.lock().await;
-        let admitted = admit(
-            daemon,
-            project,
-            &held,
-            approval.id,
-            attempt.id,
-            |tx, now| {
-                executions::start(
-                    tx,
-                    executions::Start {
-                        attempt: attempt.id,
-                        parent: Some(execution),
-                        kind: "gate",
-                        reason: Some("landing"),
-                        base: Some(&target),
-                        head: Some(&merged),
-                        proof: Some(&now.approval.proof),
-                        ticket_revision: Some(now.ticket.revision),
-                        digest: Some(&now.loaded.gate_digest),
-                        name: Some(&gate.name),
-                        ticket: Some(ticket.id),
-                        ..Default::default()
-                    },
-                )
-            },
-        )
+        let admitted = super::capacity::effect(daemon, project, execution, async {
+            let held = project.canonical.lock().await;
+            admit(
+                daemon,
+                project,
+                &held,
+                approval.id,
+                attempt.id,
+                |tx, now| {
+                    executions::start(
+                        tx,
+                        executions::Start {
+                            attempt: attempt.id,
+                            parent: Some(execution),
+                            kind: "gate",
+                            reason: Some("landing"),
+                            base: Some(&target),
+                            head: Some(&merged),
+                            proof: Some(&now.approval.proof),
+                            ticket_revision: Some(now.ticket.revision),
+                            digest: Some(&now.loaded.gate_digest),
+                            name: Some(&gate.name),
+                            ticket: Some(ticket.id),
+                            ..Default::default()
+                        },
+                    )
+                },
+            )
+            .await
+        })
         .await?;
-        drop(held);
         let child = match admitted {
             Ok(child) => child,
             Err((now, lapse)) => {
