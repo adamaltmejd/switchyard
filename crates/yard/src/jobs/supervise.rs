@@ -40,9 +40,6 @@ pub fn start_implementation(
 ) -> Result<i64, Fail> {
     // The revision and body are read here: the row names what the prompt carries.
     let ticket = tickets::get(tx, attempt.ticket)?;
-    let edited = attempts::edit_pending(tx, attempt.id)?;
-    let reason = if edited { "edit" } else { reason };
-    let feedback = if edited { None } else { feedback };
     let name = attempt.implementer["name"].as_str().unwrap_or("default");
     let harness_version = attempt.implementer["harness"]
         .as_str()

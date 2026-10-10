@@ -463,17 +463,17 @@ async fn advance(
             return Ok(());
         }
     }
-    // A pending edit is derived: the ticket is newer than the last implementer's read.
-    if edited {
-        let execution =
-            project.tx(|tx| supervise::start_implementation(tx, attempt, "edit", None))?;
-        spawn(daemon, project, "implementation", execution);
-        return Ok(());
-    }
     if let Some(next) = &attempt.next {
         let reason = next["reason"].as_str().unwrap_or("repair").to_string();
         let execution =
             project.tx(|tx| supervise::start_implementation(tx, attempt, &reason, None))?;
+        spawn(daemon, project, "implementation", execution);
+        return Ok(());
+    }
+    // A pending edit is derived: the ticket is newer than the last implementer's read.
+    if edited {
+        let execution =
+            project.tx(|tx| supervise::start_implementation(tx, attempt, "edit", None))?;
         spawn(daemon, project, "implementation", execution);
         return Ok(());
     }

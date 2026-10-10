@@ -206,8 +206,10 @@ bounded by `max_rounds` plus operator-granted extra rounds. A passing final
 seat cannot discard an earlier block. Repairs are new executions; prior
 results never reverse. Optional external `feedback`, of type `verdict`,
 binds repair findings or gate evidence to the new implementer's inputs.
-Pending edits take precedence. Existing execution limits, sync, operator
-exits and identity invalidation still apply. Landing remains queue-controlled
+Pending edits take precedence over routed repairs. A deliberate operator
+restart retains its reason and captures the current ticket body and revision.
+Existing execution limits, sync, operator exits and identity invalidation
+still apply. Landing remains queue-controlled
 with its existing gates. Arbitrary graphs remain refused until all ordinary
 lifecycle paths consume the graph. Inspection freezes no active plan.
 
