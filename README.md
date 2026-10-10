@@ -45,6 +45,7 @@ machine's settings:
 
     OPENROUTER_API_KEY=...
     OPENCODE_API_KEY=...
+    ANTHROPIC_API_KEY=...
     CLAUDE_CODE_OAUTH_TOKEN=...
     YARD_BOX_MEMORY=4G
 
@@ -52,6 +53,10 @@ machine's settings:
 `YARD_ORIGIN_<NAME>` overrides a
 connection's origin (`http` for a host service). The connections, logins
 and their keys are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+Claude agents select either `provider = "anthropic"` for direct API access
+or `login = true` for subscription access. Direct API review uses
+`model = "claude-opus-5-5"` and `effort = "medium"`.
 
 Install and start the daemon as the user service:
 
@@ -90,6 +95,10 @@ The rest is in the `yard-operator` skill
 The e2e suite (`cargo test -p e2e --locked`) runs on a host with the
 container runtime, not inside a box.
 CI pins pinfold 0.2.2.
+
+Development binaries use separate state, sockets, projects and runtime names.
+They never open the construction backlog. Release preparation does not
+authorize publication, installation, daemon replacement or configuration sync.
 
 On the operator's Mac:
 
