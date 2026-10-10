@@ -272,20 +272,33 @@ pub async fn run_harness(
     inactivity: Duration,
     deadline: tokio::time::Instant,
 ) -> Result<Run, Fail> {
-    let stop = Arc::new(tokio::sync::Notify::new());
-    daemon
+    let stop = daemon
         .stops
         .lock()
         .expect("stops lock")
-        .insert((project.key.clone(), execution), stop.clone());
+        .entry((project.key.clone(), execution))
+        .or_insert_with(|| Arc::new(tokio::sync::Notify::new()))
+        .clone();
     if kind == crate::mcp::Kind::Review {
         notify_if_edited(project, execution, &stop);
+    }
+    if take_stop(daemon, project, execution).await {
+        return Ok(Run {
+            stopped: true,
+            ..Default::default()
+        });
     }
     std::fs::create_dir_all(transcript.parent().expect("transcript dir"))
         .map_err(|error| error.to_string())?;
     let mut file = tokio::fs::File::create(transcript)
         .await
         .map_err(|error| error.to_string())?;
+    if take_stop(daemon, project, execution).await {
+        return Ok(Run {
+            stopped: true,
+            ..Default::default()
+        });
+    }
     let mut child = daemon
         .pinfold
         .exec_streaming(&box_name(project, execution), Some("/workspace"), argv)
@@ -464,6 +477,9 @@ pub async fn implement(
         })?;
     let dir = project.attempt_dir(attempt.id);
     let clone = dir.join("clone");
+    if stop_preparation(daemon, project, execution).await? {
+        return Ok(());
+    }
     if !clone.exists() {
         daemon
             .git
@@ -474,6 +490,9 @@ pub async fn implement(
                 &attempt.base,
             )
             .await?;
+    }
+    if stop_preparation(daemon, project, execution).await? {
+        return Ok(());
     }
     let state = dir.join("state");
     let input = dir.join("input");
@@ -491,6 +510,9 @@ pub async fn implement(
     )
     .await
     .map_err(Fail::refused)?;
+    if stop_preparation(daemon, project, execution).await? {
+        return Ok(());
+    }
     let stage = Stage {
         state: &state,
         input: &input,
@@ -528,6 +550,9 @@ pub async fn implement(
         row.reason.as_deref().unwrap_or("first"),
     )
     .await?;
+    if stop_preparation(daemon, project, execution).await? {
+        return Ok(());
+    }
     let argv = harness
         .argv(&crate::harness::Launch {
             provider,
@@ -540,6 +565,9 @@ pub async fn implement(
         .map_err(Fail::invalid)?;
 
     let image = image(daemon, project, &loaded).await?;
+    if stop_preparation(daemon, project, execution).await? {
+        return Ok(());
+    }
     // Resolve the route, including a login's token, before any bearer is
     // issued, so a missing credential never leaves a live grant.
     let model = harness
@@ -589,7 +617,7 @@ pub async fn implement(
         deadline,
     )
     .await;
-    let run = match run {
+    let mut run = match run {
         Ok(run) => run,
         Err(fail) => {
             daemon.grants.revoke(project, execution);
@@ -691,6 +719,7 @@ pub async fn implement(
     let proof_snapshot =
         (teardown.is_ok() && fetched.is_ok() && clean && !touches_yard && !workflow.read_only)
             .then(|| proof::snapshot(&proof_dir, &snapshots));
+    run.stopped |= take_stop(daemon, project, execution).await;
     project.tx(|tx| {
         let current = attempts::get(tx, attempt.id)?;
         if current.state != "live" {
@@ -875,6 +904,49 @@ pub async fn implement(
             "proof_path": proof::snapshot_path(project, attempt.id, &digest).display().to_string(),
         }))?;
         Ok(())
+    })
+}
+
+async fn take_stop(daemon: &Daemon, project: &Project, execution: i64) -> bool {
+    let stop = daemon
+        .stops
+        .lock()
+        .expect("stops lock")
+        .get(&(project.key.clone(), execution))
+        .cloned();
+    let Some(stop) = stop else {
+        return false;
+    };
+    tokio::select! {
+        biased;
+        _ = stop.notified() => true,
+        _ = std::future::ready(()) => false,
+    }
+}
+
+// A preparation child finishes under the effect lock before this row ends.
+// capacity::effect still requires ownership proof before releasing its slot.
+async fn stop_preparation(
+    daemon: &Daemon,
+    project: &Project,
+    execution: i64,
+) -> Result<bool, Fail> {
+    if !take_stop(daemon, project, execution).await {
+        return Ok(false);
+    }
+    project.tx(|tx| {
+        let row = executions::get(tx, execution)?;
+        let attempt = attempts::get(tx, row.attempt)?;
+        executions::end(tx, execution, executions::End {
+            outcome: "unchanged", ticket: Some(attempt.ticket), ..Default::default()
+        })?;
+        attempts::raise(tx, attempts::Raise {
+            kind: "stopped", reason: "unchanged", ticket: Some(attempt.ticket),
+            attempt: Some(attempt.id), execution: Some(execution),
+            payload: json!({ "detail": "the operator stopped the execution during preparation" }),
+            text: None,
+        })?;
+        Ok(true)
     })
 }
 

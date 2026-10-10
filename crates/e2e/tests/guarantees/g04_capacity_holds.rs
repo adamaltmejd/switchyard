@@ -543,3 +543,95 @@ fn stopping_a_capacity_waiter_prevents_its_turn_until_start() {
         vec![json!({"reserved": 0})]
     );
 }
+
+/// G4/G9: the allowed first ticket reaches approval, then the fixture holds
+/// a real clone child after reservation but before any box handle exists.
+/// Stop must retain that child's slot and prevent the second model turn.
+/// A deliberate later start reaches approval in the same project.
+/// Unlike the waiter and acting-worker scenarios, this stops preparation.
+/// Sabotage: register the stop handle only in run_harness, ignore preparation
+/// stop checks, or release the reservation at stop acceptance.
+/// Expected identities come from fixture ticket order; the PID, reservation
+/// and model requests are external observations of the held preparation.
+#[test]
+fn stopping_reserved_preparation_keeps_ownership_and_prevents_the_turn() {
+    let machine = Machine::new("g4-stop-preparation", |request| {
+        let file = if request.prompt().contains("Control") {
+            "control.txt"
+        } else {
+            "prepared.txt"
+        };
+        act(request, vec![commit_file(file, "feature\n", "Feature")])
+    });
+    let armed = machine.root.join("armed");
+    let said_path = machine.root.join("said");
+    let release = machine.root.join("release");
+    fifo(&said_path);
+    fifo(&release);
+    machine.wrapper("git", &format!(
+        "if [ -e '{}' ]; then case \" $* \" in *' clone '*) echo $$ > '{}'; read line < '{}';; esac; fi",
+        armed.display(), said_path.display(), release.display()));
+    machine.start();
+    let project = Project::new(
+        &machine,
+        "p",
+        &config("")
+            .replace("max_lanes = 2", "max_lanes = 2\nmax_executions = 1")
+            .replace("review = [\"correctness\"]", "review = \"none\""),
+    );
+    let mut watch = project.watch(0);
+    project.json(&["ticket", "new", "--title", "Control"]);
+    approval_of(&mut watch, "Y-1");
+    std::fs::write(&armed, "").unwrap();
+    project.json(&["ticket", "new", "--title", "Prepared"]);
+    let pid = watch.said(&said_path).trim().to_string();
+    let held = vec![json!({"id": 2, "status": "running", "reserved": 1, "handle": null})];
+    assert_eq!(
+        project.rows("SELECT id, status, reserved, handle FROM execution WHERE id = 2"),
+        held
+    );
+    assert_eq!(project.json(&["attempt", "stop", "Y-2"])["stopping"], 2);
+    assert!(
+        std::process::Command::new("kill")
+            .args(["-0", &pid])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert_eq!(
+        project.rows("SELECT id, status, reserved, handle FROM execution WHERE id = 2"),
+        held
+    );
+    std::fs::remove_file(&armed).unwrap();
+    std::fs::write(&release, "go\n").unwrap();
+    let stopped = watch.attention();
+    assert_eq!(stopped["execution"], 2);
+    assert_eq!(stopped["data"]["kind"], "stopped");
+    assert_eq!(stopped["data"]["reason"], "unchanged");
+    assert_eq!(
+        project.rows("SELECT status, outcome, handle FROM execution WHERE id = 2"),
+        vec![json!({"status": "ended", "outcome": "unchanged", "handle": null})]
+    );
+    assert!(
+        !machine
+            .model
+            .requests()
+            .iter()
+            .any(|r| r.prompt().contains("Prepared"))
+    );
+    project.json(&["attempt", "start", "Y-2"]);
+    approval_of(&mut watch, "Y-2");
+    assert_eq!(
+        machine
+            .model
+            .requests()
+            .iter()
+            .filter(|r| r.opens() && r.prompt().contains("Prepared"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        project.rows("SELECT reserved FROM execution WHERE id = 2"),
+        vec![json!({"reserved": 0})]
+    );
+}

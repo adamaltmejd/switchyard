@@ -137,6 +137,12 @@ pub fn spawn(daemon: &Arc<Daemon>, project: &Arc<Project>, kind: &str, execution
     let daemon = daemon.clone();
     let project = project.clone();
     let kind = kind.to_string();
+    if kind == "implementation" {
+        daemon.stops.lock().expect("stops lock").insert(
+            (project.key.clone(), execution),
+            Arc::new(tokio::sync::Notify::new()),
+        );
+    }
     tokio::spawn(async move {
         let result = if kind == "landing" {
             queue::land(&daemon, &project, execution).await
