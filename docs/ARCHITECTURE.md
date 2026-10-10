@@ -162,6 +162,9 @@ publish that entry under canonical's lock. Explicit start uses the published
 reading for admission before spawning or releasing the lock to answer a live
 stopped/red item. Canonical target/default mutations invalidate it before
 acting, then publish the validated current input or leave it unavailable.
+Sync refusals before canonical mutation preserve the published input;
+checkout-only consume does not invalidate it. A completed failed import
+revalidates the actual default; an uncertain mutation leaves it unavailable.
 An unavailable validated default refuses new effects. Selected-target cache
 reads do not replace the published default input.
 An attempt freezes its workflow's name and its

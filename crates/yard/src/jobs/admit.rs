@@ -340,17 +340,20 @@ pub async fn doctor(daemon: &Daemon, project: &Project) -> Result<Value, Fail> {
 async fn import(
     daemon: &Daemon,
     project: &Project,
+    held: &tokio::sync::MutexGuard<'_, ()>,
     branch: &str,
     ours: Option<&str>,
     theirs: &str,
 ) -> Result<Value, Fail> {
     let canonical = project.canonical_dir();
     let target = crate::git::target_ref(branch);
+    project.loaded.lock().expect("loaded lock").default = None;
     let moved = daemon
         .git
         .update_ref(&canonical, &target, theirs, ours, None)
         .await?;
     if !moved {
+        super::refresh_default(daemon, project, held).await?;
         return Err(Fail::refused(
             "canonical moved during the sync; run it again",
         ));
@@ -507,13 +510,12 @@ pub async fn sync(daemon: &Daemon, project: &Project, params: &Value) -> Result<
             .with(json!({ "tickets": orphaned })));
         }
     }
-    project.loaded.lock().expect("loaded lock").default = None;
     let mut result = if selection_only || (select && !importing) {
         json!({ "sync": "selected", "head": incoming })
     } else if ours.as_deref() == Some(theirs.as_str()) {
         json!({ "sync": "current", "head": theirs })
     } else if importing {
-        import(daemon, project, branch, ours.as_deref(), &theirs).await?
+        import(daemon, project, &held, branch, ours.as_deref(), &theirs).await?
     } else {
         let ours = ours.as_deref().expect("a consumed canonical has a head");
         let checked_out = daemon.git.current_branch(&project.root).await?;
@@ -551,6 +553,7 @@ pub async fn sync(daemon: &Daemon, project: &Project, params: &Value) -> Result<
         json!({ "sync": "consumed", "old": theirs, "head": ours })
     };
     if select && branch != default {
+        project.loaded.lock().expect("loaded lock").default = None;
         daemon.git.select_default(&canonical, branch).await?;
         project.tx(|tx| {
             store::audit(
