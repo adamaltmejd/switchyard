@@ -734,9 +734,7 @@ pub fn git(dir: &Path, args: &[&str]) -> String {
 
 /// The implementer's usual script: one commit, then done.
 pub fn commit_file(path: &str, text: &str, message: &str) -> ToolCall {
-    bash(&format!(
-        "cd /workspace && mkdir -p \"$(dirname {path})\" && printf '%s' '{text}' > {path} && git add -A && git commit -q -m '{message}' && echo committed"
-    ))
+    bash(&files_command(&[(path, text)], message))
 }
 
 /// Single-quote `text` for a POSIX shell.
