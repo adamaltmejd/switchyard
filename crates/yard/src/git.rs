@@ -201,7 +201,6 @@ impl Git {
             .ok_or_else(|| "HEAD names no branch".to_string())
     }
 
-    /// Canonical's target branch and its head, if it has one yet.
     pub async fn valid_branch(&self, repo: &Path, branch: &str) -> Result<bool, String> {
         if branch.is_empty() || branch.starts_with('-') {
             return Ok(false);

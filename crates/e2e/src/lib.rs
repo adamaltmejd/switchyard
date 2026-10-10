@@ -72,6 +72,7 @@ pub struct Machine {
     /// Extra variables in the daemon's environment.
     pub env: Vec<(String, String)>,
     daemon: std::sync::Mutex<Option<Child>>,
+    binary: std::sync::Mutex<Option<PathBuf>>,
 }
 
 impl Machine {
@@ -106,6 +107,7 @@ impl Machine {
             model,
             env: Vec::new(),
             daemon: std::sync::Mutex::new(None),
+            binary: std::sync::Mutex::new(None),
         };
         machine.wrapper("pinfold", "");
         machine.write_operator_env(&format!(
@@ -159,7 +161,8 @@ impl Machine {
     }
 
     fn command(&self) -> Command {
-        let mut command = Command::new(yard());
+        let binary = self.binary.lock().unwrap().clone();
+        let mut command = Command::new(binary.unwrap_or_else(|| yard().to_path_buf()));
         let path = std::env::var_os("PATH").unwrap_or_default();
         let mut dirs = vec![self.bin.clone()];
         dirs.extend(std::env::split_paths(&path));
@@ -172,6 +175,12 @@ impl Machine {
             command.env(name, value);
         }
         command
+    }
+
+    /// Select a real older binary for an upgrade fixture, with its daemon stopped.
+    pub fn use_binary(&self, binary: Option<PathBuf>) {
+        assert!(self.daemon.lock().unwrap().is_none());
+        *self.binary.lock().unwrap() = binary;
     }
 
     /// Start the daemon and wait for its `serving` line.

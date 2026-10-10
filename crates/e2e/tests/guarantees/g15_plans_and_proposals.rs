@@ -2,7 +2,167 @@
 
 use e2e::*;
 use serde_json::{Value, json};
+use std::path::PathBuf;
+use std::process::Command;
+use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
+
+fn pre_target_binary() -> PathBuf {
+    static BINARY: OnceLock<PathBuf> = OnceLock::new();
+    BINARY
+        .get_or_init(|| {
+            let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+            let target = yard().parent().unwrap().join("pre-target");
+            let source = target.join("source");
+            std::fs::create_dir_all(&source).unwrap();
+            // The landed Y-82 tree, before the target columns existed.
+            let archive = Command::new("git")
+                .current_dir(&root)
+                .args([
+                    "archive",
+                    "c85369dfaec8f8554da49ddf02a4dbec03bcad02",
+                    "Cargo.toml",
+                    "Cargo.lock",
+                    "crates",
+                    ".agents/skills",
+                ])
+                .output()
+                .unwrap();
+            assert!(
+                archive.status.success(),
+                "{}",
+                String::from_utf8_lossy(&archive.stderr)
+            );
+            let path = target.join("source.tar");
+            std::fs::write(&path, archive.stdout).unwrap();
+            assert!(
+                Command::new("tar")
+                    .args(["-xf"])
+                    .arg(&path)
+                    .arg("-C")
+                    .arg(&source)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            assert!(
+                Command::new(env!("CARGO"))
+                    .current_dir(&source)
+                    .args(["build", "-p", "yard", "--locked", "--target-dir"])
+                    .arg(&target)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            target.join("debug/yard")
+        })
+        .clone()
+}
+
+/// G15/G8: the old real daemon leaves a planned parent with open proposals
+/// and a live limit candidate. Upgrade preserves both operator exits without
+/// giving ended history a branch. The old binary, fixture proposal and git
+/// supply the schema, expected edge and candidate identities.
+/// Sabotage: require target_branch() for an ended legacy proposer, or omit
+/// the limit attention target backfill; acceptance or override is refused.
+#[test]
+fn an_upgrade_preserves_ended_planner_proposals_and_limit_overrides() {
+    let machine = Machine::new("g15-upgrade", |request| {
+        if request.has_tool("yard_publish_review") {
+            return act(
+                request,
+                vec![publish(json!([{ "priority": "P0", "body": "block" }]))],
+            );
+        }
+        if request.prompt().contains("Legacy plan") {
+            return act(
+                request,
+                vec![propose(json!({
+                    "kind": "ticket", "title": "Legacy child", "parked": true
+                }))],
+            );
+        }
+        act(
+            request,
+            vec![commit_file("feature.txt", "feature\n", "Add feature")],
+        )
+    });
+    machine.use_binary(Some(pre_target_binary()));
+    machine.start();
+    let project = Project::new(
+        &machine,
+        "p",
+        &config("").replace("max_rounds = 3", "max_rounds = 1"),
+    );
+    let mut watch = project.watch(0);
+    project.json(&[
+        "ticket",
+        "new",
+        "--title",
+        "Legacy plan",
+        "--workflow",
+        "plan",
+    ]);
+    watch.until("legacy planner cleanup", |event| {
+        event["event"] == "execution.ended" && event["data"]["kind"] == "cleanup"
+    });
+    let proposal = proposals(&project)[0].0;
+    project.json(&["ticket", "new", "--title", "Add feature"]);
+    let limit = watch.attention();
+    assert_eq!(
+        (&limit["data"]["kind"], &limit["data"]["reason"]),
+        (&json!("stopped"), &json!("limit"))
+    );
+    // Quiescent upgrade: both workers ended and the planner's cleanup finished.
+    assert!(
+        project
+            .rows("SELECT id FROM execution WHERE status = 'running'")
+            .is_empty()
+    );
+    let old = project.rows("SELECT id, outcome FROM attempt ORDER BY id");
+    assert_eq!(old[0]["outcome"], "planned");
+    let limit_id = limit["attention"].as_i64().unwrap();
+    let payload = serde_json::from_str::<Value>(
+        project.rows(&format!(
+            "SELECT payload FROM attention WHERE id = {limit_id}"
+        ))[0]["payload"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(payload.get("target").is_none());
+    machine.kill();
+    machine.use_binary(None);
+    machine.start();
+    let child = project.json(&["proposal", "accept", &proposal.to_string()]);
+    assert_eq!(depends_on(&project, 1), [3]);
+    assert_eq!(
+        project.rows("SELECT target_branch FROM attempt WHERE ticket = 1"),
+        vec![json!({ "target_branch": null })]
+    );
+    assert!(
+        project.json(&["ticket", "show", child["ticket"].as_str().unwrap()])["target"].is_null()
+    );
+    let head = payload["head"].as_str().unwrap();
+    let mut args = vec![
+        "attempt", "approve", "Y-2", "--target", "main", "--head", head,
+    ];
+    if !payload["proof"].as_str().unwrap().is_empty() {
+        args.extend(["--proof", payload["proof"].as_str().unwrap()]);
+    }
+    project.json(&args);
+    let mut upgraded = project.watch(0);
+    upgraded.event("landing.recorded", &[]);
+    git(
+        &project.canonical(),
+        &["merge-base", "--is-ancestor", head, "refs/heads/main"],
+    );
+    assert_eq!(
+        project.rows("SELECT overrode FROM approval WHERE attempt = 2"),
+        vec![json!({ "overrode": 1 })]
+    );
+    assert_eq!(project.json(&["ticket", "show", "Y-2"])["state"], "done");
+}
 
 fn propose(arguments: Value) -> ToolCall {
     tool("yard_propose", arguments)

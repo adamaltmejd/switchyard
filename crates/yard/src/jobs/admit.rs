@@ -550,7 +550,6 @@ pub async fn sync(daemon: &Daemon, project: &Project, params: &Value) -> Result<
     };
     if select && branch != default {
         daemon.git.select_default(&canonical, branch).await?;
-        project.loaded.lock().expect("loaded lock").remove(branch);
         project.tx(|tx| {
             store::audit(
                 tx,
@@ -1518,6 +1517,10 @@ pub async fn proposal_answer(
                 .transpose()
         })?;
         match attempt {
+            // Ended pre-target planners have open proposals but no branch identity.
+            Some(attempt) if attempt.target_branch.is_none() && attempt.state != "live" => {
+                loaded.clone()
+            }
             Some(attempt) => {
                 Some(super::load_target(daemon, project, attempt.target_branch()?).await?)
             }
