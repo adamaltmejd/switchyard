@@ -9,67 +9,50 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// and pinned frames establish invocation totals, including cache reads/writes.
 /// Sabotage: default absent cost to zero, add result totals to observations,
 /// count resumed history, or save usage only at result. Pi/Codex cannot catch
-/// Claude's result replacement or its API/login accounting differences.
+/// Claude's result replacement or repeated content-block observations. API
+/// and login use this same reader; G8 independently exercises both routes.
 #[test]
-fn claude_api_usage_is_optional_and_execution_local() {
-    scenario(false);
-}
-
-/// G7 through subscription login rather than API-key accounting.
-/// Sabotage: fabricate absent cost or count resumed session totals again.
-#[test]
-fn claude_login_usage_is_optional_and_execution_local() {
-    scenario(true);
-}
-
-fn scenario(login: bool) {
+fn claude_usage_is_optional_and_execution_local() {
     let phase = Arc::new(AtomicUsize::new(0));
     let replies = Arc::new(std::array::from_fn::<_, 4, _>(|_| AtomicUsize::new(0)));
     let hold = Latch::new();
     let (round, counts, held) = (phase.clone(), replies.clone(), hold.clone());
-    let machine = Machine::new(
-        if login { "g7-cl-login" } else { "g7-cl-api" },
-        move |request| {
-            let n = round.load(Ordering::SeqCst);
-            let marker = format!("y76-round-{n}");
-            let done = request
-                .tool_results()
-                .iter()
-                .any(|(_, text)| text.contains(&marker));
-            if done && n == 1 {
-                return Reply::AnthropicError;
-            }
-            if done && n == 2 {
-                return Reply::Hold(held.clone(), Box::new(Reply::Text("never".into())));
-            }
-            counts[n].fetch_add(1, Ordering::SeqCst);
-            let reply = if done {
-                Reply::Text("done".into())
-            } else {
-                Reply::Tools(vec![
-                    claude_bash(&format!(
-                        "printf 'feature\\n' > round-{n}.txt && git add round-{n}.txt && git commit -qm 'Round {n}' && echo {marker}"
-                    )),
-                    claude_bash("echo second-content-block"),
-                ])
-            };
-            Reply::AnthropicUsage {
-                input: PROMPT_TOKENS,
-                output: COMPLETION_TOKENS,
-                cache_read: 70,
-                cache_write: 30,
-                reply: Box::new(reply),
-            }
-        },
-    );
-    if login {
-        machine.write_claude_env();
-    } else {
-        machine.write_operator_env(&format!(
-            "ANTHROPIC_API_KEY={SECRET}\nYARD_ORIGIN_ANTHROPIC={}\n",
-            machine.model.origin()
-        ));
-    }
+    let machine = Machine::new("g7-cl-api", move |request| {
+        let n = round.load(Ordering::SeqCst);
+        let marker = format!("y76-round-{n}");
+        let done = request
+            .tool_results()
+            .iter()
+            .any(|(_, text)| text.contains(&marker));
+        if done && n == 1 {
+            return Reply::AnthropicError;
+        }
+        if done && n == 2 {
+            return Reply::Hold(held.clone(), Box::new(Reply::Text("never".into())));
+        }
+        counts[n].fetch_add(1, Ordering::SeqCst);
+        let reply = if done {
+            Reply::Text("done".into())
+        } else {
+            Reply::Tools(vec![
+                claude_bash(&format!(
+                    "printf 'feature\\n' > round-{n}.txt && git add round-{n}.txt && git commit -qm 'Round {n}' && echo {marker}"
+                )),
+                claude_bash("echo second-content-block"),
+            ])
+        };
+        Reply::AnthropicUsage {
+            input: PROMPT_TOKENS,
+            output: COMPLETION_TOKENS,
+            cache_read: 70,
+            cache_write: 30,
+            reply: Box::new(reply),
+        }
+    });
+    machine.write_operator_env(&format!(
+        "ANTHROPIC_API_KEY={SECRET}\nYARD_ORIGIN_ANTHROPIC={}\n",
+        machine.model.origin()
+    ));
     // Alter only measurement availability on real frames. Raw frames remain
     // host evidence; outcomes, sessions, registration and exit status survive.
     machine.wrapper("pinfold", &format!(r#"if [ "$1 $2" = 'box exec' ]; then
@@ -94,12 +77,9 @@ fn scenario(login: bool) {
   exit "$code"
 fi"#, machine.root.display()));
     machine.start();
-    let config = claude_config("").replace("review = [\"correctness\"]", "review = \"none\"");
-    let config = if login {
-        config
-    } else {
-        config.replace("login = true", "provider = \"anthropic\"")
-    };
+    let config = claude_config("")
+        .replace("review = [\"correctness\"]", "review = \"none\"")
+        .replace("login = true", "provider = \"anthropic\"");
     let project = Project::new(&machine, "p", &config);
     let mut history = project.watch(0);
     project.json(&["ticket", "new", "--title", "Claude usage"]);
