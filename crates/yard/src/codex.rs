@@ -322,11 +322,29 @@ fn refusal(line: &str) -> Option<Registration> {
 /// their subsets, so adding them would double-count. Cost is not reported.
 fn usage(frame: &Value) -> Usage {
     let usage = &frame["usage"];
-    let count = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
+    let input = usage.get("input_tokens").and_then(Value::as_u64);
+    let output = usage.get("output_tokens").and_then(Value::as_u64);
+    let field = |value: Option<u64>| crate::harness::UsageField {
+        completeness: if value.is_some() && frame["type"] == "turn.completed" {
+            crate::harness::Completeness::Complete
+        } else {
+            crate::harness::Completeness::Unknown
+        },
+        provenance: if value.is_some() {
+            crate::harness::Provenance::Harness
+        } else {
+            crate::harness::Provenance::Unreported
+        },
+    };
     Usage {
-        input: count("input_tokens"),
-        output: count("output_tokens"),
-        cost: 0.0,
+        input,
+        output,
+        cost: None,
+        fields: crate::harness::UsageFields {
+            input: field(input),
+            output: field(output),
+            cost: Default::default(),
+        },
     }
 }
 
