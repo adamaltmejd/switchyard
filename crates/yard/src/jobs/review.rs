@@ -247,6 +247,7 @@ pub fn publish(grant: &crate::mcp::Grant, arguments: &Value) -> Result<Value, Fa
         .loaded
         .lock()
         .expect("loaded lock")
+        .targets
         .get(&branch)
         .cloned()
         .ok_or_else(|| Fail::refused("the configuration is not loaded"))?;

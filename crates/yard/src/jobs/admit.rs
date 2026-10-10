@@ -57,6 +57,7 @@ fn spare_lanes(
     for attempt in attempts::live(conn)? {
         let configs = project.loaded.lock().expect("loaded lock");
         let selected = configs
+            .targets
             .get(attempt.target_branch()?)
             .map(Arc::as_ref)
             .ok_or_else(|| Fail::refused("the attempt configuration is not loaded"))?;
@@ -405,7 +406,7 @@ pub async fn sync(daemon: &Daemon, project: &Project, params: &Value) -> Result<
         let default = daemon.git.head_branch(&project.canonical_dir()).await?;
         refuse_default_switch(project, &default, named.expect("selection names a branch"))?;
     }
-    let _canonical = project.canonical.lock().await;
+    let held = project.canonical.lock().await;
     let canonical = project.canonical_dir();
     let default = daemon.git.head_branch(&canonical).await?;
     let branch = named.unwrap_or(&default);
@@ -506,6 +507,7 @@ pub async fn sync(daemon: &Daemon, project: &Project, params: &Value) -> Result<
             .with(json!({ "tickets": orphaned })));
         }
     }
+    project.loaded.lock().expect("loaded lock").default = None;
     let mut result = if selection_only || (select && !importing) {
         json!({ "sync": "selected", "head": incoming })
     } else if ours.as_deref() == Some(theirs.as_str()) {
@@ -562,6 +564,7 @@ pub async fn sync(daemon: &Daemon, project: &Project, params: &Value) -> Result<
     }
     result["branch"] = json!(branch);
     result["default"] = json!(if select { branch } else { &default });
+    super::refresh_default(daemon, project, &held).await?;
     Ok(result)
 }
 

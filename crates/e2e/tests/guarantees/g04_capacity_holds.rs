@@ -2,6 +2,7 @@
 
 use e2e::*;
 use serde_json::{Value, json};
+use std::io::{BufRead, Write};
 
 /// Run `yard attempt start` for each ticket at once; each one's JSON result
 /// or error.
@@ -388,9 +389,40 @@ fn one_slot_lands_with_child_gates_and_excludes_a_worker() {
     );
 }
 
-/// G4/G5: hold the first target read inheriting the landing's host lock. Its
-/// reservation precedes any prepared ref or child gate. Then, after an allowed
-/// first host gate, hold the auto-approval protected-path
+/// A host observer responds to every protected-path Git call, including calls
+/// without ownership. The external approval row distinguishes queue policy
+/// from the scheduler's earlier decision to give automatic approval.
+struct LandingPolicyProbe {
+    armed: std::path::PathBuf,
+    request: std::fs::File,
+    reply: std::fs::File,
+    observations: std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
+    reader: Option<std::thread::JoinHandle<()>>,
+    releases: Vec<std::fs::File>,
+    models: Vec<Latch>,
+}
+
+impl Drop for LandingPolicyProbe {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.armed);
+        for model in &self.models {
+            model.release();
+        }
+        for release in &mut self.releases {
+            let _ = release.write_all(b"go\n");
+        }
+        let _ = self.reply.write_all(b"go\n");
+        let _ = self.request.write_all(b"end\n");
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
+    }
+}
+
+/// G4/G5: a held worker excludes the first queue policy read after a default
+/// switch and lowering sync. Then hold the first target read inheriting the
+/// landing's host lock. Its reservation precedes any prepared ref or child
+/// gate. Then, after an allowed first host gate, hold the protected-path
 /// Git read before the second gate. The landing owns the only reservation;
 /// release permits the second gate and final landing at limit one.
 /// Expected gate names and landed bytes come from the fixture, and the parent
@@ -398,11 +430,31 @@ fn one_slot_lands_with_child_gates_and_excludes_a_worker() {
 /// Sabotage: omit the landing effect around gate-loop admission; the held
 /// Git child has no reserved owner. Keep the parent slot during the child;
 /// the second gate cannot complete at limit one.
-/// Move the initial load outside preparation: the first owned target read
+/// Move the initial admission/load outside preparation: the first owned target read
 /// comes after the prepared ref, failing the initial-boundary observer.
+/// Put policy Git back in queue::next: the host observer records an unowned
+/// read while the holder owns the slot. Allocate from main's target limit
+/// rather than the synced current default: the landing does not wait behind
+/// the holder at the lowered limit.
 #[test]
 fn landing_gate_policy_reads_hold_the_shared_execution_slot() {
-    let machine = Machine::new("g4-gate-policy-slot", |request| {
+    let feature_hold = Latch::new();
+    let holder_hold = Latch::new();
+    let (feature_held, holder_held) = (feature_hold.clone(), holder_hold.clone());
+    let machine = Machine::new("g4-gate-policy-slot", move |request| {
+        if request.opens() {
+            if request.prompt().contains("Holder") {
+                return Reply::Hold(holder_held.clone(), Box::new(Reply::Text("done".into())));
+            }
+            return Reply::Hold(
+                feature_held.clone(),
+                Box::new(Reply::Tools(vec![commit_file(
+                    "feature.txt",
+                    "feature\n",
+                    "Feature",
+                )])),
+            );
+        }
         act(
             request,
             vec![commit_file("feature.txt", "feature\n", "Feature")],
@@ -427,42 +479,158 @@ fn landing_gate_policy_reads_hold_the_shared_execution_slot() {
         markers.display()
     );
     machine.start();
-    let project = Project::new(
-        &machine,
-        "p",
-        &config(&gates)
-            .replace("max_lanes = 2", "max_lanes = 2\nmax_executions = 1")
-            .replace("approve = \"manual\"", "approve = \"auto\"")
-            .replace("review = [\"correctness\"]", "review = \"none\""),
-    );
+    let configured = config(&gates)
+        .replace("max_lanes = 2", "max_lanes = 2\nmax_executions = 2")
+        .replace("approve = \"manual\"", "approve = \"auto\"")
+        .replace("review = [\"correctness\"]", "review = \"none\"");
+    let project = Project::new(&machine, "p", &configured);
     let mut watch = project.watch(0);
+    project.json(&["ticket", "new", "--title", "Feature"]);
+    feature_hold.wait_held();
+    project.json(&["ticket", "new", "--title", "Holder"]);
+    holder_hold.wait_held();
+    project.git(&["checkout", "-qb", "capacity"]);
+    project.write(
+        ".yard/config.toml",
+        &configured
+            .replace("max_executions = 2", "max_executions = 3")
+            .replace("ref = \"main\"", "ref = \"capacity\""),
+    );
+    project.git(&["add", ".yard/config.toml"]);
+    project.git(&["commit", "-qm", "Select capacity default"]);
+    project.json(&["sync", "capacity", "--default"]);
+    project.reconfigure(
+        &configured
+            .replace("max_executions = 2", "max_executions = 1")
+            .replace("ref = \"main\"", "ref = \"capacity\""),
+    );
+    let policy_request = machine.root.join("policy-request");
+    let policy_reply = machine.root.join("policy-reply");
+    let policy_armed = machine.root.join("policy-armed");
+    fifo(&policy_request);
+    fifo(&policy_reply);
+    let open_pipe = |path: &std::path::Path| {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap()
+    };
+    let request = open_pipe(&policy_request);
+    let reply = open_pipe(&policy_reply);
+    let input = request.try_clone().unwrap();
+    let mut output = reply.try_clone().unwrap();
+    let observations = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = observations.clone();
+    let store = project.path.join(".yard/local/store.sqlite");
+    let reader = std::thread::spawn(move || {
+        let conn = rusqlite::Connection::open_with_flags(
+            store,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        for line in std::io::BufReader::new(input).lines() {
+            let line = line.unwrap();
+            if line == "end" {
+                break;
+            }
+            let approved: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM approval WHERE actor = 'auto' AND state = 'active'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            if approved != 0 {
+                let mut query = conn
+                    .prepare("SELECT id, kind FROM execution WHERE reserved = 1 ORDER BY id")
+                    .unwrap();
+                let owners = query
+                    .query_map([], |row| {
+                        Ok(json!({
+                            "id": row.get::<_, i64>(0)?, "kind": row.get::<_, String>(1)?,
+                        }))
+                    })
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push(json!({ "owned": line == "yes", "owners": owners }));
+            }
+            output.write_all(b"go\n").unwrap();
+        }
+    });
+    let probe = LandingPolicyProbe {
+        armed: policy_armed.clone(),
+        request,
+        reply,
+        observations,
+        reader: Some(reader),
+        releases: vec![open_pipe(&initial_release), open_pipe(&release)],
+        models: vec![feature_hold.clone(), holder_hold.clone()],
+    };
+    std::fs::write(&policy_armed, "").unwrap();
+    let policy_script = format!(
+        "owned=no\nfor owner in '{}'/*/lock; do for descriptor in /dev/fd/*; do\n\
+         if [ \"$descriptor\" -ef \"$owner\" ]; then owned=yes; fi\n\
+         done; done\n\
+         case \" $* \" in *' diff --name-only '*) if [ -e '{}' ]; then echo \"$owned\" > '{}'; read line < '{}'; fi;; esac\n",
+        project.path.join(".yard/local/landings").display(),
+        policy_armed.display(),
+        policy_request.display(),
+        policy_reply.display()
+    );
     std::fs::write(&initial_armed, "").unwrap();
     // Scheduler/config reads do not inherit the landing's ownership lock.
     // Compare actual open file identities, not a fixed descriptor number.
     machine.wrapper(
         "git",
         &format!(
-            "case \" $* \" in *' check-ref-format refs/heads/main '*)\n\
-         if [ -e '{}' ]; then\n\
-           for owner in '{}'/*/lock; do for descriptor in /dev/fd/*; do\n\
-             if [ \"$descriptor\" -ef \"$owner\" ] && rm '{}' 2>/dev/null; then\n\
-               echo initial > '{}'; read line < '{}';\n\
-             fi\n\
-           done; done\n\
+            "{policy_script}case \" $* \" in *' check-ref-format refs/heads/main '*)\n\
+         if [ \"$owned\" = yes ] && rm '{}' 2>/dev/null; then\n\
+           echo initial > '{}'; read line < '{}';\n\
          fi;; esac",
-            initial_armed.display(),
-            project.path.join(".yard/local/landings").display(),
             initial_armed.display(),
             initial.display(),
             initial_release.display()
         ),
     );
-    project.json(&["ticket", "new", "--title", "Feature"]);
+    feature_hold.release();
+    let waiting = watch.find("landing waits behind holder", |event| {
+        event["event"] == "execution.waiting" && event["ticket"] == "Y-1"
+    });
+    assert_eq!(waiting["data"]["reason"], "capacity");
+    let waiting_id = waiting["execution"].as_i64().unwrap();
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT kind, reserved FROM execution WHERE id = {waiting_id}"
+        )),
+        vec![json!({"kind": "landing", "reserved": 0})]
+    );
+    let holders = project.rows("SELECT execution.id FROM execution JOIN attempt ON attempt.id = execution.attempt WHERE attempt.ticket = 2 AND execution.reserved = 1");
+    assert_eq!(holders.len(), 1);
+    assert_eq!(
+        project.rows("SELECT id FROM execution WHERE reserved = 1"),
+        holders
+    );
+    assert!(
+        probe.observations.lock().unwrap().is_empty(),
+        "queue policy acted before capacity"
+    );
+    holder_hold.release();
+    let stopped_holder = watch.find("holder ended", |event| {
+        event["event"] == "attention.raised" && event["ticket"] == "Y-2"
+    });
+    assert_eq!(stopped_holder["data"]["kind"], "stopped");
+    assert_eq!(stopped_holder["data"]["reason"], "unchanged");
     assert_eq!(watch.said(&initial), "initial\n");
     let landing = watch.find("landing started", |event| {
         event["event"] == "execution.started" && event["data"]["kind"] == "landing"
     });
     let initial_parent = landing["execution"].as_i64().unwrap();
+    assert_eq!(initial_parent, waiting_id);
     assert_eq!(
         project.rows("SELECT id, kind, status FROM execution WHERE reserved = 1"),
         vec![json!({"id": initial_parent, "kind": "landing", "status": "running"})]
@@ -489,7 +657,7 @@ fn landing_gate_policy_reads_hold_the_shared_execution_slot() {
     // live approval read, rather than initial approval or final admission.
     std::fs::write(&armed, "").unwrap();
     machine.wrapper("git", &format!(
-        "case \" $* \" in *' diff --name-only '*) if rm '{}' 2>/dev/null; then echo held > '{}'; read line < '{}'; fi;; esac",
+        "{policy_script}case \" $* \" in *' diff --name-only '*) if rm '{}' 2>/dev/null; then echo held > '{}'; read line < '{}'; fi;; esac",
         armed.display(), said.display(), release.display()));
     std::fs::write(&release, "go\n").unwrap();
     assert_eq!(watch.said(&said), "held\n");
@@ -504,6 +672,15 @@ fn landing_gate_policy_reads_hold_the_shared_execution_slot() {
     );
     std::fs::write(&release, "go\n").unwrap();
     watch.event("landing.recorded", &[]);
+    let reads = probe.observations.lock().unwrap();
+    assert!(!reads.is_empty());
+    for read in reads.iter() {
+        assert_eq!(
+            read,
+            &json!({ "owned": true, "owners": [{ "id": parent, "kind": "landing" }] })
+        );
+    }
+    drop(reads);
     assert_eq!(std::fs::read_to_string(markers).unwrap(), "second\n");
     assert_eq!(
         git(&project.canonical(), &["show", "main:feature.txt"]),

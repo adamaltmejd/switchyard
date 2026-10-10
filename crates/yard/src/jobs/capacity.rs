@@ -38,7 +38,16 @@ pub async fn effect<T>(
         tokio::pin!(changed);
         changed.as_mut().enable();
         let canonical = project.canonical.lock().await;
-        let limit = super::load(daemon, project).await?.config.max_executions;
+        let limit = {
+            let configs = project.loaded.lock().expect("loaded lock");
+            configs
+                .default
+                .as_ref()
+                .and_then(|branch| configs.targets.get(branch))
+                .ok_or_else(|| Fail::refused("the project default configuration is not loaded"))?
+                .config
+                .max_executions
+        };
         let spare = project.read(|conn| {
             Ok((conn.query_row(
                 "SELECT count(*) FROM execution WHERE reserved = 1",

@@ -32,12 +32,7 @@ pub async fn next(daemon: &Arc<Daemon>, project: &Arc<Project>) -> Result<(), Fa
     }
     for approval in project.read(checks::queue)? {
         let attempt = project.read(|conn| attempts::get(conn, approval.attempt))?;
-        let loaded = load_target(daemon, project, attempt.target_branch()?).await?;
         let ticket = project.read(|conn| tickets::get(conn, attempt.ticket))?;
-        if let Some(lapse) = holds(daemon, project, &loaded, &approval, &attempt, &ticket).await? {
-            project.tx(|tx| lapsed(tx, &loaded, &approval, &attempt, &lapse))?;
-            continue;
-        }
         let blocked = project.read(|conn| {
             Ok(attempts::open_attention(conn)?
                 .iter()
@@ -259,8 +254,25 @@ pub async fn land(
     let head = approval.head.clone();
 
     let prepared = super::capacity::effect(daemon, project, execution, async {
-        let _canonical = project.canonical.lock().await;
-        let loaded = load_target(daemon, project, attempt.target_branch()?).await?;
+        let held = project.canonical.lock().await;
+        let loaded = match admit(daemon, project, &held, approval.id, attempt.id, |_, now| {
+            Ok(now.loaded.clone())
+        })
+        .await?
+        {
+            Ok(loaded) => loaded,
+            Err((now, lapse)) => {
+                withdraw(
+                    project,
+                    &now.loaded,
+                    execution,
+                    &now.approval,
+                    &now.attempt,
+                    &lapse,
+                )?;
+                return Ok(None);
+            }
+        };
         let target_ref = crate::git::target_ref(&loaded.branch);
         let target = daemon
             .git
@@ -491,12 +503,14 @@ pub async fn land(
                 &lapse,
             );
         }
+        project.loaded.lock().expect("loaded lock").default = None;
         let moved = daemon
             .git
             .update_ref(&canonical, &target_ref, &merged, Some(&target), None)
             .await;
         match moved {
             Ok(false) => {
+                let _ = super::refresh_default(daemon, project, &held).await;
                 // The target moved under the landing: retired silently, re-queued.
                 return project.tx(|tx| {
                     executions::resolve_intent(tx, execution)?;
@@ -527,6 +541,7 @@ pub async fn land(
                 format!("canonical does not contain {head} after the landing"),
             ));
         }
+        let _ = super::refresh_default(daemon, project, &held).await;
         project.tx(|tx| record_landing(tx, execution))
     })
     .await;

@@ -17,6 +17,7 @@ use crate::config::{Approve, Config, Stage};
 use crate::daemon::{Daemon, Project};
 use crate::store::{self, Target, attempts, checks, executions, tickets};
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// The one configuration: canonical's target head's.
@@ -25,6 +26,30 @@ pub struct Loaded {
     pub branch: String,
     pub head: String,
     pub gate_digest: String,
+}
+
+#[derive(Default)]
+pub struct Configurations {
+    pub targets: HashMap<String, Arc<Loaded>>,
+    pub default: Option<String>,
+}
+
+/// Publish the validated default while canonical is held by its reader or writer.
+pub async fn refresh_default(
+    daemon: &Daemon,
+    project: &Project,
+    _canonical: &tokio::sync::MutexGuard<'_, ()>,
+) -> Result<Arc<Loaded>, Fail> {
+    project.loaded.lock().expect("loaded lock").default = None;
+    let loaded = load(daemon, project).await?;
+    let mut configs = project.loaded.lock().expect("loaded lock");
+    configs.default = Some(loaded.branch.clone());
+    configs
+        .targets
+        .insert(loaded.branch.clone(), loaded.clone());
+    drop(configs);
+    project.events.notify_waiters();
+    Ok(loaded)
 }
 
 impl Loaded {
@@ -59,18 +84,24 @@ pub async fn load_target(
         ))
         .with(json!({ "reason": "missing_target", "target": branch }))
     })?;
-    if let Some(loaded) = project.loaded.lock().expect("loaded lock").get(branch)
+    if let Some(loaded) = project
+        .loaded
+        .lock()
+        .expect("loaded lock")
+        .targets
+        .get(branch)
         && loaded.head == head
         && loaded.branch == branch
     {
         return Ok(loaded.clone());
     }
     let loaded = Arc::new(read_config(daemon, &canonical, branch, None, &head).await?);
-    project
-        .loaded
-        .lock()
-        .expect("loaded lock")
-        .insert(branch.to_string(), loaded.clone());
+    let mut configs = project.loaded.lock().expect("loaded lock");
+    // Only canonical's reader/writer publishes the current default input.
+    // A concurrent cache miss must not replace it with an earlier head.
+    if configs.default.as_deref() != Some(branch) {
+        configs.targets.insert(branch.to_string(), loaded.clone());
+    }
     Ok(loaded)
 }
 
@@ -114,7 +145,7 @@ pub async fn read_config(
 pub async fn step(daemon: &Arc<Daemon>, project: &Arc<Project>) -> Result<(), Fail> {
     capacity::reap(daemon, project).await?;
     let canonical = project.canonical.lock().await;
-    let Ok(loaded) = load(daemon, project).await else {
+    let Ok(loaded) = refresh_default(daemon, project, &canonical).await else {
         return Ok(());
     };
     // Live attempts reacquire a freed lane before new tickets are admitted

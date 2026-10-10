@@ -69,7 +69,7 @@ pub struct Project {
     /// Wakes `status --history` and `status --watch` readers after a write.
     pub events: Notify,
     /// The configuration at the target head it was read from.
-    pub loaded: Mutex<HashMap<String, Arc<crate::jobs::Loaded>>>,
+    pub loaded: Mutex<crate::jobs::Configurations>,
 }
 
 impl Project {
@@ -253,6 +253,10 @@ async fn scheduler(daemon: Arc<Daemon>) {
 async fn register(daemon: &Daemon, root: PathBuf) -> Result<(), Fail> {
     let project = open_project(&root)?;
     crate::jobs::reconcile::project(daemon, &project).await?;
+    {
+        let canonical = project.canonical.lock().await;
+        let _ = crate::jobs::refresh_default(daemon, &project, &canonical).await;
+    }
     daemon
         .projects
         .lock()
@@ -337,7 +341,7 @@ fn open_project(root: &Path) -> Result<Arc<Project>, String> {
         store: Mutex::new(store),
         canonical: tokio::sync::Mutex::new(()),
         events: Notify::new(),
-        loaded: Mutex::new(HashMap::new()),
+        loaded: Mutex::new(crate::jobs::Configurations::default()),
     }))
 }
 
