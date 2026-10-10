@@ -533,6 +533,7 @@ fn a_ticket_binds_feature_inputs_repairs_and_lands_on_its_target() {
         future["inputs"]["dockerfile_blob"],
         object(&format!("{target}:.yard/Dockerfile"))
     );
+    project.json(&["ticket", "park", "Y-3"]);
     project.json(&["attempt", "abandon", "Y-3"]);
     assert_eq!(
         std::fs::read_to_string(&counter).unwrap(),

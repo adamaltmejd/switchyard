@@ -105,6 +105,7 @@ fn only_the_operators_sync_changes_yard_and_canonical() {
         project.rows("SELECT head, outcome FROM execution WHERE kind = 'gate' AND name = 'extra'"),
         vec![json!({"head": future, "outcome": "pass"})]
     );
+    project.json(&["ticket", "park", "Y-2"]);
     project.json(&["attempt", "abandon", "Y-2"]);
 
     project.write("notes.md", "notes\n");
