@@ -76,7 +76,23 @@ pub fn start_implementation(
     Ok(id)
 }
 
-/// The project image, built from canonical's target head.
+/// Build from the admitted source, independently of observed runtime image IDs.
+/// Live containment can revoke admitted access, never expand it.
+pub async fn egress(
+    daemon: &Daemon,
+    project: &Project,
+    loaded: &Loaded,
+) -> Result<Vec<String>, Fail> {
+    let policy = super::load_target(daemon, project, &loaded.branch).await?;
+    Ok(loaded
+        .config
+        .egress
+        .iter()
+        .filter(|host| policy.config.egress.contains(host))
+        .cloned()
+        .collect())
+}
+
 pub async fn image(daemon: &Daemon, project: &Project, loaded: &Loaded) -> Result<String, Fail> {
     let _building = daemon.image_build.lock().await;
     // `forget` retires the name under this lock; a build that queued behind it must not recreate it.
@@ -446,7 +462,7 @@ pub async fn implement(
 ) -> Result<(), Fail> {
     let row = project.read(|conn| executions::get(conn, execution))?;
     let attempt = project.read(|conn| attempts::get(conn, row.attempt))?;
-    let loaded = super::load_target(daemon, project, attempt.target_branch()?).await?;
+    let loaded = super::load_attempt(daemon, project, &attempt).await?;
     // The prompt carries the body the start transaction recorded; a later edit
     // stays pending for the next execution.
     let mut ticket = project.read(|conn| tickets::get(conn, attempt.ticket))?;
@@ -505,7 +521,11 @@ pub async fn implement(
     let env = crate::agent_env::AgentEnv::load(
         &daemon.git,
         &project.canonical_dir(),
-        &attempt.base,
+        attempt
+            .admission
+            .as_ref()
+            .and_then(|input| input["inputs"]["source_commit"].as_str())
+            .unwrap_or(&attempt.base),
         &clone,
     )
     .await
@@ -573,6 +593,12 @@ pub async fn implement(
     let model = harness
         .route(&stage, &daemon.machine)
         .map_err(Fail::refused)?;
+    let target_lock = project.target_lock(&crate::git::target_ref(attempt.target_branch()?));
+    let target = target_lock.lock().await;
+    let egress = egress(daemon, project, &loaded).await?;
+    if stop_preparation(daemon, project, execution).await? {
+        return Ok(());
+    }
     let bearer = daemon.grants.issue(crate::mcp::Grant {
         project: project.clone(),
         execution,
@@ -592,10 +618,11 @@ pub async fn implement(
             harness,
             stage,
             model: &model,
-            egress: &loaded.config.egress,
+            egress: &egress,
         },
     );
     let live = up_worker(daemon, project, execution, &spec, &secrets).await?;
+    drop(target);
     let deadline = {
         let spent = attempt.work_ms
             + attempt
@@ -1133,7 +1160,7 @@ pub async fn gate(
 ) -> Result<(), Fail> {
     let row = project.read(|conn| executions::get(conn, execution))?;
     let attempt = project.read(|conn| attempts::get(conn, row.attempt))?;
-    let loaded = super::load_target(daemon, project, attempt.target_branch()?).await?;
+    let loaded = super::load_attempt(daemon, project, &attempt).await?;
     let name = row.name.clone().unwrap_or_default();
     let commit = row.head.clone().unwrap_or_default();
     let base = row.base.clone().unwrap_or_default();
@@ -1314,6 +1341,11 @@ async fn box_gate(
             readonly: true,
         });
     }
+    let target_lock = project.target_lock(&crate::git::target_ref(&loaded.branch));
+    let target = target_lock.lock().await;
+    let egress = egress(daemon, project, loaded)
+        .await
+        .map_err(|fail| fail.message)?;
     let spec = BoxSpec {
         name: box_name(project, execution),
         labels: labels(project),
@@ -1330,8 +1362,8 @@ async fn box_gate(
             ),
             ("YARD_BASE".to_string(), EnvValue::Value(base.into())),
         ]),
-        egress: (!loaded.config.egress.is_empty()).then(|| Egress {
-            allow: loaded.config.egress.clone(),
+        egress: (!egress.is_empty()).then(|| Egress {
+            allow: egress,
             routes: BTreeMap::new(),
         }),
         memory: daemon.machine.box_memory.clone(),
@@ -1345,6 +1377,7 @@ async fn box_gate(
     };
     let _ = project
         .read(|conn| executions::set_handle(conn, execution, &live.name, live.image_id.as_deref()));
+    drop(target);
     let argv = [
         "sh".to_string(),
         "-c".to_string(),

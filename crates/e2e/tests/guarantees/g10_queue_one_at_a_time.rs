@@ -141,7 +141,7 @@ fn the_queue_lands_in_order_and_rejudges_a_red_merge() {
 /// While the feature worker is held, target edits are refused by identity.
 /// After approval, a conflicting operator commit supplies new feature gates
 /// and image bytes. Repair must fetch feature/a's bundle, rebase its candidate
-/// identity and take fresh branch judgments before it lands there.
+/// identity and take judgments with admitted inputs before it lands there.
 ///
 /// Git commits, image marker files and host gate counters supply expected
 /// values. Sabotage: use canonical HEAD for admission/landing, default
@@ -164,6 +164,12 @@ fn a_ticket_binds_feature_inputs_repairs_and_lands_on_its_target() {
     let machine = Machine::new("g10-target", move |request| {
         if request.has_tool("yard_publish_review") {
             return act(request, vec![publish(json!([]))]);
+        }
+        if request.prompt().contains("Future target") {
+            return act(
+                request,
+                vec![commit_file("future.txt", "future\\n", "Future work")],
+            );
         }
         if request.opens() && request.last_user().contains("failed to land") {
             return Reply::Tools(vec![bash(
@@ -402,7 +408,8 @@ fn a_ticket_binds_feature_inputs_repairs_and_lands_on_its_target() {
     );
     assert_eq!(project.rows("SELECT * FROM approval"), approvals);
 
-    // The synced inputs supersede judgments before the conflict is attempted.
+    // G2: template sync keeps judgments; conflict repair keeps admitted inputs.
+    // Sabotage: late gate/reviewer/image lookup or staging from repaired base.
     project.write("shared.txt", "operator\n");
     project.write(
         ".agents/skills/admission/SKILL.md",
@@ -416,7 +423,6 @@ fn a_ticket_binds_feature_inputs_repairs_and_lands_on_its_target() {
     project.git(&["commit", "--quiet", "-am", "Conflict and feature inputs"]);
     let target = project.git(&["rev-parse", "HEAD"]).trim().to_string();
     project.json(&["sync", "feature/a"]);
-    assert_eq!(next_approval_of(&mut watch, "Y-2"), first);
     project.json(&[
         "attempt",
         "approve",
@@ -444,6 +450,7 @@ fn a_ticket_binds_feature_inputs_repairs_and_lands_on_its_target() {
         project.json(&["attempt", "show", "Y-2"])["attempt"]["admission"],
         admission
     );
+    assert_eq!(project.rows("SELECT DISTINCT plan_revision FROM execution WHERE attempt = 2 AND kind IN ('gate', 'review')"), vec![json!({"plan_revision": 1})]);
     // Restart at rest, after the repair's boxes have ended. Today's templates
     // and the mutable candidate base both differ from recorded admission inputs.
     assert!(
@@ -451,6 +458,7 @@ fn a_ticket_binds_feature_inputs_repairs_and_lands_on_its_target() {
             .rows("SELECT id FROM execution WHERE status = 'running'")
             .is_empty()
     );
+    let results = project.rows("SELECT id, image_id, digest, plan_revision FROM execution WHERE attempt = 2 AND kind IN ('gate', 'review') ORDER BY id");
     let seq = project.json(&["status"])["seq"].as_i64().unwrap();
     drop(watch);
     machine.kill();
@@ -464,6 +472,7 @@ fn a_ticket_binds_feature_inputs_repairs_and_lands_on_its_target() {
         project.rows("SELECT state FROM approval WHERE attempt = 2"),
         vec![json!({ "state": "retired" })]
     );
+    assert_eq!(project.rows("SELECT id, image_id, digest, plan_revision FROM execution WHERE attempt = 2 AND kind IN ('gate', 'review') ORDER BY id"), results);
     // The repair alone cannot land; its new exact candidate still awaits approval.
     assert_eq!(
         git(&project.canonical(), &["rev-parse", "refs/heads/feature/a"]).trim(),
@@ -502,13 +511,36 @@ fn a_ticket_binds_feature_inputs_repairs_and_lands_on_its_target() {
         configured("feature-v2")
     );
     assert_eq!(project.json(&["ticket", "show", "Y-2"])["state"], "done");
+    // A future admission resolves the fixture's v2 definitions and Dockerfile.
+    project.json(&[
+        "ticket",
+        "new",
+        "--title",
+        "Future target",
+        "--target",
+        "feature/a",
+    ]);
+    approval_of(&mut watch, "Y-3");
+    let future = project.json(&["attempt", "show", "Y-3"])["attempt"]["admission"].clone();
+    assert_eq!(future["config_head"], repaired);
+    assert_eq!(future["revision"], 1);
+    assert_eq!(
+        future["gates"][1]["command"],
+        "test $(cat /target-input) = feature-v2"
+    );
+    assert_eq!(future["seats"]["correctness"]["instructions"], "feature-v2");
+    assert_eq!(
+        future["inputs"]["dockerfile_blob"],
+        object(&format!("{target}:.yard/Dockerfile"))
+    );
+    project.json(&["attempt", "abandon", "Y-3"]);
     assert_eq!(
         std::fs::read_to_string(&counter).unwrap(),
-        "main\nmain\nfeature-v1\nfeature-v2\nfeature-v2\nfeature-v2\n"
+        "main\nmain\nfeature-v1\nfeature-v1\nfeature-v1\nfeature-v2\n"
     );
     let images = project
         .rows("SELECT DISTINCT image_id FROM execution WHERE name = 'image' ORDER BY image_id");
-    assert_eq!(images.len(), 3, "{images:?}");
+    assert!(images.len() >= 3, "{images:?}");
     assert!(
         images
             .iter()
@@ -517,18 +549,43 @@ fn a_ticket_binds_feature_inputs_repairs_and_lands_on_its_target() {
     let digests =
         project.rows("SELECT DISTINCT digest FROM execution WHERE name = 'image' ORDER BY digest");
     assert_eq!(digests.len(), 3, "{digests:?}");
+    // Both implementer executions use trusted v1 staging even after base repair.
+    for request in machine.model.requests().iter().filter(|request| {
+        request.opens()
+            && (request.last_user().contains("Feature target")
+                || request.last_user().contains("failed to land"))
+    }) {
+        assert!(
+            request.system().contains("Admission skill v1."),
+            "{}",
+            request.prompt()
+        );
+        assert!(
+            !request.system().contains("Admission skill v2."),
+            "{}",
+            request.prompt()
+        );
+    }
     let reviews: Vec<_> = machine
         .model
         .requests()
         .into_iter()
         .filter(|request| request.opens() && request.has_tool("yard_publish_review"))
-        .map(|request| request.prompt())
+        .map(|request| request.context())
         .collect();
     for (prompt, marker) in reviews
         .iter()
-        .zip(["main", "feature-v1", "feature-v2", "feature-v2"])
+        .zip(["main", "feature-v1", "feature-v1", "feature-v2"])
     {
         assert!(prompt.contains(marker), "{prompt}");
+        if marker.starts_with("feature-") {
+            let skill = if marker == "feature-v1" {
+                "Admission skill v1."
+            } else {
+                "Admission skill v2."
+            };
+            assert!(prompt.contains(skill), "{prompt}");
+        }
     }
     assert_eq!(reviews.len(), 4);
 }

@@ -14,9 +14,9 @@ const EXTRA_GATE: &str =
 
 /// A worker commit under `.yard` comes back with the reason and no gate
 /// runs on it: the project's candidate gate runs only on the repaired head.
-/// The same change through `yard sync` is in force for the next execution.
+/// The same change through `yard sync` is in force for the next admission.
 /// The change adds a second candidate gate: refused from the worker, it runs
-/// on the candidate once the operator syncs it.
+/// on a future candidate once the operator syncs it.
 ///
 /// Then a checkout and canonical that each hold a commit the other lacks:
 /// both directions refuse naming both heads; a fast-forward passes.
@@ -33,6 +33,12 @@ fn only_the_operators_sync_changes_yard_and_canonical() {
     let configured = format!("{gated}{EXTRA_GATE}");
     let change = configured.replace('\'', "'\\''");
     let machine = Machine::new("g11-yard", move |request| {
+        if request.prompt().contains("Future feature") {
+            return act(
+                request,
+                vec![commit_file("future.txt", "future\\n", "Future feature")],
+            );
+        }
         if request.opens() && request.last_user().contains(".yard") && request.turn() > 0 {
             return Reply::Tools(vec![bash(
                 "cd /workspace && git reset -q --hard HEAD~1 && printf 'feature\\n' > feature.txt \
@@ -84,20 +90,22 @@ fn only_the_operators_sync_changes_yard_and_canonical() {
     );
 
     project.reconfigure(&configured);
-    let second = watch.attention();
-    assert_eq!(second["data"]["kind"], "approval", "{second}");
-    assert_eq!(second["data"]["payload"]["head"], head.as_str());
-    // The synced gate is in force for the candidate.
-    assert_eq!(
-        project.rows("SELECT head, outcome FROM execution WHERE kind = 'gate' AND name = 'extra'"),
-        vec![json!({ "head": head, "outcome": "pass" })]
-    );
-
     project.json(&[
         "attempt", "approve", "--target", "main", "Y-1", "--head", &head,
     ]);
     watch.event("landing.recorded", &[]);
     let landed = project.canonical_head();
+    // G11/G2: the allowed operator sync supplies a future admitted gate.
+    // Sabotage: keep using the previous admission for future attempts.
+    project.json(&["ticket", "new", "--title", "Future feature"]);
+    let second = watch.attention();
+    assert_eq!(second["data"]["kind"], "approval");
+    let future = second["data"]["payload"]["head"].as_str().unwrap();
+    assert_eq!(
+        project.rows("SELECT head, outcome FROM execution WHERE kind = 'gate' AND name = 'extra'"),
+        vec![json!({"head": future, "outcome": "pass"})]
+    );
+    project.json(&["attempt", "abandon", "Y-2"]);
 
     project.write("notes.md", "notes\n");
     project.git(&["add", "notes.md"]);

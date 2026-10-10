@@ -14,7 +14,7 @@ use std::time::Duration;
 pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -> Result<(), Fail> {
     let row = project.read(|conn| executions::get(conn, execution))?;
     let attempt = project.read(|conn| attempts::get(conn, row.attempt))?;
-    let loaded = super::load_target(daemon, project, attempt.target_branch()?).await?;
+    let loaded = super::load_attempt(daemon, project, &attempt).await?;
     let ticket = project.read(|conn| tickets::get(conn, attempt.ticket))?;
     let seat_name = row.name.clone().unwrap_or_default();
     let seat = loaded
@@ -54,10 +54,18 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
         .git
         .clone_detached(&project.canonical_dir(), &checkout, &head)
         .await?;
-    let env =
-        crate::agent_env::AgentEnv::load(&daemon.git, &project.canonical_dir(), &base, &checkout)
-            .await
-            .map_err(Fail::refused)?;
+    let env = crate::agent_env::AgentEnv::load(
+        &daemon.git,
+        &project.canonical_dir(),
+        attempt
+            .admission
+            .as_ref()
+            .and_then(|input| input["inputs"]["source_commit"].as_str())
+            .unwrap_or(&base),
+        &checkout,
+    )
+    .await
+    .map_err(Fail::refused)?;
     let stage = crate::harness::Stage {
         state: &state,
         input: &input,
@@ -237,21 +245,26 @@ pub fn publish(grant: &crate::mcp::Grant, arguments: &Value) -> Result<Value, Fa
         _ => return Err(Fail::invalid("findings is a list")),
     };
     let project = &grant.project;
-    let branch = project.read(|conn| {
+    let attempt = project.read(|conn| {
         let row = executions::get(conn, grant.execution)?;
-        Ok(attempts::get(conn, row.attempt)?
-            .target_branch()?
-            .to_string())
+        attempts::get(conn, row.attempt)
     })?;
-    let loaded = project
-        .loaded
-        .lock()
-        .expect("loaded lock")
-        .targets
-        .get(&branch)
-        .cloned()
-        .ok_or_else(|| Fail::refused("the configuration is not loaded"))?;
-    let blocking = loaded.config.review.blocking;
+    let blocking = if let Some(admission) = &attempt.admission {
+        admission["review"]["blocking"]
+            .as_u64()
+            .ok_or_else(|| Fail::refused("invalid admitted review"))? as u8
+    } else {
+        project
+            .loaded
+            .lock()
+            .expect("loaded lock")
+            .targets
+            .get(attempt.target_branch()?)
+            .ok_or_else(|| Fail::refused("the configuration is not loaded"))?
+            .config
+            .review
+            .blocking
+    };
     let check = project.tx(|tx| {
         if checks::for_execution(tx, grant.execution)?.is_some() {
             return Err(Fail::refused("this seat has already published"));
@@ -330,7 +343,7 @@ pub fn blocked(
                         "rounds": rounds, "findings": findings,
                         "target": attempt.target_branch, "base": base, "head": head,
                         "proof": current.proof.clone().unwrap_or_default(),
-                        "revision": ticket.revision,
+                        "revision": ticket.revision, "plan_revision": attempt.plan_revision(),
                         "gate_digest": loaded.gate_digest,
                         "review_digest": loaded.review_digest(&attempt.workflow)?,
                     }),

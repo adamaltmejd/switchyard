@@ -251,15 +251,14 @@ fn no_repair_starts_until_a_blocking_seats_box_is_gone() {
 
 /// A seat that always blocks gets exactly `max_rounds = 1` rounds, then
 /// `stopped:limit`. An edit then grants one more round: a second review runs
-/// and blocks, and `stopped:limit` is raised again. A synced gate change,
-/// adding a gate, makes an override stale naming the gate digest and writes
-/// no approval. Removing the gate makes the same head approvable. The
+/// and blocks, and `stopped:limit` is raised again. A synced gate change
+/// applies to future admissions; this candidate remains approvable. The
 /// operator overrides the blocking review and lands; its approval names that
 /// check.
 ///
 /// Sabotage: compare `rounds > limit`; a second round runs before the edit.
 /// Change the extra-round increment; its count differs from one. Skip the
-/// stale gate digest check; an approval is written after the sync. Drop
+/// freeze and use the current gate digest; the override becomes stale. Drop
 /// `limit_checks`' blocking review or the override flag; the row is wrong.
 #[test]
 fn a_seat_that_always_blocks_gets_max_rounds() {
@@ -324,20 +323,13 @@ fn a_seat_that_always_blocks_gets_max_rounds() {
         .to_string();
 
     project.reconfigure(&config(gate).replace("max_rounds = 3", "max_rounds = 1"));
-    let refused = project.refused(&[
-        "attempt", "approve", "--target", "main", "Y-1", "--head", &head,
-    ]);
-    assert_eq!(refused["code"], "stale", "{refused}");
-    assert!(
-        refused["message"].as_str().unwrap().contains("gate_digest"),
-        "{refused}"
-    );
-    assert!(project.rows("SELECT id FROM approval").is_empty());
-
-    project.reconfigure(&base);
     project.json(&[
         "attempt", "approve", "--target", "main", "Y-1", "--head", &head,
     ]);
+    assert_eq!(
+        project.rows("SELECT plan_revision FROM approval"),
+        vec![json!({"plan_revision": 1})]
+    );
     let landed = watch.until("landing or refusal", |event| {
         event["event"] == "landing.recorded" || event["event"] == "attention.raised"
     });

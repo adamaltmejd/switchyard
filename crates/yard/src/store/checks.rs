@@ -3,7 +3,7 @@ use crate::api::Fail;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::{Value, json};
 
-/// What a judgment binds: a candidate, the ticket revision and one digest.
+/// A judgment binds candidate, ticket revision, plan revision and selected inputs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Input {
     pub attempt: i64,
@@ -11,6 +11,7 @@ pub struct Input {
     pub head: String,
     pub proof: String,
     pub ticket_revision: i64,
+    pub plan_revision: Option<i64>,
     pub digest: String,
 }
 
@@ -24,13 +25,14 @@ pub struct Check {
     pub head: String,
     pub proof: String,
     pub ticket_revision: i64,
+    pub plan_revision: Option<i64>,
     pub verdict: String,
     pub round: Option<i64>,
 }
 
 // A check is its execution's input plus a verdict, read through the join.
 const SELECT: &str = "SELECT c.id, c.execution, c.kind, COALESCE(e.name, ''), COALESCE(e.base, ''),
-    COALESCE(e.head, ''), COALESCE(e.proof, ''), COALESCE(e.ticket_revision, 0), c.verdict, e.round
+    COALESCE(e.head, ''), COALESCE(e.proof, ''), COALESCE(e.ticket_revision, 0), c.verdict, e.round, e.plan_revision
     FROM \"check\" c JOIN execution e ON e.id = c.execution";
 
 fn row(row: &Row) -> rusqlite::Result<Check> {
@@ -45,6 +47,7 @@ fn row(row: &Row) -> rusqlite::Result<Check> {
         ticket_revision: row.get(7)?,
         verdict: row.get(8)?,
         round: row.get(9)?,
+        plan_revision: row.get(10)?,
     })
 }
 
@@ -59,6 +62,7 @@ impl Check {
             "base": self.base,
             "proof": self.proof,
             "ticket_revision": self.ticket_revision,
+            "plan_revision": self.plan_revision,
             "verdict": self.verdict,
             "round": self.round,
         })
@@ -82,7 +86,7 @@ pub fn current(
                 "{SELECT}
                  WHERE c.kind = ?1 AND e.name = ?2 AND e.attempt = ?3
                  AND e.base = ?4 AND e.head = ?5 AND e.ticket_revision = ?6 AND e.digest = ?7
-                 AND COALESCE(e.proof, '') = ?8
+                 AND COALESCE(e.proof, '') = ?8 AND e.plan_revision IS ?9
                  AND (c.kind != 'review' OR e.mcp = 'registered')
                  ORDER BY c.id DESC LIMIT 1"
             ),
@@ -94,7 +98,8 @@ pub fn current(
                 input.head,
                 input.ticket_revision,
                 input.digest,
-                input.proof
+                input.proof,
+                input.plan_revision
             ],
             row,
         )
@@ -199,6 +204,7 @@ pub struct Approval {
     pub head: String,
     pub proof: String,
     pub ticket_revision: i64,
+    pub plan_revision: Option<i64>,
     pub gate_digest: String,
     pub review_digest: String,
     pub checks: Vec<i64>,
@@ -206,7 +212,7 @@ pub struct Approval {
     pub state: String,
 }
 
-const APPROVAL_COLUMNS: &str = "id, attempt, base, head, ticket_revision, gate_digest, review_digest, checks, actor, state, proof";
+const APPROVAL_COLUMNS: &str = "id, attempt, base, head, ticket_revision, gate_digest, review_digest, checks, actor, state, proof, plan_revision";
 
 fn approval_row(row: &Row) -> rusqlite::Result<Approval> {
     Ok(Approval {
@@ -221,6 +227,7 @@ fn approval_row(row: &Row) -> rusqlite::Result<Approval> {
         actor: row.get(8)?,
         state: row.get(9)?,
         proof: row.get(10)?,
+        plan_revision: row.get(11)?,
     })
 }
 
@@ -292,6 +299,11 @@ pub fn approve(tx: &Connection, approve: Approve) -> Result<i64, Fail> {
         ],
     )?;
     let id = tx.last_insert_rowid();
+    let revision = super::attempts::get(tx, approve.attempt)?.plan_revision();
+    tx.execute(
+        "UPDATE approval SET plan_revision = ?2 WHERE id = ?1",
+        params![id, revision],
+    )?;
     audit(
         tx,
         "approval.given",

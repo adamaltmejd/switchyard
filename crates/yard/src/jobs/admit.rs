@@ -56,12 +56,19 @@ fn spare_lanes(
     let mut waiting = 0;
     for attempt in attempts::live(conn)? {
         let configs = project.loaded.lock().expect("loaded lock");
-        let selected = configs
-            .targets
-            .get(attempt.target_branch()?)
-            .map(Arc::as_ref)
-            .ok_or_else(|| Fail::refused("the attempt configuration is not loaded"))?;
-        if !attempt.lane && super::runnable(conn, selected, &attempt)?.is_some() {
+        let selected = match &attempt.admission {
+            Some(input) => configs.sources.get(
+                input["inputs"]["source_commit"]
+                    .as_str()
+                    .ok_or_else(|| Fail::refused("missing admitted source"))?,
+            ),
+            None => configs.targets.get(attempt.target_branch()?),
+        }
+        .map(Arc::as_ref)
+        .ok_or_else(|| Fail::refused("the attempt configuration is not loaded"))?;
+        if !attempt.lane
+            && super::runnable(conn, &super::resolved(selected, &attempt)?, &attempt)?.is_some()
+        {
             waiting += 1;
         }
     }
@@ -225,7 +232,7 @@ fn runner_identity() -> Result<&'static str, Fail> {
 pub async fn status(daemon: &Daemon, project: &Project) -> Result<Value, Fail> {
     let loaded = load(daemon, project).await.ok();
     for attempt in project.read(attempts::live)? {
-        super::load_target(daemon, project, attempt.target_branch()?).await?;
+        super::load_attempt(daemon, project, &attempt).await?;
     }
     let selected = match &loaded {
         Some(loaded) => ready_configs(daemon, project, loaded).await?,
@@ -1189,7 +1196,7 @@ pub async fn attempt_start(
         )));
     }
     for attempt in project.read(attempts::live)? {
-        super::load_target(daemon, project, attempt.target_branch()?).await?;
+        super::load_attempt(daemon, project, &attempt).await?;
     }
     let execution = {
         let _admission = daemon.admission.lock().expect("admission lock");
@@ -1424,6 +1431,7 @@ fn limit_checks(
 ) -> Result<Vec<i64>, Fail> {
     let (base, head) = attempt.candidate().unwrap_or_default();
     let input = checks::Input {
+        plan_revision: attempt.plan_revision(),
         attempt: attempt.id,
         base: base.to_string(),
         head: head.to_string(),
@@ -1472,7 +1480,7 @@ pub async fn attempt_approve(
     let attempt = project
         .read(|conn| attempts::live_for(conn, id))?
         .ok_or_else(|| Fail::refused("no live attempt"))?;
-    let loaded = super::load_target(daemon, project, attempt.target_branch()?).await?;
+    let loaded = super::load_attempt(daemon, project, &attempt).await?;
     let approval = project.tx(|tx| {
         let (attempt, item) = approval_item(
             tx,
@@ -1748,9 +1756,7 @@ pub async fn proposal_answer(
             Some(attempt) if attempt.target_branch.is_none() && attempt.state != "live" => {
                 loaded.clone()
             }
-            Some(attempt) => {
-                Some(super::load_target(daemon, project, attempt.target_branch()?).await?)
-            }
+            Some(attempt) => Some(super::load_attempt(daemon, project, &attempt).await?),
             None => None,
         }
     } else {

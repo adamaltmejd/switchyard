@@ -95,15 +95,13 @@ fn last_seq(project: &Project) -> i64 {
 }
 
 /// A passed gate and review, then a new commit, a ticket edit, two synced
-/// check changes and a proof-only repair in turn, each leaving the candidate
-/// unverified.
+/// template changes and a proof-only repair. Only candidate changes rejudge.
 ///
 /// The new commit keeps the tree, so only the head tells the two candidates
 /// apart. The edit's implementer run makes no commit: the same head is
 /// judged afresh at the new revision, without `stopped:unchanged`, so the
 /// revision binding shows in the revision each judging execution records.
-/// A synced gate change reruns the gate and keeps the review; then a seat
-/// change reruns the review and keeps the new gate. The proof-only repair
+/// Gate, workflow and seat sync keeps the admitted judgments. The proof-only repair
 /// reruns the gate on the same head under the new proof digest, and the old
 /// check does not count. Delayed approves naming the old proof or the old
 /// head write nothing; approving the current head and proof succeeds.
@@ -116,7 +114,7 @@ fn last_seq(project: &Project) -> i64 {
 /// no longer reads `revision + 1`. Make admit::approval_item accept an old
 /// head; the stale approve writes.
 #[test]
-fn a_new_head_revision_check_config_or_proof_leaves_the_candidate_unverified() {
+fn a_new_head_revision_or_proof_rejudges_but_template_sync_keeps_checks() {
     let machine = Machine::new(
         "g2-identity",
         worker(vec![
@@ -132,7 +130,11 @@ fn a_new_head_revision_check_config_or_proof_leaves_the_candidate_unverified() {
         ]),
     );
     machine.start();
-    let project = Project::new(&machine, "p", &config(GATE));
+    let admitted = config(GATE).replace(
+        "[workflows.default]\n",
+        "[workflows.default]\ninstructions = \"Admitted workflow instructions\"\nmax_session_executions = 1\n",
+    );
+    let project = Project::new(&machine, "p", &admitted);
     let mut watch = project.watch(0);
     project.json(&[
         "ticket",
@@ -223,37 +225,21 @@ fn a_new_head_revision_check_config_or_proof_leaves_the_candidate_unverified() {
         "Create feature.txt and nothing else"
     );
 
-    // A synced gate change reruns the gate and keeps the review.
-    // Sabotage: hash the gates into `review_digest` too; the review reruns.
-    let review = third["payload"]["checks"][1].clone();
+    // G2: late template lookup or digest invalidation would add judgments.
+    // The subsequent proof repair and its attention form the observation barrier.
     project.reconfigure(&config(&GATE.replace("test -f", "test -s")));
-    let fourth = approval(&mut watch);
-    assert_eq!(head(&fourth), candidate);
-    assert_eq!(
-        kinds(&project),
-        ["gate", "review", "gate", "review", "gate", "review", "gate"]
+    project.reconfigure(
+        &config(&GATE.replace("test -f", "test -s"))
+            .replace(
+                "Review for correctness.",
+                "Review for correctness and naming.",
+            )
+            .replace(
+                "[workflows.default]\n",
+                "[workflows.default]\ninstructions = \"New workflow instructions\"\nmax_session_executions = 1\n",
+            ),
     );
-    let gate =
-        project.rows("SELECT id FROM \"check\" WHERE kind = 'gate' ORDER BY id")[3]["id"].clone();
-    assert_eq!(fourth["payload"]["checks"], json!([gate, review]));
-
-    // The reverse change retains this new gate and replaces only the review.
-    // Sabotage: hash the seats into gate_digest too; the gate reruns.
-    project.reconfigure(&config(&GATE.replace("test -f", "test -s")).replace(
-        "Review for correctness.",
-        "Review for correctness and naming.",
-    ));
-    let fifth = approval(&mut watch);
-    assert_eq!(head(&fifth), candidate);
-    assert_eq!(
-        kinds(&project),
-        [
-            "gate", "review", "gate", "review", "gate", "review", "gate", "review"
-        ]
-    );
-    let review =
-        project.rows("SELECT id FROM \"check\" WHERE kind = 'review' ORDER BY id")[3]["id"].clone();
-    assert_eq!(fifth["payload"]["checks"], json!([gate, review]));
+    let fifth = third.clone();
 
     // A repair that changes only `/yard/proof` is a new candidate.
     // Sabotage: match only base and head in `checks::current`; the old gate
@@ -274,6 +260,33 @@ fn a_new_head_revision_check_config_or_proof_leaves_the_candidate_unverified() {
     ]);
     let sixth = approval(&mut watch);
     assert_eq!(head(&sixth), candidate);
+    let repair_prompt = machine
+        .model
+        .requests()
+        .iter()
+        .rev()
+        .find(|request| request.opens() && !request.has_tool("yard_publish_review"))
+        .unwrap()
+        .prompt();
+    assert!(
+        repair_prompt.contains("Admitted workflow instructions"),
+        "{repair_prompt}"
+    );
+    assert!(
+        !repair_prompt.contains("New workflow instructions"),
+        "{repair_prompt}"
+    );
+    assert_eq!(
+        kinds(&project),
+        [
+            "gate", "review", "gate", "review", "gate", "review", "gate", "review"
+        ]
+    );
+    assert_eq!(
+        project
+            .rows("SELECT DISTINCT plan_revision FROM execution WHERE kind IN ('gate', 'review')"),
+        vec![json!({"plan_revision": 1})]
+    );
     let gates = project.rows(
         "SELECT c.id AS id, e.head AS head, e.proof AS proof FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE c.kind = 'gate' ORDER BY c.id DESC LIMIT 2",
     );
@@ -466,6 +479,16 @@ fn a_sync_that_protects_an_auto_approved_path_withdraws_it() {
     assert_eq!(ended["data"]["outcome"], "withdrawn", "{ended}");
     let raised = approval(&mut watch);
     assert_eq!(raised["payload"]["head"], head.as_str());
+    assert_eq!(raised["payload"]["plan_revision"], 1);
+    assert_eq!(
+        machine
+            .model
+            .requests()
+            .iter()
+            .filter(|request| request.opens())
+            .count(),
+        1
+    );
     assert_eq!(
         project.rows("SELECT actor, state FROM approval"),
         vec![json!({ "actor": "auto", "state": "withdrawn" })]
@@ -582,4 +605,48 @@ fn an_attempt_abandoned_while_its_landing_rereads_policy_raises_nothing() {
         project.rows("SELECT kind FROM attention WHERE state = 'open'"),
         Vec::<Value>::new()
     );
+}
+
+/// G2: manual policy synced while the auto-approved candidate's landing is
+/// held withdraws approval on the same plan, with no new model turn or check.
+/// Sabotage: read approve from the admitted plan; the held landing continues.
+/// The protected-path scenario exercises the other policy input.
+#[test]
+fn manual_policy_withdraws_auto_approval_without_rejudgment() {
+    let machine = notes_machine("g2-manual");
+    let (project, mut watch, mut release, head) = held_after_policy_change(
+        &machine,
+        "[gates.check]\ncommand = \"test -f docs/notes.md\"\nstage = \"candidate\"\n\n",
+        |config| config.replace("approve = \"auto\"", "approve = \"manual\""),
+    );
+    release.write_all(b"go\n").unwrap();
+    let ended = watch.event("execution.ended", &[("kind", "landing")]);
+    assert_eq!(ended["data"]["outcome"], "withdrawn");
+    let raised = approval(&mut watch);
+    assert_eq!(raised["payload"]["head"], head);
+    assert_eq!(raised["payload"]["plan_revision"], 1);
+    assert_eq!(
+        machine
+            .model
+            .requests()
+            .iter()
+            .filter(|request| request.opens())
+            .count(),
+        1
+    );
+    assert_eq!(
+        project.rows("SELECT actor, state FROM approval"),
+        vec![json!({"actor": "auto", "state": "withdrawn"})]
+    );
+    assert_eq!(
+        project
+            .rows("SELECT id FROM execution WHERE kind = 'gate' AND reason = 'candidate'")
+            .len(),
+        1
+    );
+    project.json(&[
+        "attempt", "approve", "--target", "main", "Y-1", "--head", &head,
+    ]);
+    release.write_all(b"go\n").unwrap();
+    watch.event("landing.recorded", &[]);
 }

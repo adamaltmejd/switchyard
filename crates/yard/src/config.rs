@@ -58,7 +58,7 @@ pub struct Agent {
     pub effort: Option<String>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
 pub struct Workflow {
     pub implementer: String,
     /// Seat names in panel order; empty for `none`.
@@ -86,7 +86,7 @@ pub enum RunsIn {
     Host,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
 pub struct Gate {
     pub name: String,
     pub command: String,
@@ -96,7 +96,7 @@ pub struct Gate {
     pub env: Vec<String>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
 pub struct Review {
     pub max_rounds: u32,
     pub timeout_minutes: u64,

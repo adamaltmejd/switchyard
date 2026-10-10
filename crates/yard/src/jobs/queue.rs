@@ -105,6 +105,7 @@ async fn holds(
     daemon: &Daemon,
     project: &Project,
     loaded: &Loaded,
+    policy: &Loaded,
     approval: &checks::Approval,
     attempt: &attempts::Attempt,
     ticket: &tickets::Ticket,
@@ -121,6 +122,8 @@ async fn holds(
         Some("the candidate changed")
     } else if ticket.revision != approval.ticket_revision {
         Some("the ticket changed")
+    } else if approval.plan_revision != attempt.plan_revision() {
+        Some("the plan revision changed")
     } else if approval.gate_digest != loaded.gate_digest {
         Some("the gate configuration changed")
     } else if approval.review_digest != loaded.review_digest(&attempt.workflow)? {
@@ -133,7 +136,7 @@ async fn holds(
     }
     if approval.actor == "auto" {
         let protected =
-            super::protected_paths(daemon, project, loaded, &approval.base, &approval.head).await?;
+            super::protected_paths(daemon, project, policy, &approval.base, &approval.head).await?;
         if !protected.is_empty() {
             let reason = format!(
                 "the candidate touches protected paths: {}",
@@ -141,7 +144,7 @@ async fn holds(
             );
             return Ok(Some(Lapse::Policy(reason, protected)));
         }
-        if loaded.config.approve != Approve::Auto {
+        if policy.config.approve != Approve::Auto {
             return Ok(Some(Lapse::Policy(
                 "approve is now manual".into(),
                 protected,
@@ -176,7 +179,7 @@ fn lapsed(
     let workflow = loaded.config.workflow(&attempt.workflow)?;
     let payload = json!({
         "target": attempt.target_branch, "base": approval.base, "head": approval.head, "proof": approval.proof,
-        "revision": approval.ticket_revision,
+        "revision": approval.ticket_revision, "plan_revision": attempt.plan_revision(),
         "gate_digest": approval.gate_digest, "review_digest": approval.review_digest,
         "checks": approval.checks, "protected": protected,
         "unreviewed": workflow.review.is_empty(),
@@ -221,8 +224,12 @@ async fn admit<T>(
             attempt,
         ))
     })?;
-    let loaded = load_target(daemon, project, attempt.target_branch()?).await?;
-    let lapse = holds(daemon, project, &loaded, &approval, &attempt, &ticket).await?;
+    let policy = load_target(daemon, project, attempt.target_branch()?).await?;
+    let loaded = super::load_attempt(daemon, project, &attempt).await?;
+    let lapse = holds(
+        daemon, project, &loaded, &policy, &approval, &attempt, &ticket,
+    )
+    .await?;
     let now = Current {
         loaded,
         approval,

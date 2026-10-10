@@ -17,6 +17,7 @@ pub struct Execution {
     pub head: Option<String>,
     pub proof: Option<String>,
     pub ticket_revision: Option<i64>,
+    pub plan_revision: Option<i64>,
     pub name: Option<String>,
     pub round: Option<i64>,
     pub handle: Option<String>,
@@ -35,7 +36,7 @@ pub struct Execution {
 
 const COLUMNS: &str = "id, attempt, parent, kind, reason, status, outcome, detail, base, head,
     proof, ticket_revision, name, round, handle, session_id, approval, intent_old, intent_merged,
-    intent_state, progress, harness_version, resumed, reserved, lock_contract, intent_ref";
+    intent_state, progress, harness_version, resumed, reserved, lock_contract, intent_ref, plan_revision";
 
 fn row(row: &Row) -> rusqlite::Result<Execution> {
     Ok(Execution {
@@ -65,6 +66,7 @@ fn row(row: &Row) -> rusqlite::Result<Execution> {
         reserved: row.get(23)?,
         lock_contract: row.get(24)?,
         intent_ref: row.get(25)?,
+        plan_revision: row.get(26)?,
     })
 }
 
@@ -83,6 +85,7 @@ impl Execution {
             "base": self.base,
             "head": self.head,
             "proof": self.proof,
+            "plan_revision": self.plan_revision,
             "name": self.name,
             "round": self.round,
             "intent": self.intent_state.as_ref().map(|state| json!({
@@ -226,6 +229,11 @@ pub fn start(tx: &Connection, start: Start) -> Result<i64, Fail> {
         ],
     )?;
     let id = tx.last_insert_rowid();
+    let revision = super::attempts::get(tx, start.attempt)?.plan_revision();
+    tx.execute(
+        "UPDATE execution SET plan_revision = ?2 WHERE id = ?1",
+        params![id, revision],
+    )?;
     audit(
         tx,
         "execution.started",

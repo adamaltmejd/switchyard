@@ -73,6 +73,12 @@ fn row(row: &Row) -> rusqlite::Result<Attempt> {
 }
 
 impl Attempt {
+    pub fn plan_revision(&self) -> Option<i64> {
+        self.admission
+            .as_ref()
+            .and_then(|input| input["revision"].as_i64())
+    }
+
     pub fn to_json(&self) -> Value {
         json!({
             "attempt": self.id,

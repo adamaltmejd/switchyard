@@ -20,7 +20,8 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// The one configuration: canonical's target head's.
+/// Validated configuration with exact source identities.
+#[derive(Clone)]
 pub struct Loaded {
     pub config: Config,
     pub branch: String,
@@ -33,6 +34,7 @@ pub struct Loaded {
 pub struct Configurations {
     pub targets: HashMap<String, Arc<Loaded>>,
     pub default: Option<String>,
+    pub sources: HashMap<String, Arc<Loaded>>,
 }
 
 /// Automatic readers cannot restore an input an uncertain mutation invalidated.
@@ -200,20 +202,109 @@ pub async fn read_config(
     })
 }
 
+/// Resolve recorded work from its immutable admission source. Legacy work
+/// retains supported exits without invented historical evidence.
+pub async fn load_attempt(
+    daemon: &Daemon,
+    project: &Project,
+    attempt: &attempts::Attempt,
+) -> Result<Arc<Loaded>, Fail> {
+    let Some(admission) = &attempt.admission else {
+        return load_target(daemon, project, attempt.target_branch()?).await;
+    };
+    let head = admission["inputs"]["source_commit"]
+        .as_str()
+        .ok_or_else(|| Fail::refused("missing admitted source"))?;
+    let cached = project
+        .loaded
+        .lock()
+        .expect("loaded lock")
+        .sources
+        .get(head)
+        .cloned();
+    let loaded = match cached {
+        Some(loaded) => loaded,
+        None => {
+            let loaded = Arc::new(
+                read_config(
+                    daemon,
+                    &project.canonical_dir(),
+                    attempt.target_branch()?,
+                    None,
+                    head,
+                )
+                .await?,
+            );
+            project
+                .loaded
+                .lock()
+                .expect("loaded lock")
+                .sources
+                .insert(head.to_string(), loaded.clone());
+            loaded
+        }
+    };
+    if loaded.admission_inputs != admission["inputs"]
+        || serde_json::to_value(loaded.config.workflow_plan(&attempt.workflow)?)
+            .expect("plan serializes")
+            != admission["plan"]
+    {
+        return Err(Fail::refused(
+            "admitted source does not match recorded inputs",
+        ));
+    }
+    Ok(Arc::new(resolved(&loaded, attempt)?))
+}
+
+/// Consume selected definitions from the persisted resolver evidence.
+fn resolved(loaded: &Loaded, attempt: &attempts::Attempt) -> Result<Loaded, Fail> {
+    let mut loaded = loaded.clone();
+    loaded.branch = attempt.target_branch()?.to_string();
+    if let Some(admission) = &attempt.admission {
+        loaded.config.workflows.insert(
+            attempt.workflow.clone(),
+            serde_json::from_value(admission["workflow"].clone())
+                .map_err(|error| Fail::refused(error.to_string()))?,
+        );
+        loaded.config.gates = serde_json::from_value(admission["gates"].clone())
+            .map_err(|error| Fail::refused(error.to_string()))?;
+        if !admission["review"].is_null() {
+            loaded.config.review = serde_json::from_value(admission["review"].clone())
+                .map_err(|error| Fail::refused(error.to_string()))?;
+        }
+        loaded.config.seats = serde_json::from_value(admission["seats"].clone())
+            .map_err(|error| Fail::refused(error.to_string()))?;
+        for (name, agent) in admission["agents"]
+            .as_object()
+            .ok_or_else(|| Fail::refused("invalid admitted agents"))?
+        {
+            loaded.config.agents.insert(
+                name.clone(),
+                serde_json::from_value(agent["settings"].clone())
+                    .map_err(|error| Fail::refused(error.to_string()))?,
+            );
+        }
+    }
+    Ok(loaded)
+}
+
 pub async fn step(daemon: &Arc<Daemon>, project: &Arc<Project>) -> Result<(), Fail> {
     capacity::reap(daemon, project).await?;
     let canonical = project.canonical.lock().await;
-    let Ok(loaded) = refresh_default(daemon, project, &canonical).await else {
+    let Ok(_loaded) = refresh_default(daemon, project, &canonical).await else {
         return Ok(());
     };
     // Live attempts reacquire a freed lane before new tickets are admitted
     // (the scheduler also reserves lanes for them under the admission lock),
     // so a repair returning from the queue never starves behind admissions.
+    drop(canonical);
     let live = project.read(attempts::live)?;
     for attempt in live {
-        let selected = load_target(daemon, project, attempt.target_branch()?).await?;
+        let selected = load_attempt(daemon, project, &attempt).await?;
         advance(daemon, project, &selected, &attempt).await?;
     }
+    let canonical = project.canonical.lock().await;
+    let loaded = refresh_default(daemon, project, &canonical).await?;
     admit::scheduled(daemon, project, &loaded).await?;
     drop(canonical);
     queue::next(daemon, project).await?;
@@ -363,15 +454,14 @@ async fn advance(
     let executions = project.read(|conn| executions::for_attempt(conn, attempt.id))?;
     let edited = project.read(|conn| attempts::edit_pending(conn, attempt.id))?;
     let ticket = project.read(|conn| tickets::get(conn, attempt.ticket))?;
-    if !attempt.lane
-        && !admit::take_lane(
-            daemon,
-            project,
-            (load(daemon, project).await?).as_ref(),
-            attempt.id,
-        )?
-    {
-        return Ok(());
+    if !attempt.lane {
+        let canonical = project.canonical.lock().await;
+        let Ok(default) = refresh_default(daemon, project, &canonical).await else {
+            return Ok(());
+        };
+        if !admit::take_lane(daemon, project, &default, attempt.id)? {
+            return Ok(());
+        }
     }
     if let Some(next) = &attempt.next {
         let reason = next["reason"].as_str().unwrap_or("repair").to_string();
@@ -406,6 +496,7 @@ async fn advance(
         ..Default::default()
     };
     let gate_input = checks::Input {
+        plan_revision: attempt.plan_revision(),
         attempt: attempt.id,
         base: base.to_string(),
         head: head.to_string(),
@@ -517,10 +608,13 @@ async fn advance(
         return Ok(());
     }
 
-    let protected = protected_paths(daemon, project, loaded, base, head).await?;
+    let target_lock = project.target_lock(&crate::git::target_ref(attempt.target_branch()?));
+    let _target = target_lock.lock().await;
+    let policy = load_target(daemon, project, attempt.target_branch()?).await?;
+    let protected = protected_paths(daemon, project, &policy, base, head).await?;
     let payload = json!({
         "target": attempt.target_branch, "base": base, "head": head, "proof": attempt.proof.clone().unwrap_or_default(),
-        "revision": ticket.revision,
+        "revision": ticket.revision, "plan_revision": attempt.plan_revision(),
         "gate_digest": loaded.gate_digest, "review_digest": review_digest,
         "checks": passed, "protected": protected, "unreviewed": workflow.review.is_empty(),
     });
@@ -534,7 +628,7 @@ async fn advance(
         {
             return Ok(());
         }
-        if loaded.config.approve == Approve::Auto && protected.is_empty() {
+        if policy.config.approve == Approve::Auto && protected.is_empty() {
             let proof = attempt.proof.clone().unwrap_or_default();
             checks::approve(
                 tx,
@@ -598,6 +692,7 @@ pub fn stale_part(
         ("head", json!(head)),
         ("proof", json!(attempt.proof.clone().unwrap_or_default())),
         ("revision", json!(ticket.revision)),
+        ("plan_revision", json!(attempt.plan_revision())),
         ("gate_digest", json!(loaded.gate_digest)),
         (
             "review_digest",
