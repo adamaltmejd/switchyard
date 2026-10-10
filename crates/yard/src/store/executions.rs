@@ -29,11 +29,12 @@ pub struct Execution {
     pub harness_version: Option<String>,
     pub resumed: Option<i64>,
     pub reserved: bool,
+    pub lock_contract: bool,
 }
 
 const COLUMNS: &str = "id, attempt, parent, kind, reason, status, outcome, detail, base, head,
     proof, ticket_revision, name, round, handle, session_id, approval, intent_old, intent_merged,
-    intent_state, progress, harness_version, resumed, reserved";
+    intent_state, progress, harness_version, resumed, reserved, lock_contract";
 
 fn row(row: &Row) -> rusqlite::Result<Execution> {
     Ok(Execution {
@@ -61,6 +62,7 @@ fn row(row: &Row) -> rusqlite::Result<Execution> {
         harness_version: row.get(21)?,
         resumed: row.get(22)?,
         reserved: row.get(23)?,
+        lock_contract: row.get(24)?,
     })
 }
 

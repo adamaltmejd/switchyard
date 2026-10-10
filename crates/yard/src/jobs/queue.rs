@@ -412,8 +412,13 @@ pub async fn land(
                     gate.name,
                     result.detail.unwrap_or_default()
                 );
-                return returned(daemon, project, &loaded, execution, &target, "red", &detail)
-                    .await;
+                return super::capacity::effect(
+                    daemon,
+                    project,
+                    execution,
+                    returned(daemon, project, &loaded, execution, &target, "red", &detail),
+                )
+                .await;
             }
             _ => {
                 let detail = format!(

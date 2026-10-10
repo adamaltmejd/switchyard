@@ -490,3 +490,88 @@ fn a_plan_proposes_children_that_block_it() {
     project.json(&["ticket", "done", "Y-2", "--reason", "Not needed"]);
     assert_eq!(project.json(&["ticket", "show", "Y-2"])["state"], "done");
 }
+
+/// G5: a real pre-capacity binary dies with its clone Git child held before
+/// any box/handle exists. The fixture proves that PID survives SIGKILL.
+/// Upgrade retains the old row and capacity rather than guessing from an
+/// absent effects lock. A completed prior ticket is the allowed control.
+/// Releasing the known fixture child does not invent a proof on the old
+/// row; the ambiguous upgrade stays stopped for the Y80 rehearsal.
+/// Sabotage: backfill only reservations without their legacy lock contract,
+/// or accept absence of the new lock as proof for a legacy execution.
+#[test]
+fn an_upgrade_retains_a_legacy_pre_box_child_without_an_ownership_proof() {
+    let machine = Machine::new("g5-legacy-child", |request| {
+        act(
+            request,
+            vec![commit_file("control.txt", "control\n", "Control")],
+        )
+    });
+    let armed = machine.root.join("armed");
+    let said_path = machine.root.join("said");
+    let release = machine.root.join("release");
+    let done = machine.root.join("done");
+    for path in [&said_path, &release, &done] {
+        assert!(Command::new("mkfifo").arg(path).status().unwrap().success());
+    }
+    machine.wrapper("git", &format!(
+        "if [ -e '{}' ]; then case \" $* \" in *' clone '*) echo $$ > '{}'; read line < '{}'; \"$REAL\" \"$@\"; result=$?; echo done > '{}'; exit \"$result\";; esac; fi",
+        armed.display(), said_path.display(), release.display(), done.display()));
+    machine.use_binary(Some(pre_target_binary()));
+    machine.start();
+    let configured = config("").replace("review = [\"correctness\"]", "review = \"none\"");
+    let project = Project::new(&machine, "p", &configured);
+    let mut watch = project.watch(0);
+    project.json(&["ticket", "new", "--title", "Control"]);
+    let control = watch.attention();
+    assert_eq!(control["data"]["kind"], "approval");
+    std::fs::write(&armed, "").unwrap();
+    project.json(&["ticket", "new", "--title", "Legacy"]);
+    let pid = watch.said(&said_path).trim().to_string();
+    drop(watch);
+    machine.kill();
+    assert!(
+        Command::new("kill")
+            .args(["-0", &pid])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert_eq!(
+        project.rows("SELECT id, status, handle FROM execution WHERE id = 2"),
+        vec![json!({"id": 2, "status": "running", "handle": null})]
+    );
+    std::fs::remove_file(&armed).unwrap();
+    machine.use_binary(None);
+    machine.start();
+    let mut watch = project.watch(0);
+    let unknown = watch.find("legacy ownership attention", |event| {
+        event["event"] == "attention.raised" && event["execution"] == 2
+    });
+    assert_eq!(unknown["data"]["kind"], "red");
+    assert_eq!(unknown["data"]["reason"], "ownership");
+    assert_eq!(unknown["data"]["payload"]["lock_contract"], false);
+    project.write(
+        ".yard/config.toml",
+        &configured.replace("max_lanes = 2", "max_lanes = 2\nmax_executions = 1"),
+    );
+    git(&project.path, &["add", ".yard/config.toml"]);
+    git(&project.path, &["commit", "-qm", "Set shared capacity"]);
+    project.json(&["sync"]);
+    project.json(&["ticket", "new", "--title", "Waiter"]);
+    let waiting = watch.event("execution.waiting", &[]);
+    assert_eq!(waiting["ticket"], "Y-3");
+    std::fs::write(&release, "go\n").unwrap();
+    assert_eq!(watch.said(&done), "done\n");
+    assert_eq!(
+        project.rows("SELECT status, reserved, lock_contract FROM execution WHERE id = 2"),
+        vec![json!({"status": "running", "reserved": 1, "lock_contract": 0})]
+    );
+    assert!(
+        !machine
+            .model
+            .requests()
+            .iter()
+            .any(|r| r.prompt().contains("Waiter"))
+    );
+}

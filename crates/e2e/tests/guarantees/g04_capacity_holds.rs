@@ -381,8 +381,8 @@ fn one_slot_lands_with_child_gates_and_excludes_a_worker() {
 /// Killing the daemon leaves the inherited lock and reservation. A second
 /// ticket is admitted after restart but cannot act until that exact child
 /// exits. Unlike the existing restart test, the old owner survives startup.
-/// Sabotage: release capacity when the daemon dies or when the row ends,
-/// or omit the inherited lock on a pre-box Git effect.
+/// Sabotage: release capacity when the daemon dies, omit the inherited
+/// lock on a pre-box Git effect, or change ownership attention from red.
 #[test]
 fn an_old_host_child_retains_capacity_across_restart() {
     let machine = Machine::new("g4-old-child", |request| {
@@ -430,6 +430,7 @@ fn an_old_host_child_retains_capacity_across_restart() {
     let mut watch = project.watch(0);
     let attention = watch.attention();
     assert_eq!(attention["execution"], 1);
+    assert_eq!(attention["data"]["kind"], "red");
     assert_eq!(attention["data"]["reason"], "ownership");
     project.json(&["ticket", "new", "--title", "Second"]);
     let waiting = watch.event("execution.waiting", &[]);
@@ -444,5 +445,90 @@ fn an_old_host_child_retains_capacity_across_restart() {
     assert_eq!(
         project.rows("SELECT reserved, outcome FROM execution WHERE id = 1"),
         vec![json!({"reserved": 0, "outcome": "interrupted"})]
+    );
+}
+
+/// G4/G9: stop a capacity waiter while a real worker holds the sole slot.
+/// Its row ends before release; the host model never sees that turn. A
+/// deliberate start of the same ticket then reaches approval. Existing
+/// G9 stops an acting worker and cannot expose the absent waiting handle.
+/// Sabotage: stop only the in-memory handle, or reserve from a stale row
+/// after stop ended it. Expected unchanged/stopped comes from the stop
+/// contract; requests and the held turn come from the host fixture.
+#[test]
+fn stopping_a_capacity_waiter_prevents_its_turn_until_start() {
+    let hold = Latch::new();
+    let held = hold.clone();
+    let machine = Machine::new("g4-stop-waiter", move |request| {
+        if request.opens() && request.prompt().contains("Holder") {
+            return Reply::Hold(
+                held.clone(),
+                Box::new(Reply::Tools(vec![commit_file(
+                    "holder.txt",
+                    "holder\n",
+                    "Holder",
+                )])),
+            );
+        }
+        act(
+            request,
+            vec![commit_file("waiter.txt", "waiter\n", "Waiter")],
+        )
+    });
+    machine.start();
+    let project = Project::new(
+        &machine,
+        "p",
+        &config("")
+            .replace("max_lanes = 2", "max_lanes = 2\nmax_executions = 1")
+            .replace("review = [\"correctness\"]", "review = \"none\""),
+    );
+    let mut watch = project.watch(0);
+    project.json(&["ticket", "new", "--title", "Holder"]);
+    hold.wait_held();
+    project.json(&["ticket", "new", "--title", "Waiter"]);
+    let waiting = watch.event("execution.waiting", &[]);
+    assert_eq!(waiting["ticket"], "Y-2");
+    let execution = waiting["execution"].as_i64().unwrap();
+    assert_eq!(
+        project.json(&["attempt", "stop", "Y-2"])["stopping"],
+        execution
+    );
+    let stopped = watch.until("waiting execution stopped", |event| {
+        event["event"] == "attention.raised" && event["execution"] == execution
+    });
+    assert_eq!(stopped["data"]["kind"], "stopped");
+    assert_eq!(stopped["data"]["reason"], "unchanged");
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT status, outcome, reserved FROM execution WHERE id = {execution}"
+        )),
+        vec![json!({"status": "ended", "outcome": "unchanged", "reserved": 0})]
+    );
+    hold.release();
+    approval_of(&mut watch, "Y-1");
+    assert!(
+        !machine
+            .model
+            .requests()
+            .iter()
+            .any(|r| r.prompt().contains("Waiter"))
+    );
+    project.json(&["attempt", "start", "Y-2"]);
+    approval_of(&mut watch, "Y-2");
+    assert_eq!(
+        machine
+            .model
+            .requests()
+            .iter()
+            .filter(|r| r.opens() && r.prompt().contains("Waiter"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT reserved FROM execution WHERE id = {execution}"
+        )),
+        vec![json!({"reserved": 0})]
     );
 }

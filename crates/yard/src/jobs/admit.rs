@@ -1129,11 +1129,31 @@ pub fn attempt_stop(daemon: &Daemon, project: &Project, params: &Value) -> Resul
             ticket_name(id)
         )));
     };
+    let stopped_waiter = project.tx(|tx| {
+        let row = executions::get(tx, running.id)?;
+        if row.status != "running" {
+            return Err(Fail::refused("the implementer execution already ended"));
+        }
+        if row.reserved {
+            return Ok(false);
+        }
+        executions::end(tx, row.id, executions::End {
+            outcome: "unchanged", ticket: Some(id), ..Default::default()
+        })?;
+        attempts::raise(tx, attempts::Raise {
+            kind: "stopped", reason: "unchanged", ticket: Some(id),
+            attempt: Some(row.attempt), execution: Some(row.id),
+            payload: json!({ "detail": "the operator stopped the execution before external work" }),
+            text: None,
+        })?;
+        Ok(true)
+    })?;
     if let Some(stop) = daemon
         .stops
         .lock()
         .expect("stops lock")
         .get(&(project.key.clone(), running.id))
+        && !stopped_waiter
     {
         stop.notify_one();
     }

@@ -158,6 +158,9 @@ pub async fn decide_intent(
     project: &Project,
     row: &executions::Execution,
 ) -> Result<bool, Fail> {
+    if row.reserved && !super::capacity::release(daemon, project, row).await? {
+        return Ok(false);
+    }
     let undecided = |detail: &str| -> Result<bool, Fail> {
         project.tx(|tx| {
             let open = attempts::open_attention(tx)?

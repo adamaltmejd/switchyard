@@ -53,7 +53,18 @@ pub async fn effect<T>(
             return Err(Fail::refused("execution no longer eligible to act"));
         }
         if spare {
-            project.tx(|tx| executions::reserve(tx, execution, true))?;
+            project.tx(|tx| {
+                // Stop and reservation race on this row, not on a missing
+                // in-memory stop handle.
+                let current = executions::get(tx, execution)?;
+                if current.status != "running"
+                    || (current.kind != "cleanup"
+                        && attempts::get(tx, current.attempt)?.state != "live")
+                {
+                    return Err(Fail::refused("execution no longer eligible to act"));
+                }
+                executions::reserve(tx, execution, true)
+            })?;
             drop(canonical);
             break;
         }
@@ -134,33 +145,66 @@ pub async fn release(
         return Ok(true);
     }
     let label = format!("dev.yard.project={}", project.key);
-    let gone = daemon
+    let boxes_gone = daemon
         .pinfold
         .list(&label)
         .await
-        .is_ok_and(|boxes| !boxes.contains(&super::supervise::box_name(project, row.id)))
-        && super::supervise::lock_free(&dir(project, row)).unwrap_or(false);
-    // Legacy host children inherited the attempt/parent lock.
-    let legacy = if row.kind == "gate" && row.handle.as_deref().is_some_and(|h| h.starts_with('{'))
-    {
-        match row.parent {
-            Some(parent) => super::queue::landing_dir(project, parent),
-            None => project.attempt_dir(row.attempt),
-        }
+        .is_ok_and(|boxes| !boxes.contains(&super::supervise::box_name(project, row.id)));
+    let host_gone = if row.lock_contract {
+        super::supervise::lock_free(&dir(project, row)).unwrap_or(false)
     } else {
-        dir(project, row)
+        // The old binary never inherited effects/<id>/lock. Only paths
+        // whose recorded state reached an old ownership proof may use it.
+        let old_lock = if row.kind == "landing" && row.intent_state.as_deref() == Some("open") {
+            Some(super::queue::landing_dir(project, row.id))
+        } else if row.kind == "gate" && row.handle.as_deref().is_some_and(|h| h.starts_with('{')) {
+            Some(match row.parent {
+                Some(parent) => super::queue::landing_dir(project, parent),
+                None => project.attempt_dir(row.attempt),
+            })
+        } else {
+            None
+        };
+        match old_lock {
+            Some(path) => {
+                path.join("lock").is_file() && super::supervise::lock_free(&path).unwrap_or(false)
+            }
+            // These terminal box judgments finished their pre-box Git.
+            // Box absence proves the remaining controller cannot act.
+            None => {
+                row.status == "ended"
+                    && matches!(row.kind.as_str(), "gate" | "review")
+                    && matches!(row.outcome.as_deref(), Some("pass" | "fail"))
+                    && row.handle.as_deref().is_some_and(|h| !h.starts_with('{'))
+            }
+        }
     };
-    let gone = gone && super::supervise::lock_free(&legacy).unwrap_or(false);
+    let gone = boxes_gone && host_gone;
+    let detail = if !row.lock_contract && !host_gone {
+        "legacy execution has no supported host ownership proof; stop the upgrade and resolve outside Yard"
+    } else {
+        "external owner not proved gone; capacity retained"
+    };
     project.tx(|tx| {
         if gone {
             executions::reserve(tx, row.id, false)?;
-        } else if !attempts::open_attention(tx)?.iter().any(|a| a.reason == "ownership" && a.execution == Some(row.id)) {
+        } else if !attempts::open_attention(tx)?
+            .iter()
+            .any(|a| a.reason == "ownership" && a.execution == Some(row.id))
+        {
             let attempt = attempts::get(tx, row.attempt)?;
-            attempts::raise(tx, attempts::Raise {
-                kind: "red", reason: "ownership", ticket: Some(attempt.ticket),
-                attempt: (row.kind != "landing").then_some(row.attempt), execution: Some(row.id),
-                payload: json!({ "detail": "external owner not proved gone; capacity retained" }), text: None,
-            })?;
+            attempts::raise(
+                tx,
+                attempts::Raise {
+                    kind: "red",
+                    reason: "ownership",
+                    ticket: Some(attempt.ticket),
+                    attempt: (row.kind != "landing").then_some(row.attempt),
+                    execution: Some(row.id),
+                    payload: json!({ "detail": detail, "lock_contract": row.lock_contract }),
+                    text: None,
+                },
+            )?;
         }
         Ok(gone)
     })

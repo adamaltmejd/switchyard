@@ -199,4 +199,10 @@ ALTER TABLE attempt ADD COLUMN body_read TEXT;
      ALTER TABLE attempt ADD COLUMN target_branch TEXT;",
     "ALTER TABLE execution ADD COLUMN reserved INTEGER NOT NULL DEFAULT 0;
      UPDATE execution SET reserved = 1 WHERE status = 'running';",
+    "ALTER TABLE execution ADD COLUMN lock_contract INTEGER NOT NULL DEFAULT 1;
+     UPDATE execution SET lock_contract = 0;
+     UPDATE execution SET reserved = 1 WHERE status = 'running' OR intent_state = 'open'
+        OR (kind != 'cleanup' AND outcome IN ('error', 'failed', 'timeout', 'interrupted', 'refused', 'abandoned'))
+        OR kind IN ('gate', 'review')
+        OR (kind = 'landing' AND outcome IN ('red', 'conflict'));",
 ];
