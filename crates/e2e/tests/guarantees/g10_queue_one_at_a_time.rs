@@ -413,6 +413,7 @@ fn target_head(project: &Project, branch: &str) -> String {
     .to_string()
 }
 
+// Approval-needed candidates retain lanes; callers allow one per candidate.
 fn target_candidates(project: &Project, watch: &mut Watch, branches: &[&str]) -> Vec<String> {
     for (index, branch) in branches.iter().enumerate() {
         if project.git(&["branch", "--list", branch]).trim().is_empty() {
@@ -528,7 +529,7 @@ fn unrelated_targets_land_while_the_same_target_waits() {
     let project = Project::new(
         &machine,
         "p",
-        &unreviewed("").replace("max_lanes = 2", "max_lanes = 2\nmax_executions = 2"),
+        &unreviewed("").replace("max_lanes = 2", "max_lanes = 3\nmax_executions = 2"),
     );
     let mut watch = project.watch(0);
     let branches = ["feature/a", "feature/b", "feature/a"];
@@ -614,7 +615,7 @@ fn independent_target_landings_share_the_project_execution_cap() {
     let project = Project::new(
         &machine,
         "p",
-        &unreviewed("").replace("max_lanes = 2", "max_lanes = 2\nmax_executions = 1"),
+        &unreviewed("").replace("max_lanes = 2", "max_lanes = 3\nmax_executions = 1"),
     );
     let mut watch = project.watch(0);
     let branches = ["feature/a", "feature/b", "feature/c"];

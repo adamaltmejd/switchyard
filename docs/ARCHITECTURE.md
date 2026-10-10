@@ -177,7 +177,11 @@ mutations publish while their target is held; unknown landing ownership
 requires the existing reconciliation proof before publication. Startup does
 not publish over an open default intent or its retained reservation.
 An intent's start exit can prove recovery while default input is unavailable.
-An unavailable validated default refuses new effects. Selected-target cache
+An unavailable validated default excludes new effects. Already-admitted
+executions wait on project events without reserving capacity; validated
+publication wakes them to reread the current default. They remain stoppable
+and abandonable through their existing execution. Unknown default mutation
+ownership keeps that input unavailable until proved resolved. Selected-target cache
 reads do not replace the published default input.
 An attempt freezes its workflow's name and its
 implementer's settings at admission, for session continuity; every other

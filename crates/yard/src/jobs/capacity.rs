@@ -44,18 +44,20 @@ pub async fn effect<T>(
                 .default
                 .as_ref()
                 .and_then(|branch| configs.targets.get(branch))
-                .ok_or_else(|| Fail::refused("the project default configuration is not loaded"))?
-                .config
-                .max_executions
+                .map(|loaded| loaded.config.max_executions)
         };
-        let spare = project.read(|conn| {
-            Ok((conn.query_row(
-                "SELECT count(*) FROM execution WHERE reserved = 1",
-                [],
-                |row| row.get::<_, i64>(0),
-            )? as u64)
-                < limit)
-        })?;
+        // Invalidation excludes effects until validated publication wakes us.
+        let spare = match limit {
+            Some(limit) => project.read(|conn| {
+                Ok((conn.query_row(
+                    "SELECT count(*) FROM execution WHERE reserved = 1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )? as u64)
+                    < limit)
+            })?,
+            None => false,
+        };
         let row = project.read(|conn| executions::get(conn, execution))?;
         let attempt = project.read(|conn| attempts::get(conn, row.attempt))?;
         if row.status != "running" || (row.kind != "cleanup" && attempt.state != "live") {
