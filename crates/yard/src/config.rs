@@ -11,6 +11,7 @@ pub const DOCKERFILE_PATH: &str = ".yard/Dockerfile";
 #[derive(Debug, Clone)]
 pub struct Config {
     pub max_lanes: u32,
+    pub max_executions: u64,
     pub approve: Approve,
     pub target: Target,
     pub egress: Vec<String>,
@@ -113,6 +114,7 @@ pub struct Seat {
 #[serde(deny_unknown_fields)]
 struct Raw {
     max_lanes: Option<u32>,
+    max_executions: Option<u64>,
     #[serde(default)]
     approve: Approve,
     target: Target,
@@ -187,6 +189,10 @@ impl Config {
         let max_lanes = raw.max_lanes.unwrap_or(1);
         if max_lanes == 0 {
             return Err("max_lanes must be at least 1".into());
+        }
+        let max_executions = raw.max_executions.unwrap_or(u64::from(max_lanes) + 1);
+        if max_executions == 0 {
+            return Err("max_executions must be at least 1".into());
         }
         if raw.target.branch.is_empty() || raw.target.branch.starts_with('-') {
             return Err(format!(
@@ -314,6 +320,7 @@ impl Config {
         }
         Ok(Config {
             max_lanes,
+            max_executions,
             approve: raw.approve,
             target: raw.target,
             egress: raw.isolation.egress,

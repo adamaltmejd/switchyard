@@ -8,7 +8,6 @@ use crate::daemon::{Daemon, Project};
 use crate::git::Merge;
 use crate::store::{self, attempts, checks, executions, ticket_name, tickets};
 use serde_json::json;
-use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -19,10 +18,14 @@ pub fn landing_dir(project: &Project, landing: i64) -> PathBuf {
 /// Start the next landing, if the queue is free.
 pub async fn next(daemon: &Arc<Daemon>, project: &Arc<Project>) -> Result<(), Fail> {
     let busy = project.read(|conn| {
-        Ok(
-            !executions::query(conn, "kind = 'landing' AND status = 'running'", [])?.is_empty()
-                || !executions::open_intents(conn)?.is_empty(),
-        )
+        Ok(!executions::query(
+            conn,
+            "(kind = 'landing' OR parent IN (SELECT id FROM execution WHERE kind = 'landing'))
+             AND (status = 'running' OR reserved = 1)",
+            [],
+        )?
+        .is_empty()
+            || !executions::open_intents(conn)?.is_empty())
     })?;
     if busy {
         return Ok(());
@@ -255,12 +258,9 @@ pub async fn land(
     let ticket = project.read(|conn| tickets::get(conn, attempt.ticket))?;
     let canonical = project.canonical_dir();
     let target_ref = crate::git::target_ref(&loaded.branch);
-    let dir = landing_dir(project, execution);
-    let lock = super::supervise::hold_lock(&dir)?;
-    let fd = Some(lock.as_raw_fd());
     let head = approval.head.clone();
 
-    let (target, merged) = {
+    let prepared = super::capacity::effect(daemon, project, execution, async {
         let _canonical = project.canonical.lock().await;
         let target = daemon
             .git
@@ -276,7 +276,7 @@ pub async fn land(
         } else {
             match daemon.git.merge_tree(&canonical, &target, &head).await? {
                 Merge::Conflict { paths } => {
-                    return returned(
+                    returned(
                         daemon,
                         project,
                         &loaded,
@@ -288,7 +288,8 @@ pub async fn land(
                             paths.join("\n")
                         ),
                     )
-                    .await;
+                    .await?;
+                    return Ok(None);
                 }
                 Merge::Clean { tree } => {
                     let message = format!("Merge {}: {}", ticket_name(ticket.id), ticket.title);
@@ -310,7 +311,11 @@ pub async fn land(
                 None,
             )
             .await?;
-        (target, merged)
+        Ok(Some((target, merged)))
+    })
+    .await?;
+    let Some((target, merged)) = prepared else {
+        return Ok(());
     };
 
     for gate in &loaded.config.gates {
@@ -356,7 +361,35 @@ pub async fn land(
                 );
             }
         };
-        super::supervise::gate(daemon, project, child, Some(&lock)).await?;
+        let child_result = super::capacity::effect(
+            daemon,
+            project,
+            child,
+            super::supervise::gate(daemon, project, child),
+        )
+        .await;
+        if let Err(fail) = child_result {
+            project.tx(|tx| {
+                if executions::get(tx, child)?.status == "running" {
+                    executions::end(
+                        tx,
+                        child,
+                        executions::End {
+                            outcome: if attempts::get(tx, attempt.id)?.state == "live" {
+                                "error"
+                            } else {
+                                "abandoned"
+                            },
+                            detail: Some(&fail.message),
+                            ticket: Some(ticket.id),
+                            ..Default::default()
+                        },
+                    )?;
+                }
+                Ok(())
+            })?;
+            return Err(fail);
+        }
         let result = project.read(|conn| executions::get(conn, child))?;
         match result.outcome.as_deref() {
             Some("pass") => {}
@@ -421,75 +454,80 @@ pub async fn land(
         }
     }
 
-    let held = project.canonical.lock().await;
-    let admitted = admit(
-        daemon,
-        project,
-        &held,
-        approval.id,
-        attempt.id,
-        |tx, now| {
-            executions::set_intent(
-                tx,
-                execution,
-                &target,
-                &merged,
-                now.ticket.id,
-                now.attempt.id,
-            )
-        },
-    )
-    .await?;
-    if let Err((now, lapse)) = admitted {
-        return withdraw(
+    let result = super::capacity::effect(daemon, project, execution, async {
+        let held = project.canonical.lock().await;
+        let admitted = admit(
+            daemon,
             project,
-            &now.loaded,
-            execution,
-            &now.approval,
-            &now.attempt,
-            &lapse,
-        );
-    }
-    let moved = daemon
-        .git
-        .update_ref(&canonical, &target_ref, &merged, Some(&target), fd)
-        .await;
-    match moved {
-        Ok(false) => {
-            // The target moved under the landing: retired silently, re-queued.
-            return project.tx(|tx| {
-                executions::resolve_intent(tx, execution)?;
-                executions::end(
+            &held,
+            approval.id,
+            attempt.id,
+            |tx, now| {
+                executions::set_intent(
                     tx,
                     execution,
-                    executions::End {
-                        outcome: "retired",
-                        ticket: Some(ticket.id),
-                        ..Default::default()
-                    },
+                    &target,
+                    &merged,
+                    now.ticket.id,
+                    now.attempt.id,
                 )
-            });
+            },
+        )
+        .await?;
+        if let Err((now, lapse)) = admitted {
+            return withdraw(
+                project,
+                &now.loaded,
+                execution,
+                &now.approval,
+                &now.attempt,
+                &lapse,
+            );
         }
-        Ok(true) => {}
-        Err(_) => {
-            // Command success is never read as a landing: decide from canonical.
-            drop(lock);
-            let row = project.read(|conn| executions::get(conn, execution))?;
-            super::reconcile::decide_intent(daemon, project, &row).await?;
-            return Ok(());
+        let moved = daemon
+            .git
+            .update_ref(&canonical, &target_ref, &merged, Some(&target), None)
+            .await;
+        match moved {
+            Ok(false) => {
+                // The target moved under the landing: retired silently, re-queued.
+                return project.tx(|tx| {
+                    executions::resolve_intent(tx, execution)?;
+                    executions::end(
+                        tx,
+                        execution,
+                        executions::End {
+                            outcome: "retired",
+                            ticket: Some(ticket.id),
+                            ..Default::default()
+                        },
+                    )
+                });
+            }
+            Ok(true) => {}
+            Err(_) => {
+                // Command success is never read as a landing: decide from canonical.
+                return Ok(());
+            }
         }
+        if !daemon
+            .git
+            .is_ancestor(&canonical, &head, &target_ref, None)
+            .await?
+        {
+            return Err(Fail::new(
+                "internal",
+                format!("canonical does not contain {head} after the landing"),
+            ));
+        }
+        project.tx(|tx| record_landing(tx, execution))
+    })
+    .await;
+    let row = project.read(|conn| executions::get(conn, execution))?;
+    if row.intent_state.as_deref() == Some("open") {
+        super::reconcile::decide_intent(daemon, project, &row).await?;
     }
-    if !daemon
-        .git
-        .is_ancestor(&canonical, &head, &target_ref, fd)
-        .await?
-    {
-        return Err(Fail::new(
-            "internal",
-            format!("canonical does not contain {head} after the landing"),
-        ));
-    }
-    project.tx(|tx| record_landing(tx, execution))
+    result
 }
 
 /// Record a landing once: close the ticket, end the attempt, resolve the

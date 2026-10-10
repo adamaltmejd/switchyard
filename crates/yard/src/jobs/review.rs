@@ -136,7 +136,7 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
     )
     .await;
     daemon.grants.revoke(project, execution);
-    let _ = live.down(supervise::DOWN_TIMEOUT).await;
+    live.down(supervise::DOWN_TIMEOUT).await?;
     let _ = std::fs::remove_dir_all(&dir);
     let run = run?;
 

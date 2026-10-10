@@ -28,11 +28,12 @@ pub struct Execution {
     pub progress: Option<String>,
     pub harness_version: Option<String>,
     pub resumed: Option<i64>,
+    pub reserved: bool,
 }
 
 const COLUMNS: &str = "id, attempt, parent, kind, reason, status, outcome, detail, base, head,
     proof, ticket_revision, name, round, handle, session_id, approval, intent_old, intent_merged,
-    intent_state, progress, harness_version, resumed";
+    intent_state, progress, harness_version, resumed, reserved";
 
 fn row(row: &Row) -> rusqlite::Result<Execution> {
     Ok(Execution {
@@ -59,6 +60,7 @@ fn row(row: &Row) -> rusqlite::Result<Execution> {
         progress: row.get(20)?,
         harness_version: row.get(21)?,
         resumed: row.get(22)?,
+        reserved: row.get(23)?,
     })
 }
 
@@ -71,6 +73,7 @@ impl Execution {
             "kind": self.kind,
             "reason": self.reason,
             "status": self.status,
+            "reserved": self.reserved,
             "outcome": self.outcome,
             "detail": self.detail,
             "base": self.base,
@@ -370,6 +373,33 @@ pub fn resolve_intent(tx: &Connection, id: i64) -> Result<(), Fail> {
     tx.execute(
         "UPDATE execution SET intent_state = 'resolved' WHERE id = ?1",
         params![id],
+    )?;
+    Ok(())
+}
+
+pub fn reserve(tx: &Connection, id: i64, reserved: bool) -> Result<(), Fail> {
+    let row = get(tx, id)?;
+    if row.reserved == reserved {
+        return Ok(());
+    }
+    tx.execute(
+        "UPDATE execution SET reserved = ?2 WHERE id = ?1",
+        params![id, reserved],
+    )?;
+    audit(
+        tx,
+        if reserved {
+            "execution.reserved"
+        } else {
+            "execution.released"
+        },
+        Target {
+            attempt: Some(row.attempt),
+            execution: Some(id),
+            ..Default::default()
+        },
+        None,
+        json!({}),
     )?;
     Ok(())
 }

@@ -10,7 +10,6 @@ use crate::harness::{Harness, ModelRoute, Stage};
 use crate::store::{self, attempts, checks, executions, ticket_name, tickets};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -1036,13 +1035,11 @@ async fn body_diff(
 }
 
 /// One gate on one commit: a candidate-stage gate, or a landing's child.
-/// Run one gate execution. A landing's child passes the landing's lock,
-/// which its host child inherits; a candidate gate takes the attempt's.
+/// Run one gate execution inside its reserved effect scope.
 pub async fn gate(
     daemon: &Arc<Daemon>,
     project: &Arc<Project>,
     execution: i64,
-    lock: Option<&Lock>,
 ) -> Result<(), Fail> {
     let row = project.read(|conn| executions::get(conn, execution))?;
     let attempt = project.read(|conn| attempts::get(conn, row.attempt))?;
@@ -1101,8 +1098,6 @@ pub async fn gate(
                             execution,
                             gate,
                             &checkout,
-                            &dir,
-                            lock,
                             &base,
                             proof.as_deref(),
                             &stop,
@@ -1278,7 +1273,7 @@ async fn box_gate(
         _ = stop.notified() => None,
     };
     let oom = daemon.pinfold.oom_kills(&live.name).await;
-    let _ = live.down(DOWN_TIMEOUT).await;
+    live.down(DOWN_TIMEOUT).await?;
     match result {
         None => Ok(GateResult {
             stopped: true,
@@ -1316,20 +1311,10 @@ async fn host_gate(
     execution: i64,
     gate: &crate::config::Gate,
     checkout: &Path,
-    dir: &Path,
-    lock: Option<&Lock>,
     base: &str,
     proof: Option<&Path>,
     stop: &tokio::sync::Notify,
 ) -> Result<GateResult, String> {
-    let own;
-    let lock = match lock {
-        Some(lock) => lock,
-        None => {
-            own = hold_lock(dir)?;
-            &own
-        }
-    };
     let mut command = tokio::process::Command::new("sh");
     command
         .args([
@@ -1356,7 +1341,10 @@ async fn host_gate(
             command.env(name, value);
         }
     }
-    crate::git::inherit(&mut command, lock.as_raw_fd());
+    let fd = super::capacity::HOST_LOCK
+        .try_with(|fd| *fd)
+        .map_err(|_| "host gate has no execution reservation".to_string())?;
+    crate::git::inherit(&mut command, fd);
     let mut child = command
         .spawn()
         .map_err(|error| format!("spawn the host gate: {error}"))?;
@@ -1435,12 +1423,14 @@ pub fn hold_lock(dir: &Path) -> Result<Lock, String> {
 /// still act. The probe releases it again.
 pub fn lock_free(dir: &Path) -> Result<bool, String> {
     let path = dir.join("lock");
-    let Ok(file) = std::fs::OpenOptions::new()
+    let file = match std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open(&path)
-    else {
-        return Ok(true);
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(error) => return Err(error.to_string()),
     };
     match nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusiveNonblock) {
         Ok(held) => {

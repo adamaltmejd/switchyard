@@ -204,6 +204,9 @@ impl Pinfold {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .process_group(0);
+        if let Ok(fd) = crate::jobs::capacity::HOST_LOCK.try_with(|fd| *fd) {
+            crate::git::inherit(&mut command, fd);
+        }
         command
     }
 

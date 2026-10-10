@@ -224,3 +224,225 @@ fn a_returning_repair_takes_a_freed_lane_before_a_new_ticket() {
     assert_eq!(next["ticket"], "Y-1", "{next}");
     repair.release();
 }
+
+/// G4: attempt lanes admit both racers, but the last shared effect slot
+/// admits only one real worker. The other acts after checked teardown.
+/// Existing lane races cannot catch an effect limit below max_lanes.
+/// Sabotage: reserve after spawn, or count only attempt lanes.
+#[test]
+fn racing_workers_share_one_execution_slot() {
+    let hold = Latch::new();
+    let held = hold.clone();
+    let machine = Machine::new("g4-effects-race", move |request| {
+        if request.opens() {
+            return Reply::Hold(
+                held.clone(),
+                Box::new(Reply::Tools(vec![commit_file(
+                    "feature.txt",
+                    "feature\n",
+                    "Feature",
+                )])),
+            );
+        }
+        Reply::Text("done".into())
+    });
+    machine.start();
+    let project = Project::new(
+        &machine,
+        "p",
+        &config("")
+            .replace("max_lanes = 2", "max_lanes = 2\nmax_executions = 1")
+            .replace("review = [\"correctness\"]", "review = \"none\""),
+    );
+    let mut watch = project.watch(0);
+    std::thread::scope(|scope| {
+        let first = scope.spawn(|| project.json(&["ticket", "new", "--title", "First"]));
+        let second = scope.spawn(|| project.json(&["ticket", "new", "--title", "Second"]));
+        first.join().unwrap();
+        second.join().unwrap();
+    });
+    hold.wait_held();
+    let waiting = watch.event("execution.waiting", &[]);
+    assert_eq!(waiting["data"]["reason"], "capacity");
+    let owners = project.rows("SELECT id, handle FROM execution WHERE reserved = 1");
+    assert_eq!(owners.len(), 1, "{owners:?}");
+    let boxes = machine.boxes("dev.yard.project");
+    assert_eq!(boxes.len(), 1, "{boxes:?}");
+    assert_eq!(boxes[0]["name"], owners[0]["handle"]);
+    assert_ne!(owners[0]["id"], waiting["execution"]);
+    assert_eq!(
+        machine
+            .model
+            .requests()
+            .iter()
+            .filter(|r| r.opens())
+            .count(),
+        1
+    );
+    hold.release();
+    for ticket in ["Y-1", "Y-2"] {
+        approval_of(&mut watch, ticket);
+    }
+    assert_eq!(
+        machine
+            .model
+            .requests()
+            .iter()
+            .filter(|r| r.opens())
+            .count(),
+        2
+    );
+}
+
+fn fifo(path: &std::path::Path) {
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(path)
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+/// G4: a full reviewed ticket at limit one runs sequential landing children
+/// and the final Git effect. A held host gate excludes a new boxed worker,
+/// even though approval released its attempt lane. The fixture's FIFO and
+/// gate markers supply the expected acting effects; git supplies landed bytes.
+/// Sabotage: keep a parent reservation while running children, count only
+/// boxes/attempts, or release the host slot before its child ends.
+#[test]
+fn one_slot_lands_with_child_gates_and_excludes_a_worker() {
+    let machine = Machine::new("g4-host-slot", |request| {
+        if request.has_tool("yard_publish_review") {
+            return act(request, vec![publish(json!([]))]);
+        }
+        let file = if request.prompt().contains("Second") {
+            "second.txt"
+        } else {
+            "first.txt"
+        };
+        act(request, vec![commit_file(file, "feature\n", "Feature")])
+    });
+    let said = machine.root.join("said");
+    let release = machine.root.join("release");
+    let markers = machine.root.join("markers");
+    fifo(&said);
+    fifo(&release);
+    let gates = format!(
+        "[gates.candidate]\nstage = \"candidate\"\ncommand = \"test -f first.txt || test -f second.txt\"\n\
+         [gates.first]\nruns_in = \"host\"\ncommand = \"echo held > {}; read line < {}; echo first >> {}\"\n\
+         [gates.second]\nruns_in = \"host\"\ncommand = \"echo second >> {}\"\n",
+        said.display(),
+        release.display(),
+        markers.display(),
+        markers.display()
+    );
+    machine.start();
+    let project = Project::new(
+        &machine,
+        "p",
+        &config(&gates).replace("max_lanes = 2", "max_lanes = 2\nmax_executions = 1"),
+    );
+    let mut watch = project.watch(0);
+    project.json(&["ticket", "new", "--title", "First"]);
+    let head = approval_of(&mut watch, "Y-1");
+    project.json(&[
+        "attempt", "approve", "--target", "main", "Y-1", "--head", &head,
+    ]);
+    assert_eq!(watch.said(&said), "held\n");
+    project.json(&["ticket", "new", "--title", "Second"]);
+    let waiting = watch.event("execution.waiting", &[]);
+    assert_eq!(waiting["ticket"], "Y-2");
+    let owner = project.rows("SELECT kind, parent, name FROM execution WHERE reserved = 1");
+    assert_eq!(owner.len(), 1, "{owner:?}");
+    assert_eq!(owner[0]["kind"], "gate");
+    assert_eq!(owner[0]["name"], "first");
+    assert!(owner[0]["parent"].is_i64());
+    assert!(
+        !machine
+            .model
+            .requests()
+            .iter()
+            .any(|r| r.prompt().contains("Second"))
+    );
+    std::fs::write(&release, "go\n").unwrap();
+    watch.find("First landed", |event| {
+        event["event"] == "landing.recorded" && event["ticket"] == "Y-1"
+    });
+    approval_of(&mut watch, "Y-2");
+    assert_eq!(std::fs::read_to_string(markers).unwrap(), "first\nsecond\n");
+    assert_eq!(
+        git(&project.canonical(), &["show", "main:first.txt"]),
+        "feature\n"
+    );
+}
+
+/// G4/G5: an old Git child is held in clone before any worker starts.
+/// Killing the daemon leaves the inherited lock and reservation. A second
+/// ticket is admitted after restart but cannot act until that exact child
+/// exits. Unlike the existing restart test, the old owner survives startup.
+/// Sabotage: release capacity when the daemon dies or when the row ends,
+/// or omit the inherited lock on a pre-box Git effect.
+#[test]
+fn an_old_host_child_retains_capacity_across_restart() {
+    let machine = Machine::new("g4-old-child", |request| {
+        act(
+            request,
+            vec![commit_file("second.txt", "second\n", "Second")],
+        )
+    });
+    let armed = machine.root.join("armed");
+    let said_path = machine.root.join("said");
+    let release = machine.root.join("release");
+    fifo(&said_path);
+    fifo(&release);
+    machine.wrapper("git", &format!(
+        "if [ -e '{}' ]; then case \" $* \" in *' clone '*) echo $$ > '{}'; read line < '{}';; esac; fi",
+        armed.display(), said_path.display(), release.display()));
+    machine.start();
+    let project = Project::new(
+        &machine,
+        "p",
+        &config("")
+            .replace("max_lanes = 2", "max_lanes = 2\nmax_executions = 1")
+            .replace("review = [\"correctness\"]", "review = \"none\""),
+    );
+    std::fs::write(&armed, "").unwrap();
+    let mut watch = project.watch(0);
+    project.json(&["ticket", "new", "--title", "First"]);
+    let pid = watch.said(&said_path).trim().to_string();
+    drop(watch);
+    machine.kill();
+    let old = project.rows("SELECT id, status, reserved, handle FROM execution");
+    assert_eq!(
+        old,
+        vec![json!({"id": 1, "status": "running", "reserved": 1, "handle": null})]
+    );
+    assert!(
+        std::process::Command::new("kill")
+            .args(["-0", &pid])
+            .status()
+            .unwrap()
+            .success()
+    );
+    std::fs::remove_file(&armed).unwrap();
+    machine.start();
+    let mut watch = project.watch(0);
+    let attention = watch.attention();
+    assert_eq!(attention["execution"], 1);
+    assert_eq!(attention["data"]["reason"], "ownership");
+    project.json(&["ticket", "new", "--title", "Second"]);
+    let waiting = watch.event("execution.waiting", &[]);
+    assert_eq!(waiting["ticket"], "Y-2");
+    assert!(machine.model.requests().is_empty());
+    assert_eq!(
+        project.rows("SELECT id FROM execution WHERE reserved = 1"),
+        vec![json!({"id": 1})]
+    );
+    std::fs::write(&release, "go\n").unwrap();
+    approval_of(&mut watch, "Y-2");
+    assert_eq!(
+        project.rows("SELECT reserved, outcome FROM execution WHERE id = 1"),
+        vec![json!({"reserved": 0, "outcome": "interrupted"})]
+    );
+}

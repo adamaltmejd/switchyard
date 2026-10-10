@@ -81,9 +81,9 @@ impl Git {
         self.run_with(cwd, args, None).await
     }
 
-    /// `lock` makes a landing child: it inherits the landing's lock
-    /// descriptor, so its life is visible to a restarted daemon through
-    /// `flock`, and it is never killed; a timeout leaves it running.
+    /// An explicit or scoped execution lock is inherited by the child.
+    /// Its life is visible after restart through `flock`; a timeout leaves
+    /// it running and its execution retains capacity.
     pub async fn run_with(
         &self,
         cwd: &Path,
@@ -104,6 +104,7 @@ impl Git {
         args: &[&str],
         lock: Option<RawFd>,
     ) -> Result<RawOut, String> {
+        let lock = lock.or_else(|| crate::jobs::capacity::HOST_LOCK.try_with(|fd| *fd).ok());
         let mut command = Command::new("git");
         command
             .current_dir(cwd)
@@ -154,7 +155,7 @@ impl Git {
         match tokio::time::timeout(TIMEOUT, run).await {
             Ok(result) => result,
             // Dropping the future drops the child, which kills it unless it
-            // is a landing child.
+            // is an execution child holding its lock.
             Err(_) => Err(format!("git {} timed out", args.first().unwrap_or(&""))),
         }
     }

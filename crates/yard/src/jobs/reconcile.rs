@@ -42,6 +42,11 @@ pub async fn project(daemon: &Daemon, project: &Project) -> Result<(), Fail> {
     daemon.pinfold.prune().await?;
 
     let running = project.read(executions::running)?;
+    for row in
+        project.read(|conn| executions::query(conn, "reserved = 1 AND status = 'ended'", []))?
+    {
+        super::capacity::release(daemon, project, &row).await?;
+    }
     // Children first: a landing's host gates end before the landing is read.
     for row in running.iter().filter(|row| row.kind != "landing") {
         if let Some(handle) = row
@@ -50,6 +55,9 @@ pub async fn project(daemon: &Daemon, project: &Project) -> Result<(), Fail> {
             .and_then(|handle| serde_json::from_str::<Value>(handle).ok())
         {
             kill_group(&handle).await;
+        }
+        if !super::capacity::release(daemon, project, row).await? {
+            continue;
         }
         project
             .tx(|tx| {
@@ -80,6 +88,9 @@ pub async fn project(daemon: &Daemon, project: &Project) -> Result<(), Fail> {
         .filter(|row| row.kind == "landing" && row.intent_state.is_none())
     {
         let free = lock_free(&landing_dir(project, row.id))?;
+        if !super::capacity::release(daemon, project, row).await? {
+            continue;
+        }
         project.tx(|tx| {
             executions::end(
                 tx,
@@ -109,6 +120,9 @@ pub async fn project(daemon: &Daemon, project: &Project) -> Result<(), Fail> {
         })?;
     }
     for row in project.read(executions::open_intents)? {
+        if !super::capacity::release(daemon, project, &row).await? {
+            continue;
+        }
         decide_intent(daemon, project, &row).await?;
     }
     Ok(())

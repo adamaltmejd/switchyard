@@ -197,4 +197,6 @@ ALTER TABLE attempt ADD COLUMN body_read TEXT;
     "ALTER TABLE approval ADD COLUMN overrode INTEGER NOT NULL DEFAULT 0;",
     "ALTER TABLE ticket ADD COLUMN target_branch TEXT;
      ALTER TABLE attempt ADD COLUMN target_branch TEXT;",
+    "ALTER TABLE execution ADD COLUMN reserved INTEGER NOT NULL DEFAULT 0;
+     UPDATE execution SET reserved = 1 WHERE status = 'running';",
 ];

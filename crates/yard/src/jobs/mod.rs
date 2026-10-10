@@ -4,6 +4,7 @@
 //! spawns it.
 
 pub mod admit;
+pub mod capacity;
 pub mod cleanup;
 pub mod proof;
 pub mod queue;
@@ -111,6 +112,7 @@ pub async fn read_config(
 }
 
 pub async fn step(daemon: &Arc<Daemon>, project: &Arc<Project>) -> Result<(), Fail> {
+    capacity::reap(daemon, project).await?;
     let canonical = project.canonical.lock().await;
     let Ok(loaded) = load(daemon, project).await else {
         return Ok(());
@@ -136,13 +138,19 @@ pub fn spawn(daemon: &Arc<Daemon>, project: &Arc<Project>, kind: &str, execution
     let project = project.clone();
     let kind = kind.to_string();
     tokio::spawn(async move {
-        let result = match kind.as_str() {
-            "implementation" => supervise::implement(&daemon, &project, execution).await,
-            "gate" => supervise::gate(&daemon, &project, execution, None).await,
-            "review" => review::run(&daemon, &project, execution).await,
-            "landing" => queue::land(&daemon, &project, execution).await,
-            "cleanup" => cleanup::run(&daemon, &project, execution).await,
-            _ => unreachable!("five kinds"),
+        let result = if kind == "landing" {
+            queue::land(&daemon, &project, execution).await
+        } else {
+            capacity::effect(&daemon, &project, execution, async {
+                match kind.as_str() {
+                    "implementation" => supervise::implement(&daemon, &project, execution).await,
+                    "gate" => supervise::gate(&daemon, &project, execution).await,
+                    "review" => review::run(&daemon, &project, execution).await,
+                    "cleanup" => cleanup::run(&daemon, &project, execution).await,
+                    _ => unreachable!("five kinds"),
+                }
+            })
+            .await
         };
         if let Err(fail) = result {
             eprintln!(
@@ -217,7 +225,10 @@ fn runnable(
     attempt: &attempts::Attempt,
 ) -> Result<Option<Option<attempts::Attention>>, Fail> {
     let executions = executions::for_attempt(conn, attempt.id)?;
-    if executions.iter().any(|row| row.status == "running") {
+    if executions
+        .iter()
+        .any(|row| row.status == "running" || row.reserved)
+    {
         return Ok(None);
     }
     let open = attempts::open_for_attempt(conn, attempt.id)?;
