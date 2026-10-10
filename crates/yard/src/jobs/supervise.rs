@@ -354,7 +354,7 @@ pub async fn run_harness(
                                 run.registered = Some(registration);
                             }
                             crate::harness::Event::Finished { usage: spent, .. } | crate::harness::Event::Failed { usage: spent, .. } => {
-                                usage = Some((spent.input, spent.output, spent.cost));
+                                usage = Some(spent.clone());
                                 // A required-server harness reaches Yard's MCP server
                                 // over TCP while its frames come over the box's stdout
                                 // pipe; neither channel orders the other. The terminal
@@ -410,7 +410,7 @@ pub async fn run_harness(
     if !run.stopped && !run.timed_out && !refused(&run.registered) {
         run.exit_code = child.wait().await.ok().map(crate::git::exit_code);
     }
-    project.read(|conn| executions::set_worker(conn, execution, None, usage))?;
+    project.read(|conn| executions::set_worker(conn, execution, None, usage.as_ref()))?;
     Ok(run)
 }
 

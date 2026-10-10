@@ -400,12 +400,20 @@ impl Normalizer {
         // Counted here only: `turn_end` repeats the same message.
         let usage = &message["usage"];
         let count = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
-        self.usage.input += count("input") + count("cacheRead") + count("cacheWrite");
-        self.usage.output += count("output");
-        self.usage.cost += usage
-            .pointer("/cost/total")
-            .and_then(Value::as_f64)
-            .unwrap_or(0.0);
+        self.usage.input = Some(
+            self.usage.input.unwrap_or(0)
+                + count("input")
+                + count("cacheRead")
+                + count("cacheWrite"),
+        );
+        self.usage.output = Some(self.usage.output.unwrap_or(0) + count("output"));
+        self.usage.cost = Some(
+            self.usage.cost.unwrap_or(0.0)
+                + usage
+                    .pointer("/cost/total")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0),
+        );
         self.last = Some(Final {
             stop_reason: message
                 .get("stopReason")
@@ -423,7 +431,11 @@ impl Normalizer {
     // Settling is not succeeding: only a final message with stopReason "stop"
     // is a finished run. A refused request also exits 0.
     fn settled(&mut self) -> Event {
-        let usage = self.usage.clone();
+        let usage = Usage::adapter(
+            self.usage.input.unwrap_or(0),
+            self.usage.output.unwrap_or(0),
+            self.usage.cost.unwrap_or(0.0),
+        );
         match self.last.take() {
             Some(last) if last.stop_reason == "stop" => Event::Finished { usage },
             Some(last) => Event::Failed {

@@ -211,6 +211,9 @@ ALTER TABLE attempt ADD COLUMN body_read TEXT;
     "ALTER TABLE attempt ADD COLUMN admission TEXT;",
     // Old results have no proved plan binding.
     "ALTER TABLE execution ADD COLUMN plan_revision INTEGER;\n     ALTER TABLE approval ADD COLUMN plan_revision INTEGER;",
+    // Old zeros have no evidence of a measured bill; preserve them as legacy.
+    r#"ALTER TABLE execution ADD COLUMN usage_fields TEXT;
+       UPDATE execution SET usage_fields = '{"input":{"completeness":"unknown","provenance":"legacy"},"output":{"completeness":"unknown","provenance":"legacy"},"cost":{"completeness":"unknown","provenance":"legacy"}}';"#,
     // No node, result or teardown evidence is inferred for historical rows.
     "ALTER TABLE execution ADD COLUMN node TEXT;
      ALTER TABLE execution ADD COLUMN inputs TEXT;

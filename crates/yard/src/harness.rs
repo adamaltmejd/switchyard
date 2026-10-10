@@ -92,13 +92,67 @@ pub struct Stage<'a> {
     pub env: &'a AgentEnv,
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
 pub struct Usage {
     /// Prompt tokens, cache reads and writes included.
-    pub input: u64,
-    pub output: u64,
-    /// USD, as the harness prices it.
-    pub cost: f64,
+    pub input: Option<u64>,
+    pub output: Option<u64>,
+    /// USD reported by the harness, never inferred from token rates.
+    pub cost: Option<f64>,
+    pub fields: UsageFields,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct UsageFields {
+    pub input: UsageField,
+    pub output: UsageField,
+    pub cost: UsageField,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct UsageField {
+    pub completeness: Completeness,
+    pub provenance: Provenance,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Completeness {
+    #[default]
+    Unknown,
+    Partial,
+    Complete,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Provenance {
+    #[default]
+    Unreported,
+    Harness,
+    Adapter,
+    Legacy,
+}
+
+impl Usage {
+    /// Pi and Claude keep their zero defaults until their readers are
+    /// normalized. These values carry no completeness claim.
+    pub fn adapter(input: u64, output: u64, cost: f64) -> Self {
+        let field = UsageField {
+            completeness: Completeness::Unknown,
+            provenance: Provenance::Adapter,
+        };
+        Self {
+            input: Some(input),
+            output: Some(output),
+            cost: Some(cost),
+            fields: UsageFields {
+                input: field.clone(),
+                output: field.clone(),
+                cost: field,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
