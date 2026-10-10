@@ -218,8 +218,9 @@ pub trait Harness: Send + Sync {
     fn route(&self, st: &Stage, machine: &Machine) -> Result<ModelRoute, String>;
     /// Start or resume, the prompt as one argument.
     fn argv(&self, launch: &Launch) -> Result<Vec<String>, String>;
-    /// A reader over stdout and stderr for one run.
-    fn reader(&self) -> Box<dyn Reader>;
+    /// A reader over stdout and stderr for one run. Resume identity comes
+    /// from the execution row, not from a session total in the stream.
+    fn reader(&self, resumed: bool) -> Box<dyn Reader>;
 }
 
 /// The compiled-in adapters. `name` is the config token.

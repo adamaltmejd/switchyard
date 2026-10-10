@@ -5,7 +5,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Real Claude: missing cost, a failed resumed result, an interrupted
-/// resumed tool turn, then an explicit-zero resumed completion. Host counters
+/// resumed tool turn, then a resumed completion without a cost baseline.
+/// Fresh nonzero and zero reports control conservative resumed accounting.
+/// Host counters
 /// and pinned frames establish invocation totals, including cache reads/writes.
 /// Sabotage: default absent cost to zero, add result totals to observations,
 /// count resumed history, or save usage only at result. Pi/Codex cannot catch
@@ -13,10 +15,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// and login use this same reader; G8 independently exercises both routes.
 /// Ignoring or overwriting a nonzero output update also fails: the interrupted
 /// oracle checks every raw output report for its single provider response.
+/// Saving resumed session cost as local or subtracting across missing cost
+/// and interruption fails the null-cost blocks; discarding fresh estimates
+/// fails the nonzero control.
 #[test]
 fn claude_usage_is_optional_and_execution_local() {
     let phase = Arc::new(AtomicUsize::new(0));
-    let replies = Arc::new(std::array::from_fn::<_, 4, _>(|_| AtomicUsize::new(0)));
+    let replies = Arc::new(std::array::from_fn::<_, 6, _>(|_| AtomicUsize::new(0)));
     let hold = Latch::new();
     let (round, counts, held) = (phase.clone(), replies.clone(), hold.clone());
     let machine = Machine::new("g7-cl-api", move |request| {
@@ -68,7 +73,7 @@ fn claude_usage_is_optional_and_execution_local() {
       *'"type":"result"'*)
         case "$3" in
           *-1) line=$(printf '%s\n' "$line" | sed -E 's/,"total_cost_usd":[0-9.eE+-]+//g; s/"total_cost_usd":[0-9.eE+-]+,//g') ;;
-          *-4) line=$(printf '%s\n' "$line" | sed -E 's/"total_cost_usd":[0-9.eE+-]+/"total_cost_usd":0/g') ;;
+          *-6) line=$(printf '%s\n' "$line" | sed -E 's/"total_cost_usd":[0-9.eE+-]+/"total_cost_usd":0/g') ;;
         esac ;;
     esac
     printf '%s\n' "$line"
@@ -87,13 +92,7 @@ fi"#, machine.root.display()));
     project.json(&["ticket", "new", "--title", "Claude usage"]);
     let approval = history.attention();
     assert_eq!(approval["data"]["kind"], "approval");
-    check(
-        &project,
-        1,
-        replies[0].load(Ordering::SeqCst),
-        "complete",
-        false,
-    );
+    check(&project, 1, replies[0].load(Ordering::SeqCst), "complete");
     phase.store(1, Ordering::SeqCst);
     project.json(&[
         "attempt",
@@ -111,13 +110,7 @@ fi"#, machine.root.display()));
         (&failed["data"]["kind"], &failed["data"]["reason"]),
         (&json!("stopped"), &json!("failed"))
     );
-    check(
-        &project,
-        2,
-        replies[1].load(Ordering::SeqCst),
-        "partial",
-        true,
-    );
+    check(&project, 2, replies[1].load(Ordering::SeqCst), "partial");
     phase.store(2, Ordering::SeqCst);
     project.json(&["attempt", "start", "Y-1"]);
     hold.wait_held();
@@ -137,40 +130,37 @@ fi"#, machine.root.display()));
         (&json!("stopped"), &json!("failed"))
     );
     assert!(hold.is_held());
-    check(
-        &project,
-        3,
-        replies[2].load(Ordering::SeqCst),
-        "partial",
-        false,
-    );
-    let before = execution(&project, 3);
+    check(&project, 3, replies[2].load(Ordering::SeqCst), "partial");
+    let before = execution(&project, "Y-1", 3);
     drop(history);
     machine.kill();
     machine.start();
-    assert_eq!(execution(&project, 3), before);
+    assert_eq!(execution(&project, "Y-1", 3), before);
     phase.store(3, Ordering::SeqCst);
     let mut history = project.watch(stopped["seq"].as_i64().unwrap());
     project.json(&["attempt", "start", "Y-1"]);
     assert_eq!(history.attention()["data"]["kind"], "approval");
-    check(
-        &project,
-        4,
-        replies[3].load(Ordering::SeqCst),
-        "complete",
-        true,
-    );
-    assert_eq!(execution(&project, 4)["usage"]["cost"], 0.0);
-    // Compare real resumed estimates with the fresh harness estimate for the
-    // same fixture counters. No Yard pricing table supplies an expected bill.
+    check(&project, 4, replies[3].load(Ordering::SeqCst), "complete");
+    // Real resumed cost is session-cumulative even though result tokens are
+    // local. It is evidence for withholding cost, not a local price oracle.
     let fresh = raw_cost(&machine, 1);
     assert!(fresh > 0.0);
-    for (id, n) in [(2, 1), (4, 3)] {
-        let expected = fresh * replies[n].load(Ordering::SeqCst) as f64
-            / replies[0].load(Ordering::SeqCst) as f64;
-        assert!((raw_cost(&machine, id) - expected).abs() < 1e-9);
-    }
+    let failed_session = raw_cost(&machine, 2);
+    assert!(failed_session > fresh);
+    assert!(raw_cost(&machine, 4) > failed_session);
     hold.release();
+
+    // Fresh sessions supply execution-local cost evidence. These focused
+    // controls distinguish withholding ambiguous totals from discarding all
+    // estimates, while preserving the original missing-baseline resume chain.
+    phase.store(4, Ordering::SeqCst);
+    project.json(&["ticket", "new", "--title", "Fresh estimate"]);
+    assert_eq!(history.attention()["data"]["kind"], "approval");
+    assert!(fresh_estimate(&project, "Y-2", 2, 5) > 0.0);
+    phase.store(5, Ordering::SeqCst);
+    project.json(&["ticket", "new", "--title", "Explicit zero estimate"]);
+    assert_eq!(history.attention()["data"]["kind"], "approval");
+    assert_eq!(fresh_estimate(&project, "Y-3", 3, 6), 0.0);
 }
 
 fn raw_frames(machine: &Machine, id: i64) -> String {
@@ -197,14 +187,42 @@ fn raw_cost(machine: &Machine, id: i64) -> f64 {
         .unwrap()
 }
 
-fn execution(project: &Project, id: i64) -> Value {
-    project.json(&["attempt", "show", "Y-1"])["executions"]
+fn execution(project: &Project, ticket: &str, id: i64) -> Value {
+    project.json(&["attempt", "show", ticket])["executions"]
         .as_array()
         .unwrap()
         .iter()
         .find(|row| row["execution"] == id)
         .unwrap()
         .clone()
+}
+
+fn fresh_estimate(project: &Project, ticket: &str, attempt: i64, id: i64) -> f64 {
+    let execution = execution(project, ticket, id);
+    assert_eq!(execution["resumed"], Value::Null);
+    let frames = std::fs::read_to_string(project.path.join(format!(
+        ".yard/local/attempts/{attempt}/transcripts/{id}.jsonl"
+    )))
+    .unwrap();
+    let result = frames
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|frame| frame["type"] == "result")
+        .unwrap();
+    let expected = result["total_cost_usd"]
+        .as_f64()
+        .expect("numeric fresh harness cost");
+    let cost = execution["usage"]["cost"]
+        .as_f64()
+        .expect("numeric fresh execution cost");
+    assert_eq!(cost, expected);
+    assert_eq!(
+        execution["usage"]["fields"]["cost"],
+        json!({
+            "completeness": "complete", "provenance": "harness"
+        })
+    );
+    cost
 }
 
 // This fixture has one response before interruption. Inspect every raw token
@@ -230,9 +248,9 @@ fn output_reports(value: &Value, reports: &mut Vec<u64>) {
     }
 }
 
-fn check(project: &Project, id: i64, replies: usize, completeness: &str, cost_reported: bool) {
+fn check(project: &Project, id: i64, replies: usize, completeness: &str) {
     assert!(replies > 0);
-    let execution = execution(project, id);
+    let execution = execution(project, "Y-1", id);
     if id > 1 {
         assert_eq!(execution["resumed"], id - 1);
     }
@@ -291,25 +309,12 @@ fn check(project: &Project, id: i64, replies: usize, completeness: &str, cost_re
     };
     let reported = json!({"completeness": completeness, "provenance": "harness"});
     let unknown = json!({"completeness": "unknown", "provenance": "unreported"});
-    let mut observed = execution["usage"].clone();
-    let cost = if cost_reported {
-        // USD is a float value; integer 0 and float 0.0 are the same report.
-        // Both sides must be numeric, so null cannot become an observed zero.
-        let expected = result.unwrap()["total_cost_usd"]
-            .as_f64()
-            .expect("a numeric harness cost report");
-        observed["cost"] = json!(observed["cost"].as_f64().expect("a numeric execution cost"));
-        json!(expected)
-    } else {
-        Value::Null
-    };
     assert_eq!(
-        observed,
+        execution["usage"],
         json!({
             "input": (PROMPT_TOKENS + 70 + 30) * replies as u64,
-            "output": output, "cost": cost,
-            "fields": {"input": reported, "output": reported,
-                "cost": if cost_reported { &reported } else { &unknown }}
+            "output": output, "cost": null,
+            "fields": {"input": reported, "output": reported, "cost": unknown}
         })
     );
 }

@@ -167,8 +167,11 @@ impl Harness for Claude {
         argv(launch)
     }
 
-    fn reader(&self) -> Box<dyn Reader> {
-        Box::new(Normalizer::default())
+    fn reader(&self, resumed: bool) -> Box<dyn Reader> {
+        Box::new(Normalizer {
+            resumed,
+            ..Normalizer::default()
+        })
     }
 }
 
@@ -257,6 +260,7 @@ fn check_prompt(prompt: &str) -> Result<(), String> {
 #[derive(Default)]
 pub struct Normalizer {
     messages: std::collections::BTreeMap<String, Usage>,
+    resumed: bool,
 }
 
 impl Reader for Normalizer {
@@ -293,7 +297,7 @@ impl Reader for Normalizer {
                     usage: self.observed(),
                 }]
             }
-            Some("result") => vec![result(&frame, self.observed())],
+            Some("result") => vec![result(&frame, self.observed(), self.resumed)],
             _ => Vec::new(),
         }
     }
@@ -354,10 +358,17 @@ fn registration(frame: &Value) -> Registration {
 
 /// The `result` frame is the outcome; `subtype` success and no `is_error` is
 /// a finished run, anything else names the failure.
-fn result(frame: &Value, observed: Usage) -> Event {
+fn result(frame: &Value, observed: Usage, resumed: bool) -> Event {
     let ok = frame.get("subtype").and_then(Value::as_str) == Some("success")
         && frame.get("is_error").and_then(Value::as_bool) != Some(true);
     let mut usage = usage(frame, ok);
+    // The pin restores session cost, but result tokens cover only this run.
+    // No execution-local baseline is reported on resume. A missing earlier
+    // cost or interrupted run cannot be priced by subtracting stored values.
+    if resumed {
+        usage.cost = None;
+        usage.fields.cost = UsageField::default();
+    }
     if usage.input.is_none() {
         usage.input = observed.input;
         usage.fields.input = observed.fields.input;
@@ -380,8 +391,8 @@ fn result(frame: &Value, observed: Usage) -> Event {
     }
 }
 
-// Result totals cover this invocation, including on resume. They replace
-// streamed observations; adding both would count the same requests twice.
+// Result token totals cover this invocation, including on resume. They replace
+// streamed observations. Result cost is session-cumulative, handled in result.
 fn usage(frame: &Value, complete: bool) -> Usage {
     let values = &frame["usage"];
     let counts = [
