@@ -988,7 +988,7 @@ pub async fn attempt_start(
 ) -> Result<Value, Fail> {
     let id = ticket_param(params)?;
     let canonical = project.canonical.lock().await;
-    let default = load(daemon, project).await?;
+    let default = super::refresh_default(daemon, project, &canonical).await?;
     let live = project.read(|conn| attempts::live_for(conn, id))?;
     let ticket = project.read(|conn| tickets::get(conn, id))?;
     let branch = live

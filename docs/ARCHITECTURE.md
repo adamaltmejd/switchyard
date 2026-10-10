@@ -157,8 +157,10 @@ in-flight publications. Image reuse binds branch and the whole build-context
 commit. Project capacity reads the current default's `max_lanes` and
 `max_executions`, never the selected target's limits. Execution allocation
 reads the validated current default entry in the one configuration map;
-it launches no Git. Startup, scheduler refresh and sync publish that entry
-under canonical's lock. Canonical target/default mutations invalidate it before
+it launches no Git. Startup, scheduler refresh, sync and explicit attempt start
+publish that entry under canonical's lock. Explicit start uses the published
+reading for admission before spawning or releasing the lock to answer a live
+stopped/red item. Canonical target/default mutations invalidate it before
 acting, then publish the validated current input or leave it unavailable.
 An unavailable validated default refuses new effects. Selected-target cache
 reads do not replace the published default input.
