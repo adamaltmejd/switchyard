@@ -519,8 +519,9 @@ pub fn set_worker(
     )?;
     if let Some(usage) = usage {
         let mut fields = usage.fields.clone();
-        // Resumed totals are not normalized to this execution yet (Y-77).
-        if get(conn, id)?.resumed.is_some() {
+        // Pi counts only the new stream's messages, including on resume.
+        let execution = get(conn, id)?;
+        if execution.resumed.is_some() && execution.harness.as_deref() != Some("pi") {
             for field in [&mut fields.input, &mut fields.output, &mut fields.cost] {
                 field.completeness = crate::harness::Completeness::Unknown;
             }

@@ -250,6 +250,12 @@ fn is_tool_result(message: &Value) -> bool {
 }
 
 pub enum Reply {
+    /// Token counts for a real Pi chat-completions reply.
+    ChatUsage {
+        input: u64,
+        output: u64,
+        reply: Box<Reply>,
+    },
     /// Token totals for a real Codex Responses turn; no monetary cost.
     ResponsesUsage {
         input: u64,
@@ -402,6 +408,14 @@ fn render(reply: Reply, request: &ModelRequest) -> Vec<u8> {
 
 fn render_usage(reply: Reply, request: &ModelRequest, usage: (u64, u64)) -> Vec<u8> {
     match reply {
+        Reply::ChatUsage {
+            input,
+            output,
+            reply,
+        } => {
+            assert!(!responses(request) && !anthropic(request));
+            render_usage(*reply, request, (input, output))
+        }
         Reply::ResponsesUsage {
             input,
             output,
@@ -418,7 +432,7 @@ fn render_usage(reply: Reply, request: &ModelRequest, usage: (u64, u64)) -> Vec<
         Reply::Tools(calls) if anthropic(request) => anthropic_tools(calls, request),
         Reply::Text(text) if responses(request) => responses_text(&text, request, usage),
         Reply::Tools(calls) if responses(request) => responses_tools(calls, request, usage),
-        reply => openai(reply, request),
+        reply => openai(reply, request, usage),
     }
 }
 
@@ -650,7 +664,7 @@ fn anthropic_delta(stop_reason: &str) -> String {
 }
 
 /// The OpenAI chat-completions API, streamed as SSE.
-fn openai(reply: Reply, request: &ModelRequest) -> Vec<u8> {
+fn openai(reply: Reply, request: &ModelRequest, tokens: (u64, u64)) -> Vec<u8> {
     let turn = request.turn();
     let (delta, finish) = match reply {
         Reply::Text(text) => (json!({ "role": "assistant", "content": text }), "stop"),
@@ -673,7 +687,7 @@ fn openai(reply: Reply, request: &ModelRequest) -> Vec<u8> {
                 "tool_calls",
             )
         }
-        Reply::Hold(_, _) | Reply::ResponsesUsage { .. } => {
+        Reply::Hold(_, _) | Reply::ResponsesUsage { .. } | Reply::ChatUsage { .. } => {
             unreachable!("the wrapper is handled before rendering")
         }
     };
@@ -690,9 +704,9 @@ fn openai(reply: Reply, request: &ModelRequest) -> Vec<u8> {
         format!("data: {chunk}\n\n")
     };
     let usage = json!({
-        "prompt_tokens": PROMPT_TOKENS,
-        "completion_tokens": COMPLETION_TOKENS,
-        "total_tokens": PROMPT_TOKENS + COMPLETION_TOKENS,
+        "prompt_tokens": tokens.0,
+        "completion_tokens": tokens.1,
+        "total_tokens": tokens.0 + tokens.1,
     });
     let body = [
         chunk(

@@ -355,6 +355,10 @@ pub async fn run_harness(
                                 refused = matches!(registration, crate::harness::Registration::Refused(_));
                                 run.registered = Some(registration);
                             }
+                            crate::harness::Event::Usage { usage: spent } => {
+                                project.read(|conn| executions::set_worker(conn, execution, None, Some(spent)))?;
+                                usage = Some(spent.clone());
+                            }
                             crate::harness::Event::Finished { usage: spent, .. } | crate::harness::Event::Failed { usage: spent, .. } => {
                                 usage = Some(spent.clone());
                                 // A required-server harness reaches Yard's MCP server
