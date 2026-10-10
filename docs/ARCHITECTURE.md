@@ -815,6 +815,23 @@ crates/yard/src/
 crates/e2e/  src/lib.rs (harness, helpers) model.rs (fake model fixture), tests/guarantees/main.rs g*.rs
 ```
 
+## Release
+
+A direct API reviewer patch is verified before the operator switches build
+review profiles. Release preparation includes version metadata and a dated
+checklist with whole-tree cleanup, a test-audit sweep, delete/add ratio,
+largest source file and this spec's line count. The operator passes this
+spec and README before release.
+
+Verification requires fmt, locked all-targets clippy, build, real host e2e
+on Linux x86_64 and arm64, and the operator's Mac release checks. The patch
+artifact is checked against the scripted direct API fixture on isolated
+state; its hash and schema compatibility are recorded. Development binaries
+never open the construction backlog or mutate the running service.
+Publication, installation, credentials, configuration sync and runtime
+switchover are separate operator actions. Construction keeps its frozen
+binary until the operator authorizes the verified patch.
+
 ## Open questions
 
 - `replay` is out: whole-attempt disposal keeps no diff to seed from. The
