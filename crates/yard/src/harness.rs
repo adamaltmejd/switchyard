@@ -134,27 +134,6 @@ pub enum Provenance {
     Legacy,
 }
 
-impl Usage {
-    /// Claude keeps its zero defaults until its reader is
-    /// normalized. These values carry no completeness claim.
-    pub fn adapter(input: u64, output: u64, cost: f64) -> Self {
-        let field = UsageField {
-            completeness: Completeness::Unknown,
-            provenance: Provenance::Adapter,
-        };
-        Self {
-            input: Some(input),
-            output: Some(output),
-            cost: Some(cost),
-            fields: UsageFields {
-                input: field.clone(),
-                output: field.clone(),
-                cost: field,
-            },
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
     Started {

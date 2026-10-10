@@ -8,6 +8,7 @@ mod g04_capacity_holds;
 mod g05_intent_precedes_effect;
 mod g06_inputs_validated;
 mod g06_plan_inspection;
+mod g07_claude_usage;
 mod g07_lands_end_to_end;
 mod g07_operator_mcp;
 mod g07_usage;
