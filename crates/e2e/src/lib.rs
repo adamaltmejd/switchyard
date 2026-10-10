@@ -269,7 +269,7 @@ impl Machine {
         let output = lines(child.stdout.take().unwrap());
         Operator {
             child,
-            input,
+            input: Some(input),
             output,
             next: 0,
         }
@@ -967,7 +967,7 @@ fn lines(stdout: std::process::ChildStdout) -> mpsc::Receiver<String> {
 /// Newline JSON-RPC over the real operator process's pipes.
 pub struct Operator {
     child: Child,
-    input: std::process::ChildStdin,
+    input: Option<std::process::ChildStdin>,
     output: mpsc::Receiver<String>,
     next: i64,
 }
@@ -986,17 +986,23 @@ impl Operator {
 
     fn notify_value(&mut self, value: Value) {
         use std::io::Write;
-        writeln!(self.input, "{value}").unwrap();
-        self.input.flush().unwrap();
+        let input = self.input.as_mut().expect("operator input open");
+        writeln!(input, "{value}").unwrap();
+        input.flush().unwrap();
     }
 
     pub fn receive(&mut self, id: i64) -> Value {
+        let response = self.receive_frame();
+        assert_eq!(response["id"], id, "{response}");
+        response
+    }
+
+    pub fn receive_frame(&mut self) -> Value {
         let line = self
             .output
             .recv_timeout(DEADLINE)
             .expect("operator response");
         let response: Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(response["id"], id, "{response}");
         response
     }
 
@@ -1016,6 +1022,31 @@ impl Operator {
         let response = self.receive(id);
         assert!(response.get("error").is_none(), "{response}");
         self.notify("notifications/initialized", json!({}));
+    }
+
+    /// Close only stdin and observe process exit; the deadline is a failure.
+    pub fn close_input(&mut self) -> std::process::ExitStatus {
+        self.input.take();
+        loop {
+            match self.output.recv_timeout(DEADLINE) {
+                Ok(_) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    panic!("operator did not exit after stdin EOF")
+                }
+            }
+        }
+        self.child.wait().expect("wait for operator")
+    }
+
+    /// A malformed transport frame, through the same real input pipe.
+    pub fn oversized_frame(&mut self) {
+        use std::io::Write;
+        self.input
+            .as_mut()
+            .expect("operator input open")
+            .write_all(&vec![b'x'; 1024 * 1024 + 1])
+            .unwrap();
     }
 }
 

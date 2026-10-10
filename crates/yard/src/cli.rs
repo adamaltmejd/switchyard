@@ -243,7 +243,11 @@ pub fn main(cli: Cli) -> i32 {
         .expect("tokio runtime");
     let json = cli.json;
     if matches!(cli.command, Command::Mcp) {
-        return match runtime.block_on(crate::operator_mcp::serve()) {
+        let result = runtime.block_on(crate::operator_mcp::serve());
+        // Stdin's blocking reader may still await bytes after stdout failed.
+        // All accepted forwards have drained before the runtime is shut down.
+        runtime.shutdown_background();
+        return match result {
             Ok(()) => 0,
             Err(error) => {
                 eprintln!("yard mcp: {error}");

@@ -198,10 +198,38 @@ async fn write(stdout: &mut tokio::io::Stdout, response: &Value) -> std::io::Res
 /// Newline-delimited JSON-RPC. Only read waits can be cancelled; mutations
 /// finish even if stdin closes. Dropping a wait never sends a stop command.
 pub async fn serve() -> std::io::Result<()> {
+    let mut tasks = JoinSet::new();
+    let mut pending = HashMap::new();
+    let result = receive(&mut tasks, &mut pending).await;
+    for (handle, wait) in pending.values() {
+        if *wait {
+            handle.abort();
+        }
+    }
+    // Transport failure cannot retract a mutation we already accepted.
+    let mut stdout = tokio::io::stdout();
+    let mut writable = true;
+    while let Some(completed) = tasks.join_next_with_id().await {
+        if let Ok((task, (key, response))) = completed
+            && pending
+                .get(&key)
+                .is_some_and(|(handle, _)| handle.id() == task)
+        {
+            pending.remove(&key);
+            if writable {
+                writable = write(&mut stdout, &response).await.is_ok();
+            }
+        }
+    }
+    result
+}
+
+async fn receive(
+    tasks: &mut JoinSet<(String, Value)>,
+    pending: &mut HashMap<String, (tokio::task::AbortHandle, bool)>,
+) -> std::io::Result<()> {
     let mut input = BufReader::new(tokio::io::stdin());
     let mut stdout = tokio::io::stdout();
-    let mut tasks = JoinSet::new();
-    let mut pending: HashMap<String, (tokio::task::AbortHandle, bool)> = HashMap::new();
     let mut frame = Vec::new();
     let mut eof = false;
     loop {
@@ -223,6 +251,8 @@ pub async fn serve() -> std::io::Result<()> {
                     }
                 } else {
                     if frame.len() as u64 > FRAME_MAX {
+                        write(&mut stdout, &json!({"jsonrpc": "2.0", "id": null,
+                            "error": {"code": -32600, "message": "MCP frame too large"}})).await?;
                         return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "MCP frame too large"));
                     }
                     let message = serde_json::from_slice::<Value>(&frame);
