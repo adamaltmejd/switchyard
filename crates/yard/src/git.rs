@@ -250,6 +250,23 @@ impl Git {
         Ok((out.code == 0).then(|| out.stdout.trim().to_string()))
     }
 
+    /// The root tree of a commit. A tree object itself is not a commit input.
+    pub async fn root_tree(&self, repo: &Path, commit: &str) -> Result<String, String> {
+        let out = self
+            .run(
+                repo,
+                &[
+                    "rev-parse",
+                    "--verify",
+                    "--end-of-options",
+                    &format!("{commit}^{{commit}}^{{tree}}"),
+                ],
+            )
+            .await?
+            .ok("rev-parse commit tree")?;
+        Ok(out.stdout.trim().to_string())
+    }
+
     /// A file's bytes at a commit, or None when absent.
     pub async fn show(
         &self,

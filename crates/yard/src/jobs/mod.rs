@@ -164,11 +164,7 @@ pub async fn read_config(
         .show(repo, commit, crate::config::DOCKERFILE_PATH)
         .await?
         .ok_or_else(|| Fail::invalid(format!("{commit} has no .yard/Dockerfile")))?;
-    let tree = daemon
-        .git
-        .rev_parse(repo, &format!("{commit}^{{tree}}"))
-        .await?
-        .ok_or_else(|| Fail::invalid("configuration commit has no tree"))?;
+    let tree = daemon.git.root_tree(repo, commit).await?;
     let entries = daemon
         .git
         .ls_tree(
