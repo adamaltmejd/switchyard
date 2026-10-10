@@ -321,7 +321,9 @@ pub fn blocked(
     attempt: &attempts::Attempt,
     ticket: &tickets::Ticket,
     blocked: &[checks::Check],
-) -> Result<(), Fail> {
+    max_rounds: u32,
+    trigger: &checks::Check,
+) -> Result<Option<i64>, Fail> {
     let mut findings = Vec::new();
     for check in blocked {
         for finding in project.read(|conn| checks::findings(conn, check.id))? {
@@ -329,14 +331,14 @@ pub fn blocked(
         }
     }
     let rounds = attempt.rounds + 1;
-    let limit = i64::from(loaded.config.review.max_rounds) + attempt.extra_rounds;
+    let limit = i64::from(max_rounds) + attempt.extra_rounds;
     project.tx(|tx| {
         // Write only what the read saw: an edit since then owns the next step.
         let current = attempts::get(tx, attempt.id)?;
         if attempts::superseded_by_edit(tx, attempt.id, ticket.id, ticket.revision)?
             || current.rounds != attempt.rounds
         {
-            return Ok(());
+            return Ok(None);
         }
         tx.execute(
             "UPDATE attempt SET rounds = ?2 WHERE id = ?1",
@@ -363,12 +365,12 @@ pub fn blocked(
                     text: None,
                 },
             )?;
-            return Ok(());
+            return Ok(None);
         }
-        attempts::set_next(
-            tx,
-            attempt.id,
-            Some(&json!({ "reason": "repair", "findings": findings })),
-        )
+        let source = executions::get(tx, trigger.execution)?;
+        let feedback = json!({"kind": "verdict", "source": {
+            "external": "feedback", "execution": trigger.execution, "node": source.node, "output": "result"},
+            "value": {"verdict": "fail", "findings": findings}});
+        supervise::start_implementation(tx, attempt, "repair", Some(&feedback)).map(Some)
     })
 }

@@ -274,6 +274,7 @@ pub struct Start<'a> {
     pub agent: Option<(&'a str, &'a Value)>,
     /// The pinfold pin of the worker's harness, recorded with the intent.
     pub harness_version: Option<&'a str>,
+    pub feedback: Option<&'a Value>,
 }
 
 /// The intent: the row exists before any effect.
@@ -313,7 +314,7 @@ pub fn start(tx: &Connection, start: Start) -> Result<i64, Fail> {
     tx.execute(
         "UPDATE execution SET plan_revision = ?2, node = ?3, inputs = ?4, teardown = ?5 WHERE id = ?1",
         params![id, revision, binding.as_ref().map(|(node, _)| node),
-            binding.as_ref().map(|(_, inputs)| inputs.to_string()), binding.as_ref().map(|_| false)],
+            binding.as_ref().map(|(_, inputs)| inputs.to_string()).or_else(|| start.feedback.map(|feedback| json!({"feedback": feedback}).to_string())), binding.as_ref().map(|_| false)],
     )?;
     audit(
         tx,
@@ -363,12 +364,104 @@ fn binding(
         }
         _ => return Ok(None),
     };
-    let declared = &admission["plan"]["nodes"][&node]["inputs"];
+    let plan =
+        crate::plan::Plan::admitted(admission).map_err(|error| Fail::refused(error.to_string()))?;
+    let declared = serde_json::to_value(&plan.nodes[&node].inputs).expect("inputs serialize");
     let declared = declared
         .as_object()
         .ok_or_else(|| Fail::refused("node absent from admitted plan"))?;
     let mut inputs = serde_json::Map::new();
     for (name, reference) in declared {
+        if reference["output"] == "feedback" {
+            if let Some(feedback) = start.feedback {
+                inputs.insert(name.clone(), feedback.clone());
+            }
+            continue;
+        }
+        if let Some(source) = reference["node"]
+            .as_str()
+            .filter(|node| *node != "implementer")
+        {
+            let producer = conn
+                .query_row(
+                    &format!(
+                        "SELECT id FROM execution WHERE attempt = ?1 AND node = ?2
+                    AND {RESULT_ELIGIBLE} AND mcp = 'registered' AND base = ?3 AND head = ?4
+                    AND COALESCE(proof, '') = ?5 AND ticket_revision IS ?6 AND plan_revision IS ?7
+                    ORDER BY id DESC LIMIT 1"
+                    ),
+                    params![
+                        attempt.id,
+                        source,
+                        start.base,
+                        start.head,
+                        start.proof.unwrap_or_default(),
+                        start.ticket_revision,
+                        attempt.plan_revision()
+                    ],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?;
+            let (supplier, mut value) = match producer {
+                Some(producer) => {
+                    let result = get(conn, producer)?
+                        .result
+                        .ok_or_else(|| Fail::refused("missing panel result"))?;
+                    (
+                        json!({"execution": producer, "node": source, "output": reference["output"]}),
+                        result["outputs"]["result"]["value"].clone(),
+                    )
+                }
+                None => (json!({"status": "unknown"}), json!({})),
+            };
+            // Old checks can precede node/result binding. Preserve their
+            // supported panel continuation without inventing a producer result.
+            if value.get("blocked").is_none() {
+                let input = super::checks::Input {
+                    attempt: attempt.id,
+                    base: start.base.unwrap_or_default().into(),
+                    head: start.head.unwrap_or_default().into(),
+                    proof: start.proof.unwrap_or_default().into(),
+                    ticket_revision: start.ticket_revision.unwrap_or_default(),
+                    plan_revision: attempt.plan_revision(),
+                    digest: start.digest.unwrap_or_default().into(),
+                };
+                let mut blocked = Vec::new();
+                let mut previous = Some(source);
+                while let Some(node) = previous {
+                    let index = node
+                        .strip_prefix("review-")
+                        .and_then(|index| index.parse::<usize>().ok())
+                        .ok_or_else(|| Fail::refused("invalid historical panel node"))?;
+                    let seat = admission["workflow"]["review"][index]
+                        .as_str()
+                        .ok_or_else(|| Fail::refused("invalid historical panel seat"))?;
+                    let check = super::checks::current(conn, "review", seat, &input)?
+                        .ok_or_else(|| Fail::refused("panel input has no eligible check"))?;
+                    if node == source && producer.is_none() {
+                        if get(conn, check.execution)?.node.is_some() {
+                            return Err(Fail::refused("panel input has no eligible result"));
+                        }
+                        value = json!({"publication": check.id, "verdict": check.verdict});
+                    }
+                    if check.verdict == "fail" {
+                        blocked.push(json!(check.id));
+                    }
+                    previous = plan.nodes[node]
+                        .inputs
+                        .get("panel")
+                        .and_then(|input| input.node.as_deref());
+                }
+                blocked.reverse();
+                value["blocked"] = json!(blocked);
+            }
+            inputs.insert(
+                name.clone(),
+                json!({"kind": reference["kind"],
+                "source": supplier, "value": value}),
+            );
+            continue;
+        }
         let value = json!({"base": start.base, "head": start.head, "proof": start.proof.unwrap_or_default()});
         let source = if reference["node"] == "implementer" {
             let producer = conn.query_row(
@@ -535,13 +628,44 @@ pub fn end(tx: &Connection, id: i64, end: End) -> Result<(), Fail> {
                 end.outcome
             },
         );
-        let output = end.output.or_else(|| {
+        let mut output = end.output.or_else(|| {
             judgment
                 .as_ref()
                 .map(|judgment| json!({"kind": "verdict", "value": judgment}))
         });
+        let attempt = super::attempts::get(tx, execution.attempt)?;
+        let mut outcome = "complete";
+        if let Some(admission) = &attempt.admission {
+            let plan = crate::plan::Plan::admitted(admission)
+                .map_err(|error| Fail::refused(error.to_string()))?;
+            let node = &plan.nodes[execution.node.as_deref().expect("bound node")];
+            if execution.kind == "review"
+                && let Some(output) = &mut output
+            {
+                let mut blocked = execution
+                    .inputs
+                    .as_ref()
+                    .and_then(|inputs| inputs["panel"]["value"]["blocked"].as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                if let Some(check) = &publication
+                    && check.verdict == "fail"
+                {
+                    blocked.push(json!(check.id));
+                }
+                if !blocked.is_empty() && node.outcomes.iter().any(|name| name == "blocked") {
+                    outcome = "blocked";
+                }
+                output["value"]["blocked"] = json!(blocked);
+            } else if execution.kind == "gate"
+                && end.outcome == "fail"
+                && node.outcomes.iter().any(|name| name == "failed")
+            {
+                outcome = "failed";
+            }
+        }
         let result = json!({
-            "outcome": output.as_ref().map(|_| "complete"),
+            "outcome": output.as_ref().map(|_| outcome),
             "infrastructure": {"outcome": infrastructure, "exit_cause": end.exit_cause, "exit_code": end.exit_code},
             "judgment": judgment,
             "outputs": output.map_or_else(|| json!({}), |output| json!({"result": output})),

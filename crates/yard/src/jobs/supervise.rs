@@ -36,9 +36,13 @@ pub fn start_implementation(
     tx: &rusqlite::Connection,
     attempt: &attempts::Attempt,
     reason: &str,
+    feedback: Option<&Value>,
 ) -> Result<i64, Fail> {
     // The revision and body are read here: the row names what the prompt carries.
     let ticket = tickets::get(tx, attempt.ticket)?;
+    let edited = attempts::edit_pending(tx, attempt.id)?;
+    let reason = if edited { "edit" } else { reason };
+    let feedback = if edited { None } else { feedback };
     let name = attempt.implementer["name"].as_str().unwrap_or("default");
     let harness_version = attempt.implementer["harness"]
         .as_str()
@@ -57,6 +61,7 @@ pub fn start_implementation(
             ticket: Some(ticket.id),
             agent: Some((name, &attempt.implementer)),
             harness_version,
+            feedback,
             ..Default::default()
         },
     )?;
@@ -568,7 +573,7 @@ pub async fn implement(
         &attempt,
         &ticket,
         resume.as_ref().map(|(id, _)| *id),
-        row.reason.as_deref().unwrap_or("first"),
+        &row,
     )
     .await?;
     if stop_preparation(daemon, project, execution).await? {
@@ -1024,9 +1029,17 @@ async fn implementer_prompt(
     attempt: &attempts::Attempt,
     ticket: &tickets::Ticket,
     resumed: Option<i64>,
-    reason: &str,
+    execution: &executions::Execution,
 ) -> Result<String, Fail> {
-    let next = attempt.next.clone().unwrap_or(json!({}));
+    let reason = execution.reason.as_deref().unwrap_or("first");
+    let next = execution
+        .inputs
+        .as_ref()
+        .map(|inputs| &inputs["feedback"]["value"])
+        .filter(|value| !value.is_null())
+        .cloned()
+        .or_else(|| attempt.next.clone())
+        .unwrap_or(json!({}));
     let workflow = loaded.config.workflow(&attempt.workflow)?;
     let mut prompt = String::new();
     // The resumed session's owner launched its harness with this body.
@@ -1239,7 +1252,13 @@ pub async fn gate(
         Ok(result) => {
             let _ = std::fs::write(&log, &result.output);
             let tail = tail(&result.output);
-            let verdict = if result.code == 0 { "pass" } else { "fail" };
+            let verdict = if row.parent.is_none() && result.infrastructure != "completed" {
+                "error"
+            } else if result.code == 0 {
+                "pass"
+            } else {
+                "fail"
+            };
             (
                 verdict,
                 tail,

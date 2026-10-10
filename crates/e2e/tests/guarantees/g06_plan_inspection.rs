@@ -184,14 +184,14 @@ selected = [{ to = "choose", repeat = 2 }]
         "yard_plan_validate",
         json!({"target": "main"}),
     );
-    let legacy_expected = json!({"inputs": {"merged": "candidate"}, "nodes": {
+    let legacy_expected = json!({"inputs": {"merged": "candidate", "feedback": "verdict"}, "nodes": {
         "implementer": {"runner": {"kind": "agent", "agent": "worker", "instructions": ""},
-            "access": "write-allowed", "inputs": {}, "outputs": {"result": "candidate"},
+            "access": "write-allowed", "inputs": {"feedback": {"node": null, "output": "feedback", "kind": "verdict"}}, "outputs": {"result": "candidate"},
             "outcomes": ["complete"], "routes": {"complete": [{"to": "candidate-gate-check", "repeat": null}]}, "requires": []},
         "candidate-gate-check": {"runner": {"kind": "command", "gate": "check"}, "access": "write-allowed",
             "inputs": {"candidate": {"node": "implementer", "output": "result", "kind": "candidate"}},
-            "outputs": {"result": "verdict"}, "outcomes": ["complete"],
-            "routes": {"complete": [{"to": "landing-gate-check", "repeat": null}]}, "requires": ["candidate"]},
+            "outputs": {"result": "verdict"}, "outcomes": ["complete", "failed"],
+            "routes": {"complete": [{"to": "landing-gate-check", "repeat": null}], "failed": [{"to": "implementer", "repeat": 1}]}, "requires": ["candidate"]},
         "landing-gate-check": {"runner": {"kind": "command", "gate": "check"}, "access": "write-allowed",
             "inputs": {"merged": {"node": null, "output": "merged", "kind": "candidate"}},
             "outputs": {"result": "verdict"}, "outcomes": ["complete"],

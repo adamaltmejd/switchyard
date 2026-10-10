@@ -38,6 +38,7 @@ fn kinds(project: &Project, kind: &str) -> Vec<Value> {
 /// records no check and raises nothing on the ended attempt.
 ///
 /// Sabotage: let `review::run` pass an unpublished seat; no red is raised.
+/// Route missing publication as a failed judgment; a repair execution appears.
 /// Remove its end-path liveness check; the abandoned seat raises red.
 #[test]
 fn a_seat_that_exits_without_publishing_is_a_review_error() {
@@ -74,6 +75,15 @@ fn a_seat_that_exits_without_publishing_is_a_review_error() {
             .rows("SELECT id FROM \"check\" WHERE kind = 'review'")
             .is_empty()
     );
+    assert_eq!(
+        project.rows(
+            "SELECT json_extract(result, '$.outcome') AS outcome,
+        json_extract(result, '$.judgment') AS judgment, json_extract(result, '$.outputs') AS outputs
+        FROM execution WHERE kind = 'review'"
+        ),
+        vec![json!({"outcome": null, "judgment": null, "outputs": "{}"})]
+    );
+    assert_eq!(kinds(&project, "implementation").len(), 1);
 
     project.json(&["attempt", "start", "Y-1"]);
     let approval = watch.attention();
@@ -201,7 +211,7 @@ fn a_seat_killed_after_publishing_has_published() {
     assert_eq!(
         ended["result"]["outputs"]["result"],
         json!({"kind": "verdict", "value": {
-            "publication": publication["check"], "verdict": "pass",
+            "publication": publication["check"], "verdict": "pass", "blocked": [],
         }})
     );
     assert_eq!(after["checks"], before["checks"]);
@@ -212,8 +222,9 @@ fn a_seat_killed_after_publishing_has_published() {
 /// repair starts until its box is gone. A second ticket on a workflow with
 /// no review runs to approval meanwhile; the scheduler advances the first
 /// attempt before the second in every tick, so a repair started early would
-/// precede that approval. Released, the seat ends and the repair starts,
-/// and when its start is seen the seat's box is no longer listed. Control:
+/// precede that approval. Restart at this held edge reconciles the seat and
+/// starts exactly one repair, held by a second fixture latch. Its start
+/// follows checked teardown, with no duplicate review execution. Control:
 /// the seat's box is listed while the fixture holds it.
 ///
 /// The seat's P1 finding blocks at `blocking = "P1"`. The quick workflow's
@@ -222,14 +233,18 @@ fn a_seat_killed_after_publishing_has_published() {
 /// Sabotage: let `advance` ignore running seats, or start the repair before
 /// box teardown; ordering fails. Compare priorities with `<` instead of
 /// `<=`; P1 passes. Mark every approval reviewed; the quick item is wrong.
+/// Take route eligibility from publication, or leave both schedulers active;
+/// a repair starts before teardown or restart duplicates the edge.
 #[test]
 fn no_repair_starts_until_a_blocking_seats_box_is_gone() {
     let hold = Latch::new();
     let held = hold.clone();
+    let repair_hold = Latch::new();
+    let repair_held = repair_hold.clone();
     let machine = Machine::new("g8-held", move |request| {
         if !seat(&request) {
             if request.opens() && request.last_user().contains("Review blocked") {
-                return Reply::Tools(vec![repair()]);
+                return Reply::Hold(repair_held.clone(), Box::new(Reply::Tools(vec![repair()])));
             }
             return implementer(request);
         }
@@ -284,7 +299,18 @@ fn no_repair_starts_until_a_blocking_seats_box_is_gone() {
     };
     assert_eq!(repairs(&project), 1, "a repair started while the seat ran");
 
-    hold.release();
+    machine.kill();
+    // Both the durable publication and the still-running row are observed
+    // outside Yard before restart; the model latch holds this exact edge.
+    assert_eq!(
+        project.rows(
+            "SELECT status, result, teardown FROM execution WHERE attempt = 1 AND kind = 'review'"
+        ),
+        vec![json!({"status": "running", "result": null, "teardown": 0})]
+    );
+    assert_eq!(repairs(&project), 1);
+    machine.start();
+    let mut watch = project.watch(quick["seq"].as_i64().unwrap());
     watch.until("the repair", |event| {
         event["event"] == "execution.started"
             && event["ticket"] == "Y-1"
@@ -294,6 +320,16 @@ fn no_repair_starts_until_a_blocking_seats_box_is_gone() {
         !listed(&machine),
         "the repair started while the seat's box {handle} was up"
     );
+    repair_hold.wait_held();
+    assert_eq!(repairs(&project), 2);
+    assert_eq!(project.rows("SELECT outcome, teardown, json_extract(result, '$.outcome') AS route FROM execution WHERE attempt = 1 AND kind = 'review'"),
+        vec![json!({"outcome": "interrupted", "teardown": 1, "route": "blocked"})]);
+    assert_eq!(
+        project.rows("SELECT next FROM attempt WHERE id = 1"),
+        vec![json!({"next": null})]
+    );
+    hold.release();
+    repair_hold.release();
 }
 
 /// A seat that always blocks gets exactly `max_rounds = 1` rounds, then
@@ -515,6 +551,8 @@ export default async function () {
 /// Sabotage: treat a gate error like an implementer stop; `start` runs the
 /// implementer again. Remove `supervise::gate`'s end-path liveness check;
 /// the abandoned gate records a failing check.
+/// Route an infrastructure error as a failed judgment; it gains an output
+/// or starts repair instead of waiting for the operator's same-head retry.
 #[test]
 fn a_gate_errors_start_reruns_that_gate() {
     let armed = std::sync::Arc::new(Mutex::new(None::<std::path::PathBuf>));
@@ -549,6 +587,16 @@ fn a_gate_errors_start_reruns_that_gate() {
         (&json!("red"), &json!("gate")),
         "{red}"
     );
+
+    assert_eq!(
+        project.rows(
+            "SELECT json_extract(result, '$.outcome') AS outcome,
+        json_extract(result, '$.judgment') AS judgment, json_extract(result, '$.outputs') AS outputs
+        FROM execution WHERE kind = 'gate'"
+        ),
+        vec![json!({"outcome": null, "judgment": null, "outputs": "{}"})]
+    );
+    assert_eq!(kinds(&project, "implementation").len(), 1);
 
     std::fs::remove_file(&path).unwrap();
     project.json(&["attempt", "start", "Y-1"]);

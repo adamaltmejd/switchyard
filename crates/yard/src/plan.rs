@@ -1,6 +1,7 @@
 //! Shared typed resolver. Plans select existing definitions, never worker grants.
 use crate::config::{Config, Stage};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Serialize)]
@@ -160,7 +161,7 @@ pub struct Graph {
     pub nodes: BTreeMap<String, NodeSpec>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Plan {
     pub inputs: BTreeMap<String, Output>,
     pub nodes: BTreeMap<String, Node>,
@@ -247,8 +248,7 @@ impl Config {
         Ok(plan)
     }
 
-    /// A descriptive chain of the existing worker, gates and panel. It does
-    /// not replace admission, repair, approval or landing policy.
+    /// Ordinary candidate routes; landing remains supplied by the queue.
     pub fn workflow_plan(&self, name: &str) -> Result<Plan, String> {
         let workflow = self.workflow(name)?;
         let mut chain = vec![(
@@ -365,14 +365,16 @@ impl Config {
                 .routes
                 .insert("complete".into(), vec![Route { to, repeat: None }]);
         }
-        Ok(Plan {
+        let mut plan = Plan {
             inputs: if !workflow.read_only && !self.gates.is_empty() {
                 BTreeMap::from([("merged".into(), Output::Candidate)])
             } else {
                 BTreeMap::new()
             },
             nodes: chain.into_iter().collect(),
-        })
+        };
+        plan.ordinary_routes(self.review.max_rounds);
+        Ok(plan)
     }
 
     pub fn runnable_workflow(&self, plan: &Plan, selected: Option<&str>) -> Option<String> {
@@ -391,6 +393,84 @@ impl Config {
 }
 
 impl Plan {
+    pub fn admitted(admission: &Value) -> Result<Self, serde_json::Error> {
+        let mut plan: Self = serde_json::from_value(admission["plan"].clone())?;
+        if !plan.inputs.contains_key("feedback") {
+            plan.ordinary_routes(admission["review"]["max_rounds"].as_u64().unwrap_or(3) as u32);
+        }
+        Ok(plan)
+    }
+
+    /// Upgrade the ordinary descriptive chain in memory. Persisted admission
+    /// and historical execution evidence remain untouched.
+    pub fn ordinary_routes(&mut self, max_rounds: u32) {
+        if self.nodes["implementer"].outputs["result"] != Output::Candidate {
+            return;
+        }
+        self.inputs.insert("feedback".into(), Output::Verdict);
+        self.nodes
+            .get_mut("implementer")
+            .expect("implementer")
+            .inputs
+            .insert(
+                "feedback".into(),
+                Input {
+                    node: None,
+                    output: "feedback".into(),
+                    kind: Output::Verdict,
+                },
+            );
+        let mut current = "implementer".to_string();
+        let mut previous_review = None;
+        while let Some(next) = self.nodes[&current]
+            .routes
+            .get("complete")
+            .and_then(|routes| routes.first())
+            .map(|route| route.to.clone())
+        {
+            current = next;
+            if current.starts_with("landing-gate-") {
+                break;
+            }
+            let next_review = self.nodes[&current]
+                .routes
+                .get("complete")
+                .and_then(|routes| routes.first())
+                .is_some_and(|route| route.to.starts_with("review-"));
+            let node = self.nodes.get_mut(&current).expect("route destination");
+            let outcome = if current.starts_with("review-") {
+                if let Some(previous) = previous_review {
+                    node.inputs.insert(
+                        "panel".into(),
+                        Input {
+                            node: Some(previous),
+                            output: "result".into(),
+                            kind: Output::Verdict,
+                        },
+                    );
+                    node.requires = vec!["candidate".into(), "panel".into()];
+                }
+                previous_review = Some(current.clone());
+                if next_review {
+                    continue;
+                }
+                "blocked"
+            } else {
+                "failed"
+            };
+            if !node.outcomes.iter().any(|name| name == outcome) {
+                node.outcomes.push(outcome.into());
+            }
+            node.routes.insert(
+                outcome.into(),
+                vec![Route {
+                    to: "implementer".into(),
+                    repeat: Some(if outcome == "blocked" { max_rounds } else { 1 }),
+                }],
+            );
+        }
+    }
+
     pub fn unsupported_shape(&self) -> &'static str {
         if self
             .nodes

@@ -236,7 +236,7 @@ fn admit(
         None,
         json!({ "target": loaded.branch, "base": loaded.head, "workflow": name, "implementer": implementer }),
     )?;
-    super::supervise::start_implementation(tx, &row, "first")
+    super::supervise::start_implementation(tx, &row, "first", None)
 }
 
 /// The admission daemon's tool implementation identity, read once per process.
