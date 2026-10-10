@@ -238,10 +238,12 @@ async fn admit<T>(
         changed.as_mut().enable();
         let publication = project.canonical.lock().await;
         let row = project.read(|conn| executions::get(conn, execution))?;
-        if row.status != "running"
-            || project.read(|conn| Ok(attempts::get(conn, row.attempt)?.state != "live"))?
-        {
+        if row.status != "running" {
             return Err(Fail::refused("execution no longer eligible to act"));
+        }
+        // An ended attempt lapses its approval; it is not an effect failure.
+        if project.read(|conn| Ok(attempts::get(conn, row.attempt)?.state != "live"))? {
+            return Ok(Err((now, Lapse::Superseded("the attempt ended"))));
         }
         if project
             .loaded

@@ -183,6 +183,8 @@ An unavailable validated default excludes new effects. Already-admitted
 executions waiting for capacity reserve nothing. A landing whose policy
 check encounters unavailable publication after reservation waits on the
 same project events, retaining its existing reservation and host lock.
+If its attempt ends during the policy read or publication wait, the landing
+withdraws without further effects or new attention for the ended attempt.
 Validated publication wakes waiters to reread the current default. Waiters
 remain eligible for their existing stop or abandon exits. Unknown default mutation
 ownership keeps that input unavailable until proved resolved. Selected-target cache
