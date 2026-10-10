@@ -341,14 +341,14 @@ fn result(frame: &Value) -> Event {
 fn usage(frame: &Value) -> Usage {
     let usage = &frame["usage"];
     let count = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
-    Usage {
-        input: count("input_tokens")
+    Usage::adapter(
+        count("input_tokens")
             + count("cache_read_input_tokens")
             + count("cache_creation_input_tokens"),
-        output: count("output_tokens"),
-        cost: frame
+        count("output_tokens"),
+        frame
             .get("total_cost_usd")
             .and_then(Value::as_f64)
             .unwrap_or(0.0),
-    }
+    )
 }

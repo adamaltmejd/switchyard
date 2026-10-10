@@ -10,6 +10,7 @@ mod g06_inputs_validated;
 mod g06_plan_inspection;
 mod g07_lands_end_to_end;
 mod g07_operator_mcp;
+mod g07_usage;
 mod g08_review_is_a_publication;
 mod g09_implementer_starts_right;
 mod g10_queue_one_at_a_time;

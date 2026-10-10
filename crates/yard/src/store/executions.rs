@@ -1,5 +1,6 @@
 use super::{Target, audit, now};
 use crate::api::Fail;
+use crate::harness::{Usage, UsageFields};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::{Value, json};
 
@@ -32,11 +33,15 @@ pub struct Execution {
     pub resumed: Option<i64>,
     pub reserved: bool,
     pub lock_contract: bool,
+    pub usage: Usage,
+    pub harness: Option<String>,
+    pub model: Option<String>,
 }
 
 const COLUMNS: &str = "id, attempt, parent, kind, reason, status, outcome, detail, base, head,
     proof, ticket_revision, name, round, handle, session_id, approval, intent_old, intent_merged,
-    intent_state, progress, harness_version, resumed, reserved, lock_contract, intent_ref, plan_revision";
+    intent_state, progress, harness_version, resumed, reserved, lock_contract, intent_ref, plan_revision,
+    tokens_in, tokens_out, cost, usage_fields, harness, model";
 
 fn row(row: &Row) -> rusqlite::Result<Execution> {
     Ok(Execution {
@@ -67,7 +72,39 @@ fn row(row: &Row) -> rusqlite::Result<Execution> {
         lock_contract: row.get(24)?,
         intent_ref: row.get(25)?,
         plan_revision: row.get(26)?,
+        usage: Usage {
+            input: token_count(row, 27)?,
+            output: token_count(row, 28)?,
+            cost: row.get(29)?,
+            fields: row
+                .get::<_, Option<String>>(30)?
+                .map(|raw| serde_json::from_str::<UsageFields>(&raw))
+                .transpose()
+                .map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        30,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?
+                .unwrap_or_default(),
+        },
+        harness: row.get(31)?,
+        model: row.get(32)?,
     })
+}
+
+fn token_count(row: &Row, index: usize) -> rusqlite::Result<Option<u64>> {
+    row.get::<_, Option<i64>>(index)?
+        .map(u64::try_from)
+        .transpose()
+        .map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                index,
+                rusqlite::types::Type::Integer,
+                Box::new(error),
+            )
+        })
 }
 
 impl Execution {
@@ -88,6 +125,11 @@ impl Execution {
             "plan_revision": self.plan_revision,
             "name": self.name,
             "round": self.round,
+            "usage": self.usage,
+            "harness": self.harness,
+            "harness_version": self.harness_version,
+            "model": self.model,
+            "resumed": self.resumed,
             "intent": self.intent_state.as_ref().map(|state| json!({
                 "state": state, "target_ref": self.intent_ref, "old": self.intent_old, "merged": self.intent_merged,
             })),
@@ -269,21 +311,41 @@ pub fn set_worker(
     conn: &Connection,
     id: i64,
     session_id: Option<&str>,
-    usage: Option<(u64, u64, f64)>,
+    usage: Option<&Usage>,
 ) -> Result<(), Fail> {
     conn.execute(
-        "UPDATE execution SET session_id = COALESCE(?2, session_id),
-            tokens_in = COALESCE(?3, tokens_in), tokens_out = COALESCE(?4, tokens_out),
-            cost = COALESCE(?5, cost)
-         WHERE id = ?1",
-        params![
-            id,
-            session_id,
-            usage.map(|usage| usage.0 as i64),
-            usage.map(|usage| usage.1 as i64),
-            usage.map(|usage| usage.2)
-        ],
+        "UPDATE execution SET session_id = COALESCE(?2, session_id) WHERE id = ?1",
+        params![id, session_id],
     )?;
+    if let Some(usage) = usage {
+        let mut fields = usage.fields.clone();
+        // Resumed totals are not normalized to this execution yet (Y-77).
+        if get(conn, id)?.resumed.is_some() {
+            for field in [&mut fields.input, &mut fields.output, &mut fields.cost] {
+                field.completeness = crate::harness::Completeness::Unknown;
+            }
+        }
+        conn.execute(
+            "UPDATE execution SET tokens_in = ?2, tokens_out = ?3, cost = ?4,
+                usage_fields = ?5 WHERE id = ?1",
+            params![
+                id,
+                usage
+                    .input
+                    .map(i64::try_from)
+                    .transpose()
+                    .map_err(|error| Fail::new("internal", error.to_string()))?,
+                usage
+                    .output
+                    .map(i64::try_from)
+                    .transpose()
+                    .map_err(|error| Fail::new("internal", error.to_string()))?,
+                usage.cost,
+                serde_json::to_string(&fields)
+                    .map_err(|error| Fail::new("internal", error.to_string()))?
+            ],
+        )?;
+    }
     Ok(())
 }
 

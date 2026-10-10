@@ -250,6 +250,12 @@ fn is_tool_result(message: &Value) -> bool {
 }
 
 pub enum Reply {
+    /// Token totals for a real Codex Responses turn; no monetary cost.
+    ResponsesUsage {
+        input: u64,
+        output: u64,
+        reply: Box<Reply>,
+    },
     /// Assistant text, finish_reason "stop".
     Text(String),
     /// One assistant turn of tool calls, finish_reason "tool_calls".
@@ -391,15 +397,27 @@ fn read_request(stream: &TcpStream) -> Option<ModelRequest> {
 }
 
 fn render(reply: Reply, request: &ModelRequest) -> Vec<u8> {
+    render_usage(reply, request, (PROMPT_TOKENS, COMPLETION_TOKENS))
+}
+
+fn render_usage(reply: Reply, request: &ModelRequest, usage: (u64, u64)) -> Vec<u8> {
     match reply {
+        Reply::ResponsesUsage {
+            input,
+            output,
+            reply,
+        } => {
+            assert!(responses(request));
+            render_usage(*reply, request, (input, output))
+        }
         Reply::Hold(latch, inner) => {
             latch.hold();
-            render(*inner, request)
+            render_usage(*inner, request, usage)
         }
         Reply::Text(text) if anthropic(request) => anthropic_text(&text, request),
         Reply::Tools(calls) if anthropic(request) => anthropic_tools(calls, request),
-        Reply::Text(text) if responses(request) => responses_text(&text, request),
-        Reply::Tools(calls) if responses(request) => responses_tools(calls, request),
+        Reply::Text(text) if responses(request) => responses_text(&text, request, usage),
+        Reply::Tools(calls) if responses(request) => responses_tools(calls, request, usage),
         reply => openai(reply, request),
     }
 }
@@ -415,7 +433,7 @@ fn sse(name: &str, data: Value) -> String {
 }
 
 /// The `response` object each Responses event carries.
-fn responses_envelope(id: &str, request: &ModelRequest, status: &str) -> Value {
+fn responses_envelope(id: &str, request: &ModelRequest, status: &str, usage: (u64, u64)) -> Value {
     json!({
         "id": id,
         "object": "response",
@@ -424,14 +442,14 @@ fn responses_envelope(id: &str, request: &ModelRequest, status: &str) -> Value {
         "model": request.body["model"].as_str().unwrap_or("fake-model"),
         "output": [],
         "usage": {
-            "input_tokens": PROMPT_TOKENS,
-            "output_tokens": COMPLETION_TOKENS,
-            "total_tokens": PROMPT_TOKENS + COMPLETION_TOKENS,
+            "input_tokens": usage.0,
+            "output_tokens": usage.1,
+            "total_tokens": usage.0 + usage.1,
         },
     })
 }
 
-fn responses_text(text: &str, request: &ModelRequest) -> Vec<u8> {
+fn responses_text(text: &str, request: &ModelRequest, usage: (u64, u64)) -> Vec<u8> {
     let turn = request.turn();
     let response_id = format!("resp_{turn}");
     let item_id = format!("msg_{turn}");
@@ -442,13 +460,13 @@ fn responses_text(text: &str, request: &ModelRequest) -> Vec<u8> {
         "role": "assistant",
         "content": [{ "type": "output_text", "text": text, "annotations": [] }],
     });
-    let mut completed = responses_envelope(&response_id, request, "completed");
+    let mut completed = responses_envelope(&response_id, request, "completed", usage);
     completed["output"] = json!([item.clone()]);
     let body = [
         sse(
             "response.created",
             json!({ "type": "response.created",
-                    "response": responses_envelope(&response_id, request, "in_progress") }),
+                    "response": responses_envelope(&response_id, request, "in_progress", usage) }),
         ),
         sse(
             "response.output_item.added",
@@ -491,13 +509,13 @@ fn responses_text(text: &str, request: &ModelRequest) -> Vec<u8> {
     respond(200, "text/event-stream", body)
 }
 
-fn responses_tools(calls: Vec<ToolCall>, request: &ModelRequest) -> Vec<u8> {
+fn responses_tools(calls: Vec<ToolCall>, request: &ModelRequest, usage: (u64, u64)) -> Vec<u8> {
     let turn = request.turn();
     let response_id = format!("resp_{turn}");
     let mut body = sse(
         "response.created",
         json!({ "type": "response.created",
-                "response": responses_envelope(&response_id, request, "in_progress") }),
+                "response": responses_envelope(&response_id, request, "in_progress", usage) }),
     );
     let mut output = Vec::new();
     for (index, call) in calls.into_iter().enumerate() {
@@ -532,7 +550,7 @@ fn responses_tools(calls: Vec<ToolCall>, request: &ModelRequest) -> Vec<u8> {
         ));
         output.push(done.clone());
     }
-    let mut completed = responses_envelope(&response_id, request, "completed");
+    let mut completed = responses_envelope(&response_id, request, "completed", usage);
     completed["output"] = Value::Array(output);
     body.push_str(&sse(
         "response.completed",
@@ -655,7 +673,9 @@ fn openai(reply: Reply, request: &ModelRequest) -> Vec<u8> {
                 "tool_calls",
             )
         }
-        Reply::Hold(_, _) => unreachable!("the hold is released before rendering"),
+        Reply::Hold(_, _) | Reply::ResponsesUsage { .. } => {
+            unreachable!("the wrapper is handled before rendering")
+        }
     };
     let model = request.body["model"].as_str().unwrap_or("fake-model");
     let chunk = |choices: Value, usage: Value| {

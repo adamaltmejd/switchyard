@@ -7,7 +7,7 @@ use std::process::Command;
 use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 
-fn pre_target_binary() -> PathBuf {
+pub(super) fn pre_target_binary() -> PathBuf {
     static BINARY: OnceLock<PathBuf> = OnceLock::new();
     BINARY
         .get_or_init(|| {
