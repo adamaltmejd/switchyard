@@ -76,6 +76,9 @@ history. Consume requires a clean checkout of the selected branch. Named
 import keeps the project default. `yard sync feature/a --default` selects
 it explicitly after its committed `target.ref` names `feature/a`, with no
 live attempt or landing intent. Omitted sync uses canonical's symbolic HEAD.
+Selection uses an imported canonical head when the checkout branch is absent
+or behind, without changing the checkout. Its clean matching checkout rule
+applies only to consume.
 
 Check pinfold, the service, the configuration, the image, the credentials
 and registered project paths that are gone:

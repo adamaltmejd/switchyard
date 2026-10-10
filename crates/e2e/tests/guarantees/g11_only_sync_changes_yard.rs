@@ -278,6 +278,8 @@ fn named_sync_moves_only_committed_selected_history() {
 /// resolves the new symbolic HEAD. Git and the held fixture supply identities.
 /// Sabotage: change HEAD on named import, skip default/config validation,
 /// allow switching under the old attempt, or keep resolving omission to main.
+/// Revalidate an old imported config during consume, or require a matching
+/// clean local branch for default selection: the subsequent operations fail.
 #[test]
 fn default_selection_is_explicit_validated_and_has_no_live_work() {
     let hold = Latch::new();
@@ -288,6 +290,18 @@ fn default_selection_is_explicit_validated_and_has_no_live_work() {
     machine.start();
     let project = Project::new(&machine, "p", &config(""));
     let main = project.canonical_head();
+    project.git(&["checkout", "--quiet", "-b", "feature/b"]);
+    project.write("b.txt", "old b\n");
+    project.git(&["add", "b.txt"]);
+    project.git(&["commit", "--quiet", "-m", "B"]);
+    let old_b = project.git(&["rev-parse", "HEAD"]).trim().to_string();
+    project.json(&["sync", "feature/b"]);
+    project.write("b.txt", "new b\n");
+    project.git(&["commit", "--quiet", "-am", "Advance B"]);
+    let new_b = project.git(&["rev-parse", "HEAD"]).trim().to_string();
+    project.json(&["sync", "feature/b"]);
+    project.git(&["reset", "--quiet", "--hard", &old_b]);
+    project.git(&["checkout", "--quiet", "main"]);
     project.git(&["checkout", "--quiet", "-b", "feature/a"]);
     project.write("a.txt", "feature\n");
     project.git(&["add", "a.txt"]);
@@ -350,4 +364,143 @@ fn default_selection_is_explicit_validated_and_has_no_live_work() {
     project.json(&["sync"]);
     assert_eq!(branch_head(&project, "feature/a"), next);
     assert_eq!(project.canonical_head(), main);
+
+    // Already imported history can be consumed even though its config
+    // declares the former default. It is not an incoming configuration.
+    project.git(&["checkout", "--quiet", "feature/b"]);
+    project.json(&["sync", "feature/b"]);
+    assert_eq!(project.git(&["rev-parse", "HEAD"]).trim(), new_b);
+    assert_eq!(
+        std::fs::read_to_string(project.path.join("b.txt")).unwrap(),
+        "new b\n"
+    );
+
+    // Default selection uses canonical history without requiring a local
+    // checkout branch or reconciling any dirty operator files.
+    project.json(&["sync", "main", "--default"]);
+    project.git(&["branch", "--force", "feature/a", &selected]);
+    project.json(&["sync", "feature/a", "--default"]);
+    assert_eq!(default_branch(&project), "feature/a");
+    assert_eq!(project.git(&["rev-parse", "feature/a"]).trim(), selected);
+    assert_eq!(
+        project.git(&["branch", "--show-current"]).trim(),
+        "feature/b"
+    );
+    project.json(&["sync", "main", "--default"]);
+    project.git(&["branch", "-D", "feature/a"]);
+    project.write("operator.txt", "uncommitted\n");
+    project.json(&["sync", "feature/a", "--default"]);
+    assert_eq!(default_branch(&project), "feature/a");
+    assert_eq!(branch_head(&project, "feature/a"), next);
+    assert_eq!(
+        project.git(&["branch", "--show-current"]).trim(),
+        "feature/b"
+    );
+    assert_eq!(
+        project.git(&[
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/heads/feature/a"
+        ]),
+        ""
+    );
+    assert_eq!(
+        std::fs::read_to_string(project.path.join("operator.txt")).unwrap(),
+        "uncommitted\n"
+    );
+}
+
+/// G11: default selection refuses an open landing intent by its execution
+/// identity while the real git child holds update-ref. It must answer before
+/// the fixture releases the child. The completed landing controls selection
+/// in the same project. Expected ids come from the store, heads from host git.
+/// Sabotage: omit the intent identity from refusal, or wait for canonical
+/// before checking live work; the refusal cannot answer while the child holds.
+#[test]
+fn default_selection_names_a_held_landing_intent_then_succeeds() {
+    let machine = Machine::new("g11-intent", |request| {
+        act(
+            request,
+            vec![commit_file("feature.txt", "feature\n", "Feature")],
+        )
+    });
+    let armed = machine.root.join("armed");
+    let said = machine.root.join("said");
+    let release = machine.root.join("release");
+    for fifo in [&said, &release] {
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    machine.wrapper(
+        "git",
+        &format!(
+            "if [ -e '{}' ]; then case \" $* \" in *' update-ref --no-deref refs/heads/main '*)\n\
+         echo held > '{}'; read line < '{}';; esac; fi",
+            armed.display(),
+            said.display(),
+            release.display()
+        ),
+    );
+    machine.start();
+    let project = Project::new(&machine, "p", &unreviewed());
+    let main = project.canonical_head();
+    project.git(&["checkout", "--quiet", "-b", "feature/a"]);
+    project.write("a.txt", "feature a\n");
+    project.git(&["add", "a.txt"]);
+    project.git(&["commit", "--quiet", "-m", "A"]);
+    let imported = project.git(&["rev-parse", "HEAD"]).trim().to_string();
+    project.json(&["sync", "feature/a"]);
+    project.write(
+        ".yard/config.toml",
+        &unreviewed().replace("ref = \"main\"", "ref = \"feature/a\""),
+    );
+    project.git(&["commit", "--quiet", "-am", "New default"]);
+    let selected = project.git(&["rev-parse", "HEAD"]).trim().to_string();
+    project.git(&["checkout", "--quiet", "main"]);
+    let mut watch = project.watch(0);
+    project.json(&["ticket", "new", "--title", "Add feature"]);
+    let raised = watch.attention();
+    let head = raised["data"]["payload"]["head"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    std::fs::write(&armed, "").unwrap();
+    project.json(&["attempt", "approve", "Y-1", "--head", &head]);
+    assert_eq!(watch.said(&said), "held\n");
+    std::fs::remove_file(&armed).unwrap();
+    let intent = project
+        .rows("SELECT id, attempt FROM execution WHERE kind = 'landing' AND intent_state = 'open'");
+    assert_eq!(intent.len(), 1);
+    let refused = project.refused(&["sync", "feature/a", "--default"]);
+    assert_eq!(refused["code"], "refused");
+    assert_eq!(
+        refused["data"],
+        json!({ "reason": "live_target", "default": "main", "branch": "feature/a", "attempts": [intent[0]["attempt"]], "intents": [intent[0]["id"]] })
+    );
+    assert_eq!(default_branch(&project), "main");
+    assert_eq!(project.canonical_head(), main);
+    assert_eq!(branch_head(&project, "feature/a"), imported);
+    std::fs::write(&release, "go\n").unwrap();
+    watch.event("landing.recorded", &[]);
+    assert!(
+        project
+            .rows("SELECT id FROM execution WHERE intent_state = 'open'")
+            .is_empty()
+    );
+    assert!(
+        project
+            .rows("SELECT id FROM attempt WHERE state = 'live'")
+            .is_empty()
+    );
+    let landed = project.canonical_head();
+    assert_ne!(landed, main);
+    project.json(&["sync", "feature/a", "--default"]);
+    assert_eq!(default_branch(&project), "feature/a");
+    assert_eq!(branch_head(&project, "feature/a"), selected);
+    assert_eq!(project.canonical_head(), landed);
 }
