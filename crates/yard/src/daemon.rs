@@ -264,8 +264,24 @@ async fn register(daemon: &Daemon, root: PathBuf) -> Result<(), Fail> {
     let project = open_project(&root)?;
     crate::jobs::reconcile::project(daemon, &project).await?;
     {
+        let branch = daemon.git.head_branch(&project.canonical_dir()).await?;
+        let target = project.target_lock(&crate::git::target_ref(&branch));
+        let held = target.lock().await;
         let canonical = project.canonical.lock().await;
-        let _ = crate::jobs::refresh_default(daemon, &project, &canonical).await;
+        // A retained default intent must not publish while its child can act.
+        let unknown = project.read(|conn| {
+            Ok(crate::store::executions::query(
+                conn,
+                "kind = 'landing' AND (intent_state = 'open' OR reserved = 1)",
+                [],
+            )?
+            .iter()
+            .any(|row| row.intent_ref.as_deref() == Some(crate::git::target_ref(&branch).as_str())))
+        })?;
+        if !unknown {
+            let _ =
+                crate::jobs::publish_default(daemon, &project, &canonical, &branch, &held).await;
+        }
     }
     daemon
         .projects

@@ -34,12 +34,41 @@ pub struct Configurations {
     pub default: Option<String>,
 }
 
-/// Publish the validated default while canonical is held by its reader or writer.
+/// Automatic readers cannot restore an input an uncertain mutation invalidated.
 pub async fn refresh_default(
     daemon: &Daemon,
     project: &Project,
     _canonical: &tokio::sync::MutexGuard<'_, ()>,
 ) -> Result<Arc<Loaded>, Fail> {
+    if project
+        .loaded
+        .lock()
+        .expect("loaded lock")
+        .default
+        .is_none()
+    {
+        return Err(Fail::refused(
+            "the project default configuration is not loaded",
+        ));
+    }
+    read_default(daemon, project).await
+}
+
+/// Startup or a proved mutation publishes while its target is still held.
+pub async fn publish_default(
+    daemon: &Daemon,
+    project: &Project,
+    canonical: &tokio::sync::MutexGuard<'_, ()>,
+    branch: &str,
+    _target: &tokio::sync::MutexGuard<'_, ()>,
+) -> Result<Arc<Loaded>, Fail> {
+    if daemon.git.head_branch(&project.canonical_dir()).await? != branch {
+        return refresh_default(daemon, project, canonical).await;
+    }
+    read_default(daemon, project).await
+}
+
+async fn read_default(daemon: &Daemon, project: &Project) -> Result<Arc<Loaded>, Fail> {
     project.loaded.lock().expect("loaded lock").default = None;
     let loaded = load(daemon, project).await?;
     let mut configs = project.loaded.lock().expect("loaded lock");

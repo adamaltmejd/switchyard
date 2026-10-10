@@ -340,7 +340,8 @@ pub async fn doctor(daemon: &Daemon, project: &Project) -> Result<Value, Fail> {
 async fn import(
     daemon: &Daemon,
     project: &Project,
-    _held: &tokio::sync::MutexGuard<'_, ()>,
+    held: &tokio::sync::MutexGuard<'_, ()>,
+    publication: Option<&tokio::sync::MutexGuard<'_, ()>>,
     branch: &str,
     ours: Option<&str>,
     theirs: &str,
@@ -352,6 +353,15 @@ async fn import(
         .update_ref(&canonical, &target, theirs, ours, None)
         .await?;
     if !moved {
+        let acquired;
+        let published = match publication {
+            Some(published) => published,
+            None => {
+                acquired = project.canonical.lock().await;
+                &acquired
+            }
+        };
+        super::publish_default(daemon, project, published, branch, held).await?;
         return Err(Fail::refused(
             "canonical moved during the sync; run it again",
         ));
@@ -408,8 +418,9 @@ pub async fn sync(daemon: &Daemon, project: &Project, params: &Value) -> Result<
         refuse_default_switch(project, &default, named.expect("selection names a branch"))?;
     }
     let canonical = project.canonical_dir();
-    let default = daemon.git.head_branch(&canonical).await?;
-    let branch = named.unwrap_or(&default);
+    let initial_default = daemon.git.head_branch(&canonical).await?;
+    let selected_branch = named.unwrap_or(&initial_default).to_string();
+    let branch = selected_branch.as_str();
     let target = crate::git::target_ref(branch);
     let refuse_intent = || {
         project.read(|conn| {
@@ -429,11 +440,25 @@ pub async fn sync(daemon: &Daemon, project: &Project, params: &Value) -> Result<
     let target_lock = project.target_lock(&target);
     let held = target_lock.lock().await;
     refuse_intent()?;
-    let selection = if select || branch == default {
-        Some(project.canonical.lock().await)
-    } else {
-        None
-    };
+    project.read(|conn| {
+        if let Some(owner) = executions::query(
+            conn,
+            "kind = 'landing' AND reserved = 1 AND intent_ref = ?1",
+            [&target],
+        )?
+        .first()
+        {
+            return Err(Fail::refused("a landing child still owns this target")
+                .with(json!({ "reason": "ownership", "branch": branch, "execution": owner.id })));
+        }
+        Ok(())
+    })?;
+    let mut selection = Some(project.canonical.lock().await);
+    // Classification must follow both locks: selection may have changed HEAD.
+    let default = daemon.git.head_branch(&canonical).await?;
+    if !select {
+        drop(selection.take());
+    }
     if !daemon.git.valid_branch(&canonical, branch).await? {
         return Err(
             Fail::invalid("sync requires a local branch name").with(json!({ "branch": branch }))
@@ -535,16 +560,29 @@ pub async fn sync(daemon: &Daemon, project: &Project, params: &Value) -> Result<
     } else if ours.as_deref() == Some(theirs.as_str()) {
         json!({ "sync": "current", "head": theirs })
     } else if importing {
-        if branch == default {
+        if !select {
+            selection = Some(project.canonical.lock().await);
+        }
+        let current_default = daemon.git.head_branch(&canonical).await?;
+        if !select && current_default != default {
+            super::read_config(daemon, &canonical, branch, Some(&current_default), &theirs).await?;
+        }
+        if branch == current_default {
             project.loaded.lock().expect("loaded lock").default = None;
         }
-        let imported = import(daemon, project, &held, branch, ours.as_deref(), &theirs).await;
-        if imported.is_err()
-            && let Some(published) = selection.as_ref()
-        {
-            let _ = super::refresh_default(daemon, project, published).await;
+        if !select {
+            drop(selection.take());
         }
-        imported?
+        import(
+            daemon,
+            project,
+            &held,
+            selection.as_ref(),
+            branch,
+            ours.as_deref(),
+            &theirs,
+        )
+        .await?
     } else {
         let ours = ours.as_deref().expect("a consumed canonical has a head");
         let checked_out = daemon.git.current_branch(&project.root).await?;
@@ -600,7 +638,12 @@ pub async fn sync(daemon: &Daemon, project: &Project, params: &Value) -> Result<
         Some(held) => held,
         None => project.canonical.lock().await,
     };
-    super::refresh_default(daemon, project, &published).await?;
+    if (importing && ours.as_deref() != Some(theirs.as_str())) || (select && branch != default) {
+        super::publish_default(daemon, project, &published, branch, &held).await?;
+    } else {
+        // A checkout-only consume must not heal an uncertain default mutation.
+        super::refresh_default(daemon, project, &published).await?;
+    }
     Ok(result)
 }
 
@@ -1024,16 +1067,6 @@ pub async fn attempt_start(
 ) -> Result<Value, Fail> {
     let id = ticket_param(params)?;
     let canonical = project.canonical.lock().await;
-    let default = super::refresh_default(daemon, project, &canonical).await?;
-    let live = project.read(|conn| attempts::live_for(conn, id))?;
-    let ticket = project.read(|conn| tickets::get(conn, id))?;
-    let branch = live
-        .as_ref()
-        .map(attempts::Attempt::target_branch)
-        .transpose()?
-        .or(ticket.target_branch.as_deref())
-        .unwrap_or(&default.branch);
-    let loaded = super::load_target(daemon, project, branch).await?;
     let items = project.read(|conn| {
         let mut items = attempts::open_attention(conn)?;
         items.retain(|item| {
@@ -1050,6 +1083,26 @@ pub async fn attempt_start(
             json!(items.iter().map(|item| item.id).collect::<Vec<_>>()),
         ));
     }
+    if let Some(item) = items.first()
+        && let Some(execution) = item.execution
+        && project.read(|conn| {
+            Ok(executions::get(conn, execution)?.intent_state.as_deref() == Some("open"))
+        })?
+    {
+        // Intent repair proves ownership before restoring an unavailable input.
+        drop(canonical);
+        return answer_start(daemon, project, item).await;
+    }
+    let default = super::refresh_default(daemon, project, &canonical).await?;
+    let live = project.read(|conn| attempts::live_for(conn, id))?;
+    let ticket = project.read(|conn| tickets::get(conn, id))?;
+    let branch = live
+        .as_ref()
+        .map(attempts::Attempt::target_branch)
+        .transpose()?
+        .or(ticket.target_branch.as_deref())
+        .unwrap_or(&default.branch);
+    let loaded = super::load_target(daemon, project, branch).await?;
     if let Some(item) = items.first() {
         drop(canonical);
         return answer_start(daemon, project, item).await;

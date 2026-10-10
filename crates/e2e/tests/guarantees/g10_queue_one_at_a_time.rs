@@ -2,6 +2,7 @@
 
 use e2e::*;
 use serde_json::{Value, json};
+use std::io::Write;
 
 fn unreviewed(extra: &str) -> String {
     config(extra).replace("review = [\"correctness\"]", "review = \"none\"")
@@ -459,9 +460,34 @@ fn target_worker(request: &ModelRequest) -> Reply {
     act(request, vec![commit_file(file, "feature\n", "Feature")])
 }
 
-fn hold_feature_a(
-    machine: &Machine,
-) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+struct HeldTarget {
+    armed: std::path::PathBuf,
+    said: std::path::PathBuf,
+    release: std::fs::File,
+}
+
+impl HeldTarget {
+    fn release(&self) {
+        let _ = std::fs::remove_file(&self.armed);
+        let _ = (&self.release).write_all(b"go\n");
+    }
+}
+
+impl Drop for HeldTarget {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+struct HeldModel(Latch);
+
+impl Drop for HeldModel {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
+fn hold_feature_a(machine: &Machine) -> HeldTarget {
     let armed = machine.root.join("armed");
     let said = machine.root.join("said");
     let release = machine.root.join("release");
@@ -478,7 +504,16 @@ fn hold_feature_a(
         "case \" $* \" in *' update-ref --no-deref refs/heads/feature/a '*) if [ -e '{}' ]; then echo held > '{}'; read line < '{}'; fi;; esac",
         armed.display(), said.display(), release.display()
     ));
-    (armed, said, release)
+    let release = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(release)
+        .unwrap();
+    HeldTarget {
+        armed,
+        said,
+        release,
+    }
 }
 
 /// G10/G3: hold feature/a after intent, while b lands and the second a waits.
@@ -488,7 +523,7 @@ fn hold_feature_a(
 #[test]
 fn unrelated_targets_land_while_the_same_target_waits() {
     let machine = Machine::new("g10-targets", target_worker);
-    let (armed, said, release) = hold_feature_a(&machine);
+    let held = hold_feature_a(&machine);
     machine.start();
     let project = Project::new(
         &machine,
@@ -500,7 +535,7 @@ fn unrelated_targets_land_while_the_same_target_waits() {
     let heads = target_candidates(&project, &mut watch, &branches);
     let old = target_head(&project, "feature/a");
     let main = project.canonical_head();
-    std::fs::write(&armed, "").unwrap();
+    std::fs::write(&held.armed, "").unwrap();
     project.json(&[
         "attempt",
         "approve",
@@ -510,7 +545,7 @@ fn unrelated_targets_land_while_the_same_target_waits() {
         "--head",
         &heads[0],
     ]);
-    assert_eq!(watch.said(&said), "held\n");
+    assert_eq!(watch.said(&held.said), "held\n");
     for id in [3, 2] {
         project.json(&[
             "attempt",
@@ -537,8 +572,7 @@ fn unrelated_targets_land_while_the_same_target_waits() {
     assert_eq!(refused["data"]["intent"], intent[0]["id"]);
     project.git(&["checkout", "--quiet", "feature/b"]);
     project.json(&["sync", "feature/b"]);
-    std::fs::remove_file(&armed).unwrap();
-    std::fs::write(&release, "go\n").unwrap();
+    held.release();
     for ticket in ["Y-1", "Y-3"] {
         watch.find(ticket, |event| {
             event["event"] == "landing.recorded" && event["ticket"] == ticket
@@ -561,10 +595,21 @@ fn unrelated_targets_land_while_the_same_target_waits() {
 /// model fixture supplies absence of worker actions. No elapsed-time assertion.
 /// Sabotage: bypass capacity::effect for independent-target landing, or count
 /// boxes alone; the waiting targets act instead of reporting capacity waits.
+/// Launch a box without recording its handle: the scoped pinfold absence
+/// observation still sees it. The label comes from the fixture's held worker.
 #[test]
 fn independent_target_landings_share_the_project_execution_cap() {
-    let machine = Machine::new("g4-targets", target_worker);
-    let (armed, said, release) = hold_feature_a(&machine);
+    let model_hold = Latch::new();
+    let worker_hold = model_hold.clone();
+    let machine = Machine::new("g4-targets", move |request| {
+        let reply = target_worker(request);
+        if request.opens() && request.prompt().contains("Candidate 0") {
+            Reply::Hold(worker_hold.clone(), Box::new(reply))
+        } else {
+            reply
+        }
+    });
+    let held = hold_feature_a(&machine);
     machine.start();
     let project = Project::new(
         &machine,
@@ -573,8 +618,25 @@ fn independent_target_landings_share_the_project_execution_cap() {
     );
     let mut watch = project.watch(0);
     let branches = ["feature/a", "feature/b", "feature/c"];
-    let heads = target_candidates(&project, &mut watch, &branches);
-    std::fs::write(&armed, "").unwrap();
+    let (heads, label) = std::thread::scope(|scope| {
+        let _release = HeldModel(model_hold.clone());
+        let candidates = scope.spawn(|| target_candidates(&project, &mut watch, &branches));
+        model_hold.wait_held();
+        let owners = project.rows("SELECT handle FROM execution WHERE reserved = 1");
+        let worker = machine
+            .boxes("dev.yard.project")
+            .into_iter()
+            .find(|listed| listed["name"] == owners[0]["handle"])
+            .expect("the fixture's held worker has a pinfold box");
+        let label = format!(
+            "dev.yard.project={}",
+            worker["labels"]["dev.yard.project"].as_str().unwrap()
+        );
+        assert_eq!(machine.boxes(&label).len(), 1);
+        model_hold.release();
+        (candidates.join().unwrap(), label)
+    });
+    std::fs::write(&held.armed, "").unwrap();
     project.json(&[
         "attempt",
         "approve",
@@ -584,7 +646,7 @@ fn independent_target_landings_share_the_project_execution_cap() {
         "--head",
         &heads[0],
     ]);
-    assert_eq!(watch.said(&said), "held\n");
+    assert_eq!(watch.said(&held.said), "held\n");
     for id in [2, 3] {
         project.json(&[
             "attempt",
@@ -623,17 +685,10 @@ fn independent_target_landings_share_the_project_execution_cap() {
         owners,
         vec![json!({"kind": "landing", "intent_ref": "refs/heads/feature/a"})]
     );
-    let handles = project.rows("SELECT handle FROM execution WHERE handle IS NOT NULL");
-    assert!(
-        machine
-            .boxes("dev.yard.project")
-            .iter()
-            .all(|listed| !handles.iter().any(|row| row["handle"] == listed["name"]))
-    );
+    assert!(machine.boxes(&label).is_empty());
     // Cancel the new worker so only the three approved targets compete next.
     project.json(&["attempt", "abandon", "Y-4"]);
-    std::fs::remove_file(&armed).unwrap();
-    std::fs::write(&release, "go\n").unwrap();
+    held.release();
     for id in 1..=3 {
         watch.find("waiting target lands", |event| {
             event["event"] == "landing.recorded" && event["ticket"] == format!("Y-{id}")

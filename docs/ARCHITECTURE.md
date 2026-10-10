@@ -160,11 +160,20 @@ reads the validated current default entry in the one configuration map;
 it launches no Git. Startup, scheduler refresh, sync and explicit attempt start
 publish that entry under canonical's lock. Explicit start uses the published
 reading for admission before spawning or releasing the lock to answer a live
-stopped/red item. Canonical target/default mutations invalidate it before
+stopped/red item. Mutations of the current default ref or symbolic HEAD invalidate it before
 acting, then publish the validated current input or leave it unavailable.
+Classification and invalidation hold the publication lock. A nondefault ref
+mutation preserves that input. Ordinary target ref effects release the
+publication lock; default selection stays serialized. A landing's target
+lock stays held through ownership release.
 Sync refusals before canonical mutation preserve the published input;
 checkout-only consume does not invalidate it. A completed failed import
 revalidates the actual default; an uncertain mutation leaves it unavailable.
+Automatic refresh never restores an unavailable input. Known completed
+mutations publish while their target is held; unknown landing ownership
+requires the existing reconciliation proof before publication. Startup does
+not publish over an open default intent or its retained reservation.
+An intent's start exit can prove recovery while default input is unavailable.
 An unavailable validated default refuses new effects. Selected-target cache
 reads do not replace the published default input.
 An attempt freezes its workflow's name and its
@@ -618,9 +627,11 @@ admissions only.
 The refusal reads live work before waiting for canonical and again under its
 lock, so a held landing child cannot delay its named intent refusal.
 Default selection, admission, workflow edits and ticket-proposal acceptance
-serialize with project default configuration publication. A sync that changes
-the current default publishes its configuration before releasing shared
-execution admission. Body, title and priority edits, proposal
+serialize with project default configuration publication. Sync re-reads
+the default under that lock after taking its target lock and before import
+invalidation. An uncertain import or default-selection error does not
+restore the input. Named sync also refuses a retained landing mutation owner
+after taking the target lock. Body, title and priority edits, proposal
 edit/link acceptance and rejection do not wait on canonical. Target edits
 also do not wait on canonical; admission rechecks the revision and branch.
 The existing queue is partitioned by frozen target, in approval order within

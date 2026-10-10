@@ -229,6 +229,11 @@ pub async fn decide_intent(
             }
             Ok(())
         })?;
+        let published = project.canonical.lock().await;
+        let branch = target_ref
+            .strip_prefix("refs/heads/")
+            .expect("a target ref");
+        let _ = super::publish_default(daemon, project, &published, branch, &_held).await;
         return Ok(true);
     }
     if target == merged
@@ -238,6 +243,11 @@ pub async fn decide_intent(
             .await?
     {
         project.tx(|tx| record_landing(tx, row.id))?;
+        let published = project.canonical.lock().await;
+        let branch = target_ref
+            .strip_prefix("refs/heads/")
+            .expect("a target ref");
+        let _ = super::publish_default(daemon, project, &published, branch, &_held).await;
         return Ok(true);
     }
     undecided("canonical's target is neither the expected old head nor contains the merged head")

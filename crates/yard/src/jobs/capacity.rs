@@ -127,6 +127,15 @@ pub async fn reap(daemon: &Daemon, project: &Project) -> Result<(), Fail> {
         }
         if row.intent_state.as_deref() == Some("open") {
             super::reconcile::decide_intent(daemon, project, &row).await?;
+        } else if row.kind == "landing" && row.intent_state.as_deref() == Some("resolved") {
+            let target_ref = row.intent_ref.as_deref().expect("a landing intent target");
+            let branch = target_ref
+                .strip_prefix("refs/heads/")
+                .expect("a target ref");
+            let target = project.target_lock(target_ref);
+            let held = target.lock().await;
+            let published = project.canonical.lock().await;
+            let _ = super::publish_default(daemon, project, &published, branch, &held).await;
         } else if row.status == "running" {
             project.tx(|tx| {
                 executions::end(

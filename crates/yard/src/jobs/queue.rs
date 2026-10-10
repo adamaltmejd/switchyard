@@ -229,6 +229,17 @@ async fn admit<T>(
     };
     // Default selection must see an intent committed before it changes HEAD.
     let _publication = project.canonical.lock().await;
+    if project
+        .loaded
+        .lock()
+        .expect("loaded lock")
+        .default
+        .is_none()
+    {
+        return Err(Fail::refused(
+            "the project default configuration is not loaded",
+        ));
+    }
     let admitted = project.tx(|tx| {
         let unchanged = checks::approval(tx, now.approval.id)?.state == now.approval.state
             && !attempts::superseded_by_edit(
@@ -481,8 +492,8 @@ pub async fn land(
         }
     }
 
+    let held = target_lock.lock().await;
     let result = super::capacity::effect(daemon, project, execution, async {
-        let held = target_lock.lock().await;
         let admitted = admit(
             daemon,
             project,
@@ -498,7 +509,12 @@ pub async fn land(
                     &merged,
                     now.ticket.id,
                     now.attempt.id,
-                )
+                )?;
+                let mut configs = project.loaded.lock().expect("loaded lock");
+                if configs.default.as_deref() == Some(now.loaded.branch.as_str()) {
+                    configs.default = None;
+                }
+                Ok(())
             },
         )
         .await?;
@@ -519,7 +535,8 @@ pub async fn land(
         match moved {
             Ok(false) => {
                 let published = project.canonical.lock().await;
-                let _ = super::refresh_default(daemon, project, &published).await;
+                let _ = super::publish_default(daemon, project, &published, &loaded.branch, &held)
+                    .await;
                 // The target moved under the landing: retired silently, re-queued.
                 return project.tx(|tx| {
                     executions::resolve_intent(tx, execution)?;
@@ -551,11 +568,19 @@ pub async fn land(
             ));
         }
         let published = project.canonical.lock().await;
-        let _ = super::refresh_default(daemon, project, &published).await;
+        let _ = super::publish_default(daemon, project, &published, &loaded.branch, &held).await;
         project.tx(|tx| record_landing(tx, execution))
     })
     .await;
     let row = project.read(|conn| executions::get(conn, execution))?;
+    if row.reserved {
+        let _published = project.canonical.lock().await;
+        let mut configs = project.loaded.lock().expect("loaded lock");
+        if configs.default.as_deref() == Some(loaded.branch.as_str()) {
+            configs.default = None;
+        }
+    }
+    drop(held);
     if row.intent_state.as_deref() == Some("open") {
         super::reconcile::decide_intent(daemon, project, &row).await?;
     }
