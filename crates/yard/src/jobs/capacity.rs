@@ -209,6 +209,10 @@ pub async fn release(
     };
     project.tx(|tx| {
         if gone {
+            tx.execute(
+                "UPDATE execution SET teardown = 1 WHERE id = ?1 AND node IS NOT NULL",
+                [row.id],
+            )?;
             executions::reserve(tx, row.id, false)?;
         } else if !attempts::open_attention(tx)?
             .iter()

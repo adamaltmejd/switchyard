@@ -67,10 +67,13 @@ fn a_ticket_lands_end_to_end_and_leaves_only_rows() {
         event["event"] == "attention.raised" && event["data"]["kind"] == "approval"
     });
     assert_eq!(raised["ticket"], "Y-1");
-    let head = raised["data"]["payload"]["head"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let head = git(
+        &project.path.join(".yard/local/attempts/1/clone"),
+        &["rev-parse", "HEAD"],
+    )
+    .trim()
+    .to_string();
+    assert_eq!(raised["data"]["payload"]["head"], head);
     // The candidate is the worker's commit on top of the target.
     assert_eq!(
         git(
@@ -86,14 +89,30 @@ fn a_ticket_lands_end_to_end_and_leaves_only_rows() {
 
     // The snapshot is on the host before landing, holding what the worker
     // wrote into `/yard/proof`.
-    let proof = raised["data"]["payload"]["proof"].as_str().unwrap();
+    let snapshots = project.path.join(".yard/local/attempts/1/proof-snapshots");
+    let proof = std::fs::read_dir(&snapshots)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .file_name()
+        .into_string()
+        .unwrap();
+    assert_eq!(raised["data"]["payload"]["proof"], proof);
     let snapshot = project.path.join(format!(
         ".yard/local/attempts/1/proof-snapshots/{proof}/evidence.txt"
     ));
     assert_eq!(std::fs::read(&snapshot).unwrap(), b"evidence");
 
+    // Separate candidate and merged inputs with a real target advance.
+    project.write("target.txt", "target advance\n");
+    project.git(&["add", "target.txt"]);
+    project.git(&["commit", "-qm", "Advance target before landing"]);
+    let target = project.git(&["rev-parse", "HEAD"]).trim().to_string();
+    project.json(&["sync", "main"]);
+
     project.json(&[
-        "attempt", "approve", "--target", "main", "Y-1", "--head", &head, "--proof", proof,
+        "attempt", "approve", "--target", "main", "Y-1", "--head", &head, "--proof", &proof,
         "--text", "ship it",
     ]);
     watch.event("landing.recorded", &[]);
@@ -101,9 +120,88 @@ fn a_ticket_lands_end_to_end_and_leaves_only_rows() {
         event["event"] == "execution.ended" && event["data"]["kind"] == "cleanup"
     });
 
-    // Canonical is a fast-forward to the candidate, and the ticket is done.
-    assert_eq!(project.canonical_head(), head);
+    // Canonical merges the candidate and the advanced target.
+    let merged = project.canonical_head();
+    assert_eq!(
+        git(&project.canonical(), &["rev-parse", &format!("{merged}^1")]).trim(),
+        target
+    );
+    assert_eq!(
+        git(&project.canonical(), &["rev-parse", &format!("{merged}^2")]).trim(),
+        head
+    );
     assert_eq!(project.json(&["ticket", "show", "Y-1"])["state"], "done");
+
+    // G7 node/input/result evidence survives cleanup. Sabotage: attribute a
+    // result to another node/input, or feed landing gates the candidate.
+    // Names and revision are literal fixture admission; commits come from git,
+    // proof from the host snapshot. Execution IDs only establish reference
+    // agreement, including CLI/store agreement after cleanup.
+    let shown = project.json(&["attempt", "show", "Y-1"]);
+    let rows = shown["executions"].as_array().unwrap();
+    let nodes: Vec<_> = rows
+        .iter()
+        .filter(|row| row["binding"]["status"] == "recorded")
+        .collect();
+    assert_eq!(
+        nodes
+            .iter()
+            .map(|row| row["binding"]["node"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "implementer",
+            "candidate-gate-check",
+            "review-0",
+            "landing-gate-check"
+        ]
+    );
+    let candidate = json!({"base": start, "head": head, "proof": proof});
+    assert_eq!(nodes[0]["binding"]["inputs"], json!({}));
+    assert_eq!(
+        nodes[0]["result"]["outputs"]["result"],
+        json!({"kind": "candidate", "value": candidate})
+    );
+    for row in &nodes {
+        assert_eq!(row["plan_revision"], 1);
+        assert_eq!(row["result_eligible"], true);
+        assert_eq!(row["teardown"], true);
+        assert_eq!(row["result"]["outcome"], "complete");
+        assert_eq!(row["result"]["infrastructure"]["outcome"], "completed");
+    }
+    for row in &nodes[1..3] {
+        assert_eq!(
+            row["binding"]["inputs"],
+            json!({"candidate": {
+                "kind": "candidate", "source": {"execution": nodes[0]["execution"], "node": "implementer", "output": "result"},
+                "value": candidate,
+            }})
+        );
+        assert_eq!(row["result"]["outputs"]["result"]["kind"], "verdict");
+        assert_eq!(row["result"]["judgment"]["verdict"], "pass");
+    }
+    assert_eq!(
+        nodes[3]["binding"]["inputs"],
+        json!({"merged": {
+            "kind": "candidate", "source": {"external": "merged", "execution": nodes[3]["parent"]},
+            "value": {"base": target, "head": merged, "proof": proof},
+        }})
+    );
+    assert_eq!(nodes[3]["result"]["judgment"]["verdict"], "pass");
+    let stored = project.rows("SELECT node, inputs, result, plan_revision, teardown FROM execution WHERE attempt = 1 AND node IS NOT NULL ORDER BY id");
+    assert_eq!(stored.len(), nodes.len());
+    for (row, saved) in nodes.iter().zip(&stored) {
+        assert_eq!(saved["node"], row["binding"]["node"]);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(saved["inputs"].as_str().unwrap()).unwrap(),
+            row["binding"]["inputs"]
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(saved["result"].as_str().unwrap()).unwrap(),
+            row["result"]
+        );
+        assert_eq!(saved["plan_revision"], row["plan_revision"]);
+        assert_eq!(saved["teardown"], 1);
+    }
 
     // Every decision has one audit event naming its target, with its text.
     let events = project.rows("SELECT event, ticket, text FROM audit ORDER BY seq");

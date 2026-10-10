@@ -148,9 +148,8 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
     let _ = std::fs::remove_dir_all(&dir);
     let run = run?;
 
-    // The box is gone: only now does the verdict count toward anything.
-    // Whether it counts is `checks::current`'s durable registration proof;
-    // the outcome here is only the terminal frame and the publication.
+    // Publication survives a failed runner. Eligibility also needs the
+    // registration and ownership proofs checked by checks::current.
     project.tx(|tx| {
         if attempts::get(tx, attempt.id)?.state != "live" {
             return executions::end(
@@ -189,11 +188,25 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
                 .as_ref()
                 .map_or("error", |check| check.verdict.as_str()),
         };
+        let infrastructure = if run.timed_out {
+            "timeout"
+        } else if run.stopped {
+            "stopped"
+        } else if matches!(run.terminal, Some(crate::harness::Event::Failed { .. }))
+            || run.exit_code.is_some_and(|code| code != 0)
+        {
+            "failed"
+        } else if run.terminal.is_none() {
+            "unknown"
+        } else {
+            "completed"
+        };
         executions::end(
             tx,
             execution,
             executions::End {
                 outcome,
+                infrastructure: Some(infrastructure),
                 detail: failure.as_deref(),
                 exit_code: run.exit_code,
                 ticket: Some(ticket.id),

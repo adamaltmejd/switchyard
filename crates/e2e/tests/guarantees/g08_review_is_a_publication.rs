@@ -110,6 +110,9 @@ fn a_seat_that_exits_without_publishing_is_a_review_error() {
 /// Sabotage: defer recording the check to the execution's end; restart
 /// reruns the seat. Drop `review::publish`'s already-published check; the
 /// second publication records its blocking finding.
+/// Bind a result at publication, before checked teardown; the held row is
+/// eligible. Attribute the reconciled result to a new execution or another
+/// node/input; the original publication reference and input agreement fail.
 #[test]
 fn a_seat_killed_after_publishing_has_published() {
     let hold = Latch::new();
@@ -137,6 +140,28 @@ fn a_seat_killed_after_publishing_has_published() {
             .len(),
         1
     );
+    // The fixture holds the seat's request after both tool replies, so the
+    // publication is committed and its registered box is still acting.
+    let before = project.json(&["attempt", "show", "Y-1"]);
+    let review = before["executions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["kind"] == "review")
+        .unwrap()
+        .clone();
+    assert_eq!(review["binding"]["node"], "review-0");
+    assert_eq!(review["result"], serde_json::Value::Null);
+    assert_eq!(review["result_eligible"], false);
+    assert_eq!(review["teardown"], false);
+    let publication = before["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["kind"] == "review")
+        .unwrap()
+        .clone();
+    assert_eq!(publication["execution"], review["execution"]);
     machine.kill();
 
     assert_eq!(
@@ -144,8 +169,8 @@ fn a_seat_killed_after_publishing_has_published() {
         vec![json!({ "verdict": "pass" })]
     );
     assert_eq!(
-        project.rows("SELECT status FROM execution WHERE kind = 'review'"),
-        vec![json!({ "status": "running" })]
+        project.rows("SELECT status, result, teardown FROM execution WHERE kind = 'review'"),
+        vec![json!({ "status": "running", "result": null, "teardown": 0 })]
     );
 
     machine.start();
@@ -158,6 +183,28 @@ fn a_seat_killed_after_publishing_has_published() {
         project.rows("SELECT outcome FROM execution WHERE kind = 'review'"),
         vec![json!({ "outcome": "interrupted" })]
     );
+    let after = project.json(&["attempt", "show", "Y-1"]);
+    let reviews: Vec<_> = after["executions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["kind"] == "review")
+        .collect();
+    assert_eq!(reviews.len(), 1);
+    let ended = reviews[0];
+    assert_eq!(ended["execution"], review["execution"]);
+    assert_eq!(ended["binding"], review["binding"]);
+    assert_eq!(ended["result_eligible"], true);
+    assert_eq!(ended["teardown"], true);
+    assert_eq!(ended["result"]["outcome"], "complete");
+    assert_eq!(ended["result"]["infrastructure"]["outcome"], "interrupted");
+    assert_eq!(
+        ended["result"]["outputs"]["result"],
+        json!({"kind": "verdict", "value": {
+            "publication": publication["check"], "verdict": "pass",
+        }})
+    );
+    assert_eq!(after["checks"], before["checks"]);
     hold.release();
 }
 

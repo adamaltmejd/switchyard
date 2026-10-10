@@ -19,6 +19,11 @@ pub struct Execution {
     pub proof: Option<String>,
     pub ticket_revision: Option<i64>,
     pub plan_revision: Option<i64>,
+    pub node: Option<String>,
+    pub inputs: Option<Value>,
+    pub result: Option<Value>,
+    pub teardown: Option<bool>,
+    pub result_eligible: bool,
     pub name: Option<String>,
     pub round: Option<i64>,
     pub handle: Option<String>,
@@ -41,7 +46,24 @@ pub struct Execution {
 const COLUMNS: &str = "id, attempt, parent, kind, reason, status, outcome, detail, base, head,
     proof, ticket_revision, name, round, handle, session_id, approval, intent_old, intent_merged,
     intent_state, progress, harness_version, resumed, reserved, lock_contract, intent_ref, plan_revision,
-    tokens_in, tokens_out, cost, usage_fields, harness, model";
+    tokens_in, tokens_out, cost, usage_fields, harness, model, node, inputs, result, teardown";
+
+pub const RESULT_ELIGIBLE: &str = "status = 'ended' AND reserved = 0 AND teardown = 1
+    AND json_extract(result, '$.outputs.result') IS NOT NULL";
+
+fn json_column(row: &Row, index: usize) -> rusqlite::Result<Option<Value>> {
+    row.get::<_, Option<String>>(index)?
+        .map(|text| {
+            serde_json::from_str(&text).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    index,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })
+        })
+        .transpose()
+}
 
 fn row(row: &Row) -> rusqlite::Result<Execution> {
     Ok(Execution {
@@ -91,6 +113,11 @@ fn row(row: &Row) -> rusqlite::Result<Execution> {
         },
         harness: row.get(31)?,
         model: row.get(32)?,
+        node: row.get(33)?,
+        inputs: json_column(row, 34)?,
+        result: json_column(row, 35)?,
+        teardown: row.get(36)?,
+        result_eligible: row.get(37)?,
     })
 }
 
@@ -122,7 +149,14 @@ impl Execution {
             "base": self.base,
             "head": self.head,
             "proof": self.proof,
+            "ticket_revision": self.ticket_revision,
             "plan_revision": self.plan_revision,
+            "binding": self.node.as_ref().map_or_else(|| json!({"status": "unknown"}), |node| json!({
+                "status": "recorded", "node": node, "inputs": self.inputs,
+            })),
+            "result": self.result,
+            "teardown": self.teardown,
+            "result_eligible": self.result_eligible,
             "name": self.name,
             "round": self.round,
             "usage": self.usage,
@@ -139,7 +173,7 @@ impl Execution {
 
 pub fn get(conn: &Connection, id: i64) -> Result<Execution, Fail> {
     conn.query_row(
-        &format!("SELECT {COLUMNS} FROM execution WHERE id = ?1"),
+        &format!("SELECT {COLUMNS}, COALESCE(({RESULT_ELIGIBLE}), 0) FROM execution WHERE id = ?1"),
         [id],
         row,
     )
@@ -211,7 +245,9 @@ pub fn query<P: rusqlite::Params>(
 ) -> Result<Vec<Execution>, Fail> {
     super::all(
         conn,
-        &format!("SELECT {COLUMNS} FROM execution WHERE {filter}"),
+        &format!(
+            "SELECT {COLUMNS}, COALESCE(({RESULT_ELIGIBLE}), 0) FROM execution WHERE {filter}"
+        ),
         params,
         row,
     )
@@ -271,10 +307,13 @@ pub fn start(tx: &Connection, start: Start) -> Result<i64, Fail> {
         ],
     )?;
     let id = tx.last_insert_rowid();
-    let revision = super::attempts::get(tx, start.attempt)?.plan_revision();
+    let attempt = super::attempts::get(tx, start.attempt)?;
+    let revision = attempt.plan_revision();
+    let binding = binding(tx, &attempt, &start)?;
     tx.execute(
-        "UPDATE execution SET plan_revision = ?2 WHERE id = ?1",
-        params![id, revision],
+        "UPDATE execution SET plan_revision = ?2, node = ?3, inputs = ?4, teardown = ?5 WHERE id = ?1",
+        params![id, revision, binding.as_ref().map(|(node, _)| node),
+            binding.as_ref().map(|(_, inputs)| inputs.to_string()), binding.as_ref().map(|_| false)],
     )?;
     audit(
         tx,
@@ -290,6 +329,74 @@ pub fn start(tx: &Connection, start: Start) -> Result<i64, Fail> {
                 "head": start.head, "proof": start.proof, "parent": start.parent }),
     )?;
     Ok(id)
+}
+
+/// Bind only the admitted ordinary chain. Merge, cleanup and old history have no node.
+fn binding(
+    conn: &Connection,
+    attempt: &super::attempts::Attempt,
+    start: &Start,
+) -> Result<Option<(String, Value)>, Fail> {
+    let Some(admission) = &attempt.admission else {
+        return Ok(None);
+    };
+    let node = match start.kind {
+        "implementation" => "implementer".to_string(),
+        "gate" => format!(
+            "{}-gate-{}",
+            if start.parent.is_some() {
+                "landing"
+            } else {
+                "candidate"
+            },
+            start.name.unwrap_or_default()
+        ),
+        "review" => {
+            let seats = admission["workflow"]["review"]
+                .as_array()
+                .ok_or_else(|| Fail::refused("invalid admitted panel"))?;
+            let index = seats
+                .iter()
+                .position(|seat| seat.as_str() == start.name)
+                .ok_or_else(|| Fail::refused("seat absent from admitted panel"))?;
+            format!("review-{index}")
+        }
+        _ => return Ok(None),
+    };
+    let declared = &admission["plan"]["nodes"][&node]["inputs"];
+    let declared = declared
+        .as_object()
+        .ok_or_else(|| Fail::refused("node absent from admitted plan"))?;
+    let mut inputs = serde_json::Map::new();
+    for (name, reference) in declared {
+        let value = json!({"base": start.base, "head": start.head, "proof": start.proof.unwrap_or_default()});
+        let source = if reference["node"] == "implementer" {
+            let producer = conn.query_row(
+                &format!("SELECT id FROM execution WHERE attempt = ?1 AND node = 'implementer'
+                 AND {RESULT_ELIGIBLE} AND json_extract(result, '$.outputs.result.value.base') = ?2
+                 AND json_extract(result, '$.outputs.result.value.head') = ?3
+                 AND json_extract(result, '$.outputs.result.value.proof') = ?4 ORDER BY id DESC LIMIT 1"),
+                params![attempt.id, start.base, start.head, start.proof.unwrap_or_default()],
+                |row| row.get::<_, i64>(0),
+            ).optional()?;
+            // An upgraded live attempt can still carry a pre-binding candidate.
+            if producer.is_none() && !conn.query_row(
+                "SELECT COALESCE((SELECT node IS NULL FROM execution WHERE attempt = ?1
+                 AND kind = 'implementation' AND outcome = 'candidate' ORDER BY id DESC LIMIT 1), 0)",
+                [attempt.id], |row| row.get::<_, bool>(0),
+            )? {
+                return Err(Fail::refused("candidate has no eligible implementer result"));
+            }
+            producer.map_or_else(|| json!({"status": "unknown"}), |execution| json!({"execution": execution, "node": "implementer", "output": "result"}))
+        } else {
+            json!({"external": "merged", "execution": start.parent})
+        };
+        inputs.insert(
+            name.clone(),
+            json!({"kind": reference["kind"], "source": source, "value": value}),
+        );
+    }
+    Ok(Some((node, Value::Object(inputs))))
 }
 
 /// Observational: no event.
@@ -372,11 +479,14 @@ pub fn set_mcp(conn: &Connection, id: i64, mcp: &str) -> Result<(), Fail> {
 #[derive(Default)]
 pub struct End<'a> {
     pub outcome: &'a str,
+    pub infrastructure: Option<&'a str>,
     pub detail: Option<&'a str>,
     pub exit_cause: Option<&'a str>,
     pub exit_code: Option<i32>,
     pub oom_kills: Option<u64>,
     pub ticket: Option<i64>,
+    /// A candidate or report admitted after the implementer's checked teardown.
+    pub output: Option<Value>,
 }
 
 pub fn end(tx: &Connection, id: i64, end: End) -> Result<(), Fail> {
@@ -401,6 +511,47 @@ pub fn end(tx: &Connection, id: i64, end: End) -> Result<(), Fail> {
             now()
         ],
     )?;
+    if execution.node.is_some() {
+        let publication = super::checks::for_execution(tx, id)?;
+        let registered: Option<String> =
+            tx.query_row("SELECT mcp FROM execution WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })?;
+        let judgment = if end.outcome == "abandoned" {
+            None
+        } else {
+            publication
+                .as_ref()
+                .filter(|_| registered.as_deref() == Some("registered"))
+                .map(|check| json!({"publication": check.id, "verdict": check.verdict}))
+                .or_else(|| {
+                    (execution.kind == "gate" && matches!(end.outcome, "pass" | "fail"))
+                        .then(|| json!({"verdict": end.outcome}))
+                })
+        };
+        let infrastructure = end.infrastructure.unwrap_or(
+            if matches!(end.outcome, "pass" | "fail" | "candidate") || end.output.is_some() {
+                "completed"
+            } else {
+                end.outcome
+            },
+        );
+        let output = end.output.or_else(|| {
+            judgment
+                .as_ref()
+                .map(|judgment| json!({"kind": "verdict", "value": judgment}))
+        });
+        let result = json!({
+            "outcome": output.as_ref().map(|_| "complete"),
+            "infrastructure": {"outcome": infrastructure, "exit_cause": end.exit_cause, "exit_code": end.exit_code},
+            "judgment": judgment,
+            "outputs": output.map_or_else(|| json!({}), |output| json!({"result": output})),
+        });
+        tx.execute(
+            "UPDATE execution SET result = ?2 WHERE id = ?1",
+            params![id, result.to_string()],
+        )?;
+    }
     audit(
         tx,
         "execution.ended",

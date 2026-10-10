@@ -52,6 +52,7 @@ pub fn start_implementation(
             reason: Some(reason),
             base: Some(&attempt.base),
             head: attempt.head.as_deref(),
+            proof: attempt.proof.as_deref(),
             ticket_revision: Some(ticket.revision),
             ticket: Some(ticket.id),
             agent: Some((name, &attempt.implementer)),
@@ -804,6 +805,7 @@ pub async fn implement(
                 exit_code: run.exit_code,
                 oom_kills: oom,
                 ticket: Some(ticket.id),
+                ..Default::default()
             })?;
             return stop(tx, if outcome == "timeout" { "timeout" } else { "failed" }, &detail);
         }
@@ -906,6 +908,7 @@ pub async fn implement(
         if !advanced {
             executions::end(tx, execution, executions::End {
                 outcome: "unchanged",
+                output: (workflow.read_only && !run.stopped && !edited).then(|| json!({"kind": "report", "value": {"execution": execution}})),
                 exit_code: run.exit_code,
                 ticket: Some(ticket.id),
                 ..Default::default()
@@ -926,6 +929,7 @@ pub async fn implement(
         )?;
         executions::end(tx, execution, executions::End {
             outcome: "candidate",
+            output: Some(json!({"kind": "candidate", "value": {"base": base, "head": new_head, "proof": digest}})),
             exit_code: run.exit_code,
             ticket: Some(ticket.id),
             ..Default::default()
@@ -1232,15 +1236,23 @@ pub async fn gate(
     let _ = std::fs::remove_dir_all(&checkout);
     let log = dir.join("gates").join(format!("{execution}.log"));
     let stopped = matches!(&outcome, Ok(result) if result.stopped);
-    let (verdict, detail, code, oom) = match outcome {
-        Ok(result) if result.stopped => ("stopped", String::new(), None, None),
+    let (verdict, detail, code, oom, infrastructure) = match outcome {
+        Ok(result) if result.stopped => {
+            ("stopped", String::new(), None, None, result.infrastructure)
+        }
         Ok(result) => {
             let _ = std::fs::write(&log, &result.output);
             let tail = tail(&result.output);
             let verdict = if result.code == 0 { "pass" } else { "fail" };
-            (verdict, tail, Some(result.code), result.oom)
+            (
+                verdict,
+                tail,
+                Some(result.code),
+                result.oom,
+                result.infrastructure,
+            )
         }
-        Err(error) => ("error", error, None, None),
+        Err(error) => ("error", error, None, None, "error"),
     };
     project.tx(|tx| {
         if attempts::get(tx, attempt.id)?.state != "live" {
@@ -1266,6 +1278,7 @@ pub async fn gate(
             execution,
             executions::End {
                 outcome: verdict,
+                infrastructure: Some(infrastructure),
                 detail: Some(&detail),
                 exit_code: code,
                 oom_kills: oom,
@@ -1305,6 +1318,7 @@ pub async fn gate(
 }
 
 pub struct GateResult {
+    pub infrastructure: &'static str,
     /// An edit stopped the gate; nothing it produced counts.
     pub stopped: bool,
     pub code: i32,
@@ -1403,18 +1417,21 @@ async fn box_gate(
     live.down(DOWN_TIMEOUT).await?;
     match result {
         None => Ok(GateResult {
+            infrastructure: "stopped",
             stopped: true,
             code: 0,
             output: String::new(),
             oom,
         }),
         Some(Ok(out)) => Ok(GateResult {
+            infrastructure: "completed",
             stopped: false,
             code: out.code,
             output: format!("{}{}", out.stdout, out.stderr),
             oom,
         }),
         Some(Err(crate::r#box::ExecError::Timeout)) => Ok(GateResult {
+            infrastructure: "timeout",
             stopped: false,
             code: 124,
             output: format!("the gate ran past its {} minutes", gate.timeout_minutes),
@@ -1508,11 +1525,12 @@ async fn host_gate(
         result = tokio::time::timeout(limit, run) => result,
         _ = stop.notified() => {
             kill();
-            return Ok(GateResult { stopped: true, code: 0, output: String::new(), oom: None });
+            return Ok(GateResult { infrastructure: "stopped", stopped: true, code: 0, output: String::new(), oom: None });
         }
     };
     match timed {
         Ok((output, Ok(status))) => Ok(GateResult {
+            infrastructure: "completed",
             stopped: false,
             code: crate::git::exit_code(status),
             output,
@@ -1522,6 +1540,7 @@ async fn host_gate(
         Err(_) => {
             kill();
             Ok(GateResult {
+                infrastructure: "timeout",
                 stopped: false,
                 code: 124,
                 output: format!("the gate ran past its {} minutes", gate.timeout_minutes),

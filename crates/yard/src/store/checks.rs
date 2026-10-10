@@ -70,10 +70,10 @@ impl Check {
 }
 
 /// The latest check of `kind` and `name` on exactly `input`. A review check
-/// counts only when its execution row records the harness's registration
-/// proof, so a seat that never proved itself never counts, before or after a
-/// restart; a seat whose proof was recorded keeps its publication even if a
-/// crash later interrupts it. Gate checks carry no registration.
+/// counts after checked teardown and the harness's registration proof. A
+/// proven seat keeps its publication across interruption; reconciliation
+/// proves ownership gone before the result counts. Gate checks carry no
+/// registration. Historical checks retain their existing identity contract.
 pub fn current(
     conn: &Connection,
     kind: &str,
@@ -88,7 +88,10 @@ pub fn current(
                  AND e.base = ?4 AND e.head = ?5 AND e.ticket_revision = ?6 AND e.digest = ?7
                  AND COALESCE(e.proof, '') = ?8 AND e.plan_revision IS ?9
                  AND (c.kind != 'review' OR e.mcp = 'registered')
-                 ORDER BY c.id DESC LIMIT 1"
+                 AND e.status = 'ended' AND e.reserved = 0
+                 AND (e.node IS NULL OR e.id IN (SELECT id FROM execution WHERE {}))
+                 ORDER BY c.id DESC LIMIT 1",
+                super::executions::RESULT_ELIGIBLE
             ),
             params![
                 kind,
