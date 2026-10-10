@@ -1446,6 +1446,33 @@ pub fn attempt_show(project: &Project, params: &Value) -> Result<Value, Fail> {
     })
 }
 
+/// Explicit drilldown of recorded values; absent usage stays absent.
+pub fn attempt_stats(project: &Project, params: &Value) -> Result<Value, Fail> {
+    let id = ticket_param(params)?;
+    project.read(|conn| {
+        let attempt = attempts::latest_for(conn, id)?
+            .ok_or_else(|| Fail::not_found(format!("{} has no attempt", ticket_name(id))))?;
+        let mut query = conn.prepare(
+            "SELECT id, kind, model, provider, tokens_in, tokens_out, cost
+             FROM execution WHERE attempt = ?1 ORDER BY id",
+        )?;
+        let values = query
+            .query_map([attempt.id], |row| {
+                Ok(json!({
+                    "execution": row.get::<_, i64>(0)?,
+                    "kind": row.get::<_, String>(1)?,
+                    "model": row.get::<_, Option<String>>(2)?,
+                    "provider": row.get::<_, Option<String>>(3)?,
+                    "tokens_in": row.get::<_, Option<i64>>(4)?,
+                    "tokens_out": row.get::<_, Option<i64>>(5)?,
+                    "cost": row.get::<_, Option<f64>>(6)?,
+                }))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(json!({"attempt": attempt.id, "executions": values}))
+    })
+}
+
 pub async fn attempt_diff(
     daemon: &Daemon,
     project: &Project,

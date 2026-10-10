@@ -12,6 +12,7 @@ mod git;
 mod harness;
 mod jobs;
 mod mcp;
+mod operator_mcp;
 mod pi;
 mod store;
 

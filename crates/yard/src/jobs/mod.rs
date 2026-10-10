@@ -544,6 +544,7 @@ pub async fn command(daemon: &Arc<Daemon>, method: &str, params: Value) -> Resul
         "attempt.reject" => admit::attempt_reject(&project, &params),
         "attempt.abandon" => admit::attempt_abandon(daemon, &project, &params),
         "attempt.show" => admit::attempt_show(&project, &params),
+        "attempt.stats" => admit::attempt_stats(&project, &params),
         "attempt.diff" => admit::attempt_diff(daemon, &project, &params).await,
         "attempt.tail" => admit::attempt_tail(&project, &params),
         "proposal.accept" => admit::proposal_answer(daemon, &project, &params, true).await,
