@@ -135,7 +135,7 @@ pub enum Provenance {
 }
 
 impl Usage {
-    /// Pi and Claude keep their zero defaults until their readers are
+    /// Claude keeps its zero defaults until its reader is
     /// normalized. These values carry no completeness claim.
     pub fn adapter(input: u64, output: u64, cost: f64) -> Self {
         let field = UsageField {
@@ -162,6 +162,10 @@ pub enum Event {
     },
     /// The harness's registration proof, when it arrives on stdout.
     Registered(Registration),
+    /// Observed totals for this execution so far, without a terminal outcome.
+    Usage {
+        usage: Usage,
+    },
     Finished {
         usage: Usage,
     },

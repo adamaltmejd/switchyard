@@ -7,7 +7,8 @@ use crate::agent_env::AgentEnv;
 use crate::config::Agent;
 use crate::daemon::Machine;
 use crate::harness::{
-    Connection, Event, Harness, Launch, ModelRoute, Reader, Registration, Stage, Usage,
+    Completeness, Connection, Event, Harness, Launch, ModelRoute, Provenance, Reader, Registration,
+    Stage, Usage, UsageField,
 };
 use serde_json::{Value, json};
 
@@ -364,6 +365,7 @@ struct Final {
 pub struct Normalizer {
     last: Option<Final>,
     usage: Usage,
+    missing: [bool; 3],
 }
 
 impl Reader for Normalizer {
@@ -379,8 +381,13 @@ impl Reader for Normalizer {
                 _ => Vec::new(),
             },
             Some("message_end") => {
-                self.message_end(&frame["message"]);
-                Vec::new()
+                if self.message_end(&frame["message"]) {
+                    vec![Event::Usage {
+                        usage: self.usage.clone(),
+                    }]
+                } else {
+                    Vec::new()
+                }
             }
             Some("agent_settled") => vec![self.settled()],
             _ => Vec::new(),
@@ -393,26 +400,36 @@ impl Reader for Normalizer {
 }
 
 impl Normalizer {
-    fn message_end(&mut self, message: &Value) {
+    fn message_end(&mut self, message: &Value) -> bool {
         if message.get("role").and_then(Value::as_str) != Some("assistant") {
-            return;
+            return false;
         }
         // Counted here only: `turn_end` repeats the same message.
         let usage = &message["usage"];
-        let count = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
-        self.usage.input = Some(
-            self.usage.input.unwrap_or(0)
-                + count("input")
-                + count("cacheRead")
-                + count("cacheWrite"),
+        let counts =
+            ["input", "cacheRead", "cacheWrite"].map(|key| usage.get(key).and_then(Value::as_u64));
+        let input = counts.iter().flatten().copied().reduce(|a, b| a + b);
+        self.missing[0] |= counts.iter().any(Option::is_none);
+        accumulate(
+            &mut self.usage.input,
+            input,
+            &mut self.usage.fields.input,
+            &mut self.missing[0],
         );
-        self.usage.output = Some(self.usage.output.unwrap_or(0) + count("output"));
-        self.usage.cost = Some(
-            self.usage.cost.unwrap_or(0.0)
-                + usage
-                    .pointer("/cost/total")
-                    .and_then(Value::as_f64)
-                    .unwrap_or(0.0),
+        accumulate(
+            &mut self.usage.output,
+            usage.get("output").and_then(Value::as_u64),
+            &mut self.usage.fields.output,
+            &mut self.missing[1],
+        );
+        accumulate(
+            &mut self.usage.cost,
+            usage
+                .pointer("/cost/total")
+                .and_then(Value::as_f64)
+                .filter(|value| value.is_finite() && *value >= 0.0),
+            &mut self.usage.fields.cost,
+            &mut self.missing[2],
         );
         self.last = Some(Final {
             stop_reason: message
@@ -426,16 +443,31 @@ impl Normalizer {
                 .filter(|m| !m.is_empty())
                 .map(String::from),
         });
+        true
     }
 
     // Settling is not succeeding: only a final message with stopReason "stop"
     // is a finished run. A refused request also exits 0.
     fn settled(&mut self) -> Event {
-        let usage = Usage::adapter(
-            self.usage.input.unwrap_or(0),
-            self.usage.output.unwrap_or(0),
-            self.usage.cost.unwrap_or(0.0),
-        );
+        let mut usage = self.usage.clone();
+        for (field, missing) in [
+            &mut usage.fields.input,
+            &mut usage.fields.output,
+            &mut usage.fields.cost,
+        ]
+        .into_iter()
+        .zip(self.missing)
+        {
+            if field.provenance == Provenance::Harness
+                && !missing
+                && self
+                    .last
+                    .as_ref()
+                    .is_some_and(|last| last.stop_reason == "stop")
+            {
+                field.completeness = Completeness::Complete;
+            }
+        }
         match self.last.take() {
             Some(last) if last.stop_reason == "stop" => Event::Finished { usage },
             Some(last) => Event::Failed {
@@ -449,5 +481,24 @@ impl Normalizer {
                 usage,
             },
         }
+    }
+}
+
+// Missing coverage is sticky: a later report cannot account for an earlier
+// message that reported nothing. Before settlement all observations are partial.
+fn accumulate<T: Copy + std::ops::Add<Output = T>>(
+    total: &mut Option<T>,
+    increment: Option<T>,
+    field: &mut UsageField,
+    missing: &mut bool,
+) {
+    if let Some(increment) = increment {
+        *total = Some(total.map_or(increment, |value| value + increment));
+        *field = UsageField {
+            completeness: Completeness::Partial,
+            provenance: Provenance::Harness,
+        };
+    } else {
+        *missing = true;
     }
 }
