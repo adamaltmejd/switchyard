@@ -420,6 +420,7 @@ async fn handle(daemon: &Arc<Daemon>, method: &str, params: Value) -> Result<Val
         }
         "events" => events(daemon, &params).await,
         "attention" => attention(daemon, &params).await,
+        "plan.resolve" | "plan.validate" => crate::jobs::command(daemon, method, params).await,
         _ => {
             let result = crate::jobs::command(daemon, method, params).await;
             daemon.wake.notify_one();

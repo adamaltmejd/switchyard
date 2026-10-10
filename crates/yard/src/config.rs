@@ -21,6 +21,8 @@ pub struct Config {
     pub gates: Vec<Gate>,
     pub review: Review,
     pub seats: BTreeMap<String, Seat>,
+    pub profiles: BTreeMap<String, crate::plan::Profile>,
+    pub presets: BTreeMap<String, crate::plan::Graph>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
@@ -56,7 +58,7 @@ pub struct Agent {
     pub effort: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Workflow {
     pub implementer: String,
     /// Seat names in panel order; empty for `none`.
@@ -94,7 +96,7 @@ pub struct Gate {
     pub env: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Review {
     pub max_rounds: u32,
     pub timeout_minutes: u64,
@@ -128,6 +130,10 @@ struct Raw {
     gates: toml::Table,
     #[serde(default)]
     review: RawReview,
+    #[serde(default)]
+    profiles: BTreeMap<String, crate::plan::Profile>,
+    #[serde(default)]
+    presets: BTreeMap<String, crate::plan::Graph>,
 }
 
 #[derive(Deserialize, Default)]
@@ -318,7 +324,7 @@ impl Config {
                 env: gate.env,
             });
         }
-        Ok(Config {
+        let config = Config {
             max_lanes,
             max_executions,
             approve: raw.approve,
@@ -333,7 +339,23 @@ impl Config {
                 blocking,
             },
             seats,
-        })
+            profiles: raw.profiles,
+            presets: raw.presets,
+        };
+        for (name, profile) in &config.profiles {
+            crate::plan::Plan {
+                inputs: BTreeMap::new(),
+                nodes: BTreeMap::from([(name.clone(), profile.node())]),
+            }
+            .validate(&config)
+            .map_err(|error| format!("profiles.{name}: {error}"))?;
+        }
+        for (name, graph) in &config.presets {
+            config
+                .resolve_graph(graph)
+                .map_err(|error| format!("presets.{name}: {error}"))?;
+        }
+        Ok(config)
     }
 
     /// The gate digest: the Dockerfile and every gate as declared.

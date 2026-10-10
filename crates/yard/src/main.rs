@@ -14,6 +14,7 @@ mod jobs;
 mod mcp;
 mod operator_mcp;
 mod pi;
+mod plan;
 mod store;
 
 fn main() {

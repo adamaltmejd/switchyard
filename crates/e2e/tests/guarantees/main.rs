@@ -7,6 +7,7 @@ mod g03_landing_cas;
 mod g04_capacity_holds;
 mod g05_intent_precedes_effect;
 mod g06_inputs_validated;
+mod g06_plan_inspection;
 mod g07_lands_end_to_end;
 mod g07_operator_mcp;
 mod g08_review_is_a_publication;

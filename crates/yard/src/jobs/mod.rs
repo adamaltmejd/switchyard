@@ -603,6 +603,7 @@ pub async fn protected_paths(
 pub async fn command(daemon: &Arc<Daemon>, method: &str, params: Value) -> Result<Value, Fail> {
     let project = crate::daemon::project(daemon, &params)?;
     match method {
+        "plan.resolve" | "plan.validate" => inspect_plan(daemon, &project, method, params).await,
         "status" => admit::status(daemon, &project).await,
         "sync" => admit::sync(daemon, &project, &params).await,
         "doctor" => admit::doctor(daemon, &project).await,
@@ -732,4 +733,58 @@ pub fn audit_attempt(
         ..Target::default()
     };
     store::audit(tx, event, target, text, data)
+}
+
+/// Trusted inspection reads one target identity and creates no store rows.
+async fn inspect_plan(
+    daemon: &Daemon,
+    project: &Project,
+    method: &str,
+    params: Value,
+) -> Result<Value, Fail> {
+    let request: crate::plan::Request =
+        serde_json::from_value(params).map_err(|error| Fail::invalid(error.to_string()))?;
+    let mut branch = match &request.target {
+        Some(branch) => branch.clone(),
+        None => daemon.git.head_branch(&project.canonical_dir()).await?,
+    };
+    let mut target_lock = project.target_lock(&crate::git::target_ref(&branch));
+    let (_target, _canonical) = loop {
+        let target = target_lock.lock().await;
+        let canonical = project.canonical.lock().await;
+        let default = daemon.git.head_branch(&project.canonical_dir()).await?;
+        if request.target.is_none() && branch != default {
+            drop(canonical);
+            drop(target);
+            branch = default;
+            target_lock = project.target_lock(&crate::git::target_ref(&branch));
+            continue;
+        }
+        break (target, canonical);
+    };
+    let loaded = load_target(daemon, project, &branch).await?;
+    let plan = loaded
+        .config
+        .resolve_plan(&request)
+        .map_err(|invalid| Fail::invalid("invalid plan").with(json!(invalid)))?;
+    let workflow = loaded
+        .config
+        .runnable_workflow(&plan, request.workflow.as_deref());
+    let shape = if workflow.is_some() {
+        "legacy-linear"
+    } else {
+        plan.unsupported_shape()
+    };
+    if method == "plan.validate" && workflow.is_none() {
+        return Err(Fail::refused("plan shape has no runtime support")
+            .with(json!({"shape": shape, "structurally_valid": true, "runnable": false})));
+    }
+    Ok(
+        json!({"target": branch, "config_head": loaded.head, "plan": plan,
+        "structurally_valid": true, "runnable": workflow.is_some(), "shape": shape,
+        "workflow": workflow,
+        "bindings": {"agents": loaded.config.agents, "gates": loaded.config.gates,
+            "review": loaded.config.review,
+            "workflow_settings": workflow.as_ref().and_then(|name| loaded.config.workflows.get(name))}}),
+    )
 }

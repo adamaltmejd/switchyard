@@ -16,6 +16,14 @@ const OPERATIONS: &[(&str, &str)] = &[
     ("project.forget", "path!"),
     ("init", "path!"),
     ("doctor", "project!"),
+    (
+        "plan.resolve",
+        "project! target preset workflow graph:o overrides:o",
+    ),
+    (
+        "plan.validate",
+        "project! target preset workflow graph:o overrides:o",
+    ),
     ("sync", "project! branch default:b"),
     ("status", "project!"),
     ("events", "project! since:i"),
@@ -65,6 +73,7 @@ fn schema(fields: &str) -> Value {
         let key = field.trim_end_matches('!');
         let (key, kind) = key.split_once(':').unwrap_or((key, "s"));
         let value = match kind {
+            "o" => json!({"type": "object"}),
             "i" => json!({"type": "integer"}),
             "b" => json!({"type": "boolean"}),
             "a" => json!({"type": "array", "items": {"type": "string"}}),
@@ -90,6 +99,7 @@ fn validate(arguments: &Value, schema: &Value) -> Result<(), Fail> {
     }
     for (key, value) in object {
         let valid = match properties[key]["type"].as_str() {
+            Some("object") => value.is_object(),
             Some("integer") => value.as_i64().is_some(),
             Some("boolean") => value.is_boolean(),
             Some("array") => value
