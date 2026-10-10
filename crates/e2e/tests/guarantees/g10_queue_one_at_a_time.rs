@@ -153,6 +153,7 @@ fn the_queue_lands_in_order_and_rejudges_a_red_merge() {
 /// objects. Sabotage: overwrite it from the changed repair base or regenerate
 /// it from current templates on restart. No existing block observes immutable
 /// admission evidence while the candidate base and current templates change.
+/// Omit committed scaffold skills from capture: complete fixture equality fails.
 #[test]
 fn a_ticket_binds_feature_inputs_repairs_and_lands_on_its_target() {
     let hold = Latch::new();
@@ -233,6 +234,12 @@ fn a_ticket_binds_feature_inputs_repairs_and_lands_on_its_target() {
         "trusted_staged_sources": [
             {"path": ".agents/skills/admission/SKILL.md",
              "blob": object(&format!("{base}:.agents/skills/admission/SKILL.md")), "executable": false},
+            {"path": ".agents/skills/yard-drive/SKILL.md",
+             "blob": object(&format!("{base}:.agents/skills/yard-drive/SKILL.md")), "executable": false},
+            {"path": ".agents/skills/yard-file/SKILL.md",
+             "blob": object(&format!("{base}:.agents/skills/yard-file/SKILL.md")), "executable": false},
+            {"path": ".agents/skills/yard-operator/SKILL.md",
+             "blob": object(&format!("{base}:.agents/skills/yard-operator/SKILL.md")), "executable": false},
             {"path": "AGENTS.md", "blob": object(&format!("{base}:AGENTS.md")), "executable": false}
         ]
     });
