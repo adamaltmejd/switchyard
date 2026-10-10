@@ -564,7 +564,9 @@ Explicit zero stays numeric. Claude API and login executions count streamed
 assistant usage by message id, replacing repeated content-block observations.
 Input includes reported input, cache reads and cache writes. Streamed tokens
 are saved as `harness` and `partial`; interruption retains them and leaves
-unreported cost null. Result totals replace streamed observations and cover
+unreported cost null. An explicit-zero assistant output remains a partial
+zero observation; provider counters not emitted by the harness are not inferred.
+Result totals replace streamed observations and cover
 only the current invocation, including on resume. Missing result token fields
 retain streamed partial observations. Reported result cost is an optional
 harness estimate, never a subscription bill or a token-rate calculation by

@@ -11,6 +11,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// count resumed history, or save usage only at result. Pi/Codex cannot catch
 /// Claude's result replacement or repeated content-block observations. API
 /// and login use this same reader; G8 independently exercises both routes.
+/// Ignoring or overwriting a nonzero output update also fails: the interrupted
+/// oracle checks every raw output report for its single provider response.
 #[test]
 fn claude_usage_is_optional_and_execution_local() {
     let phase = Arc::new(AtomicUsize::new(0));
@@ -171,7 +173,7 @@ fi"#, machine.root.display()));
     hold.release();
 }
 
-fn raw_cost(machine: &Machine, id: i64) -> f64 {
+fn raw_frames(machine: &Machine, id: i64) -> String {
     let path = std::fs::read_dir(&machine.root)
         .unwrap()
         .map(Result::unwrap)
@@ -182,8 +184,11 @@ fn raw_cost(machine: &Machine, id: i64) -> f64 {
         })
         .unwrap()
         .path();
-    std::fs::read_to_string(path)
-        .unwrap()
+    std::fs::read_to_string(path).unwrap()
+}
+
+fn raw_cost(machine: &Machine, id: i64) -> f64 {
+    raw_frames(machine, id)
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .find(|frame| frame["type"] == "result")
@@ -200,6 +205,29 @@ fn execution(project: &Project, id: i64) -> Value {
         .find(|row| row["execution"] == id)
         .unwrap()
         .clone()
+}
+
+// This fixture has one response before interruption. Inspect every raw token
+// report, including updates outside assistant snapshots, so a missed or later
+// overwritten nonzero report cannot be hidden by selecting the last snapshot.
+fn output_reports(value: &Value, reports: &mut Vec<u64>) {
+    match value {
+        Value::Object(fields) => {
+            for (key, value) in fields {
+                if key == "output_tokens" {
+                    reports.push(value.as_u64().expect("a raw output counter"));
+                } else {
+                    output_reports(value, reports);
+                }
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                output_reports(value, reports);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn check(project: &Project, id: i64, replies: usize, completeness: &str, cost_reported: bool) {
@@ -219,8 +247,25 @@ fn check(project: &Project, id: i64, replies: usize, completeness: &str, cost_re
         .filter_map(|line| serde_json::from_str(line).ok())
         .collect();
     let result = frames.iter().find(|frame| frame["type"] == "result");
-    if id == 3 {
+    let output = if id == 3 {
         assert!(result.is_none());
+        assert_eq!(
+            replies, 1,
+            "the interrupted oracle covers one provider response"
+        );
+        let raw = raw_frames(project.machine, id);
+        eprintln!("Y-76 interrupted execution {id}, raw Claude stream-json:\n{raw}");
+        let mut reports = Vec::new();
+        for line in raw.lines() {
+            let frame: Value = serde_json::from_str(line).expect("a real Claude frame");
+            output_reports(&frame, &mut reports);
+        }
+        // The provider's message_delta is not itself a harness observation.
+        // Retain any larger raw report rather than inferring it from the reply.
+        reports
+            .into_iter()
+            .max()
+            .expect("Claude reported output before interruption")
     } else {
         let result = result.unwrap();
         assert_eq!(result["is_error"], id == 2);
@@ -242,7 +287,8 @@ fn check(project: &Project, id: i64, replies: usize, completeness: &str, cost_re
             result["usage"]["output_tokens"],
             COMPLETION_TOKENS * replies as u64
         );
-    }
+        COMPLETION_TOKENS * replies as u64
+    };
     let reported = json!({"completeness": completeness, "provenance": "harness"});
     let unknown = json!({"completeness": "unknown", "provenance": "unreported"});
     let cost = if cost_reported {
@@ -257,7 +303,7 @@ fn check(project: &Project, id: i64, replies: usize, completeness: &str, cost_re
         execution["usage"],
         json!({
             "input": (PROMPT_TOKENS + 70 + 30) * replies as u64,
-            "output": COMPLETION_TOKENS * replies as u64, "cost": cost,
+            "output": output, "cost": cost,
             "fields": {"input": reported, "output": reported,
                 "cost": if cost_reported { &reported } else { &unknown }}
         })
