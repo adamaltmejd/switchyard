@@ -490,9 +490,8 @@ async fn attention(daemon: &Daemon, params: &Value) -> Result<Value, Fail> {
     };
     match tokio::time::timeout(Duration::from_secs(25), poll).await {
         Ok(result) => result,
-        Err(_) => project.read(|conn| {
-            Ok(json!({"seq": crate::store::last_seq(conn)?, "attention": [], "idle": false}))
-        }),
+        // Incomplete reads cannot advance past attention we have not returned.
+        Err(_) => Ok(json!({"seq": since.unwrap_or(0), "attention": [], "idle": false})),
     }
 }
 

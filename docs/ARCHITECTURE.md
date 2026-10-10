@@ -777,14 +777,16 @@ and `attempt.stats`; missing recorded statistics remain null.
 at most 25 seconds if empty. `attention` is one bounded poll of the same
 wake primitive as `status --watch`, with its `seq`, `attention` and `idle`.
 Its 25-second bound covers the whole poll, including config and readiness
-Git reads. Expiry returns the current audit seq, no attention and
-`idle: false`; incomplete inputs never establish an idle board.
+Git reads. Expiry returns the caller's `since` as `seq` (zero when absent),
+no attention and `idle: false`. Incomplete inputs never establish an idle
+board or advance the cursor past unseen attention.
 Clients may poll again. `notifications/cancelled` with `requestId` releases
 only the matching events or attention request and answers JSON-RPC error
 `-32800`. Stdin EOF releases waits and the adapter exits normally after
 accepted requests finish. Input errors, oversized frames and stdout errors
-stop input, release waits and drain accepted mutation forwards before an
-error exit. Completed requests are answered while stdout remains writable.
+stop input, release waits and drain accepted mutation forwards before a
+normal error exit. Completed requests are answered while stdout remains
+writable.
 An oversized frame first answers JSON-RPC `-32600` with a null id when
 stdout is writable. Neither cancellation nor handled transport failure
 stops an execution. Stdio accepts at most 64 concurrent requests and bounds

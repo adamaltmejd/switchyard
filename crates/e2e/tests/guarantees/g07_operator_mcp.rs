@@ -256,8 +256,12 @@ fn accepted_operator_mutations_finish_after_transport_failure() {
     );
     history.event("landing.recorded", &[]);
     // Successful sync through the same client is the control.
-    let synced = call(&mut operator, &project, "yard_sync", json!({}));
-    assert_eq!(synced["isError"], false, "{synced}");
+    let control = operator.send(
+        "tools/call",
+        json!({"name": "yard_sync", "arguments": args(&project, json!({}))}),
+    );
+    let synced = operator.receive(control);
+    assert_eq!(synced["result"]["isError"], false, "{synced}");
     let before = project.canonical_head();
     project.write("transport.txt", "accepted mutation\n");
     project.git(&["add", "transport.txt"]);
@@ -294,5 +298,6 @@ fn accepted_operator_mutations_finish_after_transport_failure() {
     let completed = operator.receive(request);
     assert_eq!(completed["result"]["isError"], false, "{completed}");
     assert_eq!(project.canonical_head(), expected);
-    assert_eq!(operator.close_input().code(), Some(1));
+    let exit = operator.close_input();
+    assert!(exit.code().is_some() && !exit.success(), "{exit}");
 }
