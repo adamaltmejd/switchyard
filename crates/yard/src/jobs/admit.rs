@@ -281,45 +281,15 @@ pub async fn doctor(daemon: &Daemon, project: &Project) -> Result<Value, Fail> {
     }))
 }
 
-/// Import the checkout's head when it descends from canonical's; `None`
-/// when it does not.
+/// Import a validated fast-forward under the canonical lock.
 async fn import(
     daemon: &Daemon,
     project: &Project,
     branch: &str,
     ours: Option<&str>,
     theirs: &str,
-) -> Result<Option<Value>, Fail> {
+) -> Result<Value, Fail> {
     let canonical = project.canonical_dir();
-    let imported = match ours {
-        None => true,
-        Some(ours) => {
-            daemon
-                .git
-                .is_ancestor(&canonical, ours, theirs, None)
-                .await?
-        }
-    };
-    if !imported {
-        return Ok(None);
-    }
-    let loaded = super::read_config(daemon, &canonical, branch, theirs).await?;
-    let orphaned = project.read(|conn| {
-        Ok(tickets::list(conn)?
-            .into_iter()
-            .filter(|ticket| {
-                ticket.state == "open" && !loaded.config.workflows.contains_key(&ticket.workflow)
-            })
-            .map(|ticket| ticket_name(ticket.id))
-            .collect::<Vec<_>>())
-    })?;
-    if !orphaned.is_empty() {
-        return Err(Fail::refused(format!(
-            "the incoming configuration removes a workflow open tickets name: {}",
-            orphaned.join(", ")
-        ))
-        .with(json!({ "tickets": orphaned })));
-    }
     let target = crate::git::target_ref(branch);
     let moved = daemon
         .git
@@ -336,61 +306,176 @@ async fn import(
             "sync.imported",
             store::Target::default(),
             None,
-            json!({ "old": ours, "new": theirs }),
+            json!({ "branch": branch, "old": ours, "new": theirs }),
         )
     })?;
-    Ok(Some(
-        json!({ "sync": "imported", "old": ours, "head": theirs }),
-    ))
+    Ok(json!({ "sync": "imported", "old": ours, "head": theirs }))
 }
 
-pub async fn sync(daemon: &Daemon, project: &Project) -> Result<Value, Fail> {
+pub async fn sync(daemon: &Daemon, project: &Project, params: &Value) -> Result<Value, Fail> {
+    let named = match &params["branch"] {
+        Value::Null => None,
+        Value::String(branch) => Some(branch.as_str()),
+        _ => return Err(Fail::invalid("sync branch must be a local branch name")),
+    };
+    let select = match &params["default"] {
+        Value::Null => false,
+        Value::Bool(select) => *select,
+        _ => return Err(Fail::invalid("sync default must be a boolean")),
+    };
+    if select && named.is_none() {
+        return Err(Fail::invalid("selecting a default requires a named branch"));
+    }
     let _canonical = project.canonical.lock().await;
     let canonical = project.canonical_dir();
-    let (branch, ours) = daemon.git.target_head(&canonical).await?;
-    let target = crate::git::target_ref(&branch);
+    let default = daemon.git.head_branch(&canonical).await?;
+    let branch = named.unwrap_or(&default);
+    if !daemon.git.valid_branch(&canonical, branch).await? {
+        return Err(
+            Fail::invalid("sync requires a local branch name").with(json!({ "branch": branch }))
+        );
+    }
+    let target = crate::git::target_ref(branch);
+    let ours = daemon.git.rev_parse(&canonical, &target).await?;
     let theirs = daemon
         .git
         .rev_parse(&project.root, &target)
         .await?
-        .ok_or_else(|| Fail::refused(format!("the checkout has no branch {branch}")))?;
-    if ours.as_deref() == Some(theirs.as_str()) {
-        return Ok(json!({ "sync": "current", "head": theirs }));
+        .ok_or_else(|| {
+            Fail::refused(format!("the checkout has no branch {branch}"))
+                .with(json!({ "reason": "missing_branch", "branch": branch }))
+        })?;
+    if select && branch != default {
+        project.read(|conn| {
+            let live = attempts::live(conn)?;
+            let intents = executions::open_intents(conn)?;
+            if !live.is_empty() || !intents.is_empty() {
+                return Err(
+                    Fail::refused("live single-target work prevents changing the default").with(
+                        json!({ "reason": "live_target", "default": default, "branch": branch,
+                        "attempts": live.iter().map(|a| a.id).collect::<Vec<_>>(),
+                        "intents": intents.iter().map(|e| e.id).collect::<Vec<_>>() }),
+                    ),
+                );
+            }
+            Ok(())
+        })?;
     }
     // The objects only: no ref names them until the import moves the target.
     daemon.git.fetch(&canonical, &project.root, &target).await?;
-    if let Some(result) = import(daemon, project, &branch, ours.as_deref(), &theirs).await? {
-        return Ok(result);
-    }
-    let ours = ours.expect("a consumed canonical has a head");
-    if !daemon
-        .git
-        .is_ancestor(&canonical, &theirs, &ours, None)
-        .await?
+    let importing = match &ours {
+        None => true,
+        Some(ours) => {
+            daemon
+                .git
+                .is_ancestor(&canonical, ours, &theirs, None)
+                .await?
+        }
+    };
+    if !importing
+        && !daemon
+            .git
+            .is_ancestor(&canonical, &theirs, ours.as_deref().unwrap(), None)
+            .await?
     {
         return Err(Fail::refused(format!(
-            "the checkout's {branch} at {theirs} and canonical at {ours} have diverged"
+            "the checkout's {branch} at {theirs} and canonical at {} have diverged",
+            ours.as_deref().unwrap()
         ))
         .with(json!({ "checkout": theirs, "canonical": ours })));
     }
-    daemon.git.fetch(&project.root, &canonical, &target).await?;
-    daemon
-        .git
-        .fast_forward_checkout(&project.root, &branch, &theirs, &ours)
-        .await?;
-    project.tx(|tx| {
-        store::audit(
-            tx,
-            "sync.consumed",
-            store::Target::default(),
-            None,
-            json!({ "old": theirs, "new": ours }),
-        )
-    })?;
-    Ok(json!({ "sync": "consumed", "old": theirs, "head": ours }))
+    let incoming = if importing {
+        &theirs
+    } else {
+        ours.as_deref().unwrap()
+    };
+    let loaded = super::read_config(
+        daemon,
+        &canonical,
+        branch,
+        if select { branch } else { &default },
+        incoming,
+    )
+    .await?;
+    if branch == default || select {
+        let orphaned = project.read(|conn| {
+            Ok(tickets::list(conn)?
+                .into_iter()
+                .filter(|ticket| {
+                    ticket.state == "open"
+                        && !loaded.config.workflows.contains_key(&ticket.workflow)
+                })
+                .map(|ticket| ticket_name(ticket.id))
+                .collect::<Vec<_>>())
+        })?;
+        if !orphaned.is_empty() {
+            return Err(Fail::refused(format!(
+                "the incoming configuration removes a workflow open tickets name: {}",
+                orphaned.join(", ")
+            ))
+            .with(json!({ "tickets": orphaned })));
+        }
+    }
+    let mut result = if ours.as_deref() == Some(theirs.as_str()) {
+        json!({ "sync": "current", "head": theirs })
+    } else if importing {
+        import(daemon, project, branch, ours.as_deref(), &theirs).await?
+    } else {
+        let ours = ours.as_deref().expect("a consumed canonical has a head");
+        let checked_out = daemon.git.current_branch(&project.root).await?;
+        if checked_out.as_deref() != Some(branch) {
+            return Err(Fail::refused("consume requires the selected branch checked out")
+            .with(json!({ "reason": "checkout_branch", "branch": branch, "checked_out": checked_out,
+                "checkout": theirs, "canonical": ours })));
+        }
+        if !daemon.git.clean(&project.root).await? {
+            return Err(Fail::refused("consume requires a clean checkout")
+                .with(json!({ "reason": "dirty_checkout", "branch": branch,
+                "checkout": theirs, "canonical": ours })));
+        }
+        daemon.git.fetch(&project.root, &canonical, &target).await?;
+        if !daemon
+            .git
+            .fast_forward_checkout(&project.root, branch, &theirs, ours)
+            .await?
+        {
+            return Err(
+                Fail::refused("the checkout changed before consuming canonical")
+                    .with(json!({ "reason": "checkout_changed", "branch": branch,
+                    "checkout": theirs, "canonical": ours })),
+            );
+        }
+        project.tx(|tx| {
+            store::audit(
+                tx,
+                "sync.consumed",
+                store::Target::default(),
+                None,
+                json!({ "branch": branch, "old": theirs, "new": ours }),
+            )
+        })?;
+        json!({ "sync": "consumed", "old": theirs, "head": ours })
+    };
+    if select && branch != default {
+        daemon.git.select_default(&canonical, branch).await?;
+        *project.loaded.lock().expect("loaded lock") = None;
+        project.tx(|tx| {
+            store::audit(
+                tx,
+                "sync.default",
+                store::Target::default(),
+                None,
+                json!({ "old": default, "new": branch }),
+            )
+        })?;
+    }
+    result["branch"] = json!(branch);
+    result["default"] = json!(if select { branch } else { &default });
+    Ok(result)
 }
 
 pub async fn ticket_new(daemon: &Daemon, project: &Project, params: &Value) -> Result<Value, Fail> {
+    let _canonical = project.canonical.lock().await;
     let loaded = load(daemon, project).await?;
     let workflow = params["workflow"].as_str().unwrap_or("default");
     loaded.config.workflow(workflow).map_err(Fail::invalid)?;
@@ -469,6 +554,7 @@ pub async fn ticket_edit(
     project: &Project,
     params: &Value,
 ) -> Result<Value, Fail> {
+    let _canonical = project.canonical.lock().await;
     let id = ticket_param(params)?;
     let revision = params["revision"]
         .as_i64()
@@ -721,6 +807,7 @@ pub async fn attempt_start(
     params: &Value,
 ) -> Result<Value, Fail> {
     let id = ticket_param(params)?;
+    let canonical = project.canonical.lock().await;
     let loaded = load(daemon, project).await?;
     let live = project.read(|conn| attempts::live_for(conn, id))?;
     let items = project.read(|conn| {
@@ -740,6 +827,7 @@ pub async fn attempt_start(
         ));
     }
     if let Some(item) = items.first() {
+        drop(canonical);
         return answer_start(daemon, project, item).await;
     }
     if live.is_some() {
@@ -1178,6 +1266,7 @@ pub async fn proposal_answer(
     params: &Value,
     accept: bool,
 ) -> Result<Value, Fail> {
+    let _canonical = project.canonical.lock().await;
     let id = params["attention"]
         .as_i64()
         .ok_or_else(|| Fail::invalid("the call names no proposal"))?;

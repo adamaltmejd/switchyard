@@ -26,7 +26,13 @@ enum Command {
     /// Report pinfold, the configuration, the image and the credentials.
     Doctor,
     /// Import the checkout's branch into canonical, or consume canonical into it.
-    Sync,
+    Sync {
+        /// Local branch to sync; omission selects the project default.
+        branch: Option<String>,
+        /// Select this branch as the project default.
+        #[arg(long, requires = "branch")]
+        default: bool,
+    },
     /// The project's tickets, attempts and attention.
     #[command(group(clap::ArgGroup::new("stream").args(["watch", "history"])))]
     Status {
@@ -296,7 +302,10 @@ async fn dispatch(cli: &Cli) -> Result<Option<Value>, Fail> {
                 .map(|()| None);
         }
         Command::Doctor => ("doctor".into(), json!({})),
-        Command::Sync => ("sync".into(), json!({})),
+        Command::Sync { branch, default } => (
+            "sync".into(),
+            json!({ "branch": branch, "default": default }),
+        ),
         Command::Status { .. } => ("status".into(), json!({})),
         Command::Ticket(command) => method("ticket", command),
         Command::Attempt(command) => method("attempt", command),

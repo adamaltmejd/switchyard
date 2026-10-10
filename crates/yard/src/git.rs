@@ -208,6 +208,36 @@ impl Git {
         Ok((branch, head))
     }
 
+    pub async fn valid_branch(&self, repo: &Path, branch: &str) -> Result<bool, String> {
+        if branch.is_empty() || branch.starts_with('-') {
+            return Ok(false);
+        }
+        Ok(self
+            .run(repo, &["check-ref-format", &target_ref(branch)])
+            .await?
+            .code
+            == 0)
+    }
+
+    pub async fn select_default(&self, canonical: &Path, branch: &str) -> Result<(), String> {
+        self.run(canonical, &["symbolic-ref", "HEAD", &target_ref(branch)])
+            .await?
+            .ok("select default")?;
+        Ok(())
+    }
+
+    pub async fn clean(&self, checkout: &Path) -> Result<bool, String> {
+        Ok(self
+            .run(
+                checkout,
+                &["status", "--porcelain", "--untracked-files=all"],
+            )
+            .await?
+            .ok("status")?
+            .stdout
+            .is_empty())
+    }
+
     /// The commit `rev` names, or None.
     pub async fn rev_parse(&self, repo: &Path, rev: &str) -> Result<Option<String>, String> {
         let out = self
@@ -499,24 +529,18 @@ impl Git {
         branch: &str,
         old: &str,
         commit: &str,
-    ) -> Result<(), String> {
-        if self.current_branch(checkout).await?.as_deref() == Some(branch) {
-            self.run(checkout, &["merge", "--quiet", "--ff-only", commit])
-                .await?
-                .ok("merge --ff-only")?;
-        } else if !self
-            .update_ref(
-                checkout,
-                &format!("refs/heads/{branch}"),
-                commit,
-                Some(old),
-                None,
-            )
-            .await?
+    ) -> Result<bool, String> {
+        // Recheck after fetch: the operator may have changed the checkout.
+        if self.current_branch(checkout).await?.as_deref() != Some(branch)
+            || self.rev_parse(checkout, "HEAD").await?.as_deref() != Some(old)
+            || !self.clean(checkout).await?
         {
-            return Err(format!("the checkout's {branch} moved"));
+            return Ok(false);
         }
-        Ok(())
+        self.run(checkout, &["merge", "--quiet", "--ff-only", commit])
+            .await?
+            .ok("merge --ff-only")?;
+        Ok(true)
     }
 }
 

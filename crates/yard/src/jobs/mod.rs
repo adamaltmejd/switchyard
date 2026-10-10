@@ -42,10 +42,11 @@ pub async fn load(daemon: &Daemon, project: &Project) -> Result<Arc<Loaded>, Fai
     })?;
     if let Some(loaded) = project.loaded.lock().expect("loaded lock").as_ref()
         && loaded.head == head
+        && loaded.branch == branch
     {
         return Ok(loaded.clone());
     }
-    let loaded = Arc::new(read_config(daemon, &canonical, &branch, &head).await?);
+    let loaded = Arc::new(read_config(daemon, &canonical, &branch, &branch, &head).await?);
     *project.loaded.lock().expect("loaded lock") = Some(loaded.clone());
     Ok(loaded)
 }
@@ -55,6 +56,7 @@ pub async fn read_config(
     daemon: &Daemon,
     repo: &std::path::Path,
     branch: &str,
+    default: &str,
     commit: &str,
 ) -> Result<Loaded, Fail> {
     let text = daemon
@@ -65,11 +67,11 @@ pub async fn read_config(
     let config = Config::parse(&text).map_err(|message| {
         Fail::invalid(format!(".yard/config.toml: {message}")).with(json!({ "config": message }))
     })?;
-    if config.target.branch != branch {
+    if config.target.branch != default {
         return Err(Fail::invalid(format!(
-            ".yard/config.toml names target {:?}; this project's target is {branch:?}",
+            ".yard/config.toml names target {:?}; this project's default is {default:?}",
             config.target.branch
-        )));
+        )).with(json!({ "reason": "default_mismatch", "target": config.target.branch, "default": default })));
     }
     let dockerfile = daemon
         .git
@@ -85,6 +87,7 @@ pub async fn read_config(
 }
 
 pub async fn step(daemon: &Arc<Daemon>, project: &Arc<Project>) -> Result<(), Fail> {
+    let canonical = project.canonical.lock().await;
     let Ok(loaded) = load(daemon, project).await else {
         return Ok(());
     };
@@ -96,6 +99,7 @@ pub async fn step(daemon: &Arc<Daemon>, project: &Arc<Project>) -> Result<(), Fa
         advance(daemon, project, &loaded, &attempt).await?;
     }
     admit::scheduled(daemon, project, &loaded)?;
+    drop(canonical);
     queue::next(daemon, project, &loaded).await?;
     cleanup::next(daemon, project)?;
     Ok(())
@@ -490,7 +494,7 @@ pub async fn command(daemon: &Arc<Daemon>, method: &str, params: Value) -> Resul
     let project = crate::daemon::project(daemon, &params)?;
     match method {
         "status" => admit::status(daemon, &project).await,
-        "sync" => admit::sync(daemon, &project).await,
+        "sync" => admit::sync(daemon, &project, &params).await,
         "doctor" => admit::doctor(daemon, &project).await,
         "ticket.new" => admit::ticket_new(daemon, &project, &params).await,
         "ticket.show" => admit::ticket_show(&project, &params),
