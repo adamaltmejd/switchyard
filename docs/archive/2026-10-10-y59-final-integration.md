@@ -17,11 +17,22 @@ an operator approval or a replacement for the fresh exact-head host gate.
 
 All three heads are ancestors of this checkout's starting head,
 `20a9b291b5a2294223cee6337def08549c7090e5`. Y-85 also includes the landed
-Y-87 admission-provenance prerequisite, `12cae4b`. Y-57 and Y-58 precede
-Y-84. The abandoned Y-59 split proposal is not implementation evidence.
+Y-87 admission-provenance prerequisite,
+`92764a50d5b8eab7cc33fbaacfe1d95fa0becce8`, as recorded in
+`2026-10-10-operator-y87-validation.md`. Its initial candidate,
+`12cae4ba89b4e78778652c0a2d84878d2607d992`, failed host validation and is
+not the landed head. Y-57 and Y-58 precede Y-84. The abandoned Y-59 split
+proposal is not implementation evidence.
 These pass counts are reports from the committed operator records, not
 tests run by this worker. Y-86's complete suite includes the earlier slices'
 scenarios on the combined implementation.
+
+The operator's source-gate correction prompted a recheck of every named
+landed head against its committed validation record and Git ancestry. All
+named scenarios below exist in the stated source files; those guarantee
+files are unchanged from landed Y-86. The source assertions and operator
+records support the mapping and reported counts below. This recheck adds
+no runtime evidence and preserves every source-only and unrun label.
 
 ## Shared source and lifecycle
 
