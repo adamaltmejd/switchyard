@@ -113,8 +113,12 @@ fn an_edit_reaches_the_next_prompt_and_stop_delivers_it_sooner() {
     // The latest opening is p's second: q opens nothing more until its start.
     let second = openings(&machine).last().unwrap().last_user();
     assert!(second.contains("+Rename it too"), "{second}");
-    let head = approval["data"]["payload"]["head"].as_str().unwrap();
+    let clone = edited.path.join(".yard/local/attempts/1/clone");
+    let head = git(&clone, &["rev-parse", "HEAD"]).trim().to_string();
+    assert_eq!(git(&clone, &["show", "HEAD:renamed.txt"]), "renamed\n");
     // No gate ran on the first candidate: every gate ran on the second head.
+    // Sabotage: retain the first candidate head after delivering the edit;
+    // approval and gates agree with each other but differ from the worker's Git.
     assert_eq!(
         edited.rows("SELECT DISTINCT head FROM execution WHERE kind = 'gate'"),
         vec![json!({ "head": head })]
