@@ -43,7 +43,10 @@ const OPERATIONS: &[(&str, &str)] = &[
     ("ticket.depend", "project! ticket! on!"),
     ("ticket.done", "project! ticket! reason!"),
     ("ticket.abandon", "project! ticket! reason"),
-    ("attempt.start", "project! ticket! attention:i"),
+    (
+        "attempt.start",
+        "project! ticket! attention:i preset workflow graph:o overrides:o",
+    ),
     ("attempt.stop", "project! ticket!"),
     (
         "attempt.approve",
@@ -72,12 +75,19 @@ fn schema(fields: &str) -> Value {
     for field in fields.split_whitespace() {
         let key = field.trim_end_matches('!');
         let (key, kind) = key.split_once(':').unwrap_or((key, "s"));
-        let value = match kind {
-            "o" => json!({"type": "object"}),
-            "i" => json!({"type": "integer"}),
-            "b" => json!({"type": "boolean"}),
-            "a" => json!({"type": "array", "items": {"type": "string"}}),
-            _ => json!({"type": "string"}),
+        let value = match key {
+            "graph" => json!({"type": "object", "properties": {
+                "inputs": {"type": "object", "additionalProperties": output_schema()},
+                "nodes": {"type": "object", "additionalProperties": node_schema()}
+            }, "required": ["nodes"], "additionalProperties": false}),
+            "overrides" => json!({"type": "object", "additionalProperties": node_schema()}),
+            _ => match kind {
+                "o" => json!({"type": "object"}),
+                "i" => json!({"type": "integer"}),
+                "b" => json!({"type": "boolean"}),
+                "a" => json!({"type": "array", "items": {"type": "string"}}),
+                _ => json!({"type": "string"}),
+            },
         };
         properties.insert(key.into(), value);
         if field.ends_with('!') {
@@ -86,6 +96,35 @@ fn schema(fields: &str) -> Value {
     }
     json!({"type": "object", "properties": properties, "required": required,
            "additionalProperties": false})
+}
+
+fn output_schema() -> Value {
+    json!({"type": "string", "enum": ["candidate", "report", "verdict", "selection"]})
+}
+
+fn node_schema() -> Value {
+    json!({"type": "object", "additionalProperties": false, "properties": {
+        "profile": {"type": "string"},
+        "runner": {"oneOf": [
+            {"type": "object", "properties": {"kind": {"const": "agent"},
+                "agent": {"type": "string"}, "instructions": {"type": "string"}},
+                "required": ["kind", "agent", "instructions"], "additionalProperties": false},
+            {"type": "object", "properties": {"kind": {"const": "command"},
+                "gate": {"type": "string"}}, "required": ["kind", "gate"], "additionalProperties": false}
+        ]},
+        "access": {"type": "string", "enum": ["read-only", "write-allowed"]},
+        "outputs": {"type": "object", "additionalProperties": output_schema()},
+        "outcomes": {"type": "array", "items": {"type": "string"}},
+        "inputs": {"type": "object", "additionalProperties": {
+            "type": "object", "properties": {"node": {"type": ["string", "null"]},
+                "output": {"type": "string"}, "kind": output_schema()},
+            "required": ["output", "kind"], "additionalProperties": false}},
+        "requires": {"type": "array", "items": {"type": "string"}},
+        "routes": {"type": "object", "additionalProperties": {"type": "array", "items": {
+            "type": "object", "properties": {"to": {"type": "string"},
+                "repeat": {"type": ["integer", "null"], "minimum": 1}},
+            "required": ["to"], "additionalProperties": false}}}
+    }})
 }
 
 fn validate(arguments: &Value, schema: &Value) -> Result<(), Fail> {

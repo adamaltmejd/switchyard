@@ -1,4 +1,4 @@
-//! Typed inspection only. No plan here admits work or grants worker tools.
+//! Shared typed resolver. Plans select existing definitions, never worker grants.
 use crate::config::{Config, Stage};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};

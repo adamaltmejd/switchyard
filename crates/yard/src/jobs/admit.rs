@@ -141,7 +141,7 @@ pub async fn scheduled(
                 {
                     continue;
                 }
-                admitted.push(admit(tx, selected, ticket)?);
+                admitted.push(admit(tx, selected, ticket, None)?);
                 free -= 1;
             }
             Ok(admitted)
@@ -159,12 +159,33 @@ fn admit(
     tx: &rusqlite::Connection,
     loaded: &Loaded,
     ticket: &tickets::Ticket,
+    selection: Option<&crate::plan::Request>,
 ) -> Result<i64, Fail> {
-    let workflow = loaded.config.workflow(&ticket.workflow)?;
+    let default = crate::plan::Request {
+        _project: String::new(),
+        target: None,
+        preset: None,
+        workflow: Some(ticket.workflow.clone()),
+        graph: None,
+        overrides: Default::default(),
+    };
+    let request = selection.unwrap_or(&default);
+    let plan = loaded
+        .config
+        .resolve_plan(request)
+        .map_err(|invalid| Fail::invalid("invalid plan").with(json!(invalid)))?;
+    let name = loaded
+        .config
+        .runnable_workflow(&plan, request.workflow.as_deref())
+        .ok_or_else(|| {
+            Fail::refused("plan shape has no runtime support")
+                .with(json!({"input": "plan", "shape": plan.unsupported_shape(),
+                "structurally_valid": true, "runnable": false}))
+        })?;
+    let workflow = loaded.config.workflow(&name)?;
     let agent = &loaded.config.agents[&workflow.implementer];
     let mut implementer = serde_json::to_value(agent).expect("agent serializes");
     implementer["name"] = json!(workflow.implementer);
-    let plan = loaded.config.workflow_plan(&ticket.workflow)?;
     let mut agents = std::collections::BTreeMap::new();
     let mut seats = std::collections::BTreeMap::new();
     for name in workflow.review.iter().filter(|_| !workflow.read_only) {
@@ -189,6 +210,8 @@ fn admit(
         "config_head": loaded.head,
         "workflow": workflow,
         "plan": plan,
+        "selection": {"preset": request.preset, "workflow": request.workflow,
+            "graph": request.graph, "overrides": request.overrides},
         "agents": agents,
         "seats": seats,
         "review": if workflow.read_only { None } else { Some(&loaded.config.review) },
@@ -199,7 +222,7 @@ fn admit(
     let attempt = attempts::insert(
         tx,
         ticket.id,
-        &ticket.workflow,
+        &name,
         &implementer,
         &loaded.head,
         &loaded.branch,
@@ -211,7 +234,7 @@ fn admit(
         "attempt.admitted",
         &row,
         None,
-        json!({ "target": loaded.branch, "base": loaded.head, "workflow": ticket.workflow, "implementer": implementer }),
+        json!({ "target": loaded.branch, "base": loaded.head, "workflow": name, "implementer": implementer }),
     )?;
     super::supervise::start_implementation(tx, &row, "first")
 }
@@ -1131,6 +1154,21 @@ pub async fn attempt_start(
     project: &Arc<Project>,
     params: &Value,
 ) -> Result<Value, Fail> {
+    crate::mcp::strict(
+        params,
+        &[
+            "project",
+            "ticket",
+            "attention",
+            "preset",
+            "workflow",
+            "graph",
+            "overrides",
+        ],
+    )?;
+    let selected = ["preset", "workflow", "graph", "overrides"]
+        .iter()
+        .any(|key| params.get(*key).is_some());
     let id = ticket_param(params)?;
     let canonical = project.canonical.lock().await;
     let items = project.read(|conn| {
@@ -1148,6 +1186,12 @@ pub async fn attempt_start(
             json!(expected),
             json!(items.iter().map(|item| item.id).collect::<Vec<_>>()),
         ));
+    }
+    if selected
+        && (project.read(|conn| attempts::live_for(conn, id))?.is_some() || !items.is_empty())
+    {
+        return Err(Fail::refused("plan selection requires a new attempt")
+            .with(json!({"input": "plan", "reason": "active_plan"})));
     }
     let item = if let Some(expected) = params["attention"].as_i64() {
         items.iter().find(|item| item.id == expected)
@@ -1219,7 +1263,28 @@ pub async fn attempt_start(
             if spare_lanes(tx, project, &default)? <= 0 {
                 return Err(Fail::refused("no lane is free").with(json!({ "reason": "capacity" })));
             }
-            admit(tx, &loaded, &ticket)
+            let selection = if selected {
+                let mut fields = serde_json::Map::new();
+                fields.insert("project".into(), params["project"].clone());
+                for key in ["preset", "workflow", "graph", "overrides"] {
+                    if let Some(value) = params.get(key) {
+                        fields.insert(key.into(), value.clone());
+                    }
+                }
+                if !fields.contains_key("preset")
+                    && !fields.contains_key("graph")
+                    && !fields.contains_key("workflow")
+                {
+                    fields.insert("workflow".into(), json!(ticket.workflow));
+                }
+                Some(
+                    serde_json::from_value::<crate::plan::Request>(Value::Object(fields))
+                        .map_err(|error| Fail::invalid(error.to_string()))?,
+                )
+            } else {
+                None
+            };
+            admit(tx, &loaded, &ticket, selection.as_ref())
         })?
     };
     spawn(daemon, project, "implementation", execution);
