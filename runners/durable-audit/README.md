@@ -109,6 +109,13 @@ MCP, invokes the trusted child tool, then finishes normally. The fixture
 counts child model traffic separately from real outer Pi traffic. Missing
 assets refuse before any child request; a corrected image controls that in
 the same project. No fixture writes daemon-private launch inputs.
+CI provisions this directory on both Linux architectures with
+`sh runners/durable-audit/fetch-build-inputs.sh "$YARD_E2E_DURABLE_INPUTS"`
+before running the suite. The path must not already exist. The script uses
+host curl, jq, OpenSSL and sha256sum to fetch public archives as data and
+verify the committed Node checksums and each locked npm SHA512. It runs no
+host Node/npm, package installation or archive code. The image build still
+verifies and installs its offline inputs inside the isolated builder.
 Run it on the
 container-runtime host after approval; source and boxed Rust checks alone
 do not establish runtime acceptance. Pi's real registration, completion,

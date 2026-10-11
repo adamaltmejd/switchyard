@@ -1350,6 +1350,9 @@ Rust dependencies: `tokio`, `hyper` with `hyper-util` and `http-body-util`,
 `getrandom` (MCP bearers), `clap`. Git and pinfold are child processes.
 The trusted boxed Durable package uses Node 26.11.1 and the locked npm
 dependencies described in Publication; neither is a host runtime dependency.
+CI fetches its public build inputs before the host suite. Host `curl` fetches
+archives, `jq` reads the exact lock, and `sha256sum` and OpenSSL verify Node
+SHA256 and npm SHA512 respectively. These build tools execute no package code.
 
 ```
 crates/yard/src/

@@ -170,6 +170,12 @@ fn ended(project: &Project<'_>, ticket: &str, prompt: &str) -> Value {
             && event["execution"] == started["execution"]
             && event["data"]["kind"] == "implementation"
     });
+    // Capacity release commits checked teardown after the work future ends.
+    watch.until("admitted planner released", |event| {
+        event["event"] == "execution.released"
+            && event["attempt"] == started["attempt"]
+            && event["execution"] == started["execution"]
+    });
     let shown = project.json(&["attempt", "show", ticket]);
     let execution = shown["executions"]
         .as_array()
