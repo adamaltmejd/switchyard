@@ -46,6 +46,11 @@ fn start_selected(machine: &Machine, project: &Project, title: &str, entry: &str
     watch.find("cleanup reservation released", |event| {
         event["event"] == "execution.released" && event["execution"] == cleanup["execution"]
     });
+    let admitted = select_attempt(machine, project, entry);
+    assert!(admitted.get("error").is_none(), "{admitted}");
+}
+
+fn select_attempt(machine: &Machine, project: &Project, entry: &str) -> Value {
     let mut operator = machine.operator();
     operator.initialize();
     let mut overrides = json!({
@@ -61,13 +66,12 @@ fn start_selected(machine: &Machine, project: &Project, title: &str, entry: &str
     if entry == "landing-gate-check" {
         overrides["candidate-gate-check"] = json!({"operator_failure": true});
     }
-    let admitted = operator.call(
+    operator.call(
         "yard_attempt_start",
         json!({
             "project": project.path, "ticket": "Y-1", "workflow": "default", "overrides": overrides
         }),
-    );
-    assert!(admitted.get("error").is_none(), "{admitted}");
+    )
 }
 
 /// A seat that exits 0 without publishing is a review error, raised as
@@ -770,6 +774,9 @@ export default async function () {
 /// admission and acquire the parent's external lock before checked release.
 /// Sabotage: return on release refusal without ending the unstarted child;
 /// it remains running and prevents the same-approval allowed control.
+/// Lose a completed cleanup's exact ownership resolution after checked
+/// release; the planner's new selected admission stays refused. Keep cleanup's
+/// lock inside the removed attempt; the current external lock proof fails.
 #[test]
 fn a_gate_errors_start_reruns_that_gate() {
     let armed = std::sync::Arc::new(Mutex::new(None::<std::path::PathBuf>));
@@ -823,7 +830,203 @@ fn a_gate_errors_start_reruns_that_gate() {
     project.git(&["commit", "-qm", "Isolate gate-error fixture image"]);
     project.json(&["sync"]);
     let mut watch = project.watch(0);
-    start_selected(&machine, &project, "Add feature", "landing-gate-check");
+    // A fixture-owned executable link supplies real pinfold listings when
+    // available. Its removal produces an actual host exec failure, never a
+    // fake list response. Hold each real down completion until cleanup starts.
+    let listing = machine.root.join("listing-pinfold");
+    std::os::unix::fs::symlink(real("pinfold"), &listing).unwrap();
+    let cleanup_hold = machine.root.join("cleanup-hold");
+    let cleanup_said = machine.root.join("cleanup-said");
+    let cleanup_release = machine.root.join("cleanup-release");
+    let listing_hold = machine.root.join("listing-hold");
+    let listing_said = machine.root.join("listing-said");
+    let listing_release = machine.root.join("listing-release");
+    for fifo in [
+        &cleanup_said,
+        &cleanup_release,
+        &listing_said,
+        &listing_release,
+    ] {
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    let mut finish_cleanup = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&cleanup_release)
+        .unwrap();
+    let mut finish_listing = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&listing_release)
+        .unwrap();
+    machine.wrapper("pinfold", &format!(
+        "if [ \"$1 $2\" = 'box list' ]; then\n\
+         '{}' \"$@\"; result=$?\n\
+         if [ \"$result\" = 0 ] && [ -e '{}' ]; then echo \"$result\" > '{}'; read line < '{}'; fi\n\
+         exit \"$result\"; fi\n\
+         if [ -e '{}' ] && [ \"$1 $2\" = 'box down' ]; then\n\
+         \"$REAL\" \"$@\"; result=$?\n\
+         echo \"$3 $result\" > '{}'; read line < '{}'; exit \"$result\"; fi\n\
+         if [ -e '{}' ] && [ \"$1 $2\" = 'box up' ]; then echo 'refused by the test' >&2; exit 1; fi",
+        listing.display(), listing_hold.display(), listing_said.display(), listing_release.display(),
+        cleanup_hold.display(), cleanup_said.display(), cleanup_release.display(), path.display(),
+    ));
+    std::fs::write(&cleanup_hold, "").unwrap();
+    project.json(&[
+        "ticket",
+        "new",
+        "--title",
+        "Add feature",
+        "--workflow",
+        "plan",
+    ]);
+    let cleanup = loop {
+        let held = watch.said(&cleanup_said);
+        let (box_name, result) = held.trim().split_once(' ').unwrap();
+        assert_eq!(result, "0");
+        assert_eq!(
+            project.rows("SELECT handle FROM execution WHERE kind = 'implementation'")[0]["handle"],
+            box_name
+        );
+        let rows = project.rows("SELECT id, attempt FROM execution WHERE kind = 'cleanup'");
+        if let Some(cleanup) = rows.first() {
+            break cleanup.clone();
+        }
+        // One handshake per actual command: the planner's own teardown must
+        // finish before its cleanup can be admitted.
+        finish_cleanup.write_all(b"go\n").unwrap();
+    };
+    let cleanup_id = cleanup["id"].as_i64().unwrap();
+    let cleanup_lock = project
+        .path
+        .join(format!(".yard/local/effects/{cleanup_id}/lock"));
+    let held_lock = std::fs::OpenOptions::new()
+        .read(true)
+        .open(&cleanup_lock)
+        .unwrap();
+    assert!(matches!(
+        held_lock.try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ));
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT status, reserved, lock_contract FROM execution WHERE id = {cleanup_id}"
+        )),
+        vec![json!({"status": "running", "reserved": 1, "lock_contract": 1})]
+    );
+    drop(held_lock);
+    std::fs::remove_file(&listing).unwrap();
+    std::fs::remove_file(&cleanup_hold).unwrap();
+    finish_cleanup.write_all(b"go\n").unwrap();
+    watch.find("planner completed", |event| {
+        event["event"] == "attempt.ended"
+            && event["data"]["outcome"] == "planned"
+            && event["attempt"] == cleanup["attempt"]
+    });
+    let ended_cleanup = watch.find("planner cleanup", |event| {
+        event["event"] == "execution.ended"
+            && event["data"]["kind"] == "cleanup"
+            && event["execution"] == cleanup_id
+    });
+    assert_eq!(ended_cleanup["data"]["outcome"], "removed");
+    let ownership = watch.find("completed cleanup ownership refused", |event| {
+        event["event"] == "attention.raised" && event["execution"] == cleanup_id
+    });
+    assert_eq!(ownership["attempt"], cleanup["attempt"]);
+    assert_eq!(ownership["data"]["kind"], "red");
+    assert_eq!(ownership["data"]["reason"], "ownership");
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT status, outcome, reserved FROM execution WHERE id = {cleanup_id}"
+        )),
+        vec![json!({"status": "ended", "outcome": "removed", "reserved": 1})]
+    );
+    // Reopen the surviving current lock after removal; never lock a deleted
+    // inode or create a replacement in the private attempt directory.
+    assert!(
+        !project
+            .path
+            .join(format!(".yard/local/attempts/{}", cleanup["attempt"]))
+            .exists()
+    );
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .open(&cleanup_lock)
+        .unwrap();
+    lock.try_lock().unwrap();
+    let refused = select_attempt(&machine, &project, "landing-gate-check");
+    assert_eq!(refused["error"]["code"], "refused");
+    assert_eq!(
+        refused["error"]["data"],
+        json!({"input": "plan", "reason": "active_plan"})
+    );
+    assert_eq!(
+        project.rows("SELECT id FROM attempt"),
+        vec![json!({"id": cleanup["attempt"]})]
+    );
+
+    // Restore real listings while the real current host lock remains held.
+    // A second held successful reply proves the preceding host probe finished
+    // without clearing either reservation or the exact ownership question.
+    std::fs::write(&listing_hold, "").unwrap();
+    std::os::unix::fs::symlink(real("pinfold"), &listing).unwrap();
+    assert_eq!(watch.said(&listing_said), "0\n");
+    finish_listing.write_all(b"go\n").unwrap();
+    assert_eq!(watch.said(&listing_said), "0\n");
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT reserved FROM execution WHERE id = {cleanup_id}"
+        )),
+        vec![json!({"reserved": 1})]
+    );
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT state FROM attention WHERE id = {}",
+            ownership["attention"]
+        )),
+        vec![json!({"state": "open"})]
+    );
+    let still_refused = select_attempt(&machine, &project, "landing-gate-check");
+    assert_eq!(
+        still_refused["error"]["data"],
+        json!({"input": "plan", "reason": "active_plan"})
+    );
+    let before = project.json(&["attempt", "show", "Y-1"]);
+    assert_eq!(
+        before["executions"][0]["report"]["report"],
+        json!({"summary": "Fixture audit", "findings": []})
+    );
+    assert_eq!(before["executions"][0]["teardown"], true);
+    assert_eq!(before["executions"][0]["reserved"], false);
+    lock.unlock().unwrap();
+    std::fs::remove_file(&listing_hold).unwrap();
+    finish_listing.write_all(b"go\n").unwrap();
+    watch.find("cleanup reservation released", |event| {
+        event["event"] == "execution.released" && event["execution"] == cleanup_id
+    });
+    let resolved = watch.find("completed cleanup ownership reconciled", |event| {
+        event["event"] == "attention.resolved" && event["attention"] == ownership["attention"]
+    });
+    assert_eq!(resolved["execution"], cleanup_id);
+    assert_eq!(resolved["data"]["resolution"], "reconciled");
+    assert_eq!(
+        project.rows("SELECT id, attempt FROM execution WHERE kind = 'cleanup'"),
+        vec![cleanup]
+    );
+    assert_eq!(project.rows(&format!("SELECT status, outcome, reserved, result, teardown FROM execution WHERE id = {cleanup_id}")),
+        vec![json!({"status": "ended", "outcome": "removed", "reserved": 0, "result": null, "teardown": null})]);
+    assert_eq!(
+        project.json(&["attempt", "show", "Y-1"])["executions"][0],
+        before["executions"][0]
+    );
+    let admitted = select_attempt(&machine, &project, "landing-gate-check");
+    assert!(admitted.get("error").is_none(), "{admitted}");
     let red = watch.attention();
     assert_eq!(
         (&red["data"]["kind"], &red["data"]["reason"]),

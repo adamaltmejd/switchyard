@@ -62,7 +62,7 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
     })
 }
 
-fn remove(dir: &std::path::Path) -> Result<(), Fail> {
+pub(super) fn remove(dir: &std::path::Path) -> Result<(), Fail> {
     match std::fs::remove_dir_all(dir) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
