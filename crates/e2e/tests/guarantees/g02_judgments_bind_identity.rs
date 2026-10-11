@@ -879,6 +879,7 @@ fn selected_skipped_decisions_bind_identity_without_manufacturing_results() {
     watch.find("planner released", |event| {
         event["event"] == "execution.released" && event["execution"] == cleanup["execution"]
     });
+    // Retained gates keep their ordinary failed repair edge even without a successor.
     let graph = json!({"inputs": {"feedback": "verdict"}, "nodes": {
         "implementer": {
             "runner": {"kind": "agent", "agent": "worker", "instructions": ""},
@@ -889,7 +890,8 @@ fn selected_skipped_decisions_bind_identity_without_manufacturing_results() {
         "candidate-gate-keep": {
             "runner": {"kind": "command", "gate": "keep"}, "access": "write-allowed",
             "inputs": {"candidate": {"node": "implementer", "output": "result", "kind": "candidate"}},
-            "outputs": {"result": "verdict"}, "outcomes": ["complete"], "requires": ["candidate"], "routes": {}
+            "outputs": {"result": "verdict"}, "outcomes": ["complete", "failed"], "requires": ["candidate"],
+            "routes": {"failed": [{"to": "implementer", "repeat": 1}]}
         }
     }});
     let mut operator = machine.operator();
