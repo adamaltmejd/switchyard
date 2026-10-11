@@ -219,4 +219,28 @@ ALTER TABLE attempt ADD COLUMN body_read TEXT;
      ALTER TABLE execution ADD COLUMN inputs TEXT;
      ALTER TABLE execution ADD COLUMN result TEXT;
      ALTER TABLE execution ADD COLUMN teardown INTEGER;",
+    // No table references attention. Rebuild its closed kind constraint while
+    // keeping every historical row and the open-item index in one transaction.
+    r#"
+CREATE TABLE attention_next (
+    id INTEGER PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (kind IN ('approval', 'proposal', 'stopped', 'red', 'candidate')),
+    reason TEXT NOT NULL,
+    ticket INTEGER REFERENCES ticket(id),
+    attempt INTEGER REFERENCES attempt(id),
+    execution INTEGER REFERENCES execution(id),
+    payload TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('open', 'resolved')),
+    resolution TEXT,
+    created_at TEXT NOT NULL,
+    resolved_at TEXT
+);
+INSERT INTO attention_next
+    (id, kind, reason, ticket, attempt, execution, payload, state, resolution, created_at, resolved_at)
+SELECT id, kind, reason, ticket, attempt, execution, payload, state, resolution, created_at, resolved_at
+FROM attention;
+DROP TABLE attention;
+ALTER TABLE attention_next RENAME TO attention;
+CREATE INDEX attention_open ON attention(state) WHERE state = 'open';
+"#,
 ];

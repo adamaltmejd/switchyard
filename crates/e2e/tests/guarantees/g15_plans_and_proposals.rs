@@ -67,6 +67,9 @@ pub(super) fn pre_target_binary() -> PathBuf {
 /// the limit attention target backfill; acceptance or override is refused.
 /// G6 sabotage: fabricate historical admission evidence from today's config
 /// or the recovered candidate base. Both real historical rows must stay unknown.
+/// G8 sabotage: lose IDs, payloads, resolutions or audit history when rebuilding
+/// the attention kind constraint. Open and resolved proposals must survive two
+/// reopens; the only limit payload change is the existing target backfill.
 #[test]
 fn an_upgrade_preserves_ended_planner_proposals_and_limit_overrides() {
     let machine = Machine::new("g15-upgrade", |request| {
@@ -79,9 +82,14 @@ fn an_upgrade_preserves_ended_planner_proposals_and_limit_overrides() {
         if request.prompt().contains("Legacy plan") {
             return act(
                 request,
-                vec![propose(json!({
-                    "kind": "ticket", "title": "Legacy child", "parked": true
-                }))],
+                vec![
+                    propose(json!({
+                        "kind": "ticket", "title": "Legacy child", "parked": true
+                    })),
+                    propose(json!({
+                        "kind": "ticket", "title": "Rejected legacy child", "parked": true
+                    })),
+                ],
             );
         }
         act(
@@ -109,6 +117,8 @@ fn an_upgrade_preserves_ended_planner_proposals_and_limit_overrides() {
         event["event"] == "execution.ended" && event["data"]["kind"] == "cleanup"
     });
     let proposal = proposals(&project)[0].0;
+    let rejected = proposals(&project)[1].0;
+    project.json(&["proposal", "reject", &rejected.to_string()]);
     project.json(&["ticket", "new", "--title", "Add feature"]);
     let limit = watch.attention();
     assert_eq!(
@@ -134,8 +144,42 @@ fn an_upgrade_preserves_ended_planner_proposals_and_limit_overrides() {
     .unwrap();
     assert!(payload.get("target").is_none());
     machine.kill();
+    let proposals_before =
+        project.rows("SELECT * FROM attention WHERE kind = 'proposal' ORDER BY id");
+    let limit_before = project.rows(&format!(
+        "SELECT id, kind, reason, ticket, attempt, execution, state, resolution, created_at, resolved_at FROM attention WHERE id = {limit_id}"
+    ));
+    let audit_before = project.rows("SELECT * FROM audit ORDER BY seq");
     machine.use_binary(None);
     machine.start();
+    machine.kill();
+    machine.start();
+    assert_eq!(
+        project.rows("SELECT * FROM attention WHERE kind = 'proposal' ORDER BY id"),
+        proposals_before
+    );
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT id, kind, reason, ticket, attempt, execution, state, resolution, created_at, resolved_at FROM attention WHERE id = {limit_id}"
+        )),
+        limit_before
+    );
+    let mut expected_payload = payload.clone();
+    expected_payload["target"] = json!("main");
+    assert_eq!(
+        serde_json::from_str::<Value>(
+            project.rows(&format!(
+                "SELECT payload FROM attention WHERE id = {limit_id}"
+            ))[0]["payload"]
+                .as_str()
+                .unwrap()
+        )
+        .unwrap(),
+        expected_payload
+    );
+    let audit_after = project.rows("SELECT * FROM audit ORDER BY seq");
+    assert_eq!(&audit_after[..audit_before.len()], audit_before.as_slice());
+    assert!(project.rows("PRAGMA foreign_key_check").is_empty());
     for ticket in ["Y-1", "Y-2"] {
         assert_eq!(
             project.json(&["attempt", "show", ticket])["attempt"]["admission"],
