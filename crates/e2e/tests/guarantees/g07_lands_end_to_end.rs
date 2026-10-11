@@ -23,7 +23,7 @@ fn ordinary_candidate_routes_repair_then_reach_approval() {
             .prompt()
             .contains("Your workspace is read-only. Plan the work")
         {
-            return Reply::Text("ready for selected implementation".into());
+            return planned(request);
         }
         if request.has_tool("yard_publish_review") {
             let blocks = request.prompt().contains("correctness reviewer")
@@ -510,6 +510,7 @@ fn a_ticket_lands_end_to_end_and_leaves_only_rows() {
         "landing.recorded",
         "attention.raised",
         "attention.resolved",
+        "report.published",
         "tool.refused",
     ];
     for event in &events {

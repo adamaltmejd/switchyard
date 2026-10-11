@@ -299,6 +299,7 @@ fn a_plan_proposes_children_that_block_it() {
                     ),
                     propose(json!({ "kind": "ticket", "key": "b", "title": "More B",
                                     "parked": true, "depends_on": ["a"] })),
+                    publish_report(),
                 ]),
                 _ => Reply::Text("planned".into()),
             };
@@ -313,6 +314,7 @@ fn a_plan_proposes_children_that_block_it() {
                                 "parked": true, "depends_on": ["a"] })),
                 propose(json!({ "kind": "edit", "body": "The plan: A, then B." })),
                 propose(json!({ "kind": "edit", "body": "Stale: must not apply." })),
+                publish_report(),
             ]),
             _ => {
                 seen.lock()

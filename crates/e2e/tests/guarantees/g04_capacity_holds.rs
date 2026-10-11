@@ -74,8 +74,11 @@ fn racing_starts_admit_one_attempt() {
     let held = hold.clone();
     let seen = std::sync::Mutex::new(std::collections::HashSet::new());
     let machine = Machine::new("g4-race", move |request| {
+        if !request.opens() {
+            return Reply::Text("done".into());
+        }
         if seen.lock().unwrap().insert(request.prompt()) {
-            Reply::Text("planned".into())
+            planned(request)
         } else {
             Reply::Hold(held.clone(), Box::new(Reply::Text("planned".into())))
         }

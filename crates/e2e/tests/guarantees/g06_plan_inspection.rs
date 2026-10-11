@@ -280,9 +280,9 @@ fn selected_admission_refuses_without_work_and_freezes_operator_inputs() {
     let held = hold.clone();
     let machine = Machine::new("g6admit", move |request| {
         if request.opens() && request.last_user().contains("Chosen old.") {
-            return Reply::Hold(held.clone(), Box::new(Reply::Text("done".into())));
+            return Reply::Hold(held.clone(), Box::new(planned(request)));
         }
-        Reply::Text("done".into())
+        planned(request)
     });
     machine.start();
     let fixture = config(

@@ -91,7 +91,7 @@ fn a_seat_that_exits_without_publishing_is_a_review_error() {
             .prompt()
             .contains("Your workspace is read-only. Plan the work")
         {
-            return Reply::Text("ready".into());
+            return planned(request);
         }
         if !seat(&request) {
             return implementer(request);
@@ -181,7 +181,7 @@ fn a_seat_killed_after_publishing_has_published() {
             .prompt()
             .contains("Your workspace is read-only. Plan the work")
         {
-            return Reply::Text("ready".into());
+            return planned(request);
         }
         if !seat(&request) {
             return implementer(request);
@@ -650,7 +650,7 @@ fn a_gate_errors_start_reruns_that_gate() {
             .prompt()
             .contains("Your workspace is read-only. Plan the work")
         {
-            return Reply::Text("ready".into());
+            return planned(request);
         }
         if request.prompt().contains("Abandon gate") {
             // The first ticket landed feature.txt; this ticket needs a new candidate.
@@ -1467,7 +1467,7 @@ fn selected_failures_continue_without_rewriting_judgments() {
             .prompt()
             .contains("Your workspace is read-only. Plan the work")
         {
-            return Reply::Text("ready".into());
+            return planned(request);
         }
         if request.has_tool("yard_publish_review") {
             if request.prompt().contains("Selected failure")

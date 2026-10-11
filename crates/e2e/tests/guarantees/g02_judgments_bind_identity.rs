@@ -667,7 +667,7 @@ fn delayed_candidate_acceptance_names_the_changed_identity_and_writes_nothing() 
             .prompt()
             .contains("Your workspace is read-only. Plan the work")
         {
-            return Reply::Text("ready".into());
+            return planned(request);
         }
         if request.has_tool("yard_publish_review") {
             return act(request, vec![publish(json!([]))]);

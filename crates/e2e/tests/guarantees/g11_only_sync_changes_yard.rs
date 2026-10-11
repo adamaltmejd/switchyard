@@ -295,8 +295,8 @@ fn named_sync_moves_only_committed_selected_history() {
 fn default_selection_is_explicit_validated_and_preserves_admitted_work() {
     let hold = Latch::new();
     let held = hold.clone();
-    let machine = Machine::new("g11-default", move |_| {
-        Reply::Hold(held.clone(), Box::new(Reply::Text("planned".into())))
+    let machine = Machine::new("g11-default", move |request| {
+        Reply::Hold(held.clone(), Box::new(planned(request)))
     });
     machine.start();
     let project = Project::new(&machine, "p", &config(""));

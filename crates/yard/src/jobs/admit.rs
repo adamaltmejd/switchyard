@@ -1239,6 +1239,14 @@ pub async fn attempt_start(
         .or(ticket.target_branch.as_deref())
         .unwrap_or(&default.branch);
     let loaded = super::load_target(daemon, project, branch).await?;
+    if let Some(attempt) = &live
+        && attempt.admission.is_none()
+        && loaded.config.workflow(&attempt.workflow)?.read_only
+    {
+        return Err(Fail::refused(
+            "unbound_report: abandon the legacy read-only attempt, then start a new admitted attempt",
+        ).with(json!({"reason": "unbound_report", "attempt": attempt.id})));
+    }
     if let Some(item) = item {
         drop(canonical);
         return answer_start(daemon, project, item).await;
