@@ -70,6 +70,10 @@ fn image(project: &Project<'_>, missing: bool) {
 }
 
 fn launch(project: &Project<'_>, attempt: i64, prompt: &str) {
+    launch_with_source(project, attempt, prompt, "large.txt");
+}
+
+fn launch_with_source(project: &Project<'_>, attempt: i64, prompt: &str, source: &str) {
     // Ordinary canonical fixture files are frozen by the read-only plan. Never
     // write daemon-owned launch inputs or replace the configured Pi command.
     project.write(
@@ -77,7 +81,7 @@ fn launch(project: &Project<'_>, attempt: i64, prompt: &str) {
         &json!({
             "provider": "openrouter", "model": "fake-model", "prompt": prompt,
             "files": [
-                {"root": "source", "path": "large.txt"},
+                {"root": "source", "path": source},
                 {"root": "source", "path": "candidate.cjs"},
                 {"root": "source", "path": "candidate/.pi/extensions/candidate.js"},
                 {"root": "trusted", "path": "selected.md"},
@@ -99,8 +103,15 @@ if [ "$1 $2" = 'image build' ]; then
 fi
 if [ "$1 $2" = 'box exec' ]; then
     handle="$3"
-    "$REAL" "$@"
+    mkfifo '{root}/stdout-{attempt}.fifo' '{root}/stderr-{attempt}.fifo'
+    tee -a '{root}/stdout-{attempt}' < '{root}/stdout-{attempt}.fifo' &
+    stdout_observer=$!
+    tee -a '{root}/stderr-{attempt}' < '{root}/stderr-{attempt}.fifo' >&2 &
+    stderr_observer=$!
+    "$REAL" "$@" > '{root}/stdout-{attempt}.fifo' 2> '{root}/stderr-{attempt}.fifo'
     result=$?
+    wait "$stdout_observer" "$stderr_observer"
+    rm '{root}/stdout-{attempt}.fifo' '{root}/stderr-{attempt}.fifo'
     "$REAL" box exec "$handle" -- sh -c '
         env | grep -q "sk-e2e-"; echo upstream_in_env=$?
         grep -R -a -q "sk-e2e-" /workspace /yard/state /opt/yard/durable-audit; echo upstream_in_files=$?
@@ -145,29 +156,41 @@ fn ended(project: &Project<'_>, ticket: &str, prompt: &str) -> Value {
     let seq = project.json(&["status"])["seq"].as_i64().unwrap();
     let mut watch = project.watch(seq);
     project.json(&["ticket", "new", "--title", prompt, "--workflow", "plan"]);
-    watch.attention();
-    let execution = project.json(&["attempt", "show", ticket])["executions"][0].clone();
+    // Successful planners raise no attention. Bind the terminal observation to
+    // the admitted execution, so cleanup or another ticket cannot satisfy it.
+    let started = watch.until("admitted planner started", |event| {
+        event["event"] == "execution.started"
+            && event["ticket"] == ticket
+            && event["data"]["kind"] == "implementation"
+    });
+    watch.until("admitted planner ended", |event| {
+        event["event"] == "execution.ended"
+            && event["ticket"] == ticket
+            && event["attempt"] == started["attempt"]
+            && event["execution"] == started["execution"]
+            && event["data"]["kind"] == "implementation"
+    });
+    let shown = project.json(&["attempt", "show", ticket]);
+    let execution = shown["executions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|execution| execution["execution"] == started["execution"])
+        .unwrap()
+        .clone();
     assert_eq!(execution["teardown"], true);
     execution
 }
 
 fn transcript(project: &Project<'_>, attempt: i64) -> String {
-    let path = project
-        .path
-        .join(format!(".yard/local/attempts/{attempt}/transcripts"));
-    // Transcript filenames are not asserted: only externally recorded reasons.
-    fn collect(path: &Path, text: &mut String) {
-        if path.is_dir() {
-            for entry in std::fs::read_dir(path).unwrap() {
-                collect(&entry.unwrap().path(), text);
-            }
-        } else {
-            text.push_str(&std::fs::read_to_string(path).unwrap());
-        }
-    }
-    let mut text = String::new();
-    collect(&path, &mut text);
-    text
+    // Observe the real command's streams outside daemon-owned attempt data,
+    // which successful planner cleanup may already have removed.
+    ["stdout", "stderr"]
+        .map(|stream| {
+            std::fs::read_to_string(project.machine.root.join(format!("{stream}-{attempt}")))
+                .unwrap()
+        })
+        .concat()
 }
 
 /// G8 pre-call packaging and G12/G13 isolation: remove a sealed Durable
@@ -180,6 +203,10 @@ fn transcript(project: &Project<'_>, attempt: i64) -> String {
 /// count report characters instead of bytes, or bypass the injecting route.
 /// Existing Pi report tests prove publication,
 /// not this packaged runtime, its preflight, or its bounded read surface.
+/// Declared candidate/../large.txt normalizes to a real fixture file, so
+/// bypassing the declared '..' component guard reaches model requests.
+/// Sabotage: remove that guard. The undeclared traversal tool argument below
+/// exercises a different mechanism: allowlist lookup, not path validation.
 #[test]
 fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     let machine = Machine::new("g8-durable-package", |request| {
@@ -256,8 +283,18 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     project.json(&["attempt", "abandon", "Y-1"]);
 
     image(&project, false);
-    launch(&project, 2, "Corrected packaged audit");
-    let completed = ended(&project, "Y-2", "Corrected packaged asset");
+    launch_with_source(&project, 2, "Declared traversal", "candidate/../large.txt");
+    let traversal = ended(&project, "Y-2", "Declared traversal");
+    assert!(traversal["report"].is_null());
+    assert!(controller_requests(&machine).is_empty());
+    let log = transcript(&project, 2);
+    assert!(log.contains("invalid_input"));
+    assert!(log.contains("declared file"));
+    project.json(&["ticket", "park", "Y-2"]);
+    project.json(&["attempt", "abandon", "Y-2"]);
+
+    launch(&project, 3, "Corrected packaged audit");
+    let completed = ended(&project, "Y-3", "Corrected packaged asset");
     assert_eq!(
         completed["report"]["report"],
         json!({"summary": "Fixture audit", "findings": []})
@@ -270,7 +307,7 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
         );
         assert!(!request.body.to_string().contains(SECRET));
     }
-    let probe = std::fs::read_to_string(machine.root.join("probe-2")).unwrap();
+    let probe = std::fs::read_to_string(machine.root.join("probe-3")).unwrap();
     for token in [
         "upstream_in_env=1",
         "upstream_in_files=1",
@@ -287,7 +324,7 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
             .unwrap();
         assert_ne!(status, "0", "{probe}");
     }
-    assert!(!transcript(&project, 2).contains(SECRET));
+    assert!(!transcript(&project, 3).contains(SECRET));
     assert!(
         !serde_json::to_string(&project.rows("SELECT report FROM execution"))
             .unwrap()
