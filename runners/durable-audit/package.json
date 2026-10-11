@@ -1,0 +1,17 @@
+{
+  "name": "switchyard-durable-audit-build-input",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "engines": {
+    "node": "26.11.1"
+  },
+  "dependencies": {
+    "@earendil-works/pi-durable": "1.0.4",
+    "@earendil-works/pi-ai": "1.0.4",
+    "@earendil-works/chord": "1.0.4"
+  },
+  "overrides": {
+    "@earendil-works/pi-telemetry": "1.0.4"
+  }
+}
