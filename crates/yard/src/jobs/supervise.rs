@@ -318,13 +318,17 @@ pub async fn run_harness(
             ..Default::default()
         });
     }
+    let resumed = project
+        .read(|conn| executions::get(conn, execution))?
+        .resumed
+        .is_some();
+    let mut reader = harness.reader(resumed);
     let mut child = daemon
         .pinfold
         .exec_streaming(&box_name(project, execution), Some("/workspace"), argv)
         .map_err(|error| error.to_string())?;
     let mut stdout = BufReader::new(child.stdout.take().expect("piped")).lines();
     let mut stderr = BufReader::new(child.stderr.take().expect("piped")).lines();
-    let mut reader = harness.reader();
     let mut run = Run::default();
     let mut usage = None;
     let mut stdout_open = true;

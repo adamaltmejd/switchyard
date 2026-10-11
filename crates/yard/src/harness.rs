@@ -134,27 +134,6 @@ pub enum Provenance {
     Legacy,
 }
 
-impl Usage {
-    /// Claude keeps its zero defaults until its reader is
-    /// normalized. These values carry no completeness claim.
-    pub fn adapter(input: u64, output: u64, cost: f64) -> Self {
-        let field = UsageField {
-            completeness: Completeness::Unknown,
-            provenance: Provenance::Adapter,
-        };
-        Self {
-            input: Some(input),
-            output: Some(output),
-            cost: Some(cost),
-            fields: UsageFields {
-                input: field.clone(),
-                output: field.clone(),
-                cost: field,
-            },
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
     Started {
@@ -239,8 +218,9 @@ pub trait Harness: Send + Sync {
     fn route(&self, st: &Stage, machine: &Machine) -> Result<ModelRoute, String>;
     /// Start or resume, the prompt as one argument.
     fn argv(&self, launch: &Launch) -> Result<Vec<String>, String>;
-    /// A reader over stdout and stderr for one run.
-    fn reader(&self) -> Box<dyn Reader>;
+    /// A reader over stdout and stderr for one run. Resume identity comes
+    /// from the execution row, not from a session total in the stream.
+    fn reader(&self, resumed: bool) -> Box<dyn Reader>;
 }
 
 /// The compiled-in adapters. `name` is the config token.

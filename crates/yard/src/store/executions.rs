@@ -526,9 +526,9 @@ pub fn set_worker(
     )?;
     if let Some(usage) = usage {
         let mut fields = usage.fields.clone();
-        // Pi counts only the new stream's messages, including on resume.
+        // Codex resume accounting has not been normalized yet.
         let execution = get(conn, id)?;
-        if execution.resumed.is_some() && execution.harness.as_deref() != Some("pi") {
+        if execution.resumed.is_some() && execution.harness.as_deref() == Some("codex") {
             for field in [&mut fields.input, &mut fields.output, &mut fields.cost] {
                 field.completeness = crate::harness::Completeness::Unknown;
             }

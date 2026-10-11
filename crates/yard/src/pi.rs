@@ -111,7 +111,7 @@ impl Harness for Pi {
         argv(launch)
     }
 
-    fn reader(&self) -> Box<dyn Reader> {
+    fn reader(&self, _resumed: bool) -> Box<dyn Reader> {
         Box::new(Normalizer::default())
     }
 }

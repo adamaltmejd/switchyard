@@ -6,7 +6,8 @@
 use crate::config::Agent;
 use crate::daemon::Machine;
 use crate::harness::{
-    Event, Harness, Launch, LoginInfo, ModelRoute, Reader, Registration, Stage, Usage,
+    Completeness, Event, Harness, Launch, LoginInfo, ModelRoute, Provenance, Reader, Registration,
+    Stage, Usage, UsageField, UsageFields,
 };
 use serde_json::{Value, json};
 
@@ -166,8 +167,11 @@ impl Harness for Claude {
         argv(launch)
     }
 
-    fn reader(&self) -> Box<dyn Reader> {
-        Box::new(Normalizer)
+    fn reader(&self, resumed: bool) -> Box<dyn Reader> {
+        Box::new(Normalizer {
+            resumed,
+            ..Normalizer::default()
+        })
     }
 }
 
@@ -254,7 +258,10 @@ fn check_prompt(prompt: &str) -> Result<(), String> {
 /// servers registered; the `result` frame is the outcome. A stream that ends
 /// without `result` has decided nothing.
 #[derive(Default)]
-pub struct Normalizer;
+pub struct Normalizer {
+    messages: std::collections::BTreeMap<String, Usage>,
+    resumed: bool,
+}
 
 impl Reader for Normalizer {
     fn stdout(&mut self, line: &str) -> Vec<Event> {
@@ -276,13 +283,44 @@ impl Reader for Normalizer {
                 events.push(Event::Registered(registration(&frame)));
                 events
             }
-            Some("result") => vec![result(&frame)],
+            Some("assistant")
+                if frame.get("isApiErrorMessage").and_then(Value::as_bool) != Some(true) =>
+            {
+                let message = &frame["message"];
+                let Some(id) = message.get("id").and_then(Value::as_str) else {
+                    return Vec::new();
+                };
+                // Content blocks can repeat a message id. Replace its observation,
+                // rather than counting the same API response twice.
+                self.messages.insert(id.into(), usage(message, false));
+                vec![Event::Usage {
+                    usage: self.observed(),
+                }]
+            }
+            Some("result") => vec![result(&frame, self.observed(), self.resumed)],
             _ => Vec::new(),
         }
     }
 
     fn stderr(&mut self, _line: &str) -> Option<Registration> {
         None
+    }
+}
+
+impl Normalizer {
+    fn observed(&self) -> Usage {
+        let mut observed = Usage::default();
+        for message in self.messages.values() {
+            if let Some(input) = message.input {
+                observed.input = Some(observed.input.unwrap_or(0) + input);
+                observed.fields.input = field(Completeness::Partial);
+            }
+            if let Some(output) = message.output {
+                observed.output = Some(observed.output.unwrap_or(0) + output);
+                observed.fields.output = field(Completeness::Partial);
+            }
+        }
+        observed
     }
 }
 
@@ -320,10 +358,25 @@ fn registration(frame: &Value) -> Registration {
 
 /// The `result` frame is the outcome; `subtype` success and no `is_error` is
 /// a finished run, anything else names the failure.
-fn result(frame: &Value) -> Event {
-    let usage = usage(frame);
+fn result(frame: &Value, observed: Usage, resumed: bool) -> Event {
     let ok = frame.get("subtype").and_then(Value::as_str) == Some("success")
         && frame.get("is_error").and_then(Value::as_bool) != Some(true);
+    let mut usage = usage(frame, ok);
+    // The pin restores session cost, but result tokens cover only this run.
+    // No execution-local baseline is reported on resume. A missing earlier
+    // cost or interrupted run cannot be priced by subtracting stored values.
+    if resumed {
+        usage.cost = None;
+        usage.fields.cost = UsageField::default();
+    }
+    if usage.input.is_none() {
+        usage.input = observed.input;
+        usage.fields.input = observed.fields.input;
+    }
+    if usage.output.is_none() {
+        usage.output = observed.output;
+        usage.fields.output = observed.fields.output;
+    }
     if ok {
         return Event::Finished { usage };
     }
@@ -338,17 +391,48 @@ fn result(frame: &Value) -> Event {
     }
 }
 
-fn usage(frame: &Value) -> Usage {
-    let usage = &frame["usage"];
-    let count = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
-    Usage::adapter(
-        count("input_tokens")
-            + count("cache_read_input_tokens")
-            + count("cache_creation_input_tokens"),
-        count("output_tokens"),
-        frame
-            .get("total_cost_usd")
-            .and_then(Value::as_f64)
-            .unwrap_or(0.0),
-    )
+// Result token totals cover this invocation, including on resume. They replace
+// streamed observations. Result cost is session-cumulative, handled in result.
+fn usage(frame: &Value, complete: bool) -> Usage {
+    let values = &frame["usage"];
+    let counts = [
+        "input_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+    ]
+    .map(|key| values.get(key).and_then(Value::as_u64));
+    let input = counts.iter().flatten().copied().reduce(|a, b| a + b);
+    let output = values.get("output_tokens").and_then(Value::as_u64);
+    let cost = frame
+        .get("total_cost_usd")
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite() && *value >= 0.0);
+    let completeness = |present: bool, covered: bool| {
+        if !present {
+            UsageField::default()
+        } else {
+            field(if complete && covered {
+                Completeness::Complete
+            } else {
+                Completeness::Partial
+            })
+        }
+    };
+    Usage {
+        input,
+        output,
+        cost,
+        fields: UsageFields {
+            input: completeness(input.is_some(), counts.iter().all(Option::is_some)),
+            output: completeness(output.is_some(), true),
+            cost: completeness(cost.is_some(), true),
+        },
+    }
+}
+
+fn field(completeness: Completeness) -> UsageField {
+    UsageField {
+        completeness,
+        provenance: Provenance::Harness,
+    }
 }

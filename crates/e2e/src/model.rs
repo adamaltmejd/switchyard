@@ -250,6 +250,16 @@ fn is_tool_result(message: &Value) -> bool {
 }
 
 pub enum Reply {
+    /// Anthropic counters, including cache reads and writes.
+    AnthropicUsage {
+        input: u64,
+        output: u64,
+        cache_read: u64,
+        cache_write: u64,
+        reply: Box<Reply>,
+    },
+    /// A non-retryable Anthropic request failure from the host fixture.
+    AnthropicError,
     /// Token counts for a real Pi chat-completions reply.
     ChatUsage {
         input: u64,
@@ -408,6 +418,13 @@ fn render(reply: Reply, request: &ModelRequest) -> Vec<u8> {
 
 fn render_usage(reply: Reply, request: &ModelRequest, usage: (u64, u64)) -> Vec<u8> {
     match reply {
+        Reply::AnthropicUsage { input, output, cache_read, cache_write, reply } => {
+            assert!(anthropic(request));
+            render_anthropic(*reply, request, (input, output, cache_read, cache_write))
+        }
+        Reply::AnthropicError => respond(400, "application/json", json!({
+            "type": "error", "error": {"type": "invalid_request_error", "message": "fixture failure"}
+        }).to_string()),
         Reply::ChatUsage {
             input,
             output,
@@ -428,8 +445,7 @@ fn render_usage(reply: Reply, request: &ModelRequest, usage: (u64, u64)) -> Vec<
             latch.hold();
             render_usage(*inner, request, usage)
         }
-        Reply::Text(text) if anthropic(request) => anthropic_text(&text, request),
-        Reply::Tools(calls) if anthropic(request) => anthropic_tools(calls, request),
+        reply if anthropic(request) => render_anthropic(reply, request, (usage.0, usage.1, 0, 0)),
         Reply::Text(text) if responses(request) => responses_text(&text, request, usage),
         Reply::Tools(calls) if responses(request) => responses_tools(calls, request, usage),
         reply => openai(reply, request, usage),
@@ -578,13 +594,25 @@ fn anthropic(request: &ModelRequest) -> bool {
     request.path == "/v1/messages" || request.path.starts_with("/v1/messages?")
 }
 
-fn anthropic_text(text: &str, request: &ModelRequest) -> Vec<u8> {
+fn render_anthropic(reply: Reply, request: &ModelRequest, usage: (u64, u64, u64, u64)) -> Vec<u8> {
+    match reply {
+        Reply::Text(text) => anthropic_text(&text, request, usage),
+        Reply::Tools(calls) => anthropic_tools(calls, request, usage),
+        Reply::Hold(latch, inner) => {
+            latch.hold();
+            render_anthropic(*inner, request, usage)
+        }
+        reply => render(reply, request),
+    }
+}
+
+fn anthropic_text(text: &str, request: &ModelRequest, usage: (u64, u64, u64, u64)) -> Vec<u8> {
     let body = [
         sse(
             "message_start",
             json!({
                 "type": "message_start",
-                "message": anthropic_message(request),
+                "message": anthropic_message(request, usage),
             }),
         ),
         sse(
@@ -601,20 +629,24 @@ fn anthropic_text(text: &str, request: &ModelRequest) -> Vec<u8> {
             "content_block_stop",
             json!({ "type": "content_block_stop", "index": 0 }),
         ),
-        anthropic_delta("end_turn"),
+        anthropic_delta("end_turn", usage.1),
         sse("message_stop", json!({ "type": "message_stop" })),
     ]
     .concat();
     respond(200, "text/event-stream", body)
 }
 
-fn anthropic_tools(calls: Vec<ToolCall>, request: &ModelRequest) -> Vec<u8> {
+fn anthropic_tools(
+    calls: Vec<ToolCall>,
+    request: &ModelRequest,
+    usage: (u64, u64, u64, u64),
+) -> Vec<u8> {
     let turn = request.turn();
     let mut body = sse(
         "message_start",
         json!({
             "type": "message_start",
-            "message": anthropic_message(request),
+            "message": anthropic_message(request, usage),
         }),
     );
     for (index, call) in calls.into_iter().enumerate() {
@@ -634,12 +666,12 @@ fn anthropic_tools(calls: Vec<ToolCall>, request: &ModelRequest) -> Vec<u8> {
             json!({ "type": "content_block_stop", "index": index }),
         ));
     }
-    body.push_str(&anthropic_delta("tool_use"));
+    body.push_str(&anthropic_delta("tool_use", usage.1));
     body.push_str(&sse("message_stop", json!({ "type": "message_stop" })));
     respond(200, "text/event-stream", body)
 }
 
-fn anthropic_message(request: &ModelRequest) -> Value {
+fn anthropic_message(request: &ModelRequest, usage: (u64, u64, u64, u64)) -> Value {
     json!({
         "id": format!("msg_fake_{}", request.turn()),
         "type": "message",
@@ -648,17 +680,18 @@ fn anthropic_message(request: &ModelRequest) -> Value {
         "content": [],
         "stop_reason": null,
         "stop_sequence": null,
-        "usage": { "input_tokens": PROMPT_TOKENS, "output_tokens": 0 },
+        "usage": { "input_tokens": usage.0, "output_tokens": 0,
+                   "cache_read_input_tokens": usage.2, "cache_creation_input_tokens": usage.3 },
     })
 }
 
-fn anthropic_delta(stop_reason: &str) -> String {
+fn anthropic_delta(stop_reason: &str, output: u64) -> String {
     format!(
         "event: message_delta\ndata: {}\n\n",
         json!({
             "type": "message_delta",
             "delta": { "stop_reason": stop_reason, "stop_sequence": null },
-            "usage": { "output_tokens": COMPLETION_TOKENS },
+            "usage": { "output_tokens": output },
         })
     )
 }
@@ -687,7 +720,11 @@ fn openai(reply: Reply, request: &ModelRequest, tokens: (u64, u64)) -> Vec<u8> {
                 "tool_calls",
             )
         }
-        Reply::Hold(_, _) | Reply::ResponsesUsage { .. } | Reply::ChatUsage { .. } => {
+        Reply::Hold(_, _)
+        | Reply::ResponsesUsage { .. }
+        | Reply::ChatUsage { .. }
+        | Reply::AnthropicUsage { .. }
+        | Reply::AnthropicError => {
             unreachable!("the wrapper is handled before rendering")
         }
     };
