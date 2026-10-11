@@ -648,10 +648,15 @@ pub async fn implement(
     if stop_preparation(daemon, project, execution).await? {
         return Ok(());
     }
+    let kind = if workflow.read_only {
+        crate::mcp::Kind::Audit
+    } else {
+        crate::mcp::Kind::Implementation
+    };
     let bearer = daemon.grants.issue(crate::mcp::Grant {
         project: project.clone(),
         execution,
-        kind: crate::mcp::Kind::Implementation,
+        kind,
     });
     let mut secrets = vec![(crate::harness::BEARER_VAR.to_string(), bearer)];
     secrets.extend(model.secret.clone());
@@ -685,7 +690,7 @@ pub async fn implement(
         daemon,
         project,
         execution,
-        crate::mcp::Kind::Implementation,
+        kind,
         harness,
         &argv,
         &state,
@@ -829,6 +834,11 @@ pub async fn implement(
             }
             _ => None,
         };
+        let report = executions::get(tx, execution)?.report;
+        let failure = failure.or_else(|| {
+            (workflow.read_only && !run.stopped && report.is_none())
+                .then(|| ("failed", Some("publication"), "missing_report".to_string()))
+        });
         let edited = attempts::edit_pending(tx, attempt.id)?;
         let stop = |tx: &rusqlite::Connection, reason: &str, detail: &str| -> Result<(), Fail> {
             attempts::raise(tx, attempts::Raise {
@@ -953,7 +963,7 @@ pub async fn implement(
         if !advanced {
             executions::end(tx, execution, executions::End {
                 outcome: "unchanged",
-                output: (workflow.read_only && !run.stopped && !edited).then(|| json!({"kind": "report", "value": {"execution": execution}})),
+                output: (workflow.read_only && !run.stopped && !edited).then(|| json!({"kind": "report", "value": report})),
                 exit_code: run.exit_code,
                 ticket: Some(ticket.id),
                 ..Default::default()
@@ -1111,7 +1121,7 @@ async fn implementer_prompt(
         }
         prompt.push_str(&format!("Target branch: {}.\n\n", attempt.target_branch()?));
         if workflow.read_only {
-            prompt.push_str("Your workspace is read-only. Plan the work: propose child tickets and an edit of this ticket's body with yard_propose, then stop.\n\n");
+            prompt.push_str("Your workspace is read-only. Plan the work: propose work with yard_propose as needed. Publish exactly once with yard_publish_report: outcome complete, report with a nonempty summary and a findings list (empty if none), then stop.\n\n");
         } else {
             prompt.push_str("Work in /workspace on the current branch. Commit your work with git and leave the tree clean; uncommitted or untracked files send the work back to you. Do not change .yard/. Record progress with yard_progress. Files under /yard/proof are snapshotted with the candidate and are not merged. Propose follow-up tickets with yard_propose; if the ticket is too large, propose the split and stop.\n\n");
         }
@@ -1674,7 +1684,9 @@ pub async fn context(daemon: &Arc<Daemon>, grant: &crate::mcp::Grant) -> Result<
     let ticket = project.read(|conn| tickets::get(conn, attempt.ticket))?;
     let (base, head) = match grant.kind {
         crate::mcp::Kind::Review => (row.base.clone().unwrap_or_default(), row.head.clone()),
-        crate::mcp::Kind::Implementation => (attempt.base.clone(), attempt.head.clone()),
+        crate::mcp::Kind::Implementation | crate::mcp::Kind::Audit => {
+            (attempt.base.clone(), attempt.head.clone())
+        }
     };
     let stat = match &head {
         Some(head) => daemon

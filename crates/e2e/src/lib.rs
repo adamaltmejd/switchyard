@@ -1056,3 +1056,17 @@ impl Drop for Operator {
         let _ = self.child.wait();
     }
 }
+
+/// The scripted model's explicit read-only publication.
+pub fn publish_report() -> ToolCall {
+    tool(
+        "yard_publish_report",
+        json!({
+            "outcome": "complete", "report": {"summary": "Fixture audit", "findings": []}
+        }),
+    )
+}
+
+pub fn planned(request: &ModelRequest) -> Reply {
+    act(request, vec![publish_report()])
+}

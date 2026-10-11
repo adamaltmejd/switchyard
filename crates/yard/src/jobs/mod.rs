@@ -9,6 +9,7 @@ pub mod cleanup;
 pub mod proof;
 pub mod queue;
 pub mod reconcile;
+pub mod report;
 pub mod review;
 pub mod supervise;
 

@@ -25,6 +25,7 @@ pub struct Grant {
 pub enum Kind {
     Implementation,
     Review,
+    Audit,
 }
 
 #[derive(Default)]
@@ -191,9 +192,26 @@ fn tools(kind: Kind) -> Vec<Value> {
             "additionalProperties": false,
         },
     });
+    let report = json!({
+        "name": "yard_publish_report",
+        "description": "Publish your read-only report once with the declared outcome complete.",
+        "inputSchema": {
+            "type": "object", "additionalProperties": false,
+            "properties": {
+                "outcome": {"type": "string", "enum": ["complete"]},
+                "report": {"type": "object", "additionalProperties": false,
+                    "properties": {
+                        "summary": {"type": "string", "minLength": 1, "maxLength": 8000},
+                        "findings": {"type": "array", "maxItems": 200,
+                            "items": {"type": "string", "minLength": 1, "maxLength": 8000}}
+                    }, "required": ["summary", "findings"]}
+            }, "required": ["outcome", "report"]
+        }
+    });
     match kind {
         Kind::Implementation => vec![context, progress, propose],
         Kind::Review => vec![context, progress, publish],
+        Kind::Audit => vec![context, progress, propose, report],
     }
 }
 
@@ -316,7 +334,8 @@ async fn call(daemon: &Arc<Daemon>, grant: &Grant, params: &Value) -> Value {
             "yard_progress" => progress(grant, &arguments),
             "yard_propose" => crate::jobs::propose(grant, &arguments),
             "yard_publish_review" => crate::jobs::review::publish(grant, &arguments),
-            _ => unreachable!("granted tools are the four above"),
+            "yard_publish_report" => crate::jobs::report::publish(grant, &arguments),
+            _ => unreachable!("granted tools are listed above"),
         }
     };
     daemon.wake.notify_one();

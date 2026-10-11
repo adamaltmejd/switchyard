@@ -22,6 +22,7 @@ pub struct Execution {
     pub node: Option<String>,
     pub inputs: Option<Value>,
     pub result: Option<Value>,
+    pub report: Option<Value>,
     pub teardown: Option<bool>,
     pub result_eligible: bool,
     pub name: Option<String>,
@@ -46,7 +47,7 @@ pub struct Execution {
 const COLUMNS: &str = "id, attempt, parent, kind, reason, status, outcome, detail, base, head,
     proof, ticket_revision, name, round, handle, session_id, approval, intent_old, intent_merged,
     intent_state, progress, harness_version, resumed, reserved, lock_contract, intent_ref, plan_revision,
-    tokens_in, tokens_out, cost, usage_fields, harness, model, node, inputs, result, teardown";
+    tokens_in, tokens_out, cost, usage_fields, harness, model, node, inputs, result, teardown, report";
 
 pub const RESULT_ELIGIBLE: &str = "status = 'ended' AND reserved = 0 AND teardown = 1
     AND json_extract(result, '$.outputs.result') IS NOT NULL";
@@ -117,7 +118,8 @@ fn row(row: &Row) -> rusqlite::Result<Execution> {
         inputs: json_column(row, 34)?,
         result: json_column(row, 35)?,
         teardown: row.get(36)?,
-        result_eligible: row.get(37)?,
+        report: json_column(row, 37)?,
+        result_eligible: row.get(38)?,
     })
 }
 
@@ -155,6 +157,7 @@ impl Execution {
                 "status": "recorded", "node": node, "inputs": self.inputs,
             })),
             "result": self.result,
+            "report": self.report,
             "teardown": self.teardown,
             "result_eligible": self.result_eligible,
             "name": self.name,
@@ -634,7 +637,12 @@ pub fn end(tx: &Connection, id: i64, end: End) -> Result<(), Fail> {
                 .map(|judgment| json!({"kind": "verdict", "value": judgment}))
         });
         let attempt = super::attempts::get(tx, execution.attempt)?;
-        let mut outcome = "complete";
+        let mut outcome = output
+            .as_ref()
+            .filter(|output| output["kind"] == "report")
+            .and(execution.report.as_ref())
+            .and_then(|report| report["outcome"].as_str())
+            .unwrap_or("complete");
         if let Some(admission) = &attempt.admission {
             let plan = crate::plan::Plan::admitted(admission)
                 .map_err(|error| Fail::refused(error.to_string()))?;

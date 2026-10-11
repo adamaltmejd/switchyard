@@ -219,4 +219,5 @@ ALTER TABLE attempt ADD COLUMN body_read TEXT;
      ALTER TABLE execution ADD COLUMN inputs TEXT;
      ALTER TABLE execution ADD COLUMN result TEXT;
      ALTER TABLE execution ADD COLUMN teardown INTEGER;",
+    "ALTER TABLE execution ADD COLUMN report TEXT;",
 ];
