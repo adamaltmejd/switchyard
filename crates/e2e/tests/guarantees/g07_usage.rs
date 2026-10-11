@@ -352,6 +352,24 @@ fn codex_failed_and_interrupted_resume_usage_remain_execution_local() {
     machine.write_codex_env(&codex_jwt(account, 3600), account);
     machine.start();
     let project = Project::new(&machine, "p", &configuration());
+    // A different machine can retire a name between this build and box up.
+    // Give this fixture distinct image content, not just a distinct name.
+    let dockerfile = project.git(&["show", "HEAD:.yard/Dockerfile"]);
+    project.write(
+        ".yard/Dockerfile",
+        &format!(
+            "{dockerfile}\nLABEL dev.yard.e2e-machine=\"{}\"\n",
+            machine.root.display()
+        ),
+    );
+    project.git(&["add", ".yard/Dockerfile"]);
+    project.git(&[
+        "commit",
+        "--quiet",
+        "-m",
+        "Isolate Codex usage fixture image",
+    ]);
+    project.json(&["sync"]);
     let mut history = project.watch(0);
     project.json(&["ticket", "new", "--title", "Local usage"]);
     let approval = history.attention();
