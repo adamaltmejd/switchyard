@@ -25,6 +25,14 @@ and seals every installed regular file. No host Node/npm is required.
 
 Use the Dockerfile as a scaffold, with the repository as build context,
 or append its COPY and RUN instructions to the reviewed target Dockerfile.
+The scaffold uses a reviewed Debian glibc base with its C/C++ runtime and
+installs `libatomic1` from that base's authenticated package repositories
+during the isolated image build, before invoking Node. This supplies
+`libatomic.so.1`, which the official Node archive requires. Preserve this
+step when appending the scaffold. OS packages are image-build dependencies;
+none is installed on the host or at controller runtime. For an offline build,
+prepare a reviewed base containing this runtime closure and omit the OS
+installation RUN when appending the scaffold.
 Set `TARGETARCH` to `amd64` or `arm64`. Pin the reviewed base by digest when
 preparing the installed image. The controller lives at
 `/opt/yard/durable-audit`, outside the candidate workspace. Keep that path

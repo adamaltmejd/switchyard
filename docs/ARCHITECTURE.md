@@ -690,6 +690,10 @@ conversation and SQLite checkpoints, Pi AI the model client and schemas,
 Chord its context. Telemetry is a pinned Pi AI dependency, with no configured
 exporter. The image build checks the official Node archive checksum and
 locked npm integrities, disables package scripts, then seals installed files.
+The reviewed Debian glibc base supplies the C/C++ runtime. The isolated
+image build installs `libatomic1` from its authenticated OS repositories
+before invoking Node; it supplies Node's required `libatomic.so.1`.
+An offline build requires a reviewed base containing that runtime closure.
 The fixed launcher verifies those files and the Node binary; the controller
 checks the exact runtime, lock and required package exports before any model
 request. Missing or incompatible assets name `runner_unavailable` and the
