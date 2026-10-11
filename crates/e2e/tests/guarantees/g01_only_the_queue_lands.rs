@@ -97,7 +97,7 @@ fn a_worker_cannot_land_by_push_rpc_or_canonical() {
 /// scripted findings and host git trees, not resolver output. Existing full
 /// chains cannot expose hidden omitted gates or a stale panel predecessor.
 /// Sabotage: run configured landing gates despite selection; their rows appear.
-/// Fabricate passes for skipped nodes; the check count differs. Derive
+/// Fabricate passes for skipped nodes; the checked node/verdict sequence differs. Derive
 /// unreviewed from workflow.review; the empty selection is marked reviewed.
 /// Keep review-2's old predecessor or discard its incoming block; the reduced
 /// panel cannot repair once before approval. Auto-approve protected paths;
@@ -304,9 +304,26 @@ command = "git rev-parse HEAD"
             _ => vec![],
         };
         assert_eq!(gates, expected);
+        // Checks are candidate/review publications. Landing children carry
+        // their judgments on execution; their exact nodes and heads are above.
         let checks = project.rows(&format!(
-            "SELECT id FROM \"check\" WHERE attempt = {attempt}"
+            "SELECT e.node, c.verdict FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE e.attempt = {attempt} ORDER BY c.id"
         ));
-        assert_eq!(checks.len(), [6, 5, 0][index]);
+        let expected_checks = match index {
+            0 => vec![
+                json!({"node": "candidate-gate-check", "verdict": "pass"}),
+                json!({"node": "review-0", "verdict": "pass"}),
+                json!({"node": "review-1", "verdict": "pass"}),
+                json!({"node": "review-2", "verdict": "pass"}),
+            ],
+            1 => vec![
+                json!({"node": "review-0", "verdict": "fail"}),
+                json!({"node": "review-2", "verdict": "pass"}),
+                json!({"node": "review-0", "verdict": "pass"}),
+                json!({"node": "review-2", "verdict": "pass"}),
+            ],
+            _ => vec![],
+        };
+        assert_eq!(checks, expected_checks);
     }
 }
