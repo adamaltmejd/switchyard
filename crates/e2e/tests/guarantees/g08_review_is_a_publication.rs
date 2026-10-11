@@ -1680,12 +1680,14 @@ fn a_publication_without_a_registration_does_not_count() {
     // execution, so its line is untouched.
     let listing = machine.root.join("listing-pinfold");
     std::os::unix::fs::symlink(real("pinfold"), &listing).unwrap();
-    let down_said = machine.root.join("down-said");
-    let down_release = machine.root.join("down-release");
+    let exec_hold = machine.root.join("exec-hold");
+    std::fs::write(&exec_hold, "").unwrap();
+    let exec_said = machine.root.join("exec-said");
+    let exec_release = machine.root.join("exec-release");
     let listing_hold = machine.root.join("listing-hold");
     let listing_said = machine.root.join("listing-said");
     let listing_release = machine.root.join("listing-release");
-    for fifo in [&down_said, &down_release, &listing_said, &listing_release] {
+    for fifo in [&exec_said, &exec_release, &listing_said, &listing_release] {
         assert!(
             std::process::Command::new("mkfifo")
                 .arg(fifo)
@@ -1694,10 +1696,10 @@ fn a_publication_without_a_registration_does_not_count() {
                 .success()
         );
     }
-    let mut finish_down = std::fs::OpenOptions::new()
+    let mut finish_exec = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
-        .open(&down_release)
+        .open(&exec_release)
         .unwrap();
     let mut finish_listing = std::fs::OpenOptions::new()
         .read(true)
@@ -1709,7 +1711,7 @@ fn a_publication_without_a_registration_does_not_count() {
          '{}' \"$@\"; result=$?\n\
          if [ \"$result\" = 0 ] && [ -e '{}' ]; then echo \"$result\" > '{}'; read line < '{}'; fi\n\
          exit \"$result\"; fi\n\
-         if [ \"$1 $2\" = 'box down' ] && [ \"${{3%-1}}\" != \"$3\" ]; then\n\
+         if [ -e '{}' ] && [ \"$1 $2\" = 'box exec' ] && [ \"${{3%-1}}\" != \"$3\" ]; then\n\
          \"$REAL\" \"$@\"; result=$?\n\
          echo \"$3 $result\" > '{}'; read line < '{}'; exit \"$result\"; fi\n\
          if [ \"$1 $2\" = 'box exec' ] && [ \"${{3%-2}}\" != \"$3\" ]; then
@@ -1721,13 +1723,13 @@ fn a_publication_without_a_registration_does_not_count() {
   exit $code
 fi",
         listing.display(), listing_hold.display(), listing_said.display(), listing_release.display(),
-        down_said.display(), down_release.display(),
+        exec_hold.display(), exec_said.display(), exec_release.display(),
     ));
     machine.start();
     let project = Project::new(&machine, "p", &config(""));
     let mut watch = project.watch(0);
     project.json(&["ticket", "new", "--title", "Add feature"]);
-    let held = watch.said(&down_said);
+    let held = watch.said(&exec_said);
     let (box_name, result) = held.trim().split_once(' ').unwrap();
     assert_eq!(result, "0");
     let implementation = project
@@ -1747,10 +1749,13 @@ fi",
         lock.try_lock(),
         Err(std::fs::TryLockError::WouldBlock)
     ));
-    // The real down command has completed. Make the subsequent real host
-    // listing executable unavailable before allowing candidate completion.
+    // The real implementation box-exec child completed; its wrapper still
+    // holds the inherited owner lock and keeps completion pending. Normal
+    // teardown closes box-up stdin, so a box-down CLI hold is never reached.
+    // Make listings unavailable before releasing this actual boundary.
     std::fs::remove_file(&listing).unwrap();
-    finish_down.write_all(b"go\n").unwrap();
+    std::fs::remove_file(&exec_hold).unwrap();
+    finish_exec.write_all(b"go\n").unwrap();
     let candidate = watch.find("candidate pinned", |event| {
         event["event"] == "attempt.candidate"
     });
