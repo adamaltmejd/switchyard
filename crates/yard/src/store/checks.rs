@@ -253,10 +253,11 @@ pub struct Approval {
     pub review_digest: String,
     pub checks: Vec<i64>,
     pub actor: String,
+    pub accepted_skipped: Option<Value>,
     pub state: String,
 }
 
-const APPROVAL_COLUMNS: &str = "id, attempt, base, head, ticket_revision, gate_digest, review_digest, checks, actor, state, proof, plan_revision";
+const APPROVAL_COLUMNS: &str = "id, attempt, base, head, ticket_revision, gate_digest, review_digest, checks, actor, state, proof, plan_revision, accepted_skipped";
 
 fn approval_row(row: &Row) -> rusqlite::Result<Approval> {
     Ok(Approval {
@@ -272,6 +273,17 @@ fn approval_row(row: &Row) -> rusqlite::Result<Approval> {
         state: row.get(9)?,
         proof: row.get(10)?,
         plan_revision: row.get(11)?,
+        accepted_skipped: row
+            .get::<_, Option<String>>(12)?
+            .map(|raw| serde_json::from_str(&raw))
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    12,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
     })
 }
 
@@ -318,6 +330,7 @@ pub struct Approve<'a> {
     pub review_digest: &'a str,
     pub checks: &'a [i64],
     pub actor: &'a str,
+    pub accepted_skipped: Option<&'a Value>,
     pub text: Option<&'a str>,
     pub overrode: bool,
 }
@@ -331,7 +344,7 @@ pub fn approve(tx: &Connection, approve: Approve) -> Result<i64, Fail> {
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
-    let overrode = approve.overrode || !accepted.is_empty();
+    let overrode = approve.overrode || !accepted.is_empty() || approve.accepted_skipped.is_some();
     tx.execute(
         "INSERT INTO approval (attempt, base, head, proof, ticket_revision, gate_digest, review_digest,
             checks, actor, text, state, created_at, overrode)
@@ -354,8 +367,8 @@ pub fn approve(tx: &Connection, approve: Approve) -> Result<i64, Fail> {
     let id = tx.last_insert_rowid();
     let revision = super::attempts::get(tx, approve.attempt)?.plan_revision();
     tx.execute(
-        "UPDATE approval SET plan_revision = ?2 WHERE id = ?1",
-        params![id, revision],
+        "UPDATE approval SET plan_revision = ?2, accepted_skipped = ?3 WHERE id = ?1",
+        params![id, revision, approve.accepted_skipped.map(Value::to_string)],
     )?;
     audit(
         tx,
@@ -367,7 +380,8 @@ pub fn approve(tx: &Connection, approve: Approve) -> Result<i64, Fail> {
         },
         approve.text,
         json!({ "approval": id, "actor": approve.actor, "head": approve.head, "base": approve.base,
-                "proof": approve.proof, "checks": approve.checks, "accepted": accepted, "overrode": overrode }),
+                "proof": approve.proof, "checks": approve.checks, "accepted": accepted,
+                "accepted_skipped": approve.accepted_skipped, "overrode": overrode }),
     )?;
     Ok(id)
 }

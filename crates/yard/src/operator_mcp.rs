@@ -58,7 +58,7 @@ const OPERATIONS: &[(&str, &str)] = &[
     ),
     (
         "attempt.approve",
-        "project! ticket! head! target! proof text",
+        "project! ticket! head! target! proof text accept_skipped:a attention:i base revision:i plan_revision:i",
     ),
     (
         "attempt.reject",

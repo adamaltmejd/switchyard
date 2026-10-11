@@ -796,3 +796,234 @@ fn delayed_candidate_acceptance_names_the_changed_identity_and_writes_nothing() 
         &["merge-base", "--is-ancestor", head, "refs/heads/main"],
     );
 }
+
+/// G2/G8: explicit skipped acceptance follows a full default landing in the
+/// same project. A reduced plan retains one candidate gate and no seats.
+/// An edit holds the new worker before changing head: delayed decisions name
+/// the old revision, then old head, and write nothing. Wrong plan and retained
+/// node identities also refuse; current identities record the operator's text.
+/// Expected nodes and revisions are fixture literals; base/head come from git.
+/// The pre-decision execution/check snapshot must survive acceptance, landing
+/// and a quiescent reopen. Existing omission coverage has no explicit decision.
+/// Sabotage: manufacture a passing check/result for an accepted omission, drop
+/// skipped-node or plan binding, drop revision/head binding, or mark the empty
+/// panel reviewed on acceptance. Remove approval evidence persistence to lose
+/// the decision at landing or reopen. Accept blank text to lose the required
+/// operator explanation.
+#[test]
+fn selected_skipped_decisions_bind_identity_without_manufacturing_results() {
+    let hold = Latch::new();
+    let held = hold.clone();
+    let machine = Machine::new("g2-skipped", move |request| {
+        if request
+            .prompt()
+            .contains("Your workspace is read-only. Plan the work")
+        {
+            return planned(request);
+        }
+        if request.has_tool("yard_publish_review") {
+            return act(request, vec![publish(json!([]))]);
+        }
+        if request.opens() && request.last_user().contains("The operator edited") {
+            return Reply::Hold(
+                held.clone(),
+                Box::new(Reply::Tools(vec![bash(
+                    "cd /workspace && git commit --allow-empty -qm Edited",
+                )])),
+            );
+        }
+        let path = if request.context().contains("Reduced") {
+            "reduced.txt"
+        } else {
+            "full.txt"
+        };
+        act(request, vec![commit_file(path, "feature\n", "Feature")])
+    });
+    machine.start();
+    let project = Project::new(
+        &machine,
+        "p",
+        &config(
+            "[gates.check]\ncommand = \"git rev-parse HEAD\"\nstage = \"candidate\"\n\
+         [gates.keep]\ncommand = \"git rev-parse HEAD\"\nstage = \"candidate\"\n\
+         [gates.other]\ncommand = \"git rev-parse HEAD\"\nstage = \"candidate\"\n",
+        ),
+    );
+    let mut watch = project.watch(0);
+    project.json(&["ticket", "new", "--title", "Full"]);
+    let full = approval(&mut watch);
+    project.json(&[
+        "attempt",
+        "approve",
+        "Y-1",
+        "--target",
+        "main",
+        "--head",
+        full["payload"]["head"].as_str().unwrap(),
+    ]);
+    watch.event("landing.recorded", &[]);
+    // Ordinary approval must not silently become explicit skipped acceptance.
+    assert_eq!(
+        project.rows("SELECT accepted_skipped FROM approval"),
+        vec![json!({"accepted_skipped": null})]
+    );
+    let base = project.canonical_head();
+    project.json(&["ticket", "new", "--title", "Reduced", "--workflow", "plan"]);
+    watch.event("attempt.ended", &[("outcome", "planned")]);
+    let planner = project.json(&["attempt", "show", "Y-2"])["attempt"]["attempt"].clone();
+    let cleanup = watch.find("planner cleanup", |event| {
+        event["event"] == "execution.ended"
+            && event["data"]["kind"] == "cleanup"
+            && event["attempt"] == planner
+    });
+    watch.find("planner released", |event| {
+        event["event"] == "execution.released" && event["execution"] == cleanup["execution"]
+    });
+    // Retained gates keep their ordinary failed repair edge even without a successor.
+    let graph = json!({"inputs": {"feedback": "verdict"}, "nodes": {
+        "implementer": {
+            "runner": {"kind": "agent", "agent": "worker", "instructions": ""},
+            "access": "write-allowed", "inputs": {"feedback": {"output": "feedback", "kind": "verdict"}},
+            "outputs": {"result": "candidate"}, "outcomes": ["complete"], "requires": [],
+            "routes": {"complete": [{"to": "candidate-gate-keep"}]}
+        },
+        "candidate-gate-keep": {
+            "runner": {"kind": "command", "gate": "keep"}, "access": "write-allowed",
+            "inputs": {"candidate": {"node": "implementer", "output": "result", "kind": "candidate"}},
+            "outputs": {"result": "verdict"}, "outcomes": ["complete", "failed"], "requires": ["candidate"],
+            "routes": {"failed": [{"to": "implementer", "repeat": 1}]}
+        }
+    }});
+    let mut operator = machine.operator();
+    operator.initialize();
+    let started = operator.call(
+        "yard_attempt_start",
+        json!({"project": project.path, "ticket": "Y-2", "graph": graph}),
+    );
+    assert!(started.get("error").is_none(), "{started}");
+    let first = approval(&mut watch);
+    let shown = project.json(&["attempt", "show", "Y-2"]);
+    let first_attention = shown["attention"][0]["attention"].clone();
+    let attempt = shown["attempt"]["attempt"].as_i64().unwrap();
+    let clone = project
+        .path
+        .join(format!(".yard/local/attempts/{attempt}/clone"));
+    let first_head = git(&clone, &["rev-parse", "HEAD"]).trim().to_string();
+    let delayed = json!({"project": project.path, "ticket": "Y-2", "target": "main", "base": base,
+        "head": first_head, "proof": first["payload"]["proof"], "revision": 1, "plan_revision": 1,
+        "attention": first_attention,
+        "accept_skipped": ["candidate-gate-check", "review-0"], "text": "Accept the selected candidate omissions"});
+    project.json(&[
+        "ticket",
+        "edit",
+        "Y-2",
+        "--revision",
+        "1",
+        "--body",
+        "Reduced, edited",
+    ]);
+    hold.wait_held();
+    let before = project.rows("SELECT * FROM audit ORDER BY seq");
+    let refused = operator.call("yard_attempt_approve", delayed.clone());
+    assert_eq!(refused["error"]["code"], "stale");
+    assert_eq!(
+        refused["error"]["data"],
+        json!({"identity": "revision", "expected": 1, "current": 2})
+    );
+    assert_eq!(project.rows("SELECT * FROM audit ORDER BY seq"), before);
+    hold.release();
+    let current = approval(&mut watch);
+    let current_attention =
+        project.json(&["attempt", "show", "Y-2"])["attention"][0]["attention"].clone();
+    let head = git(&clone, &["rev-parse", "HEAD"]).trim().to_string();
+    assert_ne!(head, first_head);
+    let mut decision = delayed;
+    decision["head"] = json!(head);
+    decision["revision"] = json!(2);
+    decision["attention"] = current_attention.clone();
+    for (key, old, identity, expected) in [
+        ("head", json!(first_head), "head", json!(head)),
+        (
+            "attention",
+            first_attention.clone(),
+            "attention",
+            current_attention.clone(),
+        ),
+        ("plan_revision", json!(0), "plan_revision", json!(1)),
+        (
+            "accept_skipped",
+            json!(["candidate-gate-keep"]),
+            "skipped",
+            json!(["candidate-gate-check", "candidate-gate-other", "review-0"]),
+        ),
+    ] {
+        let mut stale = decision.clone();
+        stale[key] = old.clone();
+        let before = project.rows("SELECT * FROM audit ORDER BY seq");
+        let approvals = project.rows("SELECT * FROM approval ORDER BY id");
+        let refused = operator.call("yard_attempt_approve", stale);
+        assert_eq!(refused["error"]["code"], "stale");
+        assert_eq!(
+            refused["error"]["data"],
+            json!({"identity": identity, "expected": old, "current": expected})
+        );
+        assert_eq!(project.rows("SELECT * FROM audit ORDER BY seq"), before);
+        assert_eq!(
+            project.rows("SELECT * FROM approval ORDER BY id"),
+            approvals
+        );
+    }
+    // This snapshot proves the acceptance adds no execution, result or check.
+    // The retained gate already finished; omissions have no rows to accept.
+    let judgments = format!(
+        "SELECT e.node, e.head, e.result, c.verdict FROM execution e LEFT JOIN \"check\" c ON c.execution = e.id WHERE e.attempt = {attempt} AND e.kind IN ('gate', 'review') ORDER BY e.id"
+    );
+    let original = project.rows(&judgments);
+    assert_eq!(original.len(), 2); // first candidate, then the edited candidate
+    assert!(
+        original
+            .iter()
+            .all(|row| row["node"] == "candidate-gate-keep" && row["verdict"] == "pass")
+    );
+    assert_eq!(current["payload"]["unreviewed"], true);
+    let before = project.rows("SELECT * FROM audit ORDER BY seq");
+    let mut blank = decision.clone();
+    blank["text"] = json!("   ");
+    let refused = operator.call("yard_attempt_approve", blank);
+    assert_eq!(refused["error"]["code"], "invalid");
+    assert_eq!(project.rows("SELECT * FROM audit ORDER BY seq"), before);
+    let accepted = operator.call("yard_attempt_approve", decision.clone());
+    assert!(accepted.get("error").is_none(), "{accepted}");
+    let expected = json!({"identity": {"attempt": attempt, "target": "main", "base": base, "head": head, "proof": current["payload"]["proof"], "revision": 2, "plan_revision": 1,
+        "skipped": ["candidate-gate-check", "candidate-gate-other", "review-0"]}, "attention": current_attention, "nodes": ["candidate-gate-check", "review-0"], "actor": "operator", "text": decision["text"]});
+    let evidence =
+        format!("SELECT accepted_skipped, actor, overrode FROM approval WHERE attempt = {attempt}");
+    let rows =
+        vec![json!({"accepted_skipped": expected.to_string(), "actor": "operator", "overrode": 1})];
+    assert_eq!(project.rows(&evidence), rows);
+    watch.event("landing.recorded", &[]);
+    let cleanup = watch.find("accepted candidate cleanup", |event| {
+        event["event"] == "execution.ended"
+            && event["data"]["kind"] == "cleanup"
+            && event["attempt"] == attempt
+    });
+    watch.find("cleanup released", |event| {
+        event["event"] == "execution.released" && event["execution"] == cleanup["execution"]
+    });
+    git(
+        &project.canonical(),
+        &["merge-base", "--is-ancestor", &head, "refs/heads/main"],
+    );
+    assert_eq!(project.rows(&evidence), rows);
+    assert_eq!(project.rows(&judgments), original);
+    let admission = format!(
+        "SELECT json_extract(admission, '$.unreviewed') AS unreviewed FROM attempt WHERE id = {attempt}"
+    );
+    assert_eq!(project.rows(&admission), vec![json!({"unreviewed": 1})]);
+    machine.kill();
+    machine.start();
+    project.json(&["status"]);
+    assert_eq!(project.rows(&evidence), rows);
+    assert_eq!(project.rows(&judgments), original);
+    assert_eq!(project.rows(&admission), vec![json!({"unreviewed": 1})]);
+}

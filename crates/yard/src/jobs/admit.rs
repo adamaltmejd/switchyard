@@ -1687,6 +1687,81 @@ pub async fn candidate_answer(
     })
 }
 
+fn skipped_decision(
+    params: &Value,
+    attempt: &attempts::Attempt,
+    ticket: &tickets::Ticket,
+) -> Result<Option<Value>, Fail> {
+    let nodes = match &params["accept_skipped"] {
+        Value::Null => return Ok(None),
+        Value::Array(nodes) if nodes.is_empty() => return Ok(None),
+        Value::Array(nodes) => nodes,
+        _ => {
+            return Err(Fail::invalid(
+                "accept_skipped names candidate omitted nodes",
+            ));
+        }
+    };
+    let text = params["text"]
+        .as_str()
+        .filter(|text| !text.trim().is_empty())
+        .ok_or_else(|| Fail::invalid("skipped acceptance carries nonempty text"))?;
+    let attention = params["attention"]
+        .as_i64()
+        .ok_or_else(|| Fail::invalid("skipped acceptance names approval attention"))?;
+    let identity = super::skipped_identity(attempt, ticket);
+    for key in [
+        "target",
+        "base",
+        "head",
+        "proof",
+        "revision",
+        "plan_revision",
+    ] {
+        let named = if key == "proof"
+            && params[key].is_null()
+            && !proof::required(identity[key].as_str().unwrap_or_default())
+        {
+            identity[key].clone()
+        } else {
+            let valid = if matches!(key, "revision" | "plan_revision") {
+                params[key].as_i64().is_some()
+            } else {
+                params[key].as_str().is_some()
+            };
+            if !valid {
+                return Err(Fail::invalid(format!("skipped acceptance names {key}")));
+            }
+            params[key].clone()
+        };
+        if named != identity[key] {
+            return Err(candidate_stale(key, named, identity[key].clone()));
+        }
+    }
+    let mut distinct = std::collections::HashSet::new();
+    for node in nodes {
+        let name = node
+            .as_str()
+            .ok_or_else(|| Fail::invalid("skipped node is a name"))?;
+        if !distinct.insert(name) {
+            return Err(Fail::invalid("skipped nodes must be distinct"));
+        }
+        if !identity["skipped"]
+            .as_array()
+            .is_some_and(|skipped| skipped.contains(node))
+        {
+            return Err(candidate_stale(
+                "skipped",
+                json!(nodes),
+                identity["skipped"].clone(),
+            ));
+        }
+    }
+    Ok(Some(
+        json!({"identity": identity, "attention": attention, "nodes": nodes, "actor": "operator", "text": text}),
+    ))
+}
+
 pub async fn attempt_approve(
     daemon: &Daemon,
     project: &Project,
@@ -1703,6 +1778,19 @@ pub async fn attempt_approve(
         .ok_or_else(|| Fail::refused("no live attempt"))?;
     let loaded = super::load_attempt(daemon, project, &attempt).await?;
     let approval = project.tx(|tx| {
+        // Loading admitted policy may yield while the live attempt is replaced.
+        let current = match attempts::live_for(tx, id)? {
+            Some(current) if current.id == attempt.id => current,
+            current => {
+                return Err(candidate_stale(
+                    "attempt",
+                    json!(attempt.id),
+                    json!(current.map(|attempt| attempt.id)),
+                ));
+            }
+        };
+        let ticket = tickets::get(tx, id)?;
+        let accepted_skipped = skipped_decision(params, &current, &ticket)?;
         let (attempt, item) = approval_item(
             tx,
             id,
@@ -1714,6 +1802,20 @@ pub async fn attempt_approve(
             true,
         )?;
         let ticket = tickets::get(tx, id)?;
+        if accepted_skipped.is_some() && item.kind != "approval" {
+            return Err(Fail::refused(
+                "skipped acceptance waits for all selected candidate checks",
+            ));
+        }
+        if let Some(decision) = &accepted_skipped
+            && decision["attention"] != item.id
+        {
+            return Err(candidate_stale(
+                "attention",
+                decision["attention"].clone(),
+                json!(item.id),
+            ));
+        }
         if attempts::edit_pending(tx, attempt.id)? {
             return Err(Fail::stale(
                 format!(
@@ -1780,6 +1882,7 @@ pub async fn attempt_approve(
                 review_digest: &review_digest,
                 checks: &checks,
                 actor: "operator",
+                accepted_skipped: accepted_skipped.as_ref(),
                 text: text.as_deref(),
                 overrode,
             },
@@ -1882,6 +1985,7 @@ pub fn attempt_show(project: &Project, params: &Value) -> Result<Value, Fail> {
             "checks": checks_json,
             "approval": checks::active_for(conn, attempt.id)?.map(|approval| json!({
                 "approval": approval.id, "head": approval.head, "actor": approval.actor,
+                "accepted_skipped": approval.accepted_skipped,
             })),
             "attention": attention,
         }))

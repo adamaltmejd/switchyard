@@ -134,6 +134,12 @@ async fn holds(
     if let Some(reason) = superseded {
         return Ok(Some(Lapse::Superseded(reason)));
     }
+    if let Some(decision) = &approval.accepted_skipped
+        && (approval.actor != "operator"
+            || decision["identity"] != super::skipped_identity(attempt, ticket))
+    {
+        return Ok(Some(Lapse::Superseded("the skipped selection changed")));
+    }
     if project
         .read(|conn| {
             super::selected_checks_current(conn, attempt, ticket, loaded, &approval.checks)
