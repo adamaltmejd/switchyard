@@ -73,7 +73,7 @@ fn claude_usage_is_optional_and_execution_local() {
       *'"type":"result"'*)
         case "$3" in
           *-1) line=$(printf '%s\n' "$line" | sed -E 's/,"total_cost_usd":[0-9.eE+-]+//g; s/"total_cost_usd":[0-9.eE+-]+,//g') ;;
-          *-6) line=$(printf '%s\n' "$line" | sed -E 's/"total_cost_usd":[0-9.eE+-]+/"total_cost_usd":0/g') ;;
+          *-8) line=$(printf '%s\n' "$line" | sed -E 's/"total_cost_usd":[0-9.eE+-]+/"total_cost_usd":0/g') ;;
         esac ;;
     esac
     printf '%s\n' "$line"
@@ -149,6 +149,7 @@ fi"#, machine.root.display()));
     assert!(failed_session > fresh);
     assert!(raw_cost(&machine, 4) > failed_session);
     hold.release();
+    retire_fixture(&project, &mut history, "Y-1");
 
     // Fresh sessions supply execution-local cost evidence. These focused
     // controls distinguish withholding ambiguous totals from discarding all
@@ -156,11 +157,22 @@ fi"#, machine.root.display()));
     phase.store(4, Ordering::SeqCst);
     project.json(&["ticket", "new", "--title", "Fresh estimate"]);
     assert_eq!(history.attention()["data"]["kind"], "approval");
-    assert!(fresh_estimate(&project, "Y-2", 2, 5) > 0.0);
+    assert!(fresh_estimate(&project, "Y-2", 2, 6) > 0.0);
+    retire_fixture(&project, &mut history, "Y-2");
     phase.store(5, Ordering::SeqCst);
     project.json(&["ticket", "new", "--title", "Explicit zero estimate"]);
     assert_eq!(history.attention()["data"]["kind"], "approval");
-    assert_eq!(fresh_estimate(&project, "Y-3", 3, 6), 0.0);
+    assert_eq!(fresh_estimate(&project, "Y-3", 3, 8), 0.0);
+    retire_fixture(&project, &mut history, "Y-3");
+}
+
+// Observe transcripts before retirement removes them. Park first to prevent
+// readmission; await cleanup so its execution cannot race the next control's ID.
+fn retire_fixture(project: &Project, history: &mut Watch, ticket: &str) {
+    project.json(&["ticket", "park", ticket]);
+    project.json(&["attempt", "abandon", ticket]);
+    project.json(&["ticket", "abandon", ticket, "--reason", "Usage observed"]);
+    history.event("execution.ended", &[("kind", "cleanup")]);
 }
 
 fn raw_frames(machine: &Machine, id: i64) -> String {
