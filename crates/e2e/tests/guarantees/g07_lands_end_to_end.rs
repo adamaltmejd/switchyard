@@ -7,6 +7,11 @@ use serde_json::json;
 /// passing final seat, before a fresh candidate reaches approval. The final
 /// seat must carry the earlier block; checking only its own pass loses repair.
 /// Expected order and files come from this fixture, heads from host git.
+/// G6: a graph missing the ordinary implementer refuses as custom-graph;
+/// the selected ordinary control runs in the same project. Sabotage: admit
+/// that shape as ordinary; its named refusal or no-write assertion fails.
+/// G7: candidate and landing command order differs from configuration, and
+/// a target advance separates candidate and merged inputs before landing.
 /// Sabotage: keep the configured scheduler alongside graph scheduling;
 /// executions duplicate. Route a final seat's own verdict instead of its
 /// panel result; approval arrives before reviewed.txt exists. Ignore the
@@ -14,6 +19,12 @@ use serde_json::json;
 #[test]
 fn ordinary_candidate_routes_repair_then_reach_approval() {
     let machine = Machine::new("g7-routes", |request| {
+        if request
+            .prompt()
+            .contains("Your workspace is read-only. Plan the work")
+        {
+            return Reply::Text("ready for selected implementation".into());
+        }
         if request.has_tool("yard_publish_review") {
             let blocks = request.prompt().contains("correctness reviewer")
                 && !request.prompt().contains("reviewed.txt");
@@ -51,7 +62,45 @@ fn ordinary_candidate_routes_repair_then_reach_approval() {
     );
     let project = Project::new(&machine, "p", &configuration);
     let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Ordinary routes"]);
+    project.json(&[
+        "ticket",
+        "new",
+        "--title",
+        "Ordinary routes",
+        "--workflow",
+        "plan",
+    ]);
+    watch.event("attempt.ended", &[("outcome", "planned")]);
+    let mut operator = machine.operator();
+    operator.initialize();
+    // The missing ordinary implementer is reachable through trusted input,
+    // but is refused before admission, not rewritten by ordinary translation.
+    let refused = operator.call(
+        "yard_attempt_start",
+        json!({
+            "project": project.path, "ticket": "Y-1", "graph": {"nodes": {"reporter": {
+                "runner": {"kind": "agent", "agent": "worker", "instructions": "Report"},
+                "access": "read-only", "outputs": {"result": "report"}, "outcomes": ["complete"]
+            }}}
+        }),
+    );
+    assert_eq!(refused["error"]["code"], "refused");
+    assert_eq!(refused["error"]["data"]["shape"], "custom-graph");
+    assert_eq!(project.rows("SELECT id FROM attempt").len(), 1);
+    let admitted = operator.call("yard_attempt_start", json!({
+        "project": project.path, "ticket": "Y-1", "workflow": "default", "overrides": {
+            "implementer": {"routes": {"complete": [{"to": "candidate-gate-post"}]}},
+            "candidate-gate-post": {"routes": {
+                "complete": [{"to": "candidate-gate-pre"}], "failed": [{"to": "implementer", "repeat": 1}]}},
+            "candidate-gate-pre": {"routes": {
+                "complete": [{"to": "review-0"}], "failed": [{"to": "implementer", "repeat": 1}]}},
+            "review-1": {"routes": {
+                "complete": [{"to": "landing-gate-post"}], "blocked": [{"to": "implementer", "repeat": 3}]}},
+            "landing-gate-post": {"routes": {"complete": [{"to": "landing-gate-pre"}]}},
+            "landing-gate-pre": {"routes": {}}
+        }
+    }));
+    assert!(admitted.get("error").is_none(), "{admitted}");
     let approval = watch.attention();
     assert_eq!(approval["data"]["kind"], "approval", "{approval}");
     let shown = project.json(&["attempt", "show", "Y-1"]);
@@ -62,21 +111,22 @@ fn ordinary_candidate_routes_repair_then_reach_approval() {
             .collect::<Vec<_>>(),
         [
             "implementer",
+            "candidate-gate-post",
             "candidate-gate-pre",
             "implementer",
-            "candidate-gate-pre",
             "candidate-gate-post",
+            "candidate-gate-pre",
             "review-0",
             "review-1",
             "implementer",
-            "candidate-gate-pre",
             "candidate-gate-post",
+            "candidate-gate-pre",
             "review-0",
             "review-1"
         ]
     );
     let head = git(
-        &project.path.join(".yard/local/attempts/1/clone"),
+        &project.path.join(".yard/local/attempts/2/clone"),
         &["rev-parse", "HEAD"],
     )
     .trim()
@@ -88,13 +138,13 @@ fn ordinary_candidate_routes_repair_then_reach_approval() {
             "feature\n"
         );
     }
-    assert_eq!(rows[1]["result"]["outcome"], "failed");
-    assert_eq!(rows[6]["result"]["judgment"]["verdict"], "pass");
-    assert_eq!(rows[6]["result"]["outcome"], "blocked");
-    assert_eq!(rows[11]["result"]["outcome"], "complete");
+    assert_eq!(rows[2]["result"]["outcome"], "failed");
+    assert_eq!(rows[7]["result"]["judgment"]["verdict"], "pass");
+    assert_eq!(rows[7]["result"]["outcome"], "blocked");
+    assert_eq!(rows[12]["result"]["outcome"], "complete");
     // G7 promises selected input/result agreement. The predecessor results
     // are immutable, including the block that a passing final seat carries.
-    for (seat, previous) in [(6, 5), (11, 10)] {
+    for (seat, previous) in [(7, 6), (12, 11)] {
         assert_eq!(
             rows[seat]["binding"]["inputs"]["panel"]["source"]["execution"],
             rows[previous]["execution"]
@@ -104,7 +154,7 @@ fn ordinary_candidate_routes_repair_then_reach_approval() {
             rows[previous]["result"]["outputs"]["result"]["value"]
         );
     }
-    for (repair, trigger) in [(2, 1), (7, 6)] {
+    for (repair, trigger) in [(3, 2), (8, 7)] {
         assert_eq!(rows[repair]["reason"], "repair");
         assert_eq!(
             rows[repair]["binding"]["inputs"]["feedback"]["source"]["execution"],
@@ -113,9 +163,68 @@ fn ordinary_candidate_routes_repair_then_reach_approval() {
         assert_eq!(rows[trigger]["result_eligible"], true);
     }
     assert_eq!(
-        project.rows("SELECT rounds, next FROM attempt"),
+        project.rows("SELECT rounds, next FROM attempt WHERE id = 2"),
         vec![json!({"rounds": 1, "next": null})]
     );
+
+    project.write("target.txt", "advanced\n");
+    project.git(&["add", "target.txt"]);
+    project.git(&["commit", "-qm", "Advance target"]);
+    let target = project.git(&["rev-parse", "HEAD"]).trim().to_string();
+    project.json(&["sync", "main"]);
+    let proof = approval["data"]["payload"]["proof"].as_str().unwrap();
+    project.json(&[
+        "attempt", "approve", "Y-1", "--target", "main", "--head", &head, "--proof", proof,
+    ]);
+    watch.event("landing.recorded", &[]);
+    watch.until("cleanup", |event| {
+        event["event"] == "execution.ended" && event["data"]["kind"] == "cleanup"
+    });
+    let merged = project.canonical_head();
+    assert_eq!(
+        git(&project.canonical(), &["rev-parse", &format!("{merged}^1")]).trim(),
+        target
+    );
+    assert_eq!(
+        git(&project.canonical(), &["rev-parse", &format!("{merged}^2")]).trim(),
+        head
+    );
+    let shown = project.json(&["attempt", "show", "Y-1"]);
+    let gates: Vec<_> = shown["executions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["kind"] == "gate")
+        .collect();
+    assert_eq!(
+        gates
+            .iter()
+            .map(|row| row["binding"]["node"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "candidate-gate-post",
+            "candidate-gate-pre",
+            "candidate-gate-post",
+            "candidate-gate-pre",
+            "candidate-gate-post",
+            "candidate-gate-pre",
+            "landing-gate-post",
+            "landing-gate-pre"
+        ]
+    );
+    for gate in &gates[4..6] {
+        assert_eq!(
+            gate["binding"]["inputs"]["candidate"]["value"]["head"],
+            head
+        );
+        assert_eq!(gate["result_eligible"], true);
+    }
+    for gate in &gates[6..] {
+        assert_eq!(gate["binding"]["inputs"]["merged"]["value"]["base"], target);
+        assert_eq!(gate["binding"]["inputs"]["merged"]["value"]["head"], merged);
+        assert_eq!(gate["result_eligible"], true);
+    }
+    assert_eq!(project.json(&["ticket", "show", "Y-1"])["state"], "done");
 }
 
 /// New ticket, worker commit, candidate gate, review pass, approval, green

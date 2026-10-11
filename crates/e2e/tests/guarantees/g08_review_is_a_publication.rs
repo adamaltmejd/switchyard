@@ -31,6 +31,34 @@ fn kinds(project: &Project, kind: &str) -> Vec<Value> {
     ))
 }
 
+const SELECTED_LANDING: &str =
+    "[gates.first]\ncommand = \"true\"\n[gates.second]\ncommand = \"true\"\n";
+
+fn start_selected(machine: &Machine, project: &Project, title: &str, entry: &str) {
+    let mut watch = project.watch(0);
+    project.json(&["ticket", "new", "--title", title, "--workflow", "plan"]);
+    watch.event("attempt.ended", &[("outcome", "planned")]);
+    let mut operator = machine.operator();
+    operator.initialize();
+    let mut overrides = json!({
+        "landing-gate-second": {"routes": {"complete": [{"to": "landing-gate-first"}]}},
+        "landing-gate-first": {"routes": {}}
+    });
+    overrides[entry] = if entry == "review-0" {
+        json!({"routes": {"complete": [{"to": "landing-gate-second"}],
+            "blocked": [{"to": "implementer", "repeat": 3}]}})
+    } else {
+        json!({"routes": {"complete": [{"to": "landing-gate-second"}]}})
+    };
+    let admitted = operator.call(
+        "yard_attempt_start",
+        json!({
+            "project": project.path, "ticket": "Y-1", "workflow": "default", "overrides": overrides
+        }),
+    );
+    assert!(admitted.get("error").is_none(), "{admitted}");
+}
+
 /// A seat that exits 0 without publishing is a review error, raised as
 /// `red`, though it read its context first. Control: `start` reruns the
 /// seat on the same head, and its publication reaches approval. A second
@@ -39,6 +67,8 @@ fn kinds(project: &Project, kind: &str) -> Vec<Value> {
 ///
 /// Sabotage: let `review::run` pass an unpublished seat; no red is raised.
 /// Route missing publication as a failed judgment; a repair execution appears.
+/// Ignore selected landing routes when loading the admitted plan; the retry
+/// cannot reach approval with the fixture's second-before-first selection.
 /// Remove its end-path liveness check; the abandoned seat raises red.
 #[test]
 fn a_seat_that_exits_without_publishing_is_a_review_error() {
@@ -46,6 +76,12 @@ fn a_seat_that_exits_without_publishing_is_a_review_error() {
     let held = hold.clone();
     let seats = AtomicUsize::new(0);
     let machine = Machine::new("g8-silent", move |request| {
+        if request
+            .prompt()
+            .contains("Your workspace is read-only. Plan the work")
+        {
+            return Reply::Text("ready".into());
+        }
         if !seat(&request) {
             return implementer(request);
         }
@@ -61,9 +97,9 @@ fn a_seat_that_exits_without_publishing_is_a_review_error() {
         }
     });
     machine.start();
-    let project = Project::new(&machine, "p", &config(""));
+    let project = Project::new(&machine, "p", &config(SELECTED_LANDING));
     let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Add feature"]);
+    start_selected(&machine, &project, "Add feature", "review-0");
     let red = watch.attention();
     assert_eq!(
         (&red["data"]["kind"], &red["data"]["reason"]),
@@ -83,7 +119,7 @@ fn a_seat_that_exits_without_publishing_is_a_review_error() {
         ),
         vec![json!({"outcome": null, "judgment": null, "outputs": "{}"})]
     );
-    assert_eq!(kinds(&project, "implementation").len(), 1);
+    assert_eq!(kinds(&project, "implementation").len(), 2);
 
     project.json(&["attempt", "start", "Y-1"]);
     let approval = watch.attention();
@@ -94,7 +130,7 @@ fn a_seat_that_exits_without_publishing_is_a_review_error() {
     assert_eq!(reviews[0]["outcome"], "error");
     assert_eq!(reviews[1]["outcome"], "pass");
     assert!(reviews.iter().all(|row| row["head"] == head));
-    assert_eq!(kinds(&project, "implementation").len(), 1);
+    assert_eq!(kinds(&project, "implementation").len(), 2);
     project.json(&["ticket", "new", "--title", "Abandon seat"]);
     hold.wait_held();
     project.json(&["ticket", "park", "Y-2"]);
@@ -103,10 +139,10 @@ fn a_seat_that_exits_without_publishing_is_a_review_error() {
     let ended = watch.event("execution.ended", &[("kind", "review")]);
     assert_eq!(ended["ticket"], "Y-2", "{ended}");
     assert_eq!(ended["data"]["outcome"], "abandoned", "{ended}");
-    assert!(project.rows("SELECT c.id FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE e.attempt = 2").is_empty());
+    assert!(project.rows("SELECT c.id FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE e.attempt = 3").is_empty());
     assert!(
         project
-            .rows("SELECT id FROM attention WHERE attempt = 2 AND state = 'open'")
+            .rows("SELECT id FROM attention WHERE attempt = 3 AND state = 'open'")
             .is_empty()
     );
 }
@@ -123,11 +159,19 @@ fn a_seat_that_exits_without_publishing_is_a_review_error() {
 /// Bind a result at publication, before checked teardown; the held row is
 /// eligible. Attribute the reconciled result to a new execution or another
 /// node/input; the original publication reference and input agreement fail.
+/// An unreviewed second ticket reaches approval while the seat is held,
+/// proving the scheduler has advanced without approving the published seat.
 #[test]
 fn a_seat_killed_after_publishing_has_published() {
     let hold = Latch::new();
     let held = hold.clone();
     let machine = Machine::new("g8-killed", move |request| {
+        if request
+            .prompt()
+            .contains("Your workspace is read-only. Plan the work")
+        {
+            return Reply::Text("ready".into());
+        }
         if !seat(&request) {
             return implementer(request);
         }
@@ -140,8 +184,14 @@ fn a_seat_killed_after_publishing_has_published() {
         }
     });
     machine.start();
-    let project = Project::new(&machine, "p", &config(""));
-    project.json(&["ticket", "new", "--title", "Add feature"]);
+    let project = Project::new(
+        &machine,
+        "p",
+        &config(&format!(
+            "{SELECTED_LANDING}[workflows.quick]\nreview = \"none\"\n"
+        )),
+    );
+    start_selected(&machine, &project, "Add feature", "review-0");
     hold.wait_held();
     assert!(project.rows("SELECT id FROM finding").is_empty());
     assert_eq!(
@@ -164,6 +214,24 @@ fn a_seat_killed_after_publishing_has_published() {
     assert_eq!(review["result"], serde_json::Value::Null);
     assert_eq!(review["result_eligible"], false);
     assert_eq!(review["teardown"], false);
+    let mut live = project.watch(0);
+    project.json(&["ticket", "new", "--title", "Quick", "--workflow", "quick"]);
+    live.until("second ticket approval while review held", |event| {
+        event["event"] == "attention.raised"
+            && event["ticket"] == "Y-2"
+            && event["data"]["kind"] == "approval"
+    });
+    assert!(
+        project
+            .rows("SELECT id FROM attention WHERE ticket = 1 AND kind = 'approval'")
+            .is_empty()
+    );
+    assert!(project.rows("SELECT id FROM approval").is_empty());
+    assert!(
+        project
+            .rows("SELECT id FROM execution WHERE kind IN ('gate', 'landing')")
+            .is_empty()
+    );
     let publication = before["checks"]
         .as_array()
         .unwrap()
@@ -186,7 +254,9 @@ fn a_seat_killed_after_publishing_has_published() {
     machine.start();
     let mut watch = project.watch(0);
     let approval = watch.find("approval raised", |event| {
-        event["event"] == "attention.raised" && event["data"]["kind"] == "approval"
+        event["event"] == "attention.raised"
+            && event["ticket"] == "Y-1"
+            && event["data"]["kind"] == "approval"
     });
     assert_eq!(approval["ticket"], "Y-1");
     assert_eq!(
@@ -553,11 +623,18 @@ export default async function () {
 /// the abandoned gate records a failing check.
 /// Route an infrastructure error as a failed judgment; it gains an output
 /// or starts repair instead of waiting for the operator's same-head retry.
+/// Require workflow translation equality on retry; this selected plan stops.
 #[test]
 fn a_gate_errors_start_reruns_that_gate() {
     let armed = std::sync::Arc::new(Mutex::new(None::<std::path::PathBuf>));
     let arm = armed.clone();
     let machine = Machine::new("g8-gate-error", move |request| {
+        if request
+            .prompt()
+            .contains("Your workspace is read-only. Plan the work")
+        {
+            return Reply::Text("ready".into());
+        }
         if !request.opens() && !request.prompt().contains("Abandon gate") {
             std::fs::write(arm.lock().unwrap().as_ref().unwrap(), "").unwrap();
         }
@@ -576,11 +653,11 @@ fn a_gate_errors_start_reruns_that_gate() {
     let project = Project::new(
         &machine,
         "p",
-        &config("[gates.check]\ncommand = \"test -f feature.txt\"\nstage = \"candidate\"\n")
+        &config(&format!("[gates.check]\ncommand = \"test -f feature.txt\"\nstage = \"candidate\"\n{SELECTED_LANDING}"))
             .replace("review = [\"correctness\"]", "review = \"none\""),
     );
     let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Add feature"]);
+    start_selected(&machine, &project, "Add feature", "landing-gate-check");
     let red = watch.attention();
     assert_eq!(
         (&red["data"]["kind"], &red["data"]["reason"]),
@@ -596,7 +673,7 @@ fn a_gate_errors_start_reruns_that_gate() {
         ),
         vec![json!({"outcome": null, "judgment": null, "outputs": "{}"})]
     );
-    assert_eq!(kinds(&project, "implementation").len(), 1);
+    assert_eq!(kinds(&project, "implementation").len(), 2);
 
     std::fs::remove_file(&path).unwrap();
     project.json(&["attempt", "start", "Y-1"]);
@@ -607,7 +684,7 @@ fn a_gate_errors_start_reruns_that_gate() {
     assert_eq!(gates[0]["outcome"], "error");
     assert_eq!(gates[1]["outcome"], "pass");
     assert_eq!(gates[0]["head"], gates[1]["head"]);
-    assert_eq!(kinds(&project, "implementation").len(), 1);
+    assert_eq!(kinds(&project, "implementation").len(), 2);
     project.json(&["ticket", "park", "Y-1"]);
     project.json(&["attempt", "abandon", "Y-1"]);
     let said = machine.root.join("said");
@@ -640,10 +717,10 @@ fn a_gate_errors_start_reruns_that_gate() {
     let ended = watch.event("execution.ended", &[("kind", "gate")]);
     assert_eq!(ended["ticket"], "Y-2", "{ended}");
     assert_eq!(ended["data"]["outcome"], "abandoned", "{ended}");
-    assert!(project.rows("SELECT c.id FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE e.attempt = 2").is_empty());
+    assert!(project.rows("SELECT c.id FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE e.attempt = 3").is_empty());
     assert!(
         project
-            .rows("SELECT id FROM attention WHERE attempt = 2 AND state = 'open'")
+            .rows("SELECT id FROM attention WHERE attempt = 3 AND state = 'open'")
             .is_empty()
     );
 }

@@ -366,7 +366,14 @@ fn binding(
     };
     let plan =
         crate::plan::Plan::admitted(admission).map_err(|error| Fail::refused(error.to_string()))?;
-    let declared = serde_json::to_value(&plan.nodes[&node].inputs).expect("inputs serialize");
+    let declared = serde_json::to_value(
+        &plan
+            .nodes
+            .get(&node)
+            .ok_or_else(|| Fail::refused("node absent from admitted plan"))?
+            .inputs,
+    )
+    .expect("inputs serialize");
     let declared = declared
         .as_object()
         .ok_or_else(|| Fail::refused("node absent from admitted plan"))?;

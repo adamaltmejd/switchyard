@@ -1253,7 +1253,7 @@ pub async fn gate(
         Ok(result) => {
             let _ = std::fs::write(&log, &result.output);
             let tail = tail(&result.output);
-            let verdict = if row.parent.is_none() && result.infrastructure != "completed" {
+            let verdict = if result.infrastructure != "completed" {
                 "error"
             } else if result.code == 0 {
                 "pass"

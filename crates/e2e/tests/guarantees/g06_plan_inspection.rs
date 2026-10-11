@@ -202,7 +202,7 @@ selected = [{ to = "choose", repeat = 2 }]
     }});
     assert_eq!(legacy["result"]["plan"], legacy_expected);
     assert_eq!(legacy["result"]["runnable"], true);
-    assert_eq!(legacy["result"]["shape"], "legacy-linear");
+    assert_eq!(legacy["result"]["shape"], "ordinary-linear");
     assert!(project.rows("SELECT id FROM attempt").is_empty());
     assert!(project.rows("SELECT id FROM execution").is_empty());
     assert!(project.rows("SELECT id FROM ticket").is_empty());

@@ -246,8 +246,24 @@ pub async fn load_attempt(
     };
     let admitted =
         crate::plan::Plan::admitted(admission).map_err(|error| Fail::refused(error.to_string()))?;
+    let expected = if admission["runtime"] == "ordinary-linear" {
+        let mut selection = admission["selection"].clone();
+        selection["project"] = json!(project.root);
+        let request =
+            serde_json::from_value(selection).map_err(|error| Fail::refused(error.to_string()))?;
+        loaded
+            .config
+            .resolve_plan(&request)
+            .map_err(|error| Fail::refused(error.to_string()))?
+    } else {
+        loaded.config.workflow_plan(&attempt.workflow)?
+    };
     if loaded.admission_inputs != admission["inputs"]
-        || loaded.config.workflow_plan(&attempt.workflow)? != admitted
+        || expected != admitted
+        || loaded
+            .config
+            .runnable_workflow(&admitted, Some(&attempt.workflow))
+            .is_none()
     {
         return Err(Fail::refused(
             "admitted source does not match recorded inputs",
@@ -950,7 +966,7 @@ async fn inspect_plan(
         .config
         .runnable_workflow(&plan, request.workflow.as_deref());
     let shape = if workflow.is_some() {
-        "legacy-linear"
+        "ordinary-linear"
     } else {
         plan.unsupported_shape()
     };

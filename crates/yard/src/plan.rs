@@ -248,7 +248,7 @@ impl Config {
         Ok(plan)
     }
 
-    /// Ordinary candidate routes; landing remains supplied by the queue.
+    /// Ordinary routes; the queue supplies the merged landing input.
     pub fn workflow_plan(&self, name: &str) -> Result<Plan, String> {
         let workflow = self.workflow(name)?;
         let mut chain = vec![(
@@ -379,32 +379,86 @@ impl Config {
 
     pub fn runnable_workflow(&self, plan: &Plan, selected: Option<&str>) -> Option<String> {
         let selected = selected.unwrap_or("default");
-        if self
-            .workflow_plan(selected)
-            .is_ok_and(|legacy| legacy == *plan)
-        {
-            return Some(selected.to_string());
-        }
-        self.workflows
-            .keys()
-            .find(|name| self.workflow_plan(name).is_ok_and(|legacy| legacy == *plan))
-            .cloned()
+        std::iter::once(selected)
+            .chain(self.workflows.keys().map(String::as_str))
+            .find(|name| {
+                self.workflow_plan(name)
+                    .is_ok_and(|ordinary| plan.ordinary_linear(&ordinary))
+            })
+            .map(str::to_string)
     }
 }
 
 impl Plan {
     pub fn admitted(admission: &Value) -> Result<Self, serde_json::Error> {
         let mut plan: Self = serde_json::from_value(admission["plan"].clone())?;
-        if !plan.inputs.contains_key("feedback") {
+        if admission["runtime"] != "ordinary-linear" && !plan.inputs.contains_key("feedback") {
             plan.ordinary_routes(admission["review"]["max_rounds"].as_u64().unwrap_or(3) as u32);
         }
         Ok(plan)
     }
 
+    /// Command order is selected; panel order and repair bounds stay ordinary.
+    fn ordinary_linear(&self, ordinary: &Self) -> bool {
+        if self.inputs != ordinary.inputs || self.nodes.keys().ne(ordinary.nodes.keys()) {
+            return false;
+        }
+        for (name, node) in &self.nodes {
+            let mut selected = node.clone();
+            let mut defined = ordinary.nodes[name].clone();
+            selected.routes.remove("complete");
+            defined.routes.remove("complete");
+            if selected != defined {
+                return false;
+            }
+        }
+        let mut visited = BTreeSet::new();
+        let mut current = "implementer";
+        let mut phase = 0;
+        let mut reviews = Vec::new();
+        loop {
+            if !visited.insert(current) {
+                return false;
+            }
+            let node = &self.nodes[current];
+            let next_phase = if current == "implementer" {
+                0
+            } else if current.starts_with("candidate-gate-") {
+                1
+            } else if current.starts_with("review-") {
+                reviews.push(current);
+                2
+            } else if current.starts_with("landing-gate-") {
+                3
+            } else {
+                return false;
+            };
+            if next_phase < phase {
+                return false;
+            }
+            phase = next_phase;
+            match node.routes.get("complete").map(Vec::as_slice) {
+                None | Some([]) => break,
+                Some([route]) if route.repeat.is_none() => current = &route.to,
+                _ => return false,
+            }
+        }
+        visited.len() == self.nodes.len()
+            && reviews
+                .iter()
+                .enumerate()
+                .all(|(index, name)| *name == format!("review-{index}"))
+    }
+
     /// Upgrade the ordinary descriptive chain in memory. Persisted admission
     /// and historical execution evidence remain untouched.
     pub fn ordinary_routes(&mut self, max_rounds: u32) {
-        if self.nodes["implementer"].outputs["result"] != Output::Candidate {
+        if self
+            .nodes
+            .get("implementer")
+            .and_then(|node| node.outputs.get("result"))
+            != Some(&Output::Candidate)
+        {
             return;
         }
         self.inputs.insert("feedback".into(), Output::Verdict);

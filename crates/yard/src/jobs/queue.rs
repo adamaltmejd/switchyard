@@ -390,7 +390,35 @@ pub async fn land(
         return Ok(());
     };
 
-    for gate in &loaded.config.gates {
+    let plan = match &attempt.admission {
+        Some(admission) => crate::plan::Plan::admitted(admission)
+            .map_err(|error| Fail::refused(error.to_string()))?,
+        None => loaded.config.workflow_plan(&attempt.workflow)?,
+    };
+    let mut current = "implementer";
+    while let Some(route) = plan.nodes[current]
+        .routes
+        .get("complete")
+        .and_then(|routes| routes.first())
+    {
+        current = &route.to;
+        let node = &plan.nodes[current];
+        if !node
+            .inputs
+            .values()
+            .any(|input| input.node.is_none() && input.output == "merged")
+        {
+            continue;
+        }
+        let crate::plan::Runner::Command { gate: name } = &node.runner else {
+            return Err(Fail::refused("unsupported admitted landing runner"));
+        };
+        let gate = loaded
+            .config
+            .gates
+            .iter()
+            .find(|gate| &gate.name == name)
+            .ok_or_else(|| Fail::refused("admitted landing gate absent"))?;
         let admitted = super::capacity::effect(daemon, project, execution, async {
             let held = target_lock.lock().await;
             admit(daemon, project, &held, approval.id, execution, |tx, now| {
@@ -459,7 +487,7 @@ pub async fn land(
         }
         let result = project.read(|conn| executions::get(conn, child))?;
         match result.outcome.as_deref() {
-            Some("pass") => {}
+            Some("pass") if result.node.is_none() || result.result_eligible => {}
             Some("abandoned") => {
                 return project.tx(|tx| {
                     executions::end(

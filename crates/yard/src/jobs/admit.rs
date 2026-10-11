@@ -205,6 +205,7 @@ fn admit(
     }
     let admission = json!({
         "status": "recorded",
+        "runtime": "ordinary-linear",
         "revision": 1,
         "target": loaded.branch,
         "config_head": loaded.head,
