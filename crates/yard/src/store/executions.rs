@@ -525,14 +525,6 @@ pub fn set_worker(
         params![id, session_id],
     )?;
     if let Some(usage) = usage {
-        let mut fields = usage.fields.clone();
-        // Codex resume accounting has not been normalized yet.
-        let execution = get(conn, id)?;
-        if execution.resumed.is_some() && execution.harness.as_deref() == Some("codex") {
-            for field in [&mut fields.input, &mut fields.output, &mut fields.cost] {
-                field.completeness = crate::harness::Completeness::Unknown;
-            }
-        }
         conn.execute(
             "UPDATE execution SET tokens_in = ?2, tokens_out = ?3, cost = ?4,
                 usage_fields = ?5 WHERE id = ?1",
@@ -549,7 +541,7 @@ pub fn set_worker(
                     .transpose()
                     .map_err(|error| Fail::new("internal", error.to_string()))?,
                 usage.cost,
-                serde_json::to_string(&fields)
+                serde_json::to_string(&usage.fields)
                     .map_err(|error| Fail::new("internal", error.to_string()))?
             ],
         )?;

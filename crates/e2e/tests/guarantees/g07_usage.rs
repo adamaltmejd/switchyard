@@ -312,3 +312,151 @@ fn legacy_nullable_usage_survives_migration_and_reopen() {
         machine.kill();
     }
 }
+
+/// G7: real Codex fails and is interrupted on resumed turns after a tool
+/// response with cache/reasoning subsets. The fixture holds the next request
+/// until the real box ends; reopening then completes another resumed execution.
+/// Sabotage: add cached/reasoning subsets, copy cumulative predecessor tokens,
+/// discard nonterminal counters, or label interrupted usage complete.
+/// Fresh Y-66 controls do not exercise session baselines or lost terminal frames.
+#[test]
+fn codex_failed_and_interrupted_resume_usage_remain_execution_local() {
+    let hold = Latch::new();
+    let held = hold.clone();
+    let openings = AtomicUsize::new(0);
+    let mut machine = Machine::new("g7-codex-local", move |request| {
+        let round = if request.opens() {
+            openings.fetch_add(1, Ordering::SeqCst)
+        } else {
+            openings.load(Ordering::SeqCst) - 1
+        };
+        match round {
+            1 | 2 if request.opens() => Reply::Tools(vec![codex_shell("echo observed")]),
+            1 => Reply::ResponsesError,
+            2 => Reply::Hold(held.clone(), Box::new(Reply::Text("never".into()))),
+            _ => act(
+                request,
+                vec![codex_commit_file(
+                    if round == 0 {
+                        "feature.txt"
+                    } else {
+                        "resumed.txt"
+                    },
+                    "feature\n",
+                    "Feature",
+                )],
+            ),
+        }
+    });
+    let account = "acct-g7-local";
+    machine.write_codex_env(&codex_jwt(account, 3600), account);
+    machine.start();
+    let project = Project::new(&machine, "p", &configuration());
+    // A different machine can retire a name between this build and box up.
+    // Give this fixture distinct image content, not just a distinct name.
+    let dockerfile = project.git(&["show", "HEAD:.yard/Dockerfile"]);
+    project.write(
+        ".yard/Dockerfile",
+        &format!(
+            "{dockerfile}\nLABEL dev.yard.e2e-machine=\"{}\"\n",
+            machine.root.display()
+        ),
+    );
+    project.git(&["add", ".yard/Dockerfile"]);
+    project.git(&[
+        "commit",
+        "--quiet",
+        "-m",
+        "Isolate Codex usage fixture image",
+    ]);
+    project.json(&["sync"]);
+    let mut history = project.watch(0);
+    project.json(&["ticket", "new", "--title", "Local usage"]);
+    let approval = history.attention();
+    assert_eq!(approval["data"]["kind"], "approval");
+    let first = worker_usage(&project, 0);
+    project.json(&[
+        "attempt",
+        "reject",
+        "--target",
+        "main",
+        "Y-1",
+        "--head",
+        approval["data"]["payload"]["head"].as_str().unwrap(),
+        "--text",
+        "Observe failed usage",
+    ]);
+    let failed = history.attention();
+    assert_eq!(
+        (&failed["data"]["kind"], &failed["data"]["reason"]),
+        (&json!("stopped"), &json!("failed"))
+    );
+    let second = worker_usage(&project, 1);
+    assert_eq!(second["resumed"], first["execution"]);
+    assert_eq!(second["outcome"], "failed");
+    assert_codex_local(&second, PROMPT_TOKENS, COMPLETION_TOKENS, "partial");
+
+    let mut history = project.watch(failed["seq"].as_i64().unwrap());
+    project.json(&["attempt", "start", "Y-1"]);
+    hold.wait_held();
+    let live = project
+        .rows("SELECT handle FROM execution WHERE kind = 'implementation' AND status = 'running'");
+    let down = machine.pinfold(&["box", "down", live[0]["handle"].as_str().unwrap()]);
+    assert!(
+        down.status.success(),
+        "{}",
+        String::from_utf8_lossy(&down.stderr)
+    );
+    let interrupted = history.attention();
+    assert_eq!(
+        (&interrupted["data"]["kind"], &interrupted["data"]["reason"]),
+        (&json!("stopped"), &json!("failed"))
+    );
+    assert!(hold.is_held());
+    let third = worker_usage(&project, 2);
+    assert_eq!(third["resumed"], second["execution"]);
+    assert_eq!(third["outcome"], "failed");
+    assert_codex_local(&third, PROMPT_TOKENS, COMPLETION_TOKENS, "partial");
+
+    drop(history);
+    machine.kill();
+    machine.start();
+    assert_eq!(worker_usage(&project, 2), third);
+    let mut history = project.watch(interrupted["seq"].as_i64().unwrap());
+    project.json(&["attempt", "start", "Y-1"]);
+    assert_eq!(history.attention()["data"]["kind"], "approval");
+    let fourth = worker_usage(&project, 3);
+    assert_eq!(fourth["resumed"], third["execution"]);
+    // The resumed successful control has one tool response and one text
+    // response. These literal totals come from the scripted host model.
+    assert_codex_local(
+        &fourth,
+        2 * PROMPT_TOKENS,
+        2 * COMPLETION_TOKENS,
+        "complete",
+    );
+    hold.release();
+}
+
+fn worker_usage(project: &Project, index: usize) -> Value {
+    project.json(&["attempt", "show", "Y-1"])["executions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["kind"] == "implementation")
+        .nth(index)
+        .unwrap()
+        .clone()
+}
+
+fn assert_codex_local(execution: &Value, input: u64, output: u64, completeness: &str) {
+    let reported = json!({"completeness": completeness, "provenance": "harness"});
+    let unknown = json!({"completeness": "unknown", "provenance": "unreported"});
+    assert_eq!(
+        execution["usage"],
+        json!({
+            "input": input, "output": output, "cost": null,
+            "fields": {"input": reported, "output": reported, "cost": unknown}
+        })
+    );
+}

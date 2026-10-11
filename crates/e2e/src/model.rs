@@ -260,6 +260,8 @@ pub enum Reply {
     },
     /// A non-retryable Anthropic request failure from the host fixture.
     AnthropicError,
+    /// A non-retryable Responses failure after a reported tool reply.
+    ResponsesError,
     /// Token counts for a real Pi chat-completions reply.
     ChatUsage {
         input: u64,
@@ -425,6 +427,9 @@ fn render_usage(reply: Reply, request: &ModelRequest, usage: (u64, u64)) -> Vec<
         Reply::AnthropicError => respond(400, "application/json", json!({
             "type": "error", "error": {"type": "invalid_request_error", "message": "fixture failure"}
         }).to_string()),
+        Reply::ResponsesError => respond(400, "application/json", json!({
+            "error": {"type": "invalid_request_error", "message": "fixture failure", "code": "invalid_request"}
+        }).to_string()),
         Reply::ChatUsage {
             input,
             output,
@@ -475,6 +480,8 @@ fn responses_envelope(id: &str, request: &ModelRequest, status: &str, usage: (u6
             "input_tokens": usage.0,
             "output_tokens": usage.1,
             "total_tokens": usage.0 + usage.1,
+            "input_tokens_details": {"cached_tokens": usage.0 / 2},
+            "output_tokens_details": {"reasoning_tokens": usage.1 / 2},
         },
     })
 }
@@ -724,6 +731,7 @@ fn openai(reply: Reply, request: &ModelRequest, tokens: (u64, u64)) -> Vec<u8> {
         | Reply::ResponsesUsage { .. }
         | Reply::ChatUsage { .. }
         | Reply::AnthropicUsage { .. }
+        | Reply::ResponsesError
         | Reply::AnthropicError => {
             unreachable!("the wrapper is handled before rendering")
         }

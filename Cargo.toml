@@ -13,7 +13,7 @@ getrandom = "0.4"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
-nix = { version = "0.31", default-features = false, features = ["fs", "process", "signal", "user"] }
+nix = { version = "0.31", default-features = false, features = ["dir", "fs", "process", "signal", "user"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
