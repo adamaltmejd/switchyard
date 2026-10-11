@@ -536,7 +536,8 @@ async fn advance(
             .map_err(|error| Fail::refused(error.to_string()))?,
         None => loaded.config.workflow_plan(&attempt.workflow)?,
     };
-    let mut passed = Vec::new();
+    let mut selected = Vec::new();
+    let mut accepted = Vec::new();
     let mut blocked = Vec::new();
     let mut current = "implementer";
     let routed = attempt
@@ -616,14 +617,8 @@ async fn advance(
             return Ok(());
         };
         let result = project.read(|conn| executions::get(conn, check.execution))?;
-        if check.verdict == "pass" {
-            passed.push(check.id);
-        } else if kind == "review" {
-            blocked.push(check.clone());
-        }
-        // Intermediate seats complete their panel input even when they block.
-        // The final seat's bounded outcome is the accumulated panel decision.
-        // Old complete-only results retain the same decision without rewriting history.
+        // Intermediate seats publish their own verdict; the final result also
+        // binds the earlier blocks it carries. Acceptance never rewrites it.
         let outcome = if routed {
             result
                 .result
@@ -632,12 +627,63 @@ async fn advance(
                 .ok_or_else(|| Fail::refused("eligible judgment has no outcome"))?
         } else if kind == "gate" && check.verdict != "pass" {
             "failed"
-        } else if node.outcomes.iter().any(|outcome| outcome == "blocked") && !blocked.is_empty() {
+        } else if node.outcomes.iter().any(|outcome| outcome == "blocked")
+            && (check.verdict != "pass" || !blocked.is_empty())
+        {
             "blocked"
         } else {
             "complete"
         };
-        if outcome == "complete" {
+        let evidence = project.read(|conn| checks::evidence(conn, &check, &input))?;
+        let decision = project.read(|conn| checks::decision(conn, attempt.id, &evidence))?;
+        let failed = check.verdict != "pass" || (outcome == "blocked" && !blocked.is_empty());
+        if failed && node.operator_failure && decision.is_none() {
+            project.tx(|tx| {
+                let now = attempts::get(tx, attempt.id)?;
+                let ticket = tickets::get(tx, attempt.ticket)?;
+                let payload = json!({
+                    "actor": "operator", "target": attempt.target_branch,
+                    "base": base, "head": head, "proof": attempt.proof.clone().unwrap_or_default(),
+                    "revision": input.ticket_revision, "plan_revision": attempt.plan_revision(),
+                    "gate_digest": loaded.gate_digest, "review_digest": review_digest,
+                    "evidence": evidence,
+                });
+                if now.state != "live"
+                    || stale_part(&payload, &now, &ticket, loaded)?.is_some()
+                    || checks::current(tx, kind, name, &input)?.map(|check| check.id)
+                        != Some(check.id)
+                {
+                    return Ok(());
+                }
+                attempts::raise(
+                    tx,
+                    attempts::Raise {
+                        kind: "candidate",
+                        reason: if kind == "gate" { "failed" } else { "blocked" },
+                        ticket: Some(ticket.id),
+                        attempt: Some(attempt.id),
+                        execution: Some(check.execution),
+                        payload,
+                        text: None,
+                    },
+                )
+                .map(drop)
+            })?;
+            return Ok(());
+        }
+        selected.push(check.id);
+        if decision.as_deref() == Some("accept") {
+            accepted.push(evidence);
+            if outcome == "blocked" {
+                blocked.clear();
+            }
+        } else if kind == "review" && check.verdict != "pass" {
+            blocked.push(check.clone());
+        }
+        if outcome == "complete"
+            || (kind == "gate" && decision.as_deref() == Some("accept"))
+            || (kind == "review" && blocked.is_empty())
+        {
             continue;
         }
         let route = node
@@ -687,7 +733,7 @@ async fn advance(
         "target": attempt.target_branch, "base": base, "head": head, "proof": attempt.proof.clone().unwrap_or_default(),
         "revision": ticket.revision, "plan_revision": attempt.plan_revision(),
         "gate_digest": loaded.gate_digest, "review_digest": review_digest,
-        "checks": passed, "protected": protected,
+        "checks": selected, "accepted": accepted, "protected": protected,
         "unreviewed": !plan.nodes.keys().any(|name| name.starts_with("review-")),
         "skipped": attempt.admission.as_ref().map(|admission| &admission["skipped"]),
     });
@@ -714,10 +760,10 @@ async fn advance(
                     ticket_revision: ticket.revision,
                     gate_digest: &loaded.gate_digest,
                     review_digest: &review_digest,
-                    checks: &passed,
+                    checks: &selected,
                     actor: "auto",
                     text: None,
-                    overrode: false,
+                    overrode: !accepted.is_empty(),
                 },
             )?;
             attempts::set_lane(tx, attempt.id, false)
@@ -779,6 +825,50 @@ pub fn stale_part(
     Ok(None)
 }
 
+/// Re-read each selected identity at approval and every queue boundary.
+pub fn selected_checks_current(
+    conn: &rusqlite::Connection,
+    attempt: &attempts::Attempt,
+    ticket: &tickets::Ticket,
+    loaded: &Loaded,
+    named: &[i64],
+) -> Result<Option<(Value, Value)>, Fail> {
+    let input = checks::Input {
+        attempt: attempt.id,
+        base: attempt.base.clone(),
+        head: attempt.head.clone().unwrap_or_default(),
+        proof: attempt.proof.clone().unwrap_or_default(),
+        ticket_revision: ticket.revision,
+        plan_revision: attempt.plan_revision(),
+        digest: loaded.gate_digest.clone(),
+    };
+    let checks = checks::for_attempt(conn, attempt.id)?;
+    for id in named {
+        let Some(check) = checks.iter().find(|check| check.id == *id) else {
+            return Ok(Some((json!(id), Value::Null)));
+        };
+        let input = checks::Input {
+            digest: if check.kind == "review" {
+                loaded.review_digest(&attempt.workflow)?
+            } else {
+                loaded.gate_digest.clone()
+            },
+            ..input.clone()
+        };
+        let current = checks::current(conn, &check.kind, &check.name, &input)?;
+        if current.as_ref().map(|check| check.id) != Some(*id) {
+            return Ok(Some((json!(id), json!(current.map(|check| check.id)))));
+        }
+        if let Some(expected) = checks::accepted_evidence(conn, attempt.id, *id)? {
+            let current = checks::evidence(conn, check, &input)?;
+            if expected != current {
+                return Ok(Some((expected, current)));
+            }
+        }
+    }
+    Ok(None)
+}
+
 /// The protected paths `base..head` touches.
 pub async fn protected_paths(
     daemon: &Daemon,
@@ -816,6 +906,8 @@ pub async fn command(daemon: &Arc<Daemon>, method: &str, params: Value) -> Resul
         "attempt.start" => admit::attempt_start(daemon, &project, &params).await,
         "attempt.stop" => admit::attempt_stop(daemon, &project, &params),
         "attempt.approve" => admit::attempt_approve(daemon, &project, &params).await,
+        "attempt.accept" => admit::candidate_answer(daemon, &project, &params, true).await,
+        "attempt.repair" => admit::candidate_answer(daemon, &project, &params, false).await,
         "attempt.reject" => admit::attempt_reject(&project, &params),
         "attempt.abandon" => admit::attempt_abandon(daemon, &project, &params),
         "attempt.show" => admit::attempt_show(&project, &params),

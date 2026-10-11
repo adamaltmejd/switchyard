@@ -165,6 +165,40 @@ enum AttemptCommand {
     Stop {
         ticket: String,
     },
+    Accept {
+        ticket: String,
+        #[arg(long)]
+        attention: i64,
+        #[arg(long)]
+        check: i64,
+        #[arg(long)]
+        plan_revision: i64,
+        #[arg(long)]
+        target: String,
+        #[arg(long)]
+        head: String,
+        #[arg(long)]
+        proof: Option<String>,
+        #[arg(long)]
+        text: String,
+    },
+    Repair {
+        ticket: String,
+        #[arg(long)]
+        attention: i64,
+        #[arg(long)]
+        check: i64,
+        #[arg(long)]
+        plan_revision: i64,
+        #[arg(long)]
+        target: String,
+        #[arg(long)]
+        head: String,
+        #[arg(long)]
+        proof: Option<String>,
+        #[arg(long)]
+        text: String,
+    },
     Approve {
         ticket: String,
         /// The candidate head this approval binds.
@@ -743,17 +777,23 @@ fn render_attention(items: &[Value]) -> String {
     out
 }
 
-/// What an approval's exits bind and a person cannot retype: the candidate
-/// head, and its proof digest when one must be named. Other items bind
-/// nothing, so they render as one line.
+/// Exact candidate arguments for the item's judgment exits.
 fn exit_bindings(item: &Value) -> Option<String> {
-    if item["kind"].as_str() != Some("approval") {
+    if !matches!(item["kind"].as_str(), Some("approval" | "candidate")) {
         return None;
     }
     let head = item["payload"]["head"].as_str().unwrap_or("-");
     let digest = item["payload"]["proof"].as_str().unwrap_or_default();
     let target = item["payload"]["target"].as_str().unwrap_or("-");
     let mut line = format!("--head {head} --target {target}");
+    if item["kind"] == "candidate" {
+        line.push_str(&format!(
+            " --attention {} --check {} --plan-revision {} --text TEXT",
+            item["attention"],
+            item["payload"]["evidence"]["check"]["check"],
+            item["payload"]["plan_revision"]
+        ));
+    }
     if crate::jobs::proof::required(digest) {
         line.push_str(&format!(" --proof {digest}"));
     }

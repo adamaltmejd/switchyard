@@ -1012,7 +1012,7 @@ fn steer(tx: &rusqlite::Connection, id: i64) -> Result<Vec<i64>, Fail> {
     }
     for item in attempts::open_for_attempt(tx, attempt.id)? {
         let resolution = match item.kind.as_str() {
-            "approval" => "superseded",
+            "approval" | "candidate" => "superseded",
             "stopped" | "red" => "edit",
             _ => continue,
         };
@@ -1495,9 +1495,9 @@ fn approval_item(
     Ok((attempt, item.expect("checked above")))
 }
 
-/// What an approval over a limit item names: every candidate gate's passing
-/// check, then the blocking review checks it overrides. The item's gate
-/// digest, checked as stale first, is what guarantees the gates passed.
+/// A limit approval names selected passing or accepted candidate gates and
+/// the blocking review checks it overrides. Eligibility and identity still
+/// apply to every named check.
 fn limit_checks(
     tx: &rusqlite::Connection,
     attempt: &attempts::Attempt,
@@ -1515,15 +1515,18 @@ fn limit_checks(
         digest: loaded.gate_digest.clone(),
     };
     let mut named = Vec::new();
-    for gate in loaded
-        .config
-        .gates
-        .iter()
-        .filter(|gate| gate.stage == Stage::Candidate)
-    {
-        if let Some(check) = checks::current(tx, "gate", &gate.name, &input)?
-            && check.verdict == "pass"
-        {
+    let plan = match &attempt.admission {
+        Some(admission) => crate::plan::Plan::admitted(admission)
+            .map_err(|error| Fail::refused(error.to_string()))?,
+        None => loaded.config.workflow_plan(&attempt.workflow)?,
+    };
+    for gate in loaded.config.gates.iter().filter(|gate| {
+        gate.stage == Stage::Candidate
+            && plan
+                .nodes
+                .contains_key(&format!("candidate-gate-{}", gate.name))
+    }) {
+        if let Some(check) = checks::current(tx, "gate", &gate.name, &input)? {
             named.push(check.id);
         }
     }
@@ -1531,7 +1534,14 @@ fn limit_checks(
         digest: loaded.review_digest(&attempt.workflow)?,
         ..input
     };
-    for seat in &loaded.config.workflow(&attempt.workflow)?.review {
+    for (_, seat) in loaded
+        .config
+        .workflow(&attempt.workflow)?
+        .review
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| plan.nodes.contains_key(&format!("review-{index}")))
+    {
         if let Some(check) = checks::current(tx, "review", seat, &review)?
             && check.verdict != "pass"
         {
@@ -1539,6 +1549,134 @@ fn limit_checks(
         }
     }
     Ok(named)
+}
+
+fn candidate_stale(identity: &str, expected: Value, current: Value) -> Fail {
+    Fail::stale(
+        format!("candidate {identity} changed"),
+        expected.clone(),
+        current.clone(),
+    )
+    .with(json!({"identity": identity, "expected": expected, "current": current}))
+}
+
+pub async fn candidate_answer(
+    daemon: &Daemon,
+    project: &Project,
+    params: &Value,
+    accept: bool,
+) -> Result<Value, Fail> {
+    let ticket = ticket_param(params)?;
+    let attention = params["attention"]
+        .as_i64()
+        .ok_or_else(|| Fail::invalid("a candidate decision names attention"))?;
+    let named_check = params["check"]
+        .as_i64()
+        .ok_or_else(|| Fail::invalid("a candidate decision names its check"))?;
+    let named_plan = params["plan_revision"]
+        .as_i64()
+        .ok_or_else(|| Fail::invalid("a candidate decision names its plan revision"))?;
+    let text = params["text"]
+        .as_str()
+        .filter(|text| !text.trim().is_empty())
+        .ok_or_else(|| Fail::invalid("a candidate decision carries nonempty text"))?;
+    let attempt = project
+        .read(|conn| attempts::live_for(conn, ticket))?
+        .ok_or_else(|| Fail::refused("no live attempt"))?;
+    let loaded = super::load_attempt(daemon, project, &attempt).await?;
+    project.tx(|tx| {
+        let item = attempts::attention(tx, attention)?;
+        if item.kind != "candidate"
+            || item.attempt != Some(attempt.id)
+            || item.ticket != Some(ticket)
+        {
+            return Err(candidate_stale(
+                "attention",
+                json!(attention),
+                json!(item.to_json()),
+            ));
+        }
+        for key in ["target", "head", "proof"] {
+            if key == "proof"
+                && params[key].is_null()
+                && !proof::required(item.payload[key].as_str().unwrap_or_default())
+            {
+                continue;
+            }
+            let named = if key == "proof" {
+                params[key].as_str().unwrap_or("")
+            } else {
+                params[key]
+                    .as_str()
+                    .ok_or_else(|| Fail::invalid(format!("a candidate decision names {key}")))?
+            };
+            if item.payload[key] != named {
+                return Err(candidate_stale(
+                    key,
+                    json!(named),
+                    item.payload[key].clone(),
+                ));
+            }
+        }
+        let now = attempts::get(tx, attempt.id)?;
+        let ticket = tickets::get(tx, ticket)?;
+        if let Some((key, expected, current)) =
+            super::stale_part(&item.payload, &now, &ticket, &loaded)?
+        {
+            return Err(candidate_stale(key, expected, current));
+        }
+        if item.state != "open" {
+            return Err(candidate_stale(
+                "attention",
+                json!("open"),
+                json!(item.state),
+            ));
+        }
+        if now.plan_revision() != Some(named_plan) {
+            return Err(candidate_stale(
+                "plan_revision",
+                json!(named_plan),
+                json!(now.plan_revision()),
+            ));
+        }
+        if item.payload["evidence"]["check"]["check"] != named_check {
+            return Err(candidate_stale(
+                "selected_result",
+                json!(named_check),
+                item.payload["evidence"]["check"]["check"].clone(),
+            ));
+        }
+        let named = &item.payload["evidence"];
+        let check = &named["check"];
+        let input = checks::Input {
+            attempt: now.id,
+            base: now.base.clone(),
+            head: now.head.clone().unwrap_or_default(),
+            proof: now.proof.clone().unwrap_or_default(),
+            ticket_revision: ticket.revision,
+            plan_revision: now.plan_revision(),
+            digest: named["digest"].as_str().unwrap_or_default().to_string(),
+        };
+        let current = checks::current(
+            tx,
+            check["kind"].as_str().unwrap_or_default(),
+            check["name"].as_str().unwrap_or_default(),
+            &input,
+        )?
+        .map(|check| checks::evidence(tx, &check, &input))
+        .transpose()?
+        .unwrap_or(Value::Null);
+        if &current != named {
+            return Err(candidate_stale("selected_result", named.clone(), current));
+        }
+        attempts::resolve(
+            tx,
+            &item,
+            if accept { "accept" } else { "repair" },
+            Some(text),
+        )?;
+        Ok(json!({"attention": attention, "accepted": accept, "evidence": named}))
+    })
 }
 
 pub async fn attempt_approve(
@@ -1596,8 +1734,12 @@ pub async fn attempt_approve(
                 current,
             ));
         }
-        let overrode = item.kind == "stopped";
-        let checks: Vec<i64> = if overrode {
+        let limit = item.kind == "stopped";
+        let overrode = limit
+            || item.payload["accepted"]
+                .as_array()
+                .is_some_and(|accepted| !accepted.is_empty());
+        let checks: Vec<i64> = if limit {
             limit_checks(tx, &attempt, &ticket, &loaded)?
         } else {
             item.payload["checks"]
@@ -1607,6 +1749,15 @@ pub async fn attempt_approve(
                 .filter_map(Value::as_i64)
                 .collect()
         };
+        if let Some((expected, current)) =
+            super::selected_checks_current(tx, &attempt, &ticket, &loaded, &checks)?
+        {
+            return Err(Fail::stale(
+                "approval selected_result changed",
+                expected,
+                current,
+            ));
+        }
         let proof = attempt.proof.clone().unwrap_or_default();
         let approval = checks::approve(
             tx,

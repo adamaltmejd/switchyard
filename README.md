@@ -109,6 +109,12 @@ use `yard_ticket_show`, `yard_attempt_tail` and `yard_attempt_stats` for
 drilldowns. Cancelling a wait releases the request while work continues.
 Workers keep their separate execution-scoped HTTP grants.
 
+Before admission, candidate gate and seat overrides may select
+`operator_failure = true`. Eligible failures then ask the operator to
+`accept` the named attention with text or take `repair`. Acceptance keeps
+the failed evidence and runs every remaining selected candidate check
+before approval. Landing gates still have to pass.
+
 ## Development
 
     cargo fmt --check

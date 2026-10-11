@@ -29,6 +29,9 @@ idle and give its `seq`.
 Answer each item with one of its `exits`. Nothing else.
 
 - `start` retries from where the item stopped. It is never a fresh attempt.
+- A `candidate` item's `accept` records a reason on the exact failed evidence
+  and runs the remaining selected checks before approval. Read that evidence
+  first. Its `repair` exit takes the admitted bounded repair route.
 - `edit` (`yard ticket edit`) resolves a `stopped` item and runs the
   implementer next. On `timeout` it renews the clock; on `limit` it allows
   one more review round. On `limit`, `yard attempt approve Y-n --target BRANCH --head SHA`

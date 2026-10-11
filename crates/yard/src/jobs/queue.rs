@@ -134,6 +134,14 @@ async fn holds(
     if let Some(reason) = superseded {
         return Ok(Some(Lapse::Superseded(reason)));
     }
+    if project
+        .read(|conn| {
+            super::selected_checks_current(conn, attempt, ticket, loaded, &approval.checks)
+        })?
+        .is_some()
+    {
+        return Ok(Some(Lapse::Superseded("the selected result changed")));
+    }
     if approval.actor == "auto" {
         let protected =
             super::protected_paths(daemon, project, policy, &approval.base, &approval.head).await?;
@@ -186,6 +194,8 @@ fn lapsed(
         "revision": approval.ticket_revision, "plan_revision": attempt.plan_revision(),
         "gate_digest": approval.gate_digest, "review_digest": approval.review_digest,
         "checks": approval.checks, "protected": protected,
+        "accepted": approval.checks.iter().map(|check| checks::accepted_evidence(tx, attempt.id, *check))
+            .collect::<Result<Vec<_>, _>>()?.into_iter().flatten().collect::<Vec<_>>(),
         "unreviewed": !plan.nodes.keys().any(|name| name.starts_with("review-")),
         "skipped": attempt.admission.as_ref().map(|admission| &admission["skipped"]),
     });

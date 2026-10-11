@@ -650,3 +650,149 @@ fn manual_policy_withdraws_auto_approval_without_rejudgment() {
     release.write_all(b"go\n").unwrap();
     watch.event("landing.recorded", &[]);
 }
+
+/// G2: a delayed acceptance cannot cross an edit, even before the held edit
+/// worker changes the head. After release it cannot cross the new head either.
+/// Refusals name the changed identity and write no rows; the current item's
+/// repair exit and its completed approval supply the same-project control.
+/// Expected revisions are the two CLI edits; heads come from host git.
+/// Sabotage: omit ticket revision or head from candidate decisions, or let a
+/// repaired decision carry to the next candidate's check.
+#[test]
+fn delayed_candidate_acceptance_names_the_changed_identity_and_writes_nothing() {
+    let hold = Latch::new();
+    let held = hold.clone();
+    let machine = Machine::new("g2-accept-stale", move |request| {
+        if request
+            .prompt()
+            .contains("Your workspace is read-only. Plan the work")
+        {
+            return Reply::Text("ready".into());
+        }
+        if request.has_tool("yard_publish_review") {
+            return act(request, vec![publish(json!([]))]);
+        }
+        if request.opens() && request.last_user().contains("The operator edited") {
+            return Reply::Hold(
+                held.clone(),
+                Box::new(Reply::Tools(vec![bash(
+                    "cd /workspace && git commit --allow-empty -qm Edited",
+                )])),
+            );
+        }
+        let command = if request.last_user().contains("The gate check failed") {
+            "cd /workspace && touch ready.txt && git add -A && git commit -qm Ready"
+        } else {
+            "cd /workspace && touch feature.txt && git add -A && git commit -qm Feature"
+        };
+        act(request, vec![bash(command)])
+    });
+    machine.start();
+    let project = Project::new(
+        &machine,
+        "p",
+        &config("[gates.check]\ncommand = \"test -f ready.txt\"\nstage = \"candidate\"\n"),
+    );
+    let mut watch = project.watch(0);
+    project.json(&[
+        "ticket",
+        "new",
+        "--title",
+        "Delayed acceptance",
+        "--workflow",
+        "plan",
+    ]);
+    watch.event("attempt.ended", &[("outcome", "planned")]);
+    let cleanup = watch.find("planner cleanup", |event| {
+        event["event"] == "execution.ended"
+            && event["data"]["kind"] == "cleanup"
+            && event["attempt"] == 1
+    });
+    watch.find("cleanup reservation released", |event| {
+        event["event"] == "execution.released" && event["execution"] == cleanup["execution"]
+    });
+    let mut operator = machine.operator();
+    operator.initialize();
+    let admitted = operator.call(
+        "yard_attempt_start",
+        json!({
+            "project": project.path, "ticket": "Y-1", "workflow": "default",
+            "overrides": {"candidate-gate-check": {"operator_failure": true}}
+        }),
+    );
+    assert!(admitted.get("error").is_none(), "{admitted}");
+    let first = watch.attention();
+    assert_eq!(first["data"]["kind"], "candidate");
+    let first_item = project.json(&["attempt", "show", "Y-1"])["attention"][0].clone();
+    let first_head = git(
+        &project.path.join(".yard/local/attempts/2/clone"),
+        &["rev-parse", "HEAD"],
+    )
+    .trim()
+    .to_string();
+    let delayed = json!({
+        "project": project.path, "ticket": "Y-1", "attention": first_item["attention"], "check": first_item["payload"]["evidence"]["check"]["check"], "plan_revision": 1,
+        "target": "main", "head": first_head, "proof": first_item["payload"]["proof"], "text": "Accept the old failure"
+    });
+    project.json(&[
+        "ticket",
+        "edit",
+        "Y-1",
+        "--revision",
+        "1",
+        "--body",
+        "New brief",
+    ]);
+    hold.wait_held();
+    let before = project.rows("SELECT * FROM audit ORDER BY seq");
+    let refused = operator.call("yard_attempt_accept", delayed.clone());
+    assert_eq!(refused["error"]["code"], "stale");
+    assert_eq!(
+        refused["error"]["data"],
+        json!({"identity": "revision", "expected": 1, "current": 2})
+    );
+    assert_eq!(project.rows("SELECT * FROM audit ORDER BY seq"), before);
+    hold.release();
+    let second = watch.attention();
+    assert_eq!(second["data"]["kind"], "candidate");
+    let second_head = git(
+        &project.path.join(".yard/local/attempts/2/clone"),
+        &["rev-parse", "HEAD"],
+    )
+    .trim()
+    .to_string();
+    assert_ne!(first_head, second_head);
+    let before = project.rows("SELECT * FROM audit ORDER BY seq");
+    let refused = operator.call("yard_attempt_accept", delayed);
+    assert_eq!(refused["error"]["code"], "stale");
+    assert_eq!(
+        refused["error"]["data"],
+        json!({"identity": "head", "expected": first_head, "current": second_head})
+    );
+    assert_eq!(project.rows("SELECT * FROM audit ORDER BY seq"), before);
+    let item = project.json(&["attempt", "show", "Y-1"])["attention"][0].clone();
+    let repaired = operator.call("yard_attempt_repair", json!({
+        "project": project.path, "ticket": "Y-1", "attention": item["attention"], "check": item["payload"]["evidence"]["check"]["check"], "plan_revision": 1,
+        "target": "main", "head": second_head, "proof": item["payload"]["proof"], "text": "Use the admitted repair route"
+    }));
+    assert_eq!(repaired["accepted"], false, "{repaired}");
+    let approval = watch.attention();
+    assert_eq!(approval["data"]["kind"], "approval");
+    let payload = &approval["data"]["payload"];
+    let head = payload["head"].as_str().unwrap();
+    assert_eq!(
+        git(
+            &project.canonical(),
+            &["show", &format!("{head}:ready.txt")]
+        ),
+        ""
+    );
+    project.json(&[
+        "attempt", "approve", "Y-1", "--target", "main", "--head", head,
+    ]);
+    watch.event("landing.recorded", &[]);
+    git(
+        &project.canonical(),
+        &["merge-base", "--is-ancestor", head, "refs/heads/main"],
+    );
+}

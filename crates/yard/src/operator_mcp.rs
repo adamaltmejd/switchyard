@@ -49,6 +49,14 @@ const OPERATIONS: &[(&str, &str)] = &[
     ),
     ("attempt.stop", "project! ticket!"),
     (
+        "attempt.accept",
+        "project! ticket! attention:i! check:i! plan_revision:i! target! head! proof text!",
+    ),
+    (
+        "attempt.repair",
+        "project! ticket! attention:i! check:i! plan_revision:i! target! head! proof text!",
+    ),
+    (
         "attempt.approve",
         "project! ticket! head! target! proof text",
     ),
@@ -105,6 +113,7 @@ fn output_schema() -> Value {
 fn node_schema() -> Value {
     json!({"type": "object", "additionalProperties": false, "properties": {
         "profile": {"type": "string"},
+        "operator_failure": {"type": "boolean"},
         "runner": {"oneOf": [
             {"type": "object", "properties": {"kind": {"const": "agent"},
                 "agent": {"type": "string"}, "instructions": {"type": "string"}},

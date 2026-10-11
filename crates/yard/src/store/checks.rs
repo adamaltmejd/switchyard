@@ -121,6 +121,45 @@ pub fn for_execution(conn: &Connection, execution: i64) -> Result<Option<Check>,
         .optional()?)
 }
 
+/// The immutable eligible evidence an operator decision names.
+pub fn evidence(conn: &Connection, check: &Check, input: &Input) -> Result<Value, Fail> {
+    let execution = super::executions::get(conn, check.execution)?;
+    Ok(json!({"check": check.to_json(), "node": execution.node,
+        "digest": input.digest, "result": execution.result}))
+}
+
+/// Attention is the sole persisted decision reading. A different result
+/// cannot inherit an earlier answer, even on the same candidate.
+pub fn decision(conn: &Connection, attempt: i64, evidence: &Value) -> Result<Option<String>, Fail> {
+    Ok(conn
+        .query_row(
+            "SELECT resolution FROM attention WHERE attempt = ?1 AND kind = 'candidate'
+         AND state = 'resolved' AND json_extract(payload, '$.evidence') = ?2
+         AND resolution IN ('accept', 'repair') ORDER BY id DESC LIMIT 1",
+            params![attempt, evidence.to_string()],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+pub fn accepted_evidence(
+    conn: &Connection,
+    attempt: i64,
+    check: i64,
+) -> Result<Option<Value>, Fail> {
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT json_extract(payload, '$.evidence') FROM attention WHERE attempt = ?1
+         AND kind = 'candidate' AND state = 'resolved' AND resolution = 'accept'
+         AND json_extract(payload, '$.evidence.check.check') = ?2 ORDER BY id DESC LIMIT 1",
+            params![attempt, check],
+            |row| row.get(0),
+        )
+        .optional()?;
+    raw.map(|raw| serde_json::from_str(&raw).map_err(|error| Fail::refused(error.to_string())))
+        .transpose()
+}
+
 pub fn for_attempt(conn: &Connection, attempt: i64) -> Result<Vec<Check>, Fail> {
     super::all(
         conn,
@@ -284,6 +323,15 @@ pub struct Approve<'a> {
 }
 
 pub fn approve(tx: &Connection, approve: Approve) -> Result<i64, Fail> {
+    let accepted = approve
+        .checks
+        .iter()
+        .map(|check| accepted_evidence(tx, approve.attempt, *check))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let overrode = approve.overrode || !accepted.is_empty();
     tx.execute(
         "INSERT INTO approval (attempt, base, head, proof, ticket_revision, gate_digest, review_digest,
             checks, actor, text, state, created_at, overrode)
@@ -300,7 +348,7 @@ pub fn approve(tx: &Connection, approve: Approve) -> Result<i64, Fail> {
             approve.actor,
             approve.text,
             now(),
-            approve.overrode
+            overrode
         ],
     )?;
     let id = tx.last_insert_rowid();
@@ -319,7 +367,7 @@ pub fn approve(tx: &Connection, approve: Approve) -> Result<i64, Fail> {
         },
         approve.text,
         json!({ "approval": id, "actor": approve.actor, "head": approve.head, "base": approve.base,
-                "proof": approve.proof, "checks": approve.checks, "overrode": approve.overrode }),
+                "proof": approve.proof, "checks": approve.checks, "accepted": accepted, "overrode": overrode }),
     )?;
     Ok(id)
 }

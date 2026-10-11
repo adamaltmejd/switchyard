@@ -39,6 +39,11 @@ item's exit names.
   notes back as a repair.
 - `proposal` — `yard proposal accept ID` or `yard proposal reject ID`,
   where `ID` is the attention id.
+- `candidate` — read the named failed gate or blocking review evidence.
+  `yard attempt accept Y-n --attention ID --check CHECK --plan-revision R --target BRANCH --head SHA --text T`
+  accepts it; `yard attempt repair` with the same bindings takes bounded repair.
+  Add `--proof DIGEST` when present. Acceptance runs all remaining selected
+  checks before approval and preserves the original failure.
 - `stopped` — `yard attempt start Y-n`, `yard ticket edit Y-n`, or abandon.
   On `timeout` only edit and abandon; on `limit` also `yard attempt approve
   Y-n --target BRANCH --head SHA`, over the blocking findings. The edit reaches the next

@@ -38,6 +38,14 @@ fn start_selected(machine: &Machine, project: &Project, title: &str, entry: &str
     let mut watch = project.watch(0);
     project.json(&["ticket", "new", "--title", title, "--workflow", "plan"]);
     watch.event("attempt.ended", &[("outcome", "planned")]);
+    let cleanup = watch.find("planner cleanup", |event| {
+        event["event"] == "execution.ended"
+            && event["data"]["kind"] == "cleanup"
+            && event["attempt"] == 1
+    });
+    watch.find("cleanup reservation released", |event| {
+        event["event"] == "execution.released" && event["execution"] == cleanup["execution"]
+    });
     let mut operator = machine.operator();
     operator.initialize();
     let mut overrides = json!({
@@ -50,6 +58,9 @@ fn start_selected(machine: &Machine, project: &Project, title: &str, entry: &str
     } else {
         json!({"routes": {"complete": [{"to": "landing-gate-second"}]}})
     };
+    if entry == "landing-gate-check" {
+        overrides["candidate-gate-check"] = json!({"operator_failure": true});
+    }
     let admitted = operator.call(
         "yard_attempt_start",
         json!({
@@ -701,6 +712,35 @@ fn a_gate_errors_start_reruns_that_gate() {
     );
     assert_eq!(kinds(&project, "implementation").len(), 2);
 
+    let attention = project.json(&["attempt", "show", "Y-1"])["attention"][0].clone();
+    watch.find("gate reservation released", |event| {
+        event["event"] == "execution.released" && event["execution"] == attention["execution"]
+    });
+    let failed_head = project.rows("SELECT head FROM execution WHERE kind = 'gate'")[0]["head"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let before = project.rows("SELECT * FROM audit ORDER BY seq");
+    let refused = project.refused(&[
+        "attempt",
+        "accept",
+        "Y-1",
+        "--attention",
+        &attention["attention"].to_string(),
+        "--check",
+        "0",
+        "--plan-revision",
+        "1",
+        "--target",
+        "main",
+        "--head",
+        &failed_head,
+        "--text",
+        "Accept infrastructure error",
+    ]);
+    assert_eq!(refused["code"], "stale");
+    assert_eq!(refused["data"]["identity"], "attention");
+    assert_eq!(project.rows("SELECT * FROM audit ORDER BY seq"), before);
     std::fs::remove_file(&path).unwrap();
     project.json(&["attempt", "start", "Y-1"]);
     let approval = watch.attention();
@@ -1405,4 +1445,350 @@ fn assert_own_session_only(
             .any(|(_, text)| text.contains("status=404 status=404"))),
         "the rogue calls were not both refused with 404"
     );
+}
+
+/// G8: default repairs and approve-at-limit remain available in the same
+/// project. Selecting operator handling pauses each eligible failure, then
+/// acceptance runs the remaining gate and panel before ordinary approval.
+/// G2: failure records and results survive acceptance, landing and reopening.
+/// Expected files and verdicts come from the fixture; ancestry comes from git.
+/// Sabotage: rewrite accepted failures to pass, stop at the first acceptance,
+/// or route the final seat's carried accepted block back to the implementer.
+/// Ignore named plan revision or check identity; same-candidate stale decisions
+/// write an acceptance. Consume publication before teardown; a held item opens.
+#[test]
+fn selected_failures_continue_without_rewriting_judgments() {
+    let hold = Latch::new();
+    let held = hold.clone();
+    let final_hold = Latch::new();
+    let final_held = final_hold.clone();
+    let machine = Machine::new("g8-accept", move |request| {
+        if request
+            .prompt()
+            .contains("Your workspace is read-only. Plan the work")
+        {
+            return Reply::Text("ready".into());
+        }
+        if request.has_tool("yard_publish_review") {
+            if request.prompt().contains("Selected failure")
+                && request.prompt().contains("final reviewer")
+                && !request.opens()
+            {
+                return Reply::Hold(final_held.clone(), Box::new(Reply::Text("done".into())));
+            }
+            if request.prompt().contains("Selected failure")
+                && request.prompt().contains("correctness reviewer")
+                && !request.opens()
+            {
+                return Reply::Hold(held.clone(), Box::new(Reply::Text("done".into())));
+            }
+            let blocked = request.prompt().contains("correctness reviewer")
+                && !request.prompt().contains("reviewed.txt");
+            return act(
+                request,
+                vec![publish(if blocked {
+                    json!([{ "priority": "P0", "body": "add reviewed.txt" }])
+                } else {
+                    json!([])
+                })],
+            );
+        }
+        let prompt = request.last_user();
+        let command = if prompt.contains("The gate first failed") {
+            "cd /workspace && touch ready.txt && git add -A && git commit -qm Ready"
+        } else if prompt.contains("Review blocked") {
+            "cd /workspace && touch reviewed.txt && git add -A && git commit -qm Reviewed"
+        } else if request.prompt().contains("Selected failure") {
+            "cd /workspace && rm -f ready.txt reviewed.txt && touch selected.txt && git add -A && git commit -qm Selected"
+        } else {
+            "cd /workspace && touch feature.txt && git add -A && git commit --allow-empty -qm Feature"
+        };
+        act(request, vec![bash(command)])
+    });
+    machine.start();
+    let configuration = config(
+        "[gates.first]\ncommand = \"test -f ready.txt || test -f landing.txt\"\nstage = \"candidate\"\n\
+         [gates.remaining]\ncommand = \"true\"\nstage = \"candidate\"\n\
+         [review.seats.final]\nagent = \"worker\"\ninstructions = \"Final seat.\"\n",
+    ).replace("review = [\"correctness\"]\n\n[workflows.plan]", "review = [\"correctness\", \"final\"]\n\n[workflows.plan]")
+        .replace("max_rounds = 3", "max_rounds = 1");
+    let project = Project::new(&machine, "p", &configuration);
+    let mut watch = project.watch(0);
+    project.json(&["ticket", "new", "--title", "Default repair"]);
+    // One gate repair, then the review bound: the ordinary route is still
+    // automatic and the operator can approve its blocking evidence at limit.
+    let limit = watch.attention();
+    assert_eq!(
+        (&limit["data"]["kind"], &limit["data"]["reason"]),
+        (&json!("stopped"), &json!("limit"))
+    );
+    assert_eq!(
+        project
+            .rows("SELECT id FROM execution WHERE kind = 'implementation'")
+            .len(),
+        2
+    );
+    let payload = &limit["data"]["payload"];
+    project.json(&[
+        "attempt",
+        "approve",
+        "Y-1",
+        "--target",
+        "main",
+        "--head",
+        payload["head"].as_str().unwrap(),
+    ]);
+    watch.event("landing.recorded", &[]);
+    project.json(&["sync", "main"]);
+    let cleanup = watch.find("default cleanup", |event| {
+        event["event"] == "execution.ended"
+            && event["data"]["kind"] == "cleanup"
+            && event["attempt"] == 1
+    });
+    watch.find("cleanup reservation released", |event| {
+        event["event"] == "execution.released" && event["execution"] == cleanup["execution"]
+    });
+
+    project.json(&[
+        "ticket",
+        "new",
+        "--title",
+        "Selected failure",
+        "--workflow",
+        "plan",
+    ]);
+    watch.event("attempt.ended", &[("outcome", "planned")]);
+    let cleanup = watch.find("planner cleanup", |event| {
+        event["event"] == "execution.ended"
+            && event["data"]["kind"] == "cleanup"
+            && event["attempt"] == 2
+    });
+    watch.find("cleanup reservation released", |event| {
+        event["event"] == "execution.released" && event["execution"] == cleanup["execution"]
+    });
+    let mut operator = machine.operator();
+    operator.initialize();
+    let started = operator.call(
+        "yard_attempt_start",
+        json!({
+            "project": project.path, "ticket": "Y-2", "workflow": "default", "overrides": {
+                "candidate-gate-first": {"operator_failure": true},
+                "review-0": {"operator_failure": true}
+            }
+        }),
+    );
+    assert!(started.get("error").is_none(), "{started}");
+    let gate = watch.attention();
+    assert_eq!(
+        (&gate["data"]["kind"], &gate["data"]["reason"]),
+        (&json!("candidate"), &json!("failed"))
+    );
+    let item = project.json(&["attempt", "show", "Y-2"])["attention"][0].clone();
+    let payload = &item["payload"];
+    assert_eq!(payload["evidence"]["result"]["outcome"], "failed");
+    let gate_id = payload["evidence"]["check"]["check"].as_i64().unwrap();
+    let failed = project.rows(&format!("SELECT c.id, c.verdict, e.id AS execution, e.result FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE c.id = {gate_id}"));
+    let before = project.rows("SELECT * FROM audit ORDER BY seq");
+    let refused = operator.call("yard_attempt_accept", json!({
+        "project": project.path, "ticket": "Y-2", "attention": item["attention"], "check": gate_id,
+        "plan_revision": 2, "target": "main", "head": payload["head"], "proof": payload["proof"], "text": "Accept under another plan"
+    }));
+    assert_eq!(refused["error"]["code"], "stale");
+    assert_eq!(
+        refused["error"]["data"],
+        json!({"identity": "plan_revision", "expected": 2, "current": 1})
+    );
+    assert_eq!(project.rows("SELECT * FROM audit ORDER BY seq"), before);
+    let accepted = operator.call("yard_attempt_accept", json!({
+        "project": project.path, "ticket": "Y-2", "attention": item["attention"], "check": item["payload"]["evidence"]["check"]["check"], "plan_revision": 1,
+        "target": "main", "head": payload["head"], "proof": payload["proof"], "text": "Accept this gate failure"
+    }));
+    assert_eq!(accepted["accepted"], true, "{accepted}");
+    hold.wait_held();
+    assert_eq!(project.rows("SELECT e.result, e.teardown, c.verdict FROM execution e JOIN \"check\" c ON c.execution = e.id WHERE e.attempt = 3 AND e.kind = 'review'"),
+        vec![json!({"result": null, "teardown": 0, "verdict": "fail"})]);
+    assert!(project.rows("SELECT id FROM attention WHERE attempt = 3 AND kind = 'candidate' AND state = 'open'").is_empty());
+    let before = project.rows("SELECT * FROM audit ORDER BY seq");
+    let refused = operator.call("yard_attempt_accept", json!({
+        "project": project.path, "ticket": "Y-2", "attention": item["attention"], "check": item["payload"]["evidence"]["check"]["check"], "plan_revision": 1,
+        "target": "main", "head": payload["head"], "proof": payload["proof"], "text": "Accept while publication is held"
+    }));
+    assert_eq!(refused["error"]["code"], "stale");
+    assert_eq!(
+        refused["error"]["data"],
+        json!({"identity": "attention", "expected": "open", "current": "resolved"})
+    );
+    assert_eq!(project.rows("SELECT * FROM audit ORDER BY seq"), before);
+    hold.release();
+    let review = watch.attention();
+    assert_eq!(
+        (&review["data"]["kind"], &review["data"]["reason"]),
+        (&json!("candidate"), &json!("blocked"))
+    );
+    let shown = project.json(&["attempt", "show", "Y-2"]);
+    let item = &shown["attention"][0];
+    let payload = &item["payload"];
+    let review_id = payload["evidence"]["check"]["check"].as_i64().unwrap();
+    let blocked = project.rows(&format!("SELECT c.id, c.verdict, e.id AS execution, e.result FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE c.id = {review_id}"));
+    // The candidate and plan are unchanged. Naming the preceding gate's
+    // result on this fresh review item must not accept the review's block.
+    let before = project.rows("SELECT * FROM audit ORDER BY seq");
+    let refused = operator.call("yard_attempt_accept", json!({
+        "project": project.path, "ticket": "Y-2", "attention": item["attention"], "check": gate_id,
+        "plan_revision": 1, "target": "main", "head": payload["head"], "proof": payload["proof"], "text": "Accept the preceding gate result"
+    }));
+    assert_eq!(refused["error"]["code"], "stale");
+    assert_eq!(
+        refused["error"]["data"],
+        json!({"identity": "selected_result", "expected": gate_id, "current": review_id})
+    );
+    assert_eq!(project.rows("SELECT * FROM audit ORDER BY seq"), before);
+    let accepted = project.json(&[
+        "attempt",
+        "accept",
+        "Y-2",
+        "--attention",
+        &item["attention"].to_string(),
+        "--check",
+        &review_id.to_string(),
+        "--plan-revision",
+        "1",
+        "--target",
+        "main",
+        "--head",
+        payload["head"].as_str().unwrap(),
+        "--text",
+        "Accept this review block",
+    ]);
+    assert_eq!(accepted["accepted"], true, "{accepted}");
+    final_hold.wait_held();
+    let held_rows = project.rows("SELECT e.status, e.result, e.teardown, c.verdict FROM execution e JOIN \"check\" c ON c.execution = e.id WHERE e.attempt = 3 AND e.name = 'final'");
+    assert_eq!(
+        held_rows,
+        vec![json!({"status": "running", "result": null, "teardown": 0, "verdict": "pass"})]
+    );
+    let since = project.rows("SELECT MAX(seq) AS seq FROM audit")[0]["seq"]
+        .as_i64()
+        .unwrap();
+    machine.kill();
+    // The fixture holds a real published final seat. Prove the same point
+    // outside the stopped daemon before reconciliation consumes acceptance.
+    assert_eq!(project.rows("SELECT e.status, e.result, e.teardown, c.verdict FROM execution e JOIN \"check\" c ON c.execution = e.id WHERE e.attempt = 3 AND e.name = 'final'"), held_rows);
+    machine.start();
+    let mut watch = project.watch(since);
+    let approval = watch.attention();
+    assert_eq!(approval["data"]["kind"], "approval");
+    let shown = project.json(&["attempt", "show", "Y-2"]);
+    let executions = shown["executions"].as_array().unwrap();
+    assert_eq!(
+        executions
+            .iter()
+            .map(|row| row["binding"]["node"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "implementer",
+            "candidate-gate-first",
+            "candidate-gate-remaining",
+            "review-0",
+            "review-1"
+        ]
+    );
+    assert_eq!(executions[4]["result"]["outcome"], "blocked");
+    assert_eq!(
+        approval["data"]["payload"]["accepted"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    // Advancing the target supplies the fixture's successful landing gate,
+    // without changing the accepted candidate or its failed checks.
+    project.write("landing.txt", "landing\n");
+    project.git(&["add", "landing.txt"]);
+    project.git(&["commit", "-qm", "Allow merged gate"]);
+    project.json(&["sync", "main"]);
+    let head = approval["data"]["payload"]["head"].as_str().unwrap();
+    project.json(&[
+        "attempt", "approve", "Y-2", "--target", "main", "--head", head,
+    ]);
+    watch.event("landing.recorded", &[]);
+    watch.until("cleanup", |event| {
+        event["event"] == "execution.ended"
+            && event["data"]["kind"] == "cleanup"
+            && event["ticket"] == "Y-2"
+    });
+    git(
+        &project.canonical(),
+        &["merge-base", "--is-ancestor", head, "refs/heads/main"],
+    );
+    let query = format!(
+        "SELECT c.id, c.verdict, e.id AS execution, e.result FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE c.id IN ({gate_id}, {review_id}) ORDER BY c.id"
+    );
+    let original = [failed, blocked].concat();
+    assert!(original.iter().all(|row| row["verdict"] == "fail"));
+    assert_eq!(project.rows(&query), original);
+    assert_eq!(
+        project.rows("SELECT overrode FROM approval ORDER BY id"),
+        vec![json!({"overrode": 1}), json!({"overrode": 1})]
+    );
+    machine.kill();
+    machine.start();
+    project.json(&["status"]);
+    assert_eq!(project.rows(&query), original);
+    final_hold.release();
+
+    // A selected final result may block while its own publication passes.
+    // Accepting it names the original earlier failure too.
+    let since = project.rows("SELECT MAX(seq) AS seq FROM audit")[0]["seq"]
+        .as_i64()
+        .unwrap();
+    let mut watch = project.watch(since);
+    project.json(&[
+        "ticket",
+        "new",
+        "--title",
+        "Carried failure",
+        "--workflow",
+        "plan",
+    ]);
+    watch.event("attempt.ended", &[("outcome", "planned")]);
+    let mut operator = machine.operator();
+    operator.initialize();
+    let started = operator.call(
+        "yard_attempt_start",
+        json!({
+            "project": project.path, "ticket": "Y-3", "workflow": "default",
+            "overrides": {"review-1": {"operator_failure": true}}
+        }),
+    );
+    assert!(started.get("error").is_none(), "{started}");
+    let blocked = watch.attention();
+    assert_eq!(
+        (&blocked["data"]["kind"], &blocked["data"]["reason"]),
+        (&json!("candidate"), &json!("blocked"))
+    );
+    let item = project.json(&["attempt", "show", "Y-3"])["attention"][0].clone();
+    assert_eq!(item["payload"]["evidence"]["check"]["verdict"], "pass");
+    assert_eq!(item["payload"]["evidence"]["result"]["outcome"], "blocked");
+    let accepted = operator.call("yard_attempt_accept", json!({
+        "project": project.path, "ticket": "Y-3", "attention": item["attention"], "check": item["payload"]["evidence"]["check"]["check"], "plan_revision": 1,
+        "target": "main", "head": item["payload"]["head"], "proof": item["payload"]["proof"], "text": "Accept the carried block"
+    }));
+    assert_eq!(accepted["accepted"], true, "{accepted}");
+    let approval = watch.attention();
+    assert_eq!(approval["data"]["kind"], "approval");
+    let head = approval["data"]["payload"]["head"].as_str().unwrap();
+    project.json(&[
+        "attempt", "approve", "Y-3", "--target", "main", "--head", head,
+    ]);
+    watch.event("landing.recorded", &[]);
+    let checks: Value = serde_json::from_str(
+        project.rows("SELECT checks FROM approval ORDER BY id DESC LIMIT 1")[0]["checks"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    let failed = project.rows("SELECT c.id, c.verdict FROM \"check\" c JOIN execution e ON e.id = c.execution JOIN attempt a ON a.id = e.attempt WHERE a.ticket = 3 AND c.kind = 'review' AND e.name = 'correctness'");
+    assert_eq!(failed[0]["verdict"], "fail");
+    assert!(checks.as_array().unwrap().contains(&failed[0]["id"]));
 }

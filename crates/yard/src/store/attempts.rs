@@ -282,6 +282,7 @@ impl Attention {
     /// The commands that answer the item.
     pub fn exits(&self) -> &'static [&'static str] {
         match (self.kind.as_str(), self.reason.as_str()) {
+            ("candidate", _) => &["accept", "repair", "edit", "abandon"],
             ("approval", _) => &["approve", "reject", "abandon"],
             ("proposal", _) => &["accept", "reject"],
             ("stopped", "limit") => &["approve", "edit", "abandon"],

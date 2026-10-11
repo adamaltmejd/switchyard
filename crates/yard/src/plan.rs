@@ -4,6 +4,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
 #[derive(Debug, Serialize)]
 pub struct Invalid {
     pub input: String,
@@ -60,6 +64,7 @@ pub struct Profile {
 impl Profile {
     pub fn node(&self) -> Node {
         Node {
+            operator_failure: false,
             runner: self.runner.clone(),
             access: self.access.clone(),
             outputs: self.outputs.clone(),
@@ -91,6 +96,8 @@ pub struct Route {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Node {
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub operator_failure: bool,
     pub runner: Runner,
     pub access: Access,
     #[serde(default)]
@@ -107,6 +114,8 @@ pub struct Node {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NodeSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_failure: Option<bool>,
     pub profile: Option<String>,
     pub runner: Option<Runner>,
     pub access: Option<Access>,
@@ -130,6 +139,10 @@ impl NodeSpec {
             };
         }
         Ok(Node {
+            operator_failure: self
+                .operator_failure
+                .or_else(|| base.map(|n| n.operator_failure))
+                .unwrap_or(false),
             runner: pick!(runner),
             access: pick!(access),
             outputs: pick!(outputs),
@@ -267,6 +280,7 @@ impl Config {
         let mut chain = vec![(
             "implementer".to_string(),
             Node {
+                operator_failure: false,
                 runner: Runner::Agent {
                     agent: workflow.implementer.clone(),
                     instructions: workflow.instructions.clone(),
@@ -298,6 +312,7 @@ impl Config {
                         chain.push((
                             format!("review-{index}"),
                             Node {
+                                operator_failure: false,
                                 runner: Runner::Agent {
                                     agent: seat.agent.clone(),
                                     instructions: seat.instructions.clone(),
@@ -328,6 +343,7 @@ impl Config {
                             gate.name
                         ),
                         Node {
+                            operator_failure: false,
                             runner: Runner::Command {
                                 gate: gate.name.clone(),
                             },
@@ -465,7 +481,14 @@ impl Plan {
         for (name, node) in &mut selected.nodes {
             let defined = ordinary.nodes.get(name)?;
             let complete = node.routes.get("complete").cloned();
+            let operator_failure = node.operator_failure;
+            if operator_failure
+                && !(name.starts_with("candidate-gate-") || name.starts_with("review-"))
+            {
+                return None;
+            }
             *node = defined.clone();
+            node.operator_failure = operator_failure;
             node.routes.remove("complete");
             if let Some(routes) = complete {
                 node.routes.insert("complete".into(), routes);
@@ -482,6 +505,7 @@ impl Plan {
             let mut provided = node.clone();
             provided.routes.remove("complete");
             let mut defined = ordinary.nodes[name].clone();
+            defined.operator_failure = node.operator_failure;
             defined.routes.remove("complete");
             let mut retained = selected.nodes[name].clone();
             retained.routes.remove("complete");
