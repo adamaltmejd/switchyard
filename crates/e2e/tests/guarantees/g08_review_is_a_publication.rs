@@ -1603,7 +1603,7 @@ fn selected_failures_continue_without_rewriting_judgments() {
         "project": project.path, "ticket": "Y-2", "attention": item["attention"], "check": item["payload"]["evidence"]["check"]["check"], "plan_revision": 1,
         "target": "main", "head": payload["head"], "proof": payload["proof"], "text": "Accept this gate failure"
     }));
-    assert_eq!(accepted["accepted"], true, "{accepted}");
+    assert_eq!(accepted["result"]["accepted"], true, "{accepted}");
     hold.wait_held();
     assert_eq!(project.rows("SELECT e.result, e.teardown, c.verdict FROM execution e JOIN \"check\" c ON c.execution = e.id WHERE e.attempt = 3 AND e.kind = 'review'"),
         vec![json!({"result": null, "teardown": 0, "verdict": "fail"})]);
@@ -1774,7 +1774,7 @@ fn selected_failures_continue_without_rewriting_judgments() {
         "project": project.path, "ticket": "Y-3", "attention": item["attention"], "check": item["payload"]["evidence"]["check"]["check"], "plan_revision": 1,
         "target": "main", "head": item["payload"]["head"], "proof": item["payload"]["proof"], "text": "Accept the carried block"
     }));
-    assert_eq!(accepted["accepted"], true, "{accepted}");
+    assert_eq!(accepted["result"]["accepted"], true, "{accepted}");
     let approval = watch.attention();
     assert_eq!(approval["data"]["kind"], "approval");
     let head = approval["data"]["payload"]["head"].as_str().unwrap();

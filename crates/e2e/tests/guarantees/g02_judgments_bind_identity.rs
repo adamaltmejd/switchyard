@@ -775,7 +775,7 @@ fn delayed_candidate_acceptance_names_the_changed_identity_and_writes_nothing() 
         "project": project.path, "ticket": "Y-1", "attention": item["attention"], "check": item["payload"]["evidence"]["check"]["check"], "plan_revision": 1,
         "target": "main", "head": second_head, "proof": item["payload"]["proof"], "text": "Use the admitted repair route"
     }));
-    assert_eq!(repaired["accepted"], false, "{repaired}");
+    assert_eq!(repaired["result"]["accepted"], false, "{repaired}");
     let approval = watch.attention();
     assert_eq!(approval["data"]["kind"], "approval");
     let payload = &approval["data"]["payload"];
