@@ -54,7 +54,7 @@ timeout_minutes = 20
 
 # End to end only, on the host: it needs the container runtime and pinfold.
 [gates.e2e]
-command = "cargo test -p e2e --locked"
+command = "YARD_E2E_DURABLE_INPUTS=/home/yard/validation/switchyard-durable-inputs cargo test -p e2e --locked"
 runs_in = "host"
 env = ["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"]
 timeout_minutes = 30
