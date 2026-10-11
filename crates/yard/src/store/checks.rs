@@ -70,10 +70,12 @@ impl Check {
 }
 
 /// The latest check of `kind` and `name` on exactly `input`. A review check
-/// counts after checked teardown and the harness's registration proof. A
-/// proven seat keeps its publication across interruption; reconciliation
-/// proves ownership gone before the result counts. Gate checks carry no
-/// registration. Historical checks retain their existing identity contract.
+/// requires the harness's registration proof. Node-bound gate and review
+/// checks require an eligible result after checked teardown. Historical
+/// checks require ended, unreserved executions; their node, result and
+/// teardown evidence stays unknown. Exact identity still applies to both.
+/// A proven seat keeps its publication across interruption; reconciliation
+/// proves ownership gone before the result counts. Gates need no registration.
 pub fn current(
     conn: &Connection,
     kind: &str,

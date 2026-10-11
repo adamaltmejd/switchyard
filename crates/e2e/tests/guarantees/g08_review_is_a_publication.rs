@@ -612,8 +612,11 @@ export default async function () {
 
 /// A gate error's `start` reruns that gate on the same head. The gate's box
 /// cannot come up while the pinfold wrapper refuses; the fixture arms the
-/// refusal as the worker finishes. After the allowed retry, the first
-/// attempt is parked and abandoned. A second ticket's host gate is held, abandoned,
+/// refusal as the worker finishes. After the allowed candidate retry, a
+/// target advance separates candidate and merged inputs. Re-arm before
+/// approval: a landing child cannot come up, records error with no judgment
+/// or repair and leaves canonical unchanged. Supported start under the same
+/// approval lands a fresh exact merge of those parents. A second ticket's host gate is held, abandoned,
 /// then released to fail: it ends abandoned, records no check and raises
 /// nothing. This gives the abandonment a same-project successful control.
 /// No review runs, so the approval follows the gate alone.
@@ -624,6 +627,9 @@ export default async function () {
 /// Route an infrastructure error as a failed judgment; it gains an output
 /// or starts repair instead of waiting for the operator's same-head retry.
 /// Require workflow translation equality on retry; this selected plan stops.
+/// Classify a landing box-up error as fail in supervise::gate's Err arm,
+/// or route queue::land's error to returned: the child gains a judgment or
+/// repair instead of retaining approval for the successful requeue.
 #[test]
 fn a_gate_errors_start_reruns_that_gate() {
     let armed = std::sync::Arc::new(Mutex::new(None::<std::path::PathBuf>));
@@ -685,8 +691,101 @@ fn a_gate_errors_start_reruns_that_gate() {
     assert_eq!(gates[1]["outcome"], "pass");
     assert_eq!(gates[0]["head"], gates[1]["head"]);
     assert_eq!(kinds(&project, "implementation").len(), 2);
-    project.json(&["ticket", "park", "Y-1"]);
-    project.json(&["attempt", "abandon", "Y-1"]);
+    let head = approval["data"]["payload"]["head"].as_str().unwrap();
+    let proof = approval["data"]["payload"]["proof"].as_str().unwrap();
+    std::fs::write(project.path.join("target.txt"), "target advance\n").unwrap();
+    project.git(&["add", "target.txt"]);
+    project.git(&["commit", "-qm", "Advance target before landing error"]);
+    let target = project.git(&["rev-parse", "HEAD"]).trim().to_string();
+    project.json(&["sync", "main"]);
+    std::fs::write(&path, "").unwrap();
+    project.json(&[
+        "attempt", "approve", "Y-1", "--target", "main", "--head", head, "--proof", proof,
+    ]);
+    let red = watch.attention();
+    assert_eq!(
+        (
+            &red["data"]["kind"],
+            &red["data"]["reason"],
+            &red["attempt"]
+        ),
+        (&json!("red"), &json!("landing"), &Value::Null),
+        "{red}"
+    );
+    let children = project.rows(
+        "SELECT id, parent, node, head, outcome,
+        json_extract(inputs, '$.merged.value.base') AS input_base,
+        json_extract(inputs, '$.merged.value.head') AS input_head,
+        json_extract(inputs, '$.merged.value.proof') AS input_proof,
+        json_extract(result, '$.infrastructure.outcome') AS infrastructure,
+        json_extract(result, '$.outcome') AS route,
+        json_extract(result, '$.judgment') AS judgment,
+        json_extract(result, '$.outputs') AS outputs
+        FROM execution WHERE kind = 'gate' AND parent IS NOT NULL ORDER BY id",
+    );
+    assert_eq!(children.len(), 1, "no successor after the refused child");
+    let child = &children[0];
+    let landing_ref = format!("refs/yard/landings/{}", child["parent"]);
+    let merged = git(&project.canonical(), &["rev-parse", &landing_ref])
+        .trim()
+        .to_string();
+    assert_eq!(
+        git(&project.canonical(), &["rev-parse", &format!("{merged}^1")]).trim(),
+        target
+    );
+    assert_eq!(
+        git(&project.canonical(), &["rev-parse", &format!("{merged}^2")]).trim(),
+        head
+    );
+    assert_eq!(child["node"], "landing-gate-check");
+    assert_eq!(child["head"], merged);
+    assert_eq!(child["input_base"], target);
+    assert_eq!(child["input_head"], merged);
+    assert_eq!(child["input_proof"], proof);
+    assert_eq!(child["outcome"], "error");
+    assert_eq!(child["infrastructure"], "error");
+    assert_eq!(child["route"], Value::Null);
+    assert_eq!(child["judgment"], Value::Null);
+    assert_eq!(child["outputs"], "{}");
+    assert!(project.rows("SELECT c.id FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE e.parent IS NOT NULL").is_empty());
+    assert_eq!(project.canonical_head(), target);
+    assert_eq!(kinds(&project, "implementation").len(), 2);
+    assert_eq!(
+        project.rows("SELECT next, landing_reds FROM attempt WHERE id = 2"),
+        vec![json!({"next": null, "landing_reds": 0})]
+    );
+    let approvals = project.rows("SELECT id, state FROM approval");
+    assert_eq!(approvals.len(), 1);
+    assert_eq!(approvals[0]["state"], "active");
+
+    std::fs::remove_file(&path).unwrap();
+    project.json(&["attempt", "start", "Y-1"]);
+    watch.event("landing.recorded", &[]);
+    watch.until("cleanup after requeued landing", |event| {
+        event["event"] == "execution.ended" && event["data"]["kind"] == "cleanup"
+    });
+    let landed = project.canonical_head();
+    assert_eq!(
+        git(&project.canonical(), &["rev-parse", &format!("{landed}^1")]).trim(),
+        target
+    );
+    assert_eq!(
+        git(&project.canonical(), &["rev-parse", &format!("{landed}^2")]).trim(),
+        head
+    );
+    assert_eq!(
+        project.rows("SELECT approval, outcome FROM execution WHERE kind = 'landing' ORDER BY id"),
+        vec![
+            json!({"approval": approvals[0]["id"], "outcome": "error"}),
+            json!({"approval": approvals[0]["id"], "outcome": "landed"})
+        ]
+    );
+    assert_eq!(project.rows("SELECT node, outcome, head FROM execution WHERE kind = 'gate' AND parent IS NOT NULL ORDER BY id"),
+        vec![json!({"node": "landing-gate-check", "outcome": "error", "head": merged}),
+             json!({"node": "landing-gate-check", "outcome": "pass", "head": landed}),
+             json!({"node": "landing-gate-second", "outcome": "pass", "head": landed}),
+             json!({"node": "landing-gate-first", "outcome": "pass", "head": landed})]);
+    assert_eq!(kinds(&project, "implementation").len(), 2);
     let said = machine.root.join("said");
     let hold = machine.root.join("hold");
     for path in [&said, &hold] {
