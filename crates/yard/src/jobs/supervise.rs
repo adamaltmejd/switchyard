@@ -835,11 +835,11 @@ pub async fn implement(
             _ => None,
         };
         let report = executions::get(tx, execution)?.report;
+        let edited = attempts::edit_pending(tx, attempt.id)?;
         let failure = failure.or_else(|| {
-            (workflow.read_only && !run.stopped && report.is_none())
+            (workflow.read_only && !run.stopped && !edited && report.is_none())
                 .then(|| ("failed", Some("publication"), "missing_report".to_string()))
         });
-        let edited = attempts::edit_pending(tx, attempt.id)?;
         let stop = |tx: &rusqlite::Connection, reason: &str, detail: &str| -> Result<(), Fail> {
             attempts::raise(tx, attempts::Raise {
                 kind: "stopped",

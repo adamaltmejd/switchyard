@@ -155,3 +155,84 @@ fn a_successful_exit_without_an_audit_report_is_an_infrastructure_error() {
         json!({"summary": "Fixture audit", "findings": []})
     );
 }
+
+/// G8/G2: an edit supersedes an audit held before publication. Its late
+/// report is refused, but the missing old report is not an infrastructure
+/// error: the same attempt reruns and publishes on the edited revision.
+/// The fixture supplies revisions, body and report; CLI and store observe
+/// the old empty result and the new execution-bound publication.
+/// Sabotage: remove the edited exemption from missing_report, or accept the
+/// superseded publication. Missing-report and held-publication scenarios
+/// do not edit a ticket between registration and publication.
+#[test]
+fn a_superseded_audit_reruns_without_a_missing_report_error() {
+    let hold = Latch::new();
+    let held = hold.clone();
+    let machine = Machine::new("g8-audit-edit", move |request| {
+        if request.prompt().contains("Revised audit input") {
+            return planned(request);
+        }
+        if request.opens() {
+            return Reply::Hold(held.clone(), Box::new(Reply::Tools(vec![publish_report()])));
+        }
+        Reply::Text("done".into())
+    });
+    machine.start();
+    // A fresh harness conversation makes the new revision's model input
+    // independent of the old refused publication.
+    let project = Project::new(
+        &machine,
+        "p",
+        &config("").replace(
+            "[workflows.default]\n",
+            "[workflows.default]\nmax_session_executions = 1\n",
+        ),
+    );
+    let mut watch = project.watch(0);
+    project.json(&[
+        "ticket",
+        "new",
+        "--title",
+        "Audit edit",
+        "--workflow",
+        "plan",
+    ]);
+    hold.wait_held();
+    project.json(&[
+        "ticket",
+        "edit",
+        "Y-1",
+        "--revision",
+        "1",
+        "--body",
+        "Revised audit input",
+    ]);
+    hold.release();
+    watch.event("attempt.ended", &[("outcome", "planned")]);
+    let rows = project.rows("SELECT id, ticket_revision, report, result FROM execution WHERE kind = 'implementation' ORDER BY id");
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert_eq!(rows[0]["ticket_revision"], 1);
+    assert!(rows[0]["report"].is_null());
+    let old: Value = serde_json::from_str(rows[0]["result"].as_str().unwrap()).unwrap();
+    assert_eq!(old["outputs"], json!({}));
+    assert!(old["outcome"].is_null());
+    assert_eq!(rows[1]["ticket_revision"], 2);
+    let publication: Value = serde_json::from_str(rows[1]["report"].as_str().unwrap()).unwrap();
+    assert_eq!(publication["execution"], rows[1]["id"]);
+    assert_eq!(publication["ticket_revision"], 2);
+    assert_eq!(
+        publication["report"],
+        json!({"summary": "Fixture audit", "findings": []})
+    );
+    assert!(
+        project
+            .rows("SELECT id FROM attention WHERE kind = 'stopped' AND reason = 'failed'")
+            .is_empty()
+    );
+    assert!(machine.model.requests().iter().any(|request| {
+        request
+            .tool_results()
+            .iter()
+            .any(|(_, text)| text.contains("superseded_report"))
+    }));
+}

@@ -510,6 +510,7 @@ fn a_ticket_lands_end_to_end_and_leaves_only_rows() {
         "landing.recorded",
         "attention.raised",
         "attention.resolved",
+        "report.published",
         "tool.refused",
     ];
     for event in &events {
