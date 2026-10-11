@@ -1778,7 +1778,17 @@ pub async fn attempt_approve(
         .ok_or_else(|| Fail::refused("no live attempt"))?;
     let loaded = super::load_attempt(daemon, project, &attempt).await?;
     let approval = project.tx(|tx| {
-        let current = attempts::get(tx, attempt.id)?;
+        // Loading admitted policy may yield while the live attempt is replaced.
+        let current = match attempts::live_for(tx, id)? {
+            Some(current) if current.id == attempt.id => current,
+            current => {
+                return Err(candidate_stale(
+                    "attempt",
+                    json!(attempt.id),
+                    json!(current.map(|attempt| attempt.id)),
+                ));
+            }
+        };
         let ticket = tickets::get(tx, id)?;
         let accepted_skipped = skipped_decision(params, &current, &ticket)?;
         let (attempt, item) = approval_item(
