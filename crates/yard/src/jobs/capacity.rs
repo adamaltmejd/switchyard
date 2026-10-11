@@ -176,7 +176,8 @@ pub async fn release(
         .await
         .is_ok_and(|boxes| !boxes.contains(&super::supervise::box_name(project, row.id)));
     let host_gone = if row.lock_contract {
-        (row.kind != "cleanup" || dir(project, row).join("lock").is_file())
+        (!matches!(row.kind.as_str(), "cleanup" | "review" | "gate")
+            || dir(project, row).join("lock").is_file())
             && super::supervise::lock_free(&dir(project, row)).unwrap_or(false)
     } else {
         // The old binary never inherited effects/<id>/lock. Only paths
@@ -230,7 +231,16 @@ pub async fn release(
                 && released.outcome.as_deref() == Some("candidate")
                 && released.result_eligible
                 && dir(project, &released).join("lock").is_file();
-            if completed_cleanup || completed_candidate {
+            let completed_judgment = matches!(released.kind.as_str(), "review" | "gate")
+                && released.lock_contract
+                && matches!(released.outcome.as_deref(), Some("pass" | "fail"))
+                && released.result_eligible
+                && released
+                    .result
+                    .as_ref()
+                    .is_some_and(|result| result["infrastructure"]["outcome"] == "completed")
+                && dir(project, &released).join("lock").is_file();
+            if completed_cleanup || completed_candidate || completed_judgment {
                 for item in attempts::open_for_attempt(tx, current.attempt)? {
                     if item.kind == "red"
                         && item.reason == "ownership"

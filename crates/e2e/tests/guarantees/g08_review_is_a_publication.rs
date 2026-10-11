@@ -7,6 +7,180 @@ use std::io::Write;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+// A real delegated exec has finished, but its inherited owner still holds
+// completion. Listing failure and the same surviving inode exercise release.
+struct JudgmentOwner {
+    armed: std::path::PathBuf,
+    listing: std::path::PathBuf,
+    said: std::path::PathBuf,
+    release: std::path::PathBuf,
+    list_hold: std::path::PathBuf,
+    list_said: std::path::PathBuf,
+    list_release: std::path::PathBuf,
+}
+
+impl JudgmentOwner {
+    fn new(machine: &Machine, second_review: bool) -> Self {
+        let owner = Self {
+            armed: machine.root.join("judgment-armed"),
+            listing: machine.root.join("judgment-listing"),
+            said: machine.root.join("judgment-said"),
+            release: machine.root.join("judgment-release"),
+            list_hold: machine.root.join("judgment-list-hold"),
+            list_said: machine.root.join("judgment-list-said"),
+            list_release: machine.root.join("judgment-list-release"),
+        };
+        std::os::unix::fs::symlink(real("pinfold"), &owner.listing).unwrap();
+        std::fs::write(&owner.armed, "").unwrap();
+        for path in [
+            &owner.said,
+            &owner.release,
+            &owner.list_said,
+            &owner.list_release,
+        ] {
+            assert!(
+                std::process::Command::new("mkfifo")
+                    .arg(path)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let selection = if second_review {
+            " && [ \"${3%-3}\" != \"$3\" ]"
+        } else {
+            ""
+        };
+        let unregistered = if second_review {
+            "if [ \"$1 $2\" = 'box exec' ] && [ \"${3%-2}\" != \"$3\" ]; then\nerr=$(mktemp)\n\"$REAL\" \"$@\" 2>\"$err\"; result=$?\nsed '/^yard-mcp /d' \"$err\" >&2\nrm -f \"$err\"\nexit \"$result\"; fi\n"
+        } else {
+            ""
+        };
+        machine.wrapper("pinfold", &format!(
+            "if [ \"$1 $2\" = 'box list' ]; then\n'{}' \"$@\"; result=$?\nif [ \"$result\" = 0 ] && [ -e '{}' ]; then echo \"$result\" > '{}'; read line < '{}'; fi\nexit \"$result\"; fi\n{unregistered}if [ -e '{}' ] && [ \"$1 $2\" = 'box exec' ]{selection}; then\n\"$REAL\" \"$@\"; result=$?\necho \"$3 $result\" > '{}'; read line < '{}'; exit \"$result\"; fi",
+            owner.listing.display(), owner.list_hold.display(), owner.list_said.display(), owner.list_release.display(), owner.armed.display(), owner.said.display(), owner.release.display(),
+        ));
+        owner
+    }
+
+    fn reconcile(&self, project: &Project<'_>, watch: &mut Watch, kind: &str) {
+        let held = watch.said(&self.said);
+        let (box_name, status) = held.trim().split_once(' ').unwrap();
+        assert_eq!(status, "0");
+        let execution = project.rows(&format!(
+            "SELECT id, attempt, handle FROM execution WHERE kind = '{kind}' ORDER BY id DESC"
+        ))[0]
+            .clone();
+        assert_eq!(execution["handle"], box_name);
+        let id = execution["id"].as_i64().unwrap();
+        let lock_path = project.path.join(format!(
+            ".yard/local/attempts/{}/effects/{id}/lock",
+            execution["attempt"]
+        ));
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .open(&lock_path)
+            .unwrap();
+        assert!(matches!(
+            lock.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        std::fs::remove_file(&self.listing).unwrap();
+        std::fs::remove_file(&self.armed).unwrap();
+        std::fs::write(&self.release, "go\n").unwrap();
+        let ownership = watch.find("completed judgment ownership refused", |event| {
+            event["event"] == "attention.raised" && event["execution"] == id
+        });
+        assert_eq!(ownership["data"]["kind"], "red");
+        assert_eq!(ownership["data"]["reason"], "ownership");
+        use std::os::unix::fs::MetadataExt;
+        let inherited = lock.metadata().unwrap();
+        let current = std::fs::metadata(&lock_path).unwrap();
+        assert_eq!(
+            (current.dev(), current.ino()),
+            (inherited.dev(), inherited.ino())
+        );
+        lock.try_lock().unwrap();
+        std::fs::write(&self.list_hold, "").unwrap();
+        std::os::unix::fs::symlink(real("pinfold"), &self.listing).unwrap();
+        assert_eq!(watch.said(&self.list_said), "0\n");
+        std::fs::write(&self.list_release, "go\n").unwrap();
+        assert_eq!(watch.said(&self.list_said), "0\n");
+        assert!(
+            !project
+                .machine
+                .boxes("dev.yard.project")
+                .iter()
+                .any(|listed| listed["name"] == box_name),
+            "completed judgment box {box_name} remains"
+        );
+        let before = project.rows(&format!("SELECT status, outcome, reserved, teardown, inputs, result FROM execution WHERE id = {id}"))[0].clone();
+        assert_eq!(before["status"], "ended");
+        assert_eq!(before["outcome"], "pass");
+        assert_eq!(before["reserved"], 1);
+        assert_eq!(before["teardown"], 0);
+        let shown = project.json(&["attempt", "show", "Y-1"]);
+        let shown = shown["executions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["execution"] == id)
+            .unwrap();
+        assert_eq!(shown["result_eligible"], false);
+        let checks = project.rows(&format!(
+            "SELECT id, execution, verdict FROM \"check\" WHERE execution = {id}"
+        ));
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0]["execution"], id);
+        assert_eq!(checks[0]["verdict"], "pass");
+        if kind == "review" {
+            assert_eq!(
+                project.rows(&format!("SELECT mcp FROM execution WHERE id = {id}")),
+                vec![json!({"mcp": "registered"})]
+            );
+        }
+        assert_eq!(
+            project.rows(&format!("SELECT id FROM execution WHERE id > {id}")),
+            Vec::<Value>::new()
+        );
+        assert_eq!(
+            project.rows(&format!(
+                "SELECT state FROM attention WHERE id = {}",
+                ownership["attention"]
+            )),
+            vec![json!({"state": "open"})]
+        );
+        lock.unlock().unwrap();
+        std::fs::remove_file(&self.list_hold).unwrap();
+        std::fs::write(&self.list_release, "go\n").unwrap();
+        let resolved = watch.find("completed judgment ownership reconciled", |event| {
+            event["event"] == "attention.resolved" && event["attention"] == ownership["attention"]
+        });
+        assert_eq!(resolved["execution"], id);
+        assert_eq!(resolved["data"]["resolution"], "reconciled");
+        let after = project.rows(&format!("SELECT status, outcome, reserved, teardown, inputs, result FROM execution WHERE id = {id}"))[0].clone();
+        assert_eq!(after["reserved"], 0);
+        assert_eq!(after["teardown"], 1);
+        let shown = project.json(&["attempt", "show", "Y-1"]);
+        let shown = shown["executions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["execution"] == id)
+            .unwrap();
+        assert_eq!(shown["result_eligible"], true);
+        assert_eq!(
+            project.rows(&format!(
+                "SELECT id, execution, verdict FROM \"check\" WHERE execution = {id}"
+            )),
+            checks
+        );
+        for field in ["status", "outcome", "inputs", "result"] {
+            assert_eq!(after[field], before[field], "{field}");
+        }
+    }
+}
+
 fn implementer(request: &ModelRequest) -> Reply {
     act(
         request,
@@ -1074,7 +1248,11 @@ fn a_gate_errors_start_reruns_that_gate() {
     assert_eq!(refused["data"]["identity"], "attention");
     assert_eq!(project.rows("SELECT * FROM audit ORDER BY seq"), before);
     std::fs::remove_file(&path).unwrap();
+    // Sabotage: leave the normally completed gate's ownership item open
+    // after checked release; the same-head retry never reaches approval.
+    let judgment_owner = JudgmentOwner::new(&machine, false);
     project.json(&["attempt", "start", "Y-1"]);
+    judgment_owner.reconcile(&project, &mut watch, "gate");
     let approval = watch.attention();
     assert_eq!(approval["data"]["kind"], "approval", "{approval}");
     let gates = kinds(&project, "gate");
@@ -1797,6 +1975,11 @@ fi",
         )),
         vec![json!({"state": "open"})]
     );
+    // The next two real seats retain the original missing-registration
+    // control. Hold only the second, then verify its actual stored handle.
+    // Sabotage: leave a normal registered review's ownership item open
+    // after proof; its original publication never reaches approval.
+    let judgment_owner = JudgmentOwner::new(&machine, true);
     lock.unlock().unwrap();
     std::fs::remove_file(&listing_hold).unwrap();
     finish_listing.write_all(b"go\n").unwrap();
@@ -1808,6 +1991,7 @@ fi",
     });
     assert_eq!(resolved["execution"], id);
     assert_eq!(resolved["data"]["resolution"], "reconciled");
+    judgment_owner.reconcile(&project, &mut watch, "review");
     let approval = watch.find("approval", |event| {
         event["event"] == "attention.raised" && event["data"]["kind"] == "approval"
     });
