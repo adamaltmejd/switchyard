@@ -8,13 +8,16 @@
 // failure, not something to adapt to. No retries: a mutating call repeated on
 // its own would be a second call nobody made.
 //
-// It names no tool. The worker gets whatever `tools/list` answered for its
-// bearer, so the grant lives only in the daemon.
+// MCP tools come unchanged from `tools/list`, so grants live in the daemon.
+// An audit also gets the trusted local child tool below; its publication uses
+// that same native grant and session.
 //
 // It prints one line on stderr before the first turn, `yard-mcp {json}`, and
 // throws on failure, which makes Pi exit before any model request.
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { spawn } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
 
 const ENDPOINT_ENV = "YARD_MCP_ENDPOINT";
 const BEARER_ENV = "YARD_MCP_BEARER";
@@ -156,7 +159,76 @@ async function register(pi: ExtensionAPI, client: McpClient): Promise<string[]> 
     registerOne(pi, client, tool);
     names.push(tool.name);
   }
+  if (names.includes("yard_publish_report")) registerAuditChild(pi, client);
   return names;
+}
+
+// The real Pi harness owns registration and the one MCP session. A trusted
+// packaged child can publish through this grant without inheriting its bearer
+// or session. Anonymous pipes carry one bounded publication, never credentials.
+function registerAuditChild(pi: ExtensionAPI, client: McpClient): void {
+  pi.registerTool({
+    name: "yard_run_durable_audit",
+    label: "Packaged audit",
+    description: "Run the trusted boxed audit using read-only /workspace/audit.json.",
+    parameters: { type: "object", properties: {}, additionalProperties: false },
+    async execute(_id: string, _params: unknown, signal?: AbortSignal) {
+      const env: Record<string, string> = { PATH: "/usr/bin:/bin" };
+      for (const name of ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+        "http_proxy", "https_proxy", "all_proxy", "no_proxy", "NODE_USE_ENV_PROXY"]) {
+        if (process.env[name] !== undefined) env[name] = process.env[name]!;
+      }
+      return await new Promise((resolve, reject) => {
+        const child = spawn("/opt/yard/durable-audit/launch", ["/workspace/audit.json"], {
+          env, cwd: "/", stdio: ["ignore", "pipe", "pipe", "pipe", "pipe"],
+        });
+        let output = "";
+        let bytes = 0;
+        const requestChunks: Buffer[] = [];
+        let requestBytes = 0;
+        let requested = false;
+        let failure: string | undefined;
+        const stop = (reason: string) => { failure = reason; child.kill("SIGKILL"); };
+        const cancel = () => stop("audit_cancelled");
+        signal?.addEventListener("abort", cancel, { once: true });
+        if (signal?.aborted) cancel();
+        for (const stream of [child.stdout, child.stderr]) {
+          const decoder = new StringDecoder("utf8");
+          stream!.on("data", chunk => {
+            bytes += chunk.length;
+            if (bytes > 1024 * 1024) stop("audit_limit");
+            else output += decoder.write(chunk);
+          });
+          stream!.on("end", () => { output += decoder.end(); });
+        }
+        child.stdio[3]!.on("error", () => stop("report_refused"));
+        child.stdio[4]!.on("error", () => stop("report_refused"));
+        child.stdio[3]!.on("data", async (chunk: Buffer) => {
+          if (requested) { stop("invalid_report"); return; }
+          requestBytes += chunk.length;
+          if (requestBytes > 262145) { stop("invalid_report"); return; }
+          requestChunks.push(chunk);
+          if (chunk[chunk.length - 1] !== 10) return;
+          requested = true;
+          try {
+            const args = JSON.parse(Buffer.concat(requestChunks).toString("utf8"));
+            const result = await client.request("tools/call", {
+              name: "yard_publish_report", arguments: args,
+            }, signal);
+            (child.stdio[4] as import("node:stream").Writable).end(
+              JSON.stringify({ isError: result.isError === true }) + "\n",
+            );
+          } catch { stop("report_refused"); }
+        });
+        child.on("error", () => { failure = "runner_unavailable:/opt/yard/durable-audit/launch"; });
+        child.on("close", code => {
+          signal?.removeEventListener("abort", cancel);
+          if (failure) reject(new Error(failure));
+          else resolve({ content: [{ type: "text", text: output || `audit_exit:${code}` }], details: {} });
+        });
+      });
+    },
+  } as never);
 }
 
 function registerOne(pi: ExtensionAPI, client: McpClient, tool: McpTool): void {
