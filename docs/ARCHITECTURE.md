@@ -696,9 +696,11 @@ before invoking Node; it supplies Node's required `libatomic.so.1`.
 An offline build requires a reviewed base containing that runtime closure.
 The fixed launcher verifies those files and the Node binary; the controller
 checks the exact runtime, lock and required package exports before any model
-request. Missing or incompatible assets name `runner_unavailable` and the
-asset. Installation and installed `.yard` commit and sync belong to the
-operator. No package installation, discovery or download occurs at runtime.
+request. Durable's `Harness` is an object with callable `open`; the other
+required factory exports are functions. Missing or incompatible assets name
+`runner_unavailable` and the asset. Installation and installed `.yard` commit
+and sync belong to the operator. No package installation, discovery or
+download occurs at runtime.
 
 Controller, model client and read tools run inside one box supplied and
 owned by Yard. The controller owns no box and executes no host code. It

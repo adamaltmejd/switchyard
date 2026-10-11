@@ -177,7 +177,9 @@ async function main() {
     try { Object.assign(api, await import(`${ROOT}/node_modules/@earendil-works/${path}`)); }
     catch { refuse('runner_unavailable', path); }
   }
-  for (const name of ['Harness', 'createRegistry', 'defineTool', 'defineExtension', 'createModels', 'createProvider', 'openAICompletionsApi', 'openNodeSqliteStorage'])
+  if (!api.Harness || typeof api.Harness !== 'object' || typeof api.Harness.open !== 'function')
+    refuse('runner_unavailable', 'export Harness.open');
+  for (const name of ['createRegistry', 'defineTool', 'defineExtension', 'createModels', 'createProvider', 'openAICompletionsApi', 'openNodeSqliteStorage'])
     if (typeof api[name] !== 'function') refuse('runner_unavailable', `export ${name}`);
   if (!api.Type || !api.BACKGROUND_CONTEXT) refuse('runner_unavailable', 'Type or BACKGROUND_CONTEXT');
   const { Type, BACKGROUND_CONTEXT: context } = api;
