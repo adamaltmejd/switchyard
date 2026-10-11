@@ -13,7 +13,7 @@ pub mod review;
 pub mod supervise;
 
 use crate::api::Fail;
-use crate::config::{Approve, Config, Stage};
+use crate::config::{Approve, Config};
 use crate::daemon::{Daemon, Project};
 use crate::store::{self, Target, attempts, checks, executions, tickets};
 use serde_json::{Value, json};
@@ -244,10 +244,10 @@ pub async fn load_attempt(
             loaded
         }
     };
+    let admitted =
+        crate::plan::Plan::admitted(admission).map_err(|error| Fail::refused(error.to_string()))?;
     if loaded.admission_inputs != admission["inputs"]
-        || serde_json::to_value(loaded.config.workflow_plan(&attempt.workflow)?)
-            .expect("plan serializes")
-            != admission["plan"]
+        || loaded.config.workflow_plan(&attempt.workflow)? != admitted
     {
         return Err(Fail::refused(
             "admitted source does not match recorded inputs",
@@ -465,13 +465,15 @@ async fn advance(
     }
     if let Some(next) = &attempt.next {
         let reason = next["reason"].as_str().unwrap_or("repair").to_string();
-        let execution = project.tx(|tx| supervise::start_implementation(tx, attempt, &reason))?;
+        let execution =
+            project.tx(|tx| supervise::start_implementation(tx, attempt, &reason, None))?;
         spawn(daemon, project, "implementation", execution);
         return Ok(());
     }
     // A pending edit is derived: the ticket is newer than the last implementer's read.
     if edited {
-        let execution = project.tx(|tx| supervise::start_implementation(tx, attempt, "edit"))?;
+        let execution =
+            project.tx(|tx| supervise::start_implementation(tx, attempt, "edit", None))?;
         spawn(daemon, project, "implementation", execution);
         return Ok(());
     }
@@ -485,6 +487,14 @@ async fn advance(
         .map(|row| row.id)
         .max()
         .unwrap_or(0);
+    if executions
+        .iter()
+        .rev()
+        .find(|row| row.kind == "implementation" && row.outcome.as_deref() == Some("candidate"))
+        .is_some_and(|row| row.node.is_some() && !row.result_eligible)
+    {
+        return Ok(());
+    }
 
     let shared = executions::Start {
         attempt: attempt.id,
@@ -504,106 +514,151 @@ async fn advance(
         ticket_revision: ticket.revision,
         digest: loaded.gate_digest.clone(),
     };
-    let mut passed = Vec::new();
-    for gate in loaded
-        .config
-        .gates
-        .iter()
-        .filter(|gate| gate.stage == Stage::Candidate)
-    {
-        match project.read(|conn| checks::current(conn, "gate", &gate.name, &gate_input))? {
-            None => {
-                let execution = project.tx(|tx| {
-                    if attempts::superseded_by_edit(tx, attempt.id, ticket.id, ticket.revision)? {
-                        return Ok(None);
-                    }
-                    executions::start(
-                        tx,
-                        executions::Start {
-                            kind: "gate",
-                            reason: Some("candidate"),
-                            digest: Some(&loaded.gate_digest),
-                            name: Some(&gate.name),
-                            ..shared
-                        },
-                    )
-                    .map(Some)
-                })?;
-                if let Some(execution) = execution {
-                    spawn(daemon, project, "gate", execution);
-                }
-                return Ok(());
-            }
-            Some(check) if check.verdict == "pass" => passed.push(check.id),
-            Some(check) => {
-                if check.execution > last_implementation {
-                    let detail = project
-                        .read(|conn| executions::get(conn, check.execution))?
-                        .detail
-                        .unwrap_or_default();
-                    let next = json!({ "reason": "repair", "gate": gate.name, "detail": detail });
-                    // Write only what the read saw: an edit since then owns the next step.
-                    project.tx(|tx| {
-                        if attempts::superseded_by_edit(tx, attempt.id, ticket.id, ticket.revision)?
-                        {
-                            return Ok(());
-                        }
-                        attempts::set_next(tx, attempt.id, Some(&next))
-                    })?;
-                }
-                return Ok(());
-            }
-        }
-    }
-
     let review_digest = loaded.config.review_digest(workflow);
-    let review_input = checks::Input {
-        digest: review_digest.clone(),
-        ..gate_input.clone()
+    let plan = match &attempt.admission {
+        Some(admission) => crate::plan::Plan::admitted(admission)
+            .map_err(|error| Fail::refused(error.to_string()))?,
+        None => loaded.config.workflow_plan(&attempt.workflow)?,
     };
+    let mut passed = Vec::new();
     let mut blocked = Vec::new();
-    for seat in &workflow.review {
-        match project.read(|conn| checks::current(conn, "review", seat, &review_input))? {
-            None => {
-                let agent = &loaded.config.seats[seat].agent;
-                let settings =
-                    serde_json::to_value(&loaded.config.agents[agent]).expect("agent serializes");
-                let harness_version = crate::harness::get(&loaded.config.agents[agent].harness)
-                    .map(|harness| harness.version());
-                let execution = project.tx(|tx| {
-                    if attempts::superseded_by_edit(tx, attempt.id, ticket.id, ticket.revision)? {
-                        return Ok(None);
-                    }
-                    executions::start(
-                        tx,
-                        executions::Start {
-                            kind: "review",
-                            reason: Some("first"),
-                            digest: Some(&review_digest),
-                            name: Some(seat),
-                            round: Some(attempt.rounds + 1),
-                            agent: Some((agent, &settings)),
-                            harness_version,
-                            ..shared
-                        },
-                    )
-                    .map(Some)
-                })?;
-                if let Some(execution) = execution {
-                    spawn(daemon, project, "review", execution);
-                }
-                return Ok(());
-            }
-            Some(check) if check.verdict == "pass" => passed.push(check.id),
-            Some(check) => blocked.push(check),
-        }
-    }
-    if !blocked.is_empty() {
-        if blocked
-            .iter()
-            .all(|check| check.execution > last_implementation)
+    let mut current = "implementer";
+    let routed = attempt
+        .admission
+        .as_ref()
+        .is_some_and(|admission| admission["plan"]["inputs"].get("feedback").is_some());
+    // Only the candidate/review portion consumes routes here. The queue owns
+    // the external merged input and all effects beyond this boundary.
+    while let Some(route) = plan.nodes[current]
+        .routes
+        .get("complete")
+        .and_then(|routes| routes.first())
+    {
+        current = &route.to;
+        let node = &plan.nodes[current];
+        if node
+            .inputs
+            .values()
+            .any(|input| input.node.is_none() && input.output == "merged")
         {
-            review::blocked(project, loaded, attempt, &ticket, &blocked)?;
+            break;
+        }
+        let (kind, name, digest) = match &node.runner {
+            crate::plan::Runner::Command { gate } => {
+                ("gate", gate.as_str(), loaded.gate_digest.as_str())
+            }
+            crate::plan::Runner::Agent { .. } => {
+                let index = current
+                    .strip_prefix("review-")
+                    .and_then(|index| index.parse::<usize>().ok())
+                    .ok_or_else(|| Fail::refused("unsupported admitted review node"))?;
+                (
+                    "review",
+                    workflow.review[index].as_str(),
+                    review_digest.as_str(),
+                )
+            }
+        };
+        let input = checks::Input {
+            digest: digest.to_string(),
+            ..gate_input.clone()
+        };
+        let check = project.read(|conn| checks::current(conn, kind, name, &input))?;
+        let Some(check) = check else {
+            let agent = match &node.runner {
+                crate::plan::Runner::Agent { agent, .. } => Some(agent.as_str()),
+                _ => None,
+            };
+            let settings = agent.map(|agent| {
+                serde_json::to_value(&loaded.config.agents[agent]).expect("agent serializes")
+            });
+            let harness_version = agent
+                .and_then(|agent| crate::harness::get(&loaded.config.agents[agent].harness))
+                .map(|harness| harness.version());
+            let execution = project.tx(|tx| {
+                if attempts::superseded_by_edit(tx, attempt.id, ticket.id, ticket.revision)? {
+                    return Ok(None);
+                }
+                executions::start(
+                    tx,
+                    executions::Start {
+                        kind,
+                        name: Some(name),
+                        digest: Some(digest),
+                        reason: Some(if kind == "gate" { "candidate" } else { "first" }),
+                        round: (kind == "review").then_some(attempt.rounds + 1),
+                        agent: agent.zip(settings.as_ref()),
+                        harness_version,
+                        ..shared
+                    },
+                )
+                .map(Some)
+            })?;
+            if let Some(execution) = execution {
+                spawn(daemon, project, kind, execution);
+            }
+            return Ok(());
+        };
+        let result = project.read(|conn| executions::get(conn, check.execution))?;
+        if check.verdict == "pass" {
+            passed.push(check.id);
+        } else if kind == "review" {
+            blocked.push(check.clone());
+        }
+        // Intermediate seats complete their panel input even when they block.
+        // The final seat's bounded outcome is the accumulated panel decision.
+        // Old complete-only results retain the same decision without rewriting history.
+        let outcome = if routed {
+            result
+                .result
+                .as_ref()
+                .and_then(|result| result["outcome"].as_str())
+                .ok_or_else(|| Fail::refused("eligible judgment has no outcome"))?
+        } else if kind == "gate" && check.verdict != "pass" {
+            "failed"
+        } else if node.outcomes.iter().any(|outcome| outcome == "blocked") && !blocked.is_empty() {
+            "blocked"
+        } else {
+            "complete"
+        };
+        if outcome == "complete" {
+            continue;
+        }
+        let route = node
+            .routes
+            .get(outcome)
+            .and_then(|routes| routes.first())
+            .ok_or_else(|| Fail::refused("judgment has no admitted outcome route"))?;
+        if route.to != "implementer" || route.repeat.is_none() {
+            return Err(Fail::refused("unsupported admitted repair route"));
+        }
+        // One eligible result buys one back edge, never a reversal of a result.
+        if check.execution <= last_implementation {
+            return Ok(());
+        }
+        let execution = if kind == "review" {
+            review::blocked(
+                project,
+                loaded,
+                attempt,
+                &ticket,
+                &blocked,
+                route.repeat.expect("bounded"),
+                &check,
+            )?
+        } else {
+            let feedback = json!({"kind": "verdict", "source": {
+                "external": "feedback", "execution": check.execution, "node": current, "output": "result"},
+                "value": {"verdict": "fail", "gate": name, "detail": result.detail.unwrap_or_default()}});
+            project.tx(|tx| {
+                if attempts::superseded_by_edit(tx, attempt.id, ticket.id, ticket.revision)? {
+                    return Ok(None);
+                }
+                supervise::start_implementation(tx, attempt, "repair", Some(&feedback)).map(Some)
+            })?
+        };
+        if let Some(execution) = execution {
+            spawn(daemon, project, "implementation", execution);
         }
         return Ok(());
     }

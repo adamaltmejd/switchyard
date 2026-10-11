@@ -3,6 +3,121 @@
 use e2e::*;
 use serde_json::json;
 
+/// G7 ordinary routes cross a failed gate, then a blocking first seat and
+/// passing final seat, before a fresh candidate reaches approval. The final
+/// seat must carry the earlier block; checking only its own pass loses repair.
+/// Expected order and files come from this fixture, heads from host git.
+/// Sabotage: keep the configured scheduler alongside graph scheduling;
+/// executions duplicate. Route a final seat's own verdict instead of its
+/// panel result; approval arrives before reviewed.txt exists. Ignore the
+/// failed gate back edge or its feedback; ready.txt never reaches approval.
+#[test]
+fn ordinary_candidate_routes_repair_then_reach_approval() {
+    let machine = Machine::new("g7-routes", |request| {
+        if request.has_tool("yard_publish_review") {
+            let blocks = request.prompt().contains("correctness reviewer")
+                && !request.prompt().contains("reviewed.txt");
+            return act(
+                request,
+                vec![publish(if blocks {
+                    json!([{ "priority": "P1", "body": "add reviewed.txt" }])
+                } else {
+                    json!([])
+                })],
+            );
+        }
+        let prompt = request.last_user();
+        let file = if prompt.contains("The gate pre failed") {
+            "ready.txt"
+        } else if prompt.contains("Review blocked") {
+            "reviewed.txt"
+        } else {
+            "feature.txt"
+        };
+        act(
+            request,
+            vec![commit_file(file, "feature\n", "Advance candidate")],
+        )
+    });
+    machine.start();
+    let configuration = config(
+        "[review.seats.final]\nagent = \"worker\"\ninstructions = \"Final seat.\"\n\
+        [gates.pre]\ncommand = \"test -f ready.txt\"\nstage = \"candidate\"\n\
+        [gates.post]\ncommand = \"test -f feature.txt\"\nstage = \"candidate\"\n",
+    )
+    .replace(
+        "review = [\"correctness\"]",
+        "review = [\"correctness\", \"final\"]",
+    );
+    let project = Project::new(&machine, "p", &configuration);
+    let mut watch = project.watch(0);
+    project.json(&["ticket", "new", "--title", "Ordinary routes"]);
+    let approval = watch.attention();
+    assert_eq!(approval["data"]["kind"], "approval", "{approval}");
+    let shown = project.json(&["attempt", "show", "Y-1"]);
+    let rows = shown["executions"].as_array().unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|row| row["binding"]["node"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "implementer",
+            "candidate-gate-pre",
+            "implementer",
+            "candidate-gate-pre",
+            "candidate-gate-post",
+            "review-0",
+            "review-1",
+            "implementer",
+            "candidate-gate-pre",
+            "candidate-gate-post",
+            "review-0",
+            "review-1"
+        ]
+    );
+    let head = git(
+        &project.path.join(".yard/local/attempts/1/clone"),
+        &["rev-parse", "HEAD"],
+    )
+    .trim()
+    .to_string();
+    assert_eq!(approval["data"]["payload"]["head"], head);
+    for file in ["feature.txt", "ready.txt", "reviewed.txt"] {
+        assert_eq!(
+            git(&project.canonical(), &["show", &format!("{head}:{file}")]),
+            "feature\n"
+        );
+    }
+    assert_eq!(rows[1]["result"]["outcome"], "failed");
+    assert_eq!(rows[6]["result"]["judgment"]["verdict"], "pass");
+    assert_eq!(rows[6]["result"]["outcome"], "blocked");
+    assert_eq!(rows[11]["result"]["outcome"], "complete");
+    // G7 promises selected input/result agreement. The predecessor results
+    // are immutable, including the block that a passing final seat carries.
+    for (seat, previous) in [(6, 5), (11, 10)] {
+        assert_eq!(
+            rows[seat]["binding"]["inputs"]["panel"]["source"]["execution"],
+            rows[previous]["execution"]
+        );
+        assert_eq!(
+            rows[seat]["binding"]["inputs"]["panel"]["value"],
+            rows[previous]["result"]["outputs"]["result"]["value"]
+        );
+    }
+    for (repair, trigger) in [(2, 1), (7, 6)] {
+        assert_eq!(rows[repair]["reason"], "repair");
+        assert_eq!(
+            rows[repair]["binding"]["inputs"]["feedback"]["source"]["execution"],
+            rows[trigger]["execution"]
+        );
+        assert_eq!(rows[trigger]["result_eligible"], true);
+    }
+    assert_eq!(
+        project.rows("SELECT rounds, next FROM attempt"),
+        vec![json!({"rounds": 1, "next": null})]
+    );
+}
+
 /// New ticket, worker commit, candidate gate, review pass, approval, green
 /// landing: canonical moves and the ticket is done. Afterwards every
 /// decision has one audit event naming its target and text, the execution
