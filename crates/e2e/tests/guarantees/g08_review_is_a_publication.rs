@@ -1253,6 +1253,15 @@ fn a_gate_errors_start_reruns_that_gate() {
     let judgment_owner = JudgmentOwner::new(&machine, false);
     project.json(&["attempt", "start", "Y-1"]);
     judgment_owner.reconcile(&project, &mut watch, "gate");
+    // The ownership wrapper replaced the original box-up refusal. Restore
+    // it before the later landing infrastructure-error and requeue control.
+    machine.wrapper(
+        "pinfold",
+        &format!(
+            "if [ -e '{}' ] && [ \"$1 $2\" = 'box up' ]; then echo 'refused by the test' >&2; exit 1; fi",
+            path.display()
+        ),
+    );
     let approval = watch.attention();
     assert_eq!(approval["data"]["kind"], "approval", "{approval}");
     let gates = kinds(&project, "gate");
