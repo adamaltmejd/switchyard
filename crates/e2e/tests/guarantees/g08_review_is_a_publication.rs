@@ -172,6 +172,11 @@ fn a_seat_that_exits_without_publishing_is_a_review_error() {
 /// node/input; the original publication reference and input agreement fail.
 /// An unreviewed second ticket reaches approval while the seat is held,
 /// proving the scheduler has advanced without approving the published seat.
+/// A FIFO-held wrapper delegates the real pinfold invocation unchanged and
+/// retains its inherited effect lock after daemon death. Restart refuses
+/// ownership while it lives, then reaches approval after checked release.
+/// Sabotage: leave that exact ownership item open after the interrupted
+/// publication settles.
 #[test]
 fn a_seat_killed_after_publishing_has_published() {
     let hold = Latch::new();
@@ -194,6 +199,35 @@ fn a_seat_killed_after_publishing_has_published() {
             _ => Reply::Hold(held.clone(), Box::new(Reply::Text("never".into()))),
         }
     });
+    let owner_said = machine.root.join("owner-said");
+    let owner_release = machine.root.join("owner-release");
+    for fifo in [&owner_said, &owner_release] {
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    // Dropping the writer also frees the child if an assertion fails.
+    let mut release_owner = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&owner_release)
+        .unwrap();
+    machine.wrapper(
+        "pinfold",
+        &format!(
+            "if [ \"$1 $2\" = 'box exec' ]; then\n\
+             case \"$*\" in *'You are the correctness reviewer for ticket Y-1:'*)\n\
+             \"$REAL\" \"$@\" & child=$!\n\
+             echo \"$$ $3\" > '{}'; read line < '{}'; wait \"$child\"; exit $?\n\
+             ;; esac; fi",
+            owner_said.display(),
+            owner_release.display(),
+        ),
+    );
     machine.start();
     let project = Project::new(
         &machine,
@@ -204,6 +238,8 @@ fn a_seat_killed_after_publishing_has_published() {
     );
     start_selected(&machine, &project, "Add feature", "review-0");
     hold.wait_held();
+    let owner = said(&owner_said);
+    let (pid, owner_box) = owner.trim().split_once(' ').unwrap();
     assert!(project.rows("SELECT id FROM finding").is_empty());
     assert_eq!(
         project
@@ -251,6 +287,10 @@ fn a_seat_killed_after_publishing_has_published() {
         .unwrap()
         .clone();
     assert_eq!(publication["execution"], review["execution"]);
+    assert_eq!(
+        project.rows("SELECT handle FROM execution WHERE kind = 'review'")[0]["handle"],
+        owner_box
+    );
     machine.kill();
 
     assert_eq!(
@@ -261,9 +301,73 @@ fn a_seat_killed_after_publishing_has_published() {
         project.rows("SELECT status, result, teardown FROM execution WHERE kind = 'review'"),
         vec![json!({ "status": "running", "result": null, "teardown": 0 })]
     );
+    assert!(
+        std::process::Command::new("kill")
+            .args(["-0", pid])
+            .status()
+            .unwrap()
+            .success(),
+        "the delegated child must outlive the daemon"
+    );
+    // Read the real effect lock; never write the daemon's private inputs.
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .open(project.path.join(format!(
+            ".yard/local/attempts/{}/effects/{}/lock",
+            review["attempt"], review["execution"]
+        )))
+        .unwrap();
+    assert!(matches!(
+        lock.try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ));
 
     machine.start();
     let mut watch = project.watch(0);
+    let ownership = watch.find("review ownership refused", |event| {
+        event["event"] == "attention.raised"
+            && event["execution"] == review["execution"]
+            && event["attempt"] == review["attempt"]
+    });
+    assert_eq!(ownership["data"]["kind"], "red");
+    assert_eq!(ownership["data"]["reason"], "ownership");
+    let retained = project.json(&["attempt", "show", "Y-1"]);
+    let retained_review = retained["executions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["execution"] == review["execution"])
+        .unwrap();
+    assert_eq!(retained_review["reserved"], true);
+    assert_eq!(retained_review["result_eligible"], false);
+    assert_eq!(retained_review["teardown"], false);
+    assert_eq!(retained_review["result"], Value::Null);
+    assert!(matches!(
+        lock.try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ));
+    assert!(
+        !machine
+            .boxes("dev.yard.project")
+            .iter()
+            .any(|listed| listed["name"] == owner_box)
+    );
+    assert!(
+        project
+            .rows("SELECT id FROM attention WHERE ticket = 1 AND kind = 'approval'")
+            .is_empty()
+    );
+    assert!(
+        project
+            .rows("SELECT id FROM execution WHERE kind IN ('gate', 'landing')")
+            .is_empty()
+    );
+    release_owner.write_all(b"go\n").unwrap();
+    watch.find("review reservation released", |event| {
+        event["event"] == "execution.released"
+            && event["execution"] == review["execution"]
+            && event["attempt"] == review["attempt"]
+    });
     let approval = watch.find("approval raised", |event| {
         event["event"] == "attention.raised"
             && event["ticket"] == "Y-1"
@@ -296,6 +400,15 @@ fn a_seat_killed_after_publishing_has_published() {
         }})
     );
     assert_eq!(after["checks"], before["checks"]);
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT state, resolution FROM attention WHERE id = {}",
+            ownership["attention"]
+        )),
+        vec![json!({"state": "resolved", "resolution": "reconciled"})]
+    );
+    lock.try_lock().unwrap();
+    lock.unlock().unwrap();
     hold.release();
 }
 
