@@ -210,6 +210,17 @@ enum AttemptCommand {
         /// The candidate proof digest this approval binds, when it has one.
         #[arg(long)]
         proof: Option<String>,
+        /// Omitted candidate nodes explicitly accepted with this approval.
+        #[arg(long)]
+        accept_skipped: Vec<String>,
+        #[arg(long)]
+        attention: Option<i64>,
+        #[arg(long)]
+        base: Option<String>,
+        #[arg(long)]
+        revision: Option<i64>,
+        #[arg(long)]
+        plan_revision: Option<i64>,
         #[arg(long, default_value = "")]
         text: String,
     },

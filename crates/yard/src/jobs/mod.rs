@@ -766,6 +766,7 @@ async fn advance(
                     review_digest: &review_digest,
                     checks: &selected,
                     actor: "auto",
+                    accepted_skipped: None,
                     text: None,
                     overrode: !accepted.is_empty(),
                 },
@@ -827,6 +828,28 @@ pub fn stale_part(
         }
     }
     Ok(None)
+}
+
+pub fn skipped_identity(attempt: &attempts::Attempt, ticket: &tickets::Ticket) -> Value {
+    let skipped: Vec<_> = attempt
+        .admission
+        .as_ref()
+        .and_then(|admission| admission["skipped"].as_array())
+        .into_iter()
+        .flatten()
+        .filter(|node| {
+            node.as_str().is_some_and(|name| {
+                name.starts_with("candidate-gate-") || name.starts_with("review-")
+            })
+        })
+        .cloned()
+        .collect();
+    json!({
+        "attempt": attempt.id, "target": attempt.target_branch, "base": attempt.base,
+        "head": attempt.head, "proof": attempt.proof.clone().unwrap_or_default(),
+        "revision": ticket.revision, "plan_revision": attempt.plan_revision(),
+        "skipped": skipped
+    })
 }
 
 /// Re-read each selected identity at approval and every queue boundary.
