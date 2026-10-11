@@ -16,8 +16,6 @@ env:
 jobs:
   e2e:
     runs-on: ${{ matrix.runner }}
-    env:
-      YARD_E2E_DURABLE_INPUTS: ${{ runner.temp }}/yard-durable-inputs
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -65,5 +63,9 @@ jobs:
       # has none until it is built.
       - run: pinfold build --profile default
       - name: Fetch verified public Durable image inputs
+        env:
+          YARD_E2E_DURABLE_INPUTS: ${{ runner.temp }}/yard-durable-inputs
         run: sh runners/durable-audit/fetch-build-inputs.sh "$YARD_E2E_DURABLE_INPUTS"
       - run: cargo test -p e2e --locked
+        env:
+          YARD_E2E_DURABLE_INPUTS: ${{ runner.temp }}/yard-durable-inputs
