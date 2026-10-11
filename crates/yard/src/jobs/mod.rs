@@ -427,6 +427,9 @@ fn runnable(
     loaded: &Loaded,
     attempt: &attempts::Attempt,
 ) -> Result<Option<Option<attempts::Attention>>, Fail> {
+    if attempt.admission.is_none() && loaded.config.workflow(&attempt.workflow)?.read_only {
+        return Ok(None);
+    }
     let executions = executions::for_attempt(conn, attempt.id)?;
     if executions
         .iter()

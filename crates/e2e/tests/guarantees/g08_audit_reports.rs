@@ -63,6 +63,13 @@ fn an_audit_publication_is_validated_bound_and_held_until_teardown() {
         assert_eq!(report[key], row[key]);
     }
     assert_eq!(report["execution"], row["id"]);
+    // G7: the publication event names the same durable execution and its
+    // attempt/ticket. Sabotage: omit or misbind report.published's target.
+    assert_eq!(
+        project
+            .rows("SELECT ticket, attempt, execution FROM audit WHERE event = 'report.published'"),
+        vec![json!({"ticket": 1, "attempt": 1, "execution": row["id"]})]
+    );
     assert_eq!(
         report["inputs"],
         serde_json::from_str::<Value>(row["inputs"].as_str().unwrap()).unwrap()
@@ -235,4 +242,108 @@ fn a_superseded_audit_reruns_without_a_missing_report_error() {
             .iter()
             .any(|(_, text)| text.contains("superseded_report"))
     }));
+}
+
+/// G8/G6: a real pre-target daemon stops a read-only planner before it
+/// publishes. Upgrade must refuse continuation without inventing admission
+/// or verification evidence. An edit must not schedule that unbound attempt.
+/// Abandon then fresh start in the same project is the successful control.
+/// Old binary and fixture supply historical rows; spec supplies unbound_report
+/// and unknown evidence. This is quiescent upgrade, not a crash: the old
+/// execution has ended before replacing the daemon, so G5 does not mask G8.
+/// Sabotage: allow unbound read-only start, schedule its pending edit, backfill
+/// admission/node/results, or require bindings for ended planner history.
+/// Existing upgrade test covers ended proposals; none resumes a live planner.
+#[test]
+fn an_unbound_legacy_planner_requires_a_fresh_admitted_attempt() {
+    let hold = Latch::new();
+    let held = hold.clone();
+    let machine = Machine::new("g8-audit-legacy", move |request| {
+        if request.has_tool("yard_publish_report") {
+            return planned(request);
+        }
+        Reply::Hold(
+            held.clone(),
+            Box::new(Reply::Text("old planner stopped".into())),
+        )
+    });
+    machine.use_binary(Some(super::g15_plans_and_proposals::pre_target_binary()));
+    machine.start();
+    let project = Project::new(&machine, "p", &config(""));
+    let mut watch = project.watch(0);
+    project.json(&[
+        "ticket",
+        "new",
+        "--title",
+        "Legacy audit",
+        "--workflow",
+        "plan",
+    ]);
+    hold.wait_held();
+    project.json(&["attempt", "stop", "Y-1"]);
+    watch.find("old planner stopped", |event| {
+        event["event"] == "attention.raised" && event["data"]["kind"] == "stopped"
+    });
+    assert!(
+        project
+            .rows("SELECT id FROM execution WHERE status = 'running'")
+            .is_empty()
+    );
+    hold.release();
+    machine.kill();
+    machine.use_binary(None);
+    machine.start();
+    let before =
+        project.rows("SELECT * FROM execution WHERE attempt = 1 AND kind = 'implementation'");
+    let historical = project.json(&["attempt", "show", "Y-1"]);
+    assert_eq!(
+        historical["attempt"]["admission"],
+        json!({"status": "unknown"})
+    );
+    assert_eq!(
+        historical["executions"][0]["binding"],
+        json!({"status": "unknown"})
+    );
+    assert!(historical["executions"][0]["result"].is_null());
+    assert!(historical["executions"][0]["teardown"].is_null());
+    assert_eq!(historical["executions"][0]["result_eligible"], false);
+    let refused = project.refused(&["attempt", "start", "Y-1"]);
+    assert_eq!(refused["code"], "refused");
+    assert_eq!(
+        refused["data"],
+        json!({"reason": "unbound_report", "attempt": 1})
+    );
+    project.json(&[
+        "ticket",
+        "edit",
+        "Y-1",
+        "--revision",
+        "1",
+        "--body",
+        "Fresh audit input",
+    ]);
+    let refused = project.refused(&["attempt", "start", "Y-1"]);
+    assert_eq!(refused["code"], "refused");
+    assert_eq!(
+        refused["data"],
+        json!({"reason": "unbound_report", "attempt": 1})
+    );
+    project.json(&["attempt", "abandon", "Y-1"]);
+    let mut watch = project.watch(0);
+    project.json(&["attempt", "start", "Y-1"]);
+    watch.event("attempt.ended", &[("outcome", "planned")]);
+    let fresh = project.json(&["attempt", "show", "Y-1"]);
+    assert_eq!(fresh["executions"][0]["report"]["ticket_revision"], 2);
+    assert_eq!(
+        fresh["executions"][0]["report"]["report"],
+        json!({"summary": "Fixture audit", "findings": []})
+    );
+    assert_eq!(
+        project.rows("SELECT * FROM execution WHERE attempt = 1 AND kind = 'implementation'"),
+        before
+    );
+    assert_eq!(
+        project.rows("SELECT admission FROM attempt WHERE id = 1"),
+        vec![json!({"admission": null})]
+    );
 }

@@ -1121,7 +1121,7 @@ async fn implementer_prompt(
         }
         prompt.push_str(&format!("Target branch: {}.\n\n", attempt.target_branch()?));
         if workflow.read_only {
-            prompt.push_str("Your workspace is read-only. Plan the work: propose work with yard_propose as needed. Publish exactly once with yard_publish_report: outcome complete, report with a nonempty summary and a findings list (empty if none), then stop.\n\n");
+            prompt.push_str("Your workspace is read-only. Plan the work: propose child tickets and an edit of this ticket's body with yard_propose. Publish exactly once with yard_publish_report: outcome complete, report with a nonempty summary and a findings list (empty if none), then stop.\n\n");
         } else {
             prompt.push_str("Work in /workspace on the current branch. Commit your work with git and leave the tree clean; uncommitted or untracked files send the work back to you. Do not change .yard/. Record progress with yard_progress. Files under /yard/proof are snapshotted with the candidate and are not merged. Propose follow-up tickets with yard_propose; if the ticket is too large, propose the split and stop.\n\n");
         }
