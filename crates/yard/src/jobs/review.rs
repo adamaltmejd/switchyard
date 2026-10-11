@@ -138,6 +138,7 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
         crate::mcp::Kind::Review,
         harness,
         &argv,
+        &state,
         &supervise::transcript(project, attempt.id, execution),
         timeout,
         tokio::time::Instant::now() + timeout,

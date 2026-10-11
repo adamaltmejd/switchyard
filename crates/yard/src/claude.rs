@@ -426,6 +426,7 @@ fn usage(frame: &Value, complete: bool) -> Usage {
             input: completeness(input.is_some(), counts.iter().all(Option::is_some)),
             output: completeness(output.is_some(), true),
             cost: completeness(cost.is_some(), true),
+            service_tier: None,
         },
     }
 }

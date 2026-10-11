@@ -107,6 +107,9 @@ pub struct UsageFields {
     pub input: UsageField,
     pub output: UsageField,
     pub cost: UsageField,
+    /// Reported execution tier, independent of token coverage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -163,6 +166,12 @@ pub enum Registration {
 
 /// A per-run reader over the harness's stdout and stderr.
 pub trait Reader: Send {
+    /// Capture session counters before launch. Other readers use stdout only.
+    fn prepare(&mut self, _state: &Path, _session: Option<&str>) {}
+    /// Observe persisted harness counters without deciding the run's outcome.
+    fn observe(&mut self) -> Option<Usage> {
+        None
+    }
     /// One stdout line, normalised. Empty for a line that decides nothing.
     fn stdout(&mut self, line: &str) -> Vec<Event>;
     /// One stderr line, if it is the registration line.

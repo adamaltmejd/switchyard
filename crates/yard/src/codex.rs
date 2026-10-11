@@ -9,6 +9,8 @@ use crate::harness::{
     Event, Harness, Launch, LoginInfo, ModelRoute, Reader, Registration, Stage, Usage,
 };
 use serde_json::Value;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::Path;
 
 const CODEX: &str = "/opt/pinfold/codex/codex";
 const HOME_GUEST: &str = "/yard/state/home";
@@ -118,8 +120,11 @@ impl Harness for Codex {
         argv(launch)
     }
 
-    fn reader(&self, _resumed: bool) -> Box<dyn Reader> {
-        Box::new(Normalizer::default())
+    fn reader(&self, resumed: bool) -> Box<dyn Reader> {
+        Box::new(Normalizer {
+            baseline: (!resumed).then_some((Some(0), Some(0))),
+            ..Default::default()
+        })
     }
 }
 
@@ -255,9 +260,75 @@ pub struct Normalizer {
     /// A thread has started, so the run is registered and no later stderr
     /// line may downgrade it.
     registered: bool,
+    session: Option<String>,
+    codex_home: Option<nix::dir::Dir>,
+    file: Option<std::fs::File>,
+    offset: u64,
+    baseline: Option<(Option<u64>, Option<u64>)>,
+    observed: Usage,
+    terminal: bool,
 }
 
 impl Reader for Normalizer {
+    fn prepare(&mut self, state: &Path, session: Option<&str>) {
+        use nix::dir::Dir;
+        use nix::fcntl::OFlag;
+        use nix::sys::stat::Mode;
+        let flags = OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC;
+        self.codex_home = (|| {
+            let root = Dir::open(state, flags, Mode::empty()).ok()?;
+            let codex = Dir::openat(&root, "codex", flags, Mode::empty()).ok()?;
+            // Hold the directory so discovery never follows a replaced path.
+            Some(codex)
+        })();
+        self.session = session.map(str::to_owned);
+        if session.is_some() {
+            self.find_session();
+            let mut baseline = None;
+            // Bound history reads; a missing baseline never borrows a row's
+            // possibly incomplete execution totals.
+            for _ in 0..16 {
+                let frames = self.frames();
+                if frames.is_empty() {
+                    break;
+                }
+                for frame in frames {
+                    if let Some(total) = token_total(&frame) {
+                        baseline = Some((total.input, total.output));
+                    }
+                }
+            }
+            if self
+                .file
+                .as_ref()
+                .and_then(|file| file.metadata().ok())
+                .is_some_and(|metadata| metadata.len() == self.offset)
+            {
+                self.baseline = baseline;
+            }
+        }
+    }
+
+    fn observe(&mut self) -> Option<Usage> {
+        if self.terminal || self.baseline.is_none() {
+            return None;
+        }
+        self.find_session();
+        let previous = self.observed.clone();
+        for frame in self.frames() {
+            if let Some(tier) = frame
+                .pointer("/payload/service_tier")
+                .and_then(Value::as_str)
+            {
+                self.observed.fields.service_tier = Some(tier.to_owned());
+            }
+            if let Some(total) = token_total(&frame) {
+                self.record(total);
+            }
+        }
+        (self.observed != previous).then(|| self.observed.clone())
+    }
+
     fn stdout(&mut self, line: &str) -> Vec<Event> {
         let Some(frame) = serde_json::from_str::<Value>(line.trim_end_matches('\r')).ok() else {
             return Vec::new();
@@ -274,6 +345,12 @@ impl Reader for Normalizer {
                     ))];
                 };
                 self.registered = true;
+                if self.session.as_deref().is_some_and(|session| session != id) {
+                    self.baseline = None;
+                    self.file = None;
+                    self.offset = 0;
+                }
+                self.session = Some(id.into());
                 vec![
                     Event::Started {
                         session_id: id.into(),
@@ -283,16 +360,24 @@ impl Reader for Normalizer {
                     Event::Registered(Registration::Registered(Vec::new())),
                 ]
             }
-            Some("turn.completed") => vec![Event::Finished {
-                usage: usage(&frame),
-            }],
-            Some("turn.failed") => vec![Event::Failed {
-                message: message(&frame),
-                usage: usage(&frame),
-            }],
+            Some("turn.completed" | "turn.failed") => {
+                self.observe();
+                self.record(usage(&frame));
+                self.terminal = true;
+                if frame["type"] == "turn.completed" {
+                    vec![Event::Finished {
+                        usage: self.observed.clone(),
+                    }]
+                } else {
+                    vec![Event::Failed {
+                        message: message(&frame),
+                        usage: self.observed.clone(),
+                    }]
+                }
+            }
             Some("error") => vec![Event::Failed {
                 message: message(&frame),
-                usage: Usage::default(),
+                usage: self.observed.clone(),
             }],
             _ => Vec::new(),
         }
@@ -307,6 +392,148 @@ impl Reader for Normalizer {
         }
         refusal(line)
     }
+}
+
+impl Normalizer {
+    fn find_session(&mut self) {
+        if self.file.is_some() {
+            return;
+        }
+        let (Some(root), Some(session)) = (&self.codex_home, &self.session) else {
+            return;
+        };
+        if check_session_id(session).is_err() {
+            return;
+        }
+        use nix::fcntl::OFlag;
+        use nix::sys::stat::Mode;
+        if let Ok(mut sessions) = nix::dir::Dir::openat(
+            root,
+            "sessions",
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        ) {
+            self.file = session_file(&mut sessions, session, 3, &mut 4096);
+        }
+    }
+
+    fn frames(&mut self) -> Vec<Value> {
+        let Some(file) = &mut self.file else {
+            return Vec::new();
+        };
+        let mut bytes = Vec::new();
+        if file.seek(SeekFrom::Start(self.offset)).is_err()
+            || file.take(1024 * 1024).read_to_end(&mut bytes).is_err()
+        {
+            return Vec::new();
+        }
+        let Some(end) = bytes.iter().rposition(|byte| *byte == b'\n') else {
+            return Vec::new();
+        };
+        let frames: Vec<Value> = bytes[..end]
+            .split(|byte| *byte == b'\n')
+            .filter_map(|line| serde_json::from_slice(line).ok())
+            .collect();
+        if self.offset == 0
+            && !frames.first().is_some_and(|frame| {
+                frame["type"] == "session_meta"
+                    && frame["payload"]["id"].as_str() == self.session.as_deref()
+            })
+        {
+            return Vec::new();
+        }
+        self.offset += (end + 1) as u64;
+        frames
+    }
+
+    fn record(&mut self, total: Usage) {
+        if total.fields.service_tier.is_some() {
+            self.observed.fields.service_tier = total.fields.service_tier.clone();
+        }
+        let Some((input, output)) = self.baseline else {
+            return;
+        };
+        for (value, baseline, observed, field, reported) in [
+            (
+                total.input,
+                input,
+                &mut self.observed.input,
+                &mut self.observed.fields.input,
+                &total.fields.input,
+            ),
+            (
+                total.output,
+                output,
+                &mut self.observed.output,
+                &mut self.observed.fields.output,
+                &total.fields.output,
+            ),
+        ] {
+            if let Some(local) = value
+                .zip(baseline)
+                .and_then(|(value, baseline)| value.checked_sub(baseline))
+            {
+                *observed = Some(local);
+                *field = crate::harness::UsageField {
+                    completeness: reported.completeness.clone(),
+                    provenance: crate::harness::Provenance::Harness,
+                };
+            }
+        }
+    }
+}
+
+/// Open every worker-controlled component relative to a held directory.
+/// No links, devices or unbounded traversal can redirect a read onto the host.
+fn session_file(
+    dir: &mut nix::dir::Dir,
+    session: &str,
+    depth: usize,
+    budget: &mut usize,
+) -> Option<std::fs::File> {
+    use nix::fcntl::{OFlag, openat};
+    use nix::sys::stat::{Mode, SFlag, fstat};
+    let names: Vec<_> = dir
+        .iter()
+        .take(*budget)
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_owned())
+        .collect();
+    *budget = budget.saturating_sub(names.len());
+    for name in names {
+        let bytes = name.to_bytes();
+        if bytes == b"." || bytes == b".." {
+            continue;
+        }
+        let flags = OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC | OFlag::O_NONBLOCK;
+        if depth > 0 {
+            if let Ok(mut child) = nix::dir::Dir::openat(
+                &*dir,
+                name.as_c_str(),
+                flags | OFlag::O_DIRECTORY,
+                Mode::empty(),
+            ) && let Some(file) = session_file(&mut child, session, depth - 1, budget)
+            {
+                return Some(file);
+            }
+        } else if bytes.starts_with(b"rollout-")
+            && bytes.ends_with(format!("-{session}.jsonl").as_bytes())
+        {
+            let fd = openat(&*dir, name.as_c_str(), flags, Mode::empty()).ok()?;
+            if SFlag::from_bits_truncate(fstat(&fd).ok()?.st_mode) == SFlag::S_IFREG {
+                return Some(std::fs::File::from(fd));
+            }
+        }
+    }
+    None
+}
+
+fn token_total(frame: &Value) -> Option<Usage> {
+    if frame["type"] != "event_msg" || frame["payload"]["type"] != "token_count" {
+        return None;
+    }
+    let total = frame.pointer("/payload/info/total_token_usage")?;
+    Some(usage(&serde_json::json!({"type": "usage", "usage": total})))
 }
 
 fn refusal(line: &str) -> Option<Registration> {
@@ -325,8 +552,12 @@ fn usage(frame: &Value) -> Usage {
     let input = usage.get("input_tokens").and_then(Value::as_u64);
     let output = usage.get("output_tokens").and_then(Value::as_u64);
     let field = |value: Option<u64>| crate::harness::UsageField {
-        completeness: if value.is_some() && frame["type"] == "turn.completed" {
-            crate::harness::Completeness::Complete
+        completeness: if value.is_some() {
+            if frame["type"] == "turn.completed" {
+                crate::harness::Completeness::Complete
+            } else {
+                crate::harness::Completeness::Partial
+            }
         } else {
             crate::harness::Completeness::Unknown
         },
@@ -344,6 +575,10 @@ fn usage(frame: &Value) -> Usage {
             input: field(input),
             output: field(output),
             cost: Default::default(),
+            service_tier: frame
+                .get("service_tier")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
         },
     }
 }

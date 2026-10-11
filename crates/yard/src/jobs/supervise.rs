@@ -287,6 +287,7 @@ pub async fn run_harness(
     kind: crate::mcp::Kind,
     harness: &'static dyn Harness,
     argv: &[String],
+    state: &Path,
     transcript: &Path,
     inactivity: Duration,
     deadline: tokio::time::Instant,
@@ -318,11 +319,19 @@ pub async fn run_harness(
             ..Default::default()
         });
     }
-    let resumed = project
-        .read(|conn| executions::get(conn, execution))?
-        .resumed
-        .is_some();
-    let mut reader = harness.reader(resumed);
+    let predecessor = project.read(|conn| {
+        executions::get(conn, execution)?
+            .resumed
+            .map(|id| executions::get(conn, id))
+            .transpose()
+    })?;
+    let mut reader = harness.reader(predecessor.is_some());
+    reader.prepare(
+        state,
+        predecessor
+            .as_ref()
+            .and_then(|row| row.session_id.as_deref()),
+    );
     let mut child = daemon
         .pinfold
         .exec_streaming(&box_name(project, execution), Some("/workspace"), argv)
@@ -333,17 +342,21 @@ pub async fn run_harness(
     let mut usage = None;
     let mut stdout_open = true;
     let mut stderr_open = true;
+    let mut observations = tokio::time::interval(Duration::from_millis(100));
+    let mut idle_deadline = tokio::time::Instant::now() + inactivity;
     let activity_key = (project.key.clone(), execution);
+    daemon
+        .activity
+        .lock()
+        .expect("activity lock")
+        .insert(activity_key.clone(), std::time::Instant::now());
     while stdout_open || stderr_open {
-        daemon
-            .activity
-            .lock()
-            .expect("activity lock")
-            .insert(activity_key.clone(), std::time::Instant::now());
-        let idle = tokio::time::sleep(inactivity);
         tokio::select! {
             line = stdout.next_line(), if stdout_open => match line {
                 Ok(Some(line)) => {
+                    idle_deadline = tokio::time::Instant::now() + inactivity;
+                    daemon.activity.lock().expect("activity lock")
+                        .insert(activity_key.clone(), std::time::Instant::now());
                     let _ = file.write_all(line.as_bytes()).await;
                     let _ = file.write_all(b"\n").await;
                     let mut refused = false;
@@ -395,6 +408,9 @@ pub async fn run_harness(
             },
             line = stderr.next_line(), if stderr_open => match line {
                 Ok(Some(line)) => {
+                    idle_deadline = tokio::time::Instant::now() + inactivity;
+                    daemon.activity.lock().expect("activity lock")
+                        .insert(activity_key.clone(), std::time::Instant::now());
                     if let Some(registration) = reader.stderr(&line) {
                         let registration = complete(harness, registration, kind);
                         let refused = matches!(registration, crate::harness::Registration::Refused(_));
@@ -408,7 +424,13 @@ pub async fn run_harness(
                 _ => stderr_open = false,
             },
             _ = stop.notified() => { run.stopped = true; break; }
-            _ = idle => { run.timed_out = true; break; }
+            _ = observations.tick(), if harness.name() == "codex" => {
+                if let Some(spent) = reader.observe() {
+                    project.read(|conn| executions::set_worker(conn, execution, None, Some(&spent)))?;
+                    usage = Some(spent);
+                }
+            }
+            _ = tokio::time::sleep_until(idle_deadline) => { run.timed_out = true; break; }
             _ = tokio::time::sleep_until(deadline) => { run.timed_out = true; break; }
         }
     }
@@ -419,6 +441,22 @@ pub async fn run_harness(
         .remove(&activity_key);
     if !run.stopped && !run.timed_out && !refused(&run.registered) {
         run.exit_code = child.wait().await.ok().map(crate::git::exit_code);
+    }
+    if let Some(spent) = reader.observe() {
+        usage = Some(spent);
+    }
+    if (run.stopped || run.timed_out)
+        && let Some(spent) = &mut usage
+    {
+        for field in [
+            &mut spent.fields.input,
+            &mut spent.fields.output,
+            &mut spent.fields.cost,
+        ] {
+            if field.completeness == crate::harness::Completeness::Complete {
+                field.completeness = crate::harness::Completeness::Partial;
+            }
+        }
     }
     project.read(|conn| executions::set_worker(conn, execution, None, usage.as_ref()))?;
     Ok(run)
@@ -650,6 +688,7 @@ pub async fn implement(
         crate::mcp::Kind::Implementation,
         harness,
         &argv,
+        &state,
         &transcript(project, attempt.id, execution),
         Duration::from_secs(workflow.inactivity_timeout_minutes * 60),
         deadline,
