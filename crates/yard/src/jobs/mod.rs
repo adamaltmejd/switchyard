@@ -691,7 +691,9 @@ async fn advance(
         "target": attempt.target_branch, "base": base, "head": head, "proof": attempt.proof.clone().unwrap_or_default(),
         "revision": ticket.revision, "plan_revision": attempt.plan_revision(),
         "gate_digest": loaded.gate_digest, "review_digest": review_digest,
-        "checks": passed, "protected": protected, "unreviewed": workflow.review.is_empty(),
+        "checks": passed, "protected": protected,
+        "unreviewed": !plan.nodes.keys().any(|name| name.starts_with("review-")),
+        "skipped": attempt.admission.as_ref().map(|admission| &admission["skipped"]),
     });
     project.tx(|tx| {
         // The paths were read outside this transaction: the candidate must

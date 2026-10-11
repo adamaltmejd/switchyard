@@ -669,6 +669,19 @@ fn a_gate_errors_start_reruns_that_gate() {
         &config(&format!("[gates.check]\ncommand = \"test -f feature.txt\"\nstage = \"candidate\"\n{SELECTED_LANDING}"))
             .replace("review = [\"correctness\"]", "review = \"none\""),
     );
+    // Parallel fixtures retire their image names. Give this scenario distinct
+    // image contents before its planner and deliberately refused gate run.
+    let dockerfile = project.git(&["show", "HEAD:.yard/Dockerfile"]);
+    project.write(
+        ".yard/Dockerfile",
+        &format!(
+            "{dockerfile}\nLABEL dev.yard.e2e-machine=\"{}\"\n",
+            machine.root.display()
+        ),
+    );
+    project.git(&["add", ".yard/Dockerfile"]);
+    project.git(&["commit", "-qm", "Isolate gate-error fixture image"]);
+    project.json(&["sync"]);
     let mut watch = project.watch(0);
     start_selected(&machine, &project, "Add feature", "landing-gate-check");
     let red = watch.attention();

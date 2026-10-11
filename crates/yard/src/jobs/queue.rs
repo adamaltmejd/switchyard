@@ -176,13 +176,18 @@ fn lapsed(
     let Lapse::Policy(_, protected) = lapse else {
         return Ok(());
     };
-    let workflow = loaded.config.workflow(&attempt.workflow)?;
+    let plan = match &attempt.admission {
+        Some(admission) => crate::plan::Plan::admitted(admission)
+            .map_err(|error| Fail::refused(error.to_string()))?,
+        None => loaded.config.workflow_plan(&attempt.workflow)?,
+    };
     let payload = json!({
         "target": attempt.target_branch, "base": approval.base, "head": approval.head, "proof": approval.proof,
         "revision": approval.ticket_revision, "plan_revision": attempt.plan_revision(),
         "gate_digest": approval.gate_digest, "review_digest": approval.review_digest,
         "checks": approval.checks, "protected": protected,
-        "unreviewed": workflow.review.is_empty(),
+        "unreviewed": !plan.nodes.keys().any(|name| name.starts_with("review-")),
+        "skipped": attempt.admission.as_ref().map(|admission| &admission["skipped"]),
     });
     // Only for the candidate as it is now: the lapse was read before this
     // transaction, and the attempt may have ended or moved on since.

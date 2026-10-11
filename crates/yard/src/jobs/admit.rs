@@ -203,6 +203,13 @@ fn admit(
             }));
         }
     }
+    let ordinary = loaded.config.workflow_plan(&name)?;
+    let skipped: Vec<_> = ordinary
+        .nodes
+        .keys()
+        .filter(|name| !plan.nodes.contains_key(*name))
+        .collect();
+    let unreviewed = !plan.nodes.keys().any(|name| name.starts_with("review-"));
     let admission = json!({
         "status": "recorded",
         "runtime": "ordinary-linear",
@@ -211,6 +218,8 @@ fn admit(
         "config_head": loaded.head,
         "workflow": workflow,
         "plan": plan,
+        "skipped": skipped,
+        "unreviewed": unreviewed,
         "selection": {"preset": request.preset, "workflow": request.workflow,
             "graph": request.graph, "overrides": request.overrides},
         "agents": agents,

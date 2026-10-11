@@ -218,8 +218,20 @@ impl Config {
             let node = patch.resolve(Some(&base), &format!("overrides.{name}"))?;
             plan.nodes.insert(name.clone(), node);
         }
+        self.normalize_ordinary(&mut plan);
         plan.validate(self)?;
         Ok(plan)
+    }
+
+    fn normalize_ordinary(&self, plan: &mut Plan) {
+        for name in std::iter::once("default").chain(self.workflows.keys().map(String::as_str)) {
+            if let Ok(ordinary) = self.workflow_plan(name)
+                && let Some(selected) = plan.ordinary_selection(&ordinary, self.review.max_rounds)
+            {
+                *plan = selected;
+                break;
+            }
+        }
     }
 
     pub fn resolve_graph(&self, graph: &Graph) -> Result<Plan, Invalid> {
@@ -240,10 +252,11 @@ impl Config {
                 spec.resolve(base.as_ref(), &format!("nodes.{name}"))?,
             );
         }
-        let plan = Plan {
+        let mut plan = Plan {
             inputs: graph.inputs.clone(),
             nodes,
         };
+        self.normalize_ordinary(&mut plan);
         plan.validate(self)?;
         Ok(plan)
     }
@@ -382,8 +395,10 @@ impl Config {
         std::iter::once(selected)
             .chain(self.workflows.keys().map(String::as_str))
             .find(|name| {
-                self.workflow_plan(name)
-                    .is_ok_and(|ordinary| plan.ordinary_linear(&ordinary))
+                self.workflow_plan(name).is_ok_and(|ordinary| {
+                    plan.ordinary_selection(&ordinary, self.review.max_rounds)
+                        .is_some()
+                })
             })
             .map(str::to_string)
     }
@@ -398,56 +413,83 @@ impl Plan {
         Ok(plan)
     }
 
-    /// Command order is selected; panel order and repair bounds stay ordinary.
-    fn ordinary_linear(&self, ordinary: &Self) -> bool {
-        if self.inputs != ordinary.inputs || self.nodes.keys().ne(ordinary.nodes.keys()) {
-            return false;
-        }
-        for (name, node) in &self.nodes {
-            let mut selected = node.clone();
-            let mut defined = ordinary.nodes[name].clone();
-            selected.routes.remove("complete");
-            defined.routes.remove("complete");
-            if selected != defined {
-                return false;
-            }
+    /// Retained definitions and repair bounds stay ordinary. Panel links follow
+    /// retained seats, even when their original predecessor is omitted.
+    fn ordinary_selection(&self, ordinary: &Self, max_rounds: u32) -> Option<Self> {
+        if self
+            .inputs
+            .iter()
+            .any(|(name, kind)| ordinary.inputs.get(name) != Some(kind))
+        {
+            return None;
         }
         let mut visited = BTreeSet::new();
         let mut current = "implementer";
         let mut phase = 0;
-        let mut reviews = Vec::new();
+        let mut previous_review = None;
         loop {
             if !visited.insert(current) {
-                return false;
+                return None;
             }
-            let node = &self.nodes[current];
+            let node = self.nodes.get(current)?;
             let next_phase = if current == "implementer" {
                 0
             } else if current.starts_with("candidate-gate-") {
                 1
-            } else if current.starts_with("review-") {
-                reviews.push(current);
+            } else if let Some(index) = current.strip_prefix("review-") {
+                let index = index.parse::<usize>().ok()?;
+                if previous_review.is_some_and(|previous| index <= previous) {
+                    return None;
+                }
+                previous_review = Some(index);
                 2
             } else if current.starts_with("landing-gate-") {
                 3
             } else {
-                return false;
+                return None;
             };
             if next_phase < phase {
-                return false;
+                return None;
             }
             phase = next_phase;
             match node.routes.get("complete").map(Vec::as_slice) {
                 None | Some([]) => break,
                 Some([route]) if route.repeat.is_none() => current = &route.to,
-                _ => return false,
+                _ => return None,
             }
         }
-        visited.len() == self.nodes.len()
-            && reviews
-                .iter()
-                .enumerate()
-                .all(|(index, name)| *name == format!("review-{index}"))
+        if visited.len() != self.nodes.len() {
+            return None;
+        }
+        let mut selected = self.clone();
+        for (name, node) in &mut selected.nodes {
+            let defined = ordinary.nodes.get(name)?;
+            let complete = node.routes.get("complete").cloned();
+            *node = defined.clone();
+            node.routes.remove("complete");
+            if let Some(routes) = complete {
+                node.routes.insert("complete".into(), routes);
+            }
+            if name.starts_with("review-") {
+                node.inputs.remove("panel");
+                node.requires = vec!["candidate".into()];
+                node.outcomes.retain(|outcome| outcome != "blocked");
+                node.routes.remove("blocked");
+            }
+        }
+        selected.ordinary_routes(max_rounds);
+        for (name, node) in &self.nodes {
+            let mut provided = node.clone();
+            provided.routes.remove("complete");
+            let mut defined = ordinary.nodes[name].clone();
+            defined.routes.remove("complete");
+            let mut retained = selected.nodes[name].clone();
+            retained.routes.remove("complete");
+            if provided != defined && provided != retained {
+                return None;
+            }
+        }
+        Some(selected)
     }
 
     /// Upgrade the ordinary descriptive chain in memory. Persisted admission
