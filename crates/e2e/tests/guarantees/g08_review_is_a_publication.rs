@@ -1712,10 +1712,13 @@ fn selected_failures_continue_without_rewriting_judgments() {
         "attempt", "approve", "Y-2", "--target", "main", "--head", head,
     ]);
     watch.event("landing.recorded", &[]);
-    watch.until("cleanup", |event| {
+    let cleanup = watch.find("accepted candidate cleanup", |event| {
         event["event"] == "execution.ended"
             && event["data"]["kind"] == "cleanup"
-            && event["ticket"] == "Y-2"
+            && event["attempt"] == 3
+    });
+    watch.find("cleanup reservation released", |event| {
+        event["event"] == "execution.released" && event["execution"] == cleanup["execution"]
     });
     git(
         &project.canonical(),
