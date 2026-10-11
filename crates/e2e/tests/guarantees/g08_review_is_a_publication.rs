@@ -1658,6 +1658,10 @@ fi"#);
 ///
 /// Sabotage: drop the `e.mcp = 'registered'` condition in `checks::current`;
 /// the unproven seat's check is approved with one review.
+/// Lose completed candidate ownership reconciliation in checked release:
+/// the exact obsolete question blocks both real reviews after owner freedom.
+/// Resolve it on box absence alone: the held inherited lock permits a review
+/// before its owner is proved gone (G5/G8).
 #[test]
 fn a_publication_without_a_registration_does_not_count() {
     let machine = Machine::new("g8-noreg", |request| {
@@ -1674,24 +1678,157 @@ fn a_publication_without_a_registration_does_not_count() {
     // Drop the first review box's registration line: the seat registers its
     // tools, but the daemon records no proof. The review after it is a new
     // execution, so its line is untouched.
-    machine.wrapper(
-        "pinfold",
-        r#"if [ "$1 $2" = 'box exec' ] && [ "${3%-2}" != "$3" ]; then
+    let listing = machine.root.join("listing-pinfold");
+    std::os::unix::fs::symlink(real("pinfold"), &listing).unwrap();
+    let down_said = machine.root.join("down-said");
+    let down_release = machine.root.join("down-release");
+    let listing_hold = machine.root.join("listing-hold");
+    let listing_said = machine.root.join("listing-said");
+    let listing_release = machine.root.join("listing-release");
+    for fifo in [&down_said, &down_release, &listing_said, &listing_release] {
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    let mut finish_down = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&down_release)
+        .unwrap();
+    let mut finish_listing = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&listing_release)
+        .unwrap();
+    machine.wrapper("pinfold", &format!(
+        "if [ \"$1 $2\" = 'box list' ]; then\n\
+         '{}' \"$@\"; result=$?\n\
+         if [ \"$result\" = 0 ] && [ -e '{}' ]; then echo \"$result\" > '{}'; read line < '{}'; fi\n\
+         exit \"$result\"; fi\n\
+         if [ \"$1 $2\" = 'box down' ] && [ \"${{3%-1}}\" != \"$3\" ]; then\n\
+         \"$REAL\" \"$@\"; result=$?\n\
+         echo \"$3 $result\" > '{}'; read line < '{}'; exit \"$result\"; fi\n\
+         if [ \"$1 $2\" = 'box exec' ] && [ \"${{3%-2}}\" != \"$3\" ]; then
   err=$(mktemp)
-  "$REAL" "$@" 2>"$err"
+  \"$REAL\" \"$@\" 2>\"$err\"
   code=$?
-  sed '/^yard-mcp /d' "$err" >&2
-  rm -f "$err"
+  sed '/^yard-mcp /d' \"$err\" >&2
+  rm -f \"$err\"
   exit $code
-fi"#,
-    );
+fi",
+        listing.display(), listing_hold.display(), listing_said.display(), listing_release.display(),
+        down_said.display(), down_release.display(),
+    ));
     machine.start();
     let project = Project::new(&machine, "p", &config(""));
     let mut watch = project.watch(0);
     project.json(&["ticket", "new", "--title", "Add feature"]);
+    let held = watch.said(&down_said);
+    let (box_name, result) = held.trim().split_once(' ').unwrap();
+    assert_eq!(result, "0");
+    let implementation = project
+        .rows("SELECT id, attempt, handle FROM execution WHERE kind = 'implementation'")[0]
+        .clone();
+    assert_eq!(implementation["handle"], box_name);
+    let id = implementation["id"].as_i64().unwrap();
+    let lock_path = project.path.join(format!(
+        ".yard/local/attempts/{}/effects/{id}/lock",
+        implementation["attempt"]
+    ));
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .open(&lock_path)
+        .unwrap();
+    assert!(matches!(
+        lock.try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ));
+    // The real down command has completed. Make the subsequent real host
+    // listing executable unavailable before allowing candidate completion.
+    std::fs::remove_file(&listing).unwrap();
+    finish_down.write_all(b"go\n").unwrap();
+    let candidate = watch.find("candidate pinned", |event| {
+        event["event"] == "attempt.candidate"
+    });
+    assert_eq!(candidate["attempt"], implementation["attempt"]);
+    let ownership = watch.find("candidate ownership refused", |event| {
+        event["event"] == "attention.raised" && event["execution"] == id
+    });
+    assert_eq!(ownership["data"]["kind"], "red");
+    assert_eq!(ownership["data"]["reason"], "ownership");
+    // Lock the same surviving inherited inode after the controller drops it.
+    use std::os::unix::fs::MetadataExt;
+    let inherited = lock.metadata().unwrap();
+    let current = std::fs::metadata(&lock_path).unwrap();
+    assert_eq!(
+        (current.dev(), current.ino()),
+        (inherited.dev(), inherited.ino())
+    );
+    lock.try_lock().unwrap();
+    std::fs::write(&listing_hold, "").unwrap();
+    std::os::unix::fs::symlink(real("pinfold"), &listing).unwrap();
+    assert_eq!(watch.said(&listing_said), "0\n");
+    finish_listing.write_all(b"go\n").unwrap();
+    assert_eq!(watch.said(&listing_said), "0\n");
+    // A second real reply proves the preceding checked probe completed with
+    // box absence and a held lock; it cannot admit the first review.
+    let before = project.json(&["attempt", "show", "Y-1"])["executions"][0].clone();
+    assert_eq!(before["execution"], id);
+    assert_eq!(before["outcome"], "candidate");
+    assert_eq!(before["reserved"], true);
+    assert_eq!(before["result_eligible"], false);
+    assert_eq!(
+        project.rows("SELECT id FROM execution WHERE kind = 'review'"),
+        Vec::<Value>::new()
+    );
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT state FROM attention WHERE id = {}",
+            ownership["attention"]
+        )),
+        vec![json!({"state": "open"})]
+    );
+    lock.unlock().unwrap();
+    std::fs::remove_file(&listing_hold).unwrap();
+    finish_listing.write_all(b"go\n").unwrap();
+    watch.find("candidate released", |event| {
+        event["event"] == "execution.released" && event["execution"] == id
+    });
+    let resolved = watch.find("candidate ownership reconciled", |event| {
+        event["event"] == "attention.resolved" && event["attention"] == ownership["attention"]
+    });
+    assert_eq!(resolved["execution"], id);
+    assert_eq!(resolved["data"]["resolution"], "reconciled");
     let approval = watch.find("approval", |event| {
         event["event"] == "attention.raised" && event["data"]["kind"] == "approval"
     });
+    let after = project.json(&["attempt", "show", "Y-1"])["executions"][0].clone();
+    assert_eq!(after["reserved"], false);
+    assert_eq!(after["result_eligible"], true);
+    for field in [
+        "execution",
+        "attempt",
+        "kind",
+        "status",
+        "outcome",
+        "base",
+        "head",
+        "proof",
+        "ticket_revision",
+        "plan_revision",
+        "binding",
+        "result",
+    ] {
+        assert_eq!(after[field], before[field], "{field}");
+    }
+    assert_eq!(
+        project.rows("SELECT id FROM execution WHERE kind = 'implementation'"),
+        vec![json!({"id": id})]
+    );
     // Two seats published; only the second recorded a proof and counts.
     let checks = project.rows("SELECT id FROM \"check\" WHERE kind = 'review' ORDER BY id");
     assert_eq!(checks.len(), 2);

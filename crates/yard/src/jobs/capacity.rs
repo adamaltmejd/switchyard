@@ -224,7 +224,13 @@ pub async fn release(
                 [row.id],
             )?;
             executions::reserve(tx, row.id, false)?;
-            if completed_cleanup {
+            let released = executions::get(tx, row.id)?;
+            let completed_candidate = released.kind == "implementation"
+                && released.lock_contract
+                && released.outcome.as_deref() == Some("candidate")
+                && released.result_eligible
+                && dir(project, &released).join("lock").is_file();
+            if completed_cleanup || completed_candidate {
                 for item in attempts::open_for_attempt(tx, current.attempt)? {
                     if item.kind == "red"
                         && item.reason == "ownership"
