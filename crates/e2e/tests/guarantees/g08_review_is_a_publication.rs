@@ -641,7 +641,14 @@ fn a_gate_errors_start_reruns_that_gate() {
         {
             return Reply::Text("ready".into());
         }
-        if !request.opens() && !request.prompt().contains("Abandon gate") {
+        if request.prompt().contains("Abandon gate") {
+            // The first ticket landed feature.txt; this ticket needs a new candidate.
+            return act(
+                request,
+                vec![commit_file("abandon.txt", "abandon\n", "Reach held gate")],
+            );
+        }
+        if !request.opens() {
             std::fs::write(arm.lock().unwrap().as_ref().unwrap(), "").unwrap();
         }
         implementer(request)
