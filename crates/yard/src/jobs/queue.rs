@@ -440,9 +440,10 @@ pub async fn land(
             .iter()
             .find(|gate| &gate.name == name)
             .ok_or_else(|| Fail::refused("admitted landing gate absent"))?;
+        let mut pending_child = None;
         let admitted = super::capacity::effect(daemon, project, execution, async {
             let held = target_lock.lock().await;
-            admit(daemon, project, &held, approval.id, execution, |tx, now| {
+            let admitted = admit(daemon, project, &held, approval.id, execution, |tx, now| {
                 executions::start(
                     tx,
                     executions::Start {
@@ -461,9 +462,38 @@ pub async fn land(
                     },
                 )
             })
-            .await
+            .await?;
+            if let Ok(child) = &admitted {
+                pending_child = Some(*child);
+            }
+            Ok(admitted)
         })
-        .await?;
+        .await;
+        let admitted = match admitted {
+            Ok(admitted) => admitted,
+            Err(fail) => {
+                // Admission committed, but the parent's checked release can
+                // refuse before the child controller is ever started.
+                if let Some(child) = pending_child {
+                    project.tx(|tx| {
+                        if executions::get(tx, child)?.status == "running" {
+                            executions::end(
+                                tx,
+                                child,
+                                executions::End {
+                                    outcome: "interrupted",
+                                    detail: Some(&fail.message),
+                                    ticket: Some(ticket.id),
+                                    ..Default::default()
+                                },
+                            )?;
+                        }
+                        Ok(())
+                    })?;
+                }
+                return Err(fail);
+            }
+        };
         let child = match admitted {
             Ok(child) => child,
             Err((now, lapse)) => {
