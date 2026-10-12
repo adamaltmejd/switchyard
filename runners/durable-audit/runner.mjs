@@ -18,8 +18,8 @@ const exact = (value, keys) => value !== null && typeof value === 'object' &&
   !Array.isArray(value) && Object.keys(value).sort().join(',') === keys.sort().join(',');
 
 // Only declared paths under these fixed guest roots can be opened. The caller
-// mounts these inputs read-only; Y-93 owns that staging, not this controller.
-const roots = { source: '/workspace', proof: '/yard/proof', trusted: '/workspace/trusted' };
+// mounts these inputs read-only; Yard owns staging, not this controller.
+const roots = { source: '/workspace', proof: '/yard/proof', trusted: '/yard/input/trusted' };
 async function regular(path, directory = false) {
   if (!path.startsWith('/') || path.includes('\0')) refuse('invalid_input', 'path');
   let current = '';
@@ -68,17 +68,20 @@ async function identity() {
 
 async function main() {
   await identity();
-  if (process.argv.length !== 3 || process.argv[2] !== '/workspace/audit.json')
-    refuse('invalid_input', '/workspace/audit.json');
+  if (process.argv.length !== 3 || process.argv[2] !== '/yard/input/audit.json')
+    refuse('invalid_input', '/yard/input/audit.json');
   const input = await boundedFile(process.argv[2], 131072);
   if (input.truncated) refuse('invalid_input', 'launch size');
   const cfg = JSON.parse(input.value);
-  if (!exact(cfg, ['provider', 'model', 'prompt', 'files', 'skill']) ||
+  if (!exact(cfg, ['provider', 'model', 'prompt', 'files', 'skill', 'identity']) ||
       !['openrouter', 'opencode-go'].includes(cfg.provider) ||
       typeof cfg.model !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_./:-]{0,255}$/.test(cfg.model) ||
       typeof cfg.prompt !== 'string' || !cfg.prompt.trim() || Buffer.byteLength(cfg.prompt) > 32768 ||
       !Array.isArray(cfg.files) || cfg.files.length > 512 || typeof cfg.skill !== 'string')
     refuse('invalid_input', 'launch schema');
+  if (!exact(cfg.identity, ['name', 'node', 'launcher', 'launch_sha256', 'runner_sha256', 'lock_sha256']) ||
+      cfg.identity.name !== 'durable-audit' || cfg.identity.node !== '26.11.1' || cfg.identity.launcher !== `${ROOT}/launch`)
+    refuse('runner_unavailable', 'selected package identity');
   const allowed = new Map();
   for (const f of cfg.files) {
     if (!exact(f, ['root', 'path']) || !Object.hasOwn(roots, f.root) ||

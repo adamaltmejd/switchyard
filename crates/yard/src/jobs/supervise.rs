@@ -525,6 +525,12 @@ pub async fn implement(
         ticket.body = body;
     }
     let workflow = loaded.config.workflow(&attempt.workflow)?.clone();
+    let plan = match &attempt.admission {
+        Some(admission) => crate::plan::Plan::admitted(admission)
+            .map_err(|error| Fail::refused(error.to_string()))?,
+        None => loaded.config.workflow_plan(&attempt.workflow)?,
+    };
+    let packaged = plan.packaged();
     let provider = attempt.implementer["provider"].as_str();
     let connection = match provider {
         Some(name) => Some(
@@ -533,13 +539,17 @@ pub async fn implement(
         ),
         None => None,
     };
-    let harness = crate::harness::get(attempt.implementer["harness"].as_str().unwrap_or_default())
-        .ok_or_else(|| {
-            Fail::invalid(format!(
-                "harness {:?} is unknown",
-                attempt.implementer["harness"]
-            ))
-        })?;
+    let harness: &'static dyn Harness = if packaged.is_some() {
+        &crate::pi::PackagedAudit
+    } else {
+        crate::harness::get(attempt.implementer["harness"].as_str().unwrap_or_default())
+            .ok_or_else(|| {
+                Fail::invalid(format!(
+                    "harness {:?} is unknown",
+                    attempt.implementer["harness"]
+                ))
+            })?
+    };
     let dir = project.attempt_dir(attempt.id);
     let audit_dir = dir.join("audits").join(execution.to_string());
     let clone = if workflow.read_only {
@@ -599,18 +609,22 @@ pub async fn implement(
         std::fs::create_dir_all(&live).map_err(|error| error.to_string())?;
         live
     };
-    let env = crate::agent_env::AgentEnv::load(
-        &daemon.git,
-        &project.canonical_dir(),
-        attempt
-            .admission
-            .as_ref()
-            .and_then(|input| input["inputs"]["source_commit"].as_str())
-            .unwrap_or(&attempt.base),
-        &clone,
-    )
-    .await
-    .map_err(Fail::refused)?;
+    let env = if packaged.is_some() {
+        crate::agent_env::AgentEnv::empty(&clone)
+    } else {
+        crate::agent_env::AgentEnv::load(
+            &daemon.git,
+            &project.canonical_dir(),
+            attempt
+                .admission
+                .as_ref()
+                .and_then(|input| input["inputs"]["source_commit"].as_str())
+                .unwrap_or(&attempt.base),
+            &clone,
+        )
+        .await
+        .map_err(Fail::refused)?
+    };
     if stop_preparation(daemon, project, execution).await? {
         return Ok(());
     }
@@ -621,6 +635,58 @@ pub async fn implement(
         env: &env,
     };
     harness.stage(&stage).map_err(|error| error.to_string())?;
+    if let Some(crate::plan::Runner::Packaged {
+        skill,
+        references,
+        files,
+        instructions,
+        ..
+    }) = packaged
+    {
+        let trusted = input.join("trusted");
+        std::fs::create_dir(&trusted).map_err(|error| error.to_string())?;
+        let admitted = attempt.admission.as_ref().expect("admitted plan");
+        for source in admitted["inputs"]["trusted_staged_sources"]
+            .as_array()
+            .ok_or_else(|| Fail::refused("missing selected inputs"))?
+        {
+            let path = source["path"]
+                .as_str()
+                .ok_or_else(|| Fail::refused("invalid selected path"))?;
+            let blob = source["blob"]
+                .as_str()
+                .ok_or_else(|| Fail::refused("invalid selected blob"))?;
+            let bytes = daemon.git.blob(&project.canonical_dir(), blob).await?;
+            if path == skill && std::str::from_utf8(&bytes).is_err() {
+                return Err(Fail::refused(
+                    "invalid_input: selected Markdown is not UTF-8",
+                ));
+            }
+            let dest = trusted.join(path);
+            std::fs::create_dir_all(dest.parent().expect("selected parent"))
+                .map_err(|error| error.to_string())?;
+            std::fs::write(dest, bytes).map_err(|error| error.to_string())?;
+        }
+        let mut declared = files.clone();
+        declared.extend(std::iter::once(skill).chain(references).map(|path| {
+            crate::plan::AuditFile {
+                root: "trusted".into(),
+                path: path.clone(),
+            }
+        }));
+        let prompt = format!("{instructions}\n{}\n{}", ticket.title, ticket.body);
+        if prompt.len() > 32768 {
+            return Err(Fail::refused("invalid_input: audit prompt bound"));
+        }
+        let launch = json!({"provider": provider, "model": attempt.implementer["model"],
+            "prompt": prompt, "files": declared, "skill": format!("trusted:{skill}"),
+            "identity": admitted["inputs"]["package"]});
+        let bytes = launch.to_string();
+        if bytes.len() > 131072 {
+            return Err(Fail::refused("invalid_input: audit launch bound"));
+        }
+        std::fs::write(input.join("audit.json"), bytes).map_err(|error| error.to_string())?;
+    }
 
     // Writable sessions resume until their execution bound or version changes.
     let resume = match project.read(|conn| {

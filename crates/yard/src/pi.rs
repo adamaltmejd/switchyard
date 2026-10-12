@@ -46,6 +46,106 @@ pub const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 /// The one harness.
 pub struct Pi;
 
+/// The native Pi session owns MCP; its input hook runs the selected package.
+pub struct PackagedAudit;
+
+pub fn package_identity() -> Value {
+    use sha2::{Digest, Sha256};
+    json!({"name": "durable-audit", "node": "26.11.1",
+        "launcher": "/opt/yard/durable-audit/launch",
+        "launch_sha256": crate::config::hex(&Sha256::digest(include_bytes!("../../../runners/durable-audit/launch"))),
+        "runner_sha256": crate::config::hex(&Sha256::digest(include_bytes!("../../../runners/durable-audit/runner.mjs"))),
+        "lock_sha256": crate::config::hex(&Sha256::digest(include_bytes!("../../../runners/durable-audit/package-lock.json")))})
+}
+
+// Admission hashes belong to that attempt, not to a later daemon binary.
+pub fn valid_package_identity(identity: &Value) -> bool {
+    identity.as_object().is_some_and(|fields| {
+        fields.len() == 6
+            && identity["name"] == "durable-audit"
+            && identity["launcher"] == "/opt/yard/durable-audit/launch"
+            && identity["node"].as_str().is_some_and(|version| {
+                version.split('.').count() == 3
+                    && version.split('.').all(|part| {
+                        !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit())
+                    })
+            })
+            && ["launch_sha256", "runner_sha256", "lock_sha256"]
+                .iter()
+                .all(|key| {
+                    identity[key].as_str().is_some_and(|hash| {
+                        hash.len() == 64
+                            && hash
+                                .bytes()
+                                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                    })
+                })
+    })
+}
+
+impl Harness for PackagedAudit {
+    fn name(&self) -> &'static str {
+        "pi"
+    }
+    fn accepts(&self, agent: &Agent) -> Result<(), String> {
+        Pi.accepts(agent)
+    }
+    fn stage(&self, st: &Stage) -> std::io::Result<()> {
+        Pi.stage(st)?;
+        std::fs::write(
+            st.input.join(EXTENSION_FILE),
+            EXTENSION.replace(
+                "const SELECTED_AUDIT = false;",
+                "const SELECTED_AUDIT = true;",
+            ),
+        )
+    }
+    fn env(&self, st: &Stage) -> Vec<(String, String)> {
+        Pi.env(st)
+    }
+    fn route(&self, st: &Stage, machine: &Machine) -> Result<ModelRoute, String> {
+        Pi.route(st, machine)
+    }
+    fn argv(&self, launch: &Launch) -> Result<Vec<String>, String> {
+        Pi.argv(launch)
+    }
+    fn reader(&self, _resumed: bool) -> Box<dyn Reader> {
+        Box::new(AuditReader)
+    }
+}
+
+struct AuditReader;
+
+impl Reader for AuditReader {
+    fn stdout(&mut self, line: &str) -> Vec<Event> {
+        let Ok(frame) = serde_json::from_str::<Value>(line) else {
+            return Vec::new();
+        };
+        match frame["type"].as_str() {
+            Some("yard_audit_started") => frame["session_id"]
+                .as_str()
+                .filter(|id| !id.is_empty())
+                .map(|id| {
+                    vec![Event::Started {
+                        session_id: id.into(),
+                    }]
+                })
+                .unwrap_or_default(),
+            Some("yard_audit_terminal") if frame["exit_code"] == 0 => vec![Event::Finished {
+                usage: Usage::default(),
+            }],
+            Some("yard_audit_terminal") => vec![Event::Failed {
+                message: frame["detail"].as_str().unwrap_or("audit_failed").into(),
+                usage: Usage::default(),
+            }],
+            _ => Vec::new(),
+        }
+    }
+    fn stderr(&mut self, line: &str) -> Option<Registration> {
+        registration(line)
+    }
+}
+
 impl Harness for Pi {
     fn name(&self) -> &'static str {
         "pi"

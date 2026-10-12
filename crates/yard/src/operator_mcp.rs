@@ -119,7 +119,16 @@ fn node_schema() -> Value {
                 "agent": {"type": "string"}, "instructions": {"type": "string"}},
                 "required": ["kind", "agent", "instructions"], "additionalProperties": false},
             {"type": "object", "properties": {"kind": {"const": "command"},
-                "gate": {"type": "string"}}, "required": ["kind", "gate"], "additionalProperties": false}
+                "gate": {"type": "string"}}, "required": ["kind", "gate"], "additionalProperties": false},
+            {"type": "object", "additionalProperties": false, "properties": {
+                "kind": {"const": "packaged"}, "package": {"const": "durable-audit"},
+                "agent": {"type": "string"}, "instructions": {"type": "string"},
+                "skill": {"type": "string"},
+                "references": {"type": "array", "items": {"type": "string"}},
+                "files": {"type": "array", "items": {"type": "object", "additionalProperties": false,
+                    "properties": {"root": {"enum": ["source", "proof"]}, "path": {"type": "string"}},
+                    "required": ["root", "path"]}}},
+                "required": ["kind", "package", "agent", "instructions", "skill", "files"]}
         ]},
         "access": {"type": "string", "enum": ["read-only", "write-allowed"]},
         "outputs": {"type": "object", "additionalProperties": output_schema()},
