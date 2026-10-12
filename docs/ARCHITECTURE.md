@@ -1199,10 +1199,12 @@ need what a box cannot give, such as a container runtime. `YARD_PROOF` is
 the host path of the proof snapshot this execution judges: the candidate's
 at the candidate stage, the approved candidate's at landing.
 
-Harness state (a harness's session store and launch files) is one
-directory per attempt under its files, mounted at one fixed path, written
-by the attempt's implementer executions, and removed by cleanup. A review seat gets a fresh one per execution. A fresh session
-is one that resumes no execution; a harness version change ends session
+Harness state (a harness's session store and launch files) for a write-allowed
+implementer is one directory per attempt under its files, mounted at one
+fixed path. A read-only audit or review seat gets fresh state per execution.
+Only that execution mounts an audit's writable state; its row binds the
+admitted node. Whole-attempt cleanup removes the state after checked release.
+A fresh session is one that resumes no execution; a harness version change ends session
 continuity and the next execution is fresh.
 
 The model route is an injecting route: the box sees a placeholder and
