@@ -1,6 +1,6 @@
 // Yard's MCP client for Pi, embedded in the yard binary and staged read-only
-// into every worker box. The file is the same bytes for every execution: the
-// endpoint and bearer come from the process environment, never from a file.
+// into every worker box. Selection is staged by Yard; the endpoint and bearer
+// come from the process environment, never from a file.
 //
 // It speaks one subset of MCP over HTTP: one POST per JSON-RPC message, a JSON
 // response body, `initialize`, `notifications/initialized`, one page of
@@ -9,8 +9,8 @@
 // its own would be a second call nobody made.
 //
 // MCP tools come unchanged from `tools/list`, so grants live in the daemon.
-// An audit also gets the trusted local child tool below; its publication uses
-// that same native grant and session.
+// A selected audit runs from the native input hook before model dispatch.
+// Its publication uses that same native grant and session.
 //
 // It prints one line on stderr before the first turn, `yard-mcp {json}`, and
 // throws on failure, which makes Pi exit before any model request.
@@ -18,6 +18,11 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
+import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { writeSync } from "node:fs";
+
+const SELECTED_AUDIT = false;
 
 const ENDPOINT_ENV = "YARD_MCP_ENDPOINT";
 const BEARER_ENV = "YARD_MCP_BEARER";
@@ -127,6 +132,7 @@ export default async function (pi: ExtensionAPI) {
     report({ registered: true, tools });
   } catch (cause) {
     report({ registered: false, reason: errorText(cause) });
+    if (SELECTED_AUDIT) process.exit(1);
     throw new Error(`MCP tools were not registered: ${errorText(cause)}`);
   }
 }
@@ -159,76 +165,98 @@ async function register(pi: ExtensionAPI, client: McpClient): Promise<string[]> 
     registerOne(pi, client, tool);
     names.push(tool.name);
   }
-  if (names.includes("yard_publish_report")) registerAuditChild(pi, client);
+  if (SELECTED_AUDIT) {
+    if (!names.includes("yard_publish_report")) throw new Error("audit grant unavailable");
+    pi.on("input", async (_event, context) => {
+      let terminal = { exit_code: 1, detail: "runner_unavailable:native Pi session" };
+      try {
+        const sessionId = context.sessionManager.getSessionId();
+        if (sessionId) {
+          auditFrame({ type: "yard_audit_started", session_id: sessionId });
+          terminal = await runAudit(client);
+        }
+      } catch { terminal = { exit_code: 1, detail: "audit_failed" }; }
+      auditFrame({ type: "yard_audit_terminal", ...terminal });
+      return { action: "handled" };
+    });
+  }
   return names;
+}
+
+// Native protocol frames must bypass Pi's stdout handling and finish before
+// print mode can exit after a handled input.
+function auditFrame(frame: Record<string, unknown>): void {
+  const wire = Buffer.from(JSON.stringify(frame) + "\n");
+  let offset = 0;
+  while (offset < wire.length) offset += writeSync(1, wire, offset);
 }
 
 // The real Pi harness owns registration and the one MCP session. A trusted
 // packaged child can publish through this grant without inheriting its bearer
 // or session. Anonymous pipes carry one bounded publication, never credentials.
-function registerAuditChild(pi: ExtensionAPI, client: McpClient): void {
-  pi.registerTool({
-    name: "yard_run_durable_audit",
-    label: "Packaged audit",
-    description: "Run the trusted boxed audit using read-only /workspace/audit.json.",
-    parameters: { type: "object", properties: {}, additionalProperties: false },
-    async execute(_id: string, _params: unknown, signal?: AbortSignal) {
-      const env: Record<string, string> = { PATH: "/usr/bin:/bin" };
-      for (const name of ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
-        "http_proxy", "https_proxy", "all_proxy", "no_proxy", "NODE_USE_ENV_PROXY"]) {
-        if (process.env[name] !== undefined) env[name] = process.env[name]!;
+async function runAudit(client: McpClient): Promise<{ exit_code: number; detail: string }> {
+  // Verify admitted image identity before running even an older sealed package.
+  const launch = JSON.parse(await readFile("/yard/input/audit.json", "utf8"));
+  for (const [asset, key] of [["launch", "launch_sha256"], ["runner.mjs", "runner_sha256"],
+    ["package-lock.json", "lock_sha256"]]) {
+    const path = `/opt/yard/durable-audit/${asset}`;
+    try {
+      const bytes = await readFile(path);
+      if (createHash("sha256").update(bytes).digest("hex") !== launch.identity[key]) {
+        return { exit_code: 1, detail: `runner_unavailable:${path}` };
       }
-      return await new Promise((resolve, reject) => {
-        const child = spawn("/opt/yard/durable-audit/launch", ["/workspace/audit.json"], {
-          env, cwd: "/", stdio: ["ignore", "pipe", "pipe", "pipe", "pipe"],
-        });
-        let output = "";
-        let bytes = 0;
-        const requestChunks: Buffer[] = [];
-        let requestBytes = 0;
-        let requested = false;
-        let failure: string | undefined;
-        const stop = (reason: string) => { failure = reason; child.kill("SIGKILL"); };
-        const cancel = () => stop("audit_cancelled");
-        signal?.addEventListener("abort", cancel, { once: true });
-        if (signal?.aborted) cancel();
-        for (const stream of [child.stdout, child.stderr]) {
-          const decoder = new StringDecoder("utf8");
-          stream!.on("data", chunk => {
-            bytes += chunk.length;
-            if (bytes > 1024 * 1024) stop("audit_limit");
-            else output += decoder.write(chunk);
-          });
-          stream!.on("end", () => { output += decoder.end(); });
-        }
-        child.stdio[3]!.on("error", () => stop("report_refused"));
-        child.stdio[4]!.on("error", () => stop("report_refused"));
-        child.stdio[3]!.on("data", async (chunk: Buffer) => {
-          if (requested) { stop("invalid_report"); return; }
-          requestBytes += chunk.length;
-          if (requestBytes > 262145) { stop("invalid_report"); return; }
-          requestChunks.push(chunk);
-          if (chunk[chunk.length - 1] !== 10) return;
-          requested = true;
-          try {
-            const args = JSON.parse(Buffer.concat(requestChunks).toString("utf8"));
-            const result = await client.request("tools/call", {
-              name: "yard_publish_report", arguments: args,
-            }, signal);
-            (child.stdio[4] as import("node:stream").Writable).end(
-              JSON.stringify({ isError: result.isError === true }) + "\n",
-            );
-          } catch { stop("report_refused"); }
-        });
-        child.on("error", () => { failure = "runner_unavailable:/opt/yard/durable-audit/launch"; });
-        child.on("close", code => {
-          signal?.removeEventListener("abort", cancel);
-          if (failure) reject(new Error(failure));
-          else resolve({ content: [{ type: "text", text: output || `audit_exit:${code}` }], details: {} });
-        });
+    } catch { return { exit_code: 1, detail: `runner_unavailable:${path}` }; }
+  }
+  const env: Record<string, string> = { PATH: "/usr/bin:/bin" };
+  for (const name of ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+    "http_proxy", "https_proxy", "all_proxy", "no_proxy", "NODE_USE_ENV_PROXY"]) {
+    if (process.env[name] !== undefined) env[name] = process.env[name]!;
+  }
+  return await new Promise(resolve => {
+    const child = spawn("/opt/yard/durable-audit/launch", ["/yard/input/audit.json"], {
+      env, cwd: "/", stdio: ["ignore", "pipe", "pipe", "pipe", "pipe"],
+    });
+    let output = "";
+    let bytes = 0;
+    const requestChunks: Buffer[] = [];
+    let requestBytes = 0;
+    let requested = false;
+    let failure: string | undefined;
+    const stop = (reason: string) => { failure = reason; child.kill("SIGKILL"); };
+    for (const stream of [child.stdout, child.stderr]) {
+      const decoder = new StringDecoder("utf8");
+      stream!.on("data", chunk => {
+        bytes += chunk.length;
+        if (bytes > 1024 * 1024) stop("audit_limit");
+        else output += decoder.write(chunk);
       });
-    },
-  } as never);
+      stream!.on("end", () => { output += decoder.end(); });
+    }
+    child.stdio[3]!.on("error", () => stop("report_refused"));
+    child.stdio[4]!.on("error", () => stop("report_refused"));
+    child.stdio[3]!.on("data", async (chunk: Buffer) => {
+      if (requested) { stop("invalid_report"); return; }
+      requestBytes += chunk.length;
+      if (requestBytes > 262145) { stop("invalid_report"); return; }
+      requestChunks.push(chunk);
+      if (chunk[chunk.length - 1] !== 10) return;
+      requested = true;
+      try {
+        const args = JSON.parse(Buffer.concat(requestChunks).toString("utf8"));
+        const result = await client.request("tools/call", {
+          name: "yard_publish_report", arguments: args,
+        });
+        (child.stdio[4] as import("node:stream").Writable).end(
+          JSON.stringify({ isError: result.isError === true }) + "\n",
+        );
+      } catch { stop("report_refused"); }
+    });
+    child.on("error", () => { failure = "runner_unavailable:/opt/yard/durable-audit/launch"; });
+    child.on("close", code => {
+      resolve({ exit_code: failure ? 1 : code ?? 1,
+        detail: failure ?? (output.trim() || "audit_failed") });
+    });
+  });
 }
 
 function registerOne(pi: ExtensionAPI, client: McpClient, tool: McpTool): void {

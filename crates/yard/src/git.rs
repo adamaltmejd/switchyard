@@ -280,15 +280,37 @@ impl Git {
         Ok((out.code == 0).then_some(out.stdout))
     }
 
-    /// The files of `commit` under `paths`, with sizes.
+    /// Entries of `commit` at `paths`, with sizes. Exact selection checks
+    /// object types first: even nonrecursive ls-tree opens a named directory.
     pub async fn ls_tree(
         &self,
         repo: &Path,
         commit: &str,
         paths: &[&str],
+        recursive: bool,
     ) -> Result<Vec<TreeEntry>, String> {
-        let mut args = vec!["ls-tree", "-r", "-l", "-z", "--full-tree", commit, "--"];
-        args.extend(paths);
+        let mut blobs = Vec::new();
+        if !recursive {
+            for path in paths {
+                let object = self
+                    .run(repo, &["cat-file", "-t", &format!("{commit}:{path}")])
+                    .await?;
+                if object.code == 0 && object.stdout.trim() == "blob" {
+                    blobs.push(*path);
+                }
+            }
+            if blobs.is_empty() {
+                return Ok(Vec::new());
+            }
+        }
+        let mut args = vec!["ls-tree"];
+        if recursive {
+            args.push("-r");
+        } else {
+            args.insert(0, "--literal-pathspecs");
+        }
+        args.extend(["-l", "-z", "--full-tree", commit, "--"]);
+        args.extend(if recursive { paths } else { &blobs });
         let out = self.run(repo, &args).await?.ok("ls-tree")?;
         out.stdout
             .split('\0')

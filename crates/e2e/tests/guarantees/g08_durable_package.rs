@@ -1,4 +1,4 @@
-//! G8/G12/G13: trusted packaging, independently of daemon runner selection.
+//! G8/G12/G13: explicit packaged selection and frozen instruction authority.
 
 use e2e::*;
 use serde_json::{Value, json};
@@ -31,6 +31,17 @@ fn fixture<'a>(machine: &'a Machine) -> Project<'a> {
     let sentinel = "require('node:fs').writeFileSync('/yard/state/sentinel', 'executed');\n";
     project.write("candidate.cjs", sentinel);
     project.write("candidate/.pi/extensions/candidate.js", sentinel);
+    project.write(".pi/extensions/unselected.js", sentinel);
+    project.write(
+        "AGENTS.md",
+        "UNSELECTED_GUIDANCE: load no selected audit instructions.\n",
+    );
+    project.write(".agents/skills/unselected/SKILL.md", "UNSELECTED_SKILL\n");
+    project.write("candidate/trusted/selected.md", "CANDIDATE_SKILL\n");
+    project.write(
+        "audit.json",
+        "CANDIDATE_LAUNCH: not trusted configuration\n",
+    );
     project.write(
         "trusted/selected.md",
         "TRUSTED_SELECTED_SKILL_Y92: inspect declared files and publish.\n",
@@ -46,17 +57,12 @@ fn fixture<'a>(machine: &'a Machine) -> Project<'a> {
     project
 }
 
-fn image(project: &Project<'_>, missing: bool) {
+fn image(project: &Project<'_>, sabotage: &str) {
     let source = std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../runners/durable-audit/Dockerfile"),
     )
     .unwrap()
     .replace("\"$TARGETARCH\"", "\"$(uname -m)\"");
-    let sabotage = if missing {
-        "RUN rm /opt/yard/durable-audit/node_modules/@earendil-works/pi-durable/dist/index.js\n"
-    } else {
-        ""
-    };
     project.write(
         ".yard/Dockerfile",
         &format!(
@@ -74,25 +80,24 @@ fn launch(project: &Project<'_>, attempt: i64, prompt: &str) {
 }
 
 fn launch_with_source(project: &Project<'_>, attempt: i64, prompt: &str, source: &str) {
-    // Ordinary canonical fixture files are frozen by the read-only plan. Never
-    // write daemon-owned launch inputs or replace the configured Pi command.
-    project.write(
-        "audit.json",
-        &json!({
-            "provider": "openrouter", "model": "fake-model", "prompt": prompt,
-            "files": [
-                {"root": "source", "path": source},
-                {"root": "source", "path": "candidate.cjs"},
-                {"root": "source", "path": "candidate/.pi/extensions/candidate.js"},
-                {"root": "trusted", "path": "selected.md"},
-                {"root": "trusted", "path": "reference.txt"}
-            ], "skill": "trusted:selected.md"
-        })
-        .to_string(),
-    );
-    project.git(&["add", "audit.json"]);
-    project.git(&["commit", "-qm", "Declare trusted boxed audit inputs"]);
-    project.json(&["sync"]);
+    // Select canonical instructions through the operator config and MCP.
+    // Candidate audit.json is hostile data, never daemon launch input.
+    let selected = config(&format!(r#"
+[profiles.durable]
+access = "read-only"
+outcomes = ["complete"]
+[profiles.durable.outputs]
+result = "report"
+[profiles.durable.runner]
+kind = "packaged"
+package = "durable-audit"
+agent = "worker"
+instructions = {}
+skill = "trusted/selected.md"
+references = ["trusted/reference.txt"]
+files = [{{root = "source", path = {}}}, {{root = "source", path = "candidate.cjs"}}, {{root = "source", path = "candidate/.pi/extensions/candidate.js"}}]
+"#, json!(prompt), json!(source))).replace("[workflows.plan]", "[workflows.plan]\nprofile = \"durable\"");
+    project.reconfigure(&selected);
     project.machine.wrapper("pinfold", &format!(r#"
 if [ "$1 $2" = 'image build' ]; then
     previous=''
@@ -108,8 +113,11 @@ if [ "$1 $2" = 'box exec' ]; then
             test -e /yard/state/audit-checkpoints/owned; echo predecessor_visible=$?
             test -d /yard/proof; echo proof_present=$?
             echo blocked > /yard/proof/intrusion 2>/dev/null; echo proof_write=$?
+            cd /opt/yard/durable-audit && sha256sum --quiet --strict -c identity.sha256
+            echo package_seal=$?
         ' >> '{root}/fresh-{attempt}'
-    ;; esac
+        "$REAL" box exec "$handle" -- cat /opt/yard/durable-audit/runner.mjs > '{root}/asset-{attempt}'
+    ;; *) exec "$REAL" "$@" ;; esac
     mkfifo '{root}/stdout-{attempt}.fifo' '{root}/stderr-{attempt}.fifo'
     tee -a '{root}/stdout-{attempt}' < '{root}/stdout-{attempt}.fifo' &
     stdout_observer=$!
@@ -121,33 +129,53 @@ if [ "$1 $2" = 'box exec' ]; then
     rm '{root}/stdout-{attempt}.fifo' '{root}/stderr-{attempt}.fifo'
     "$REAL" box exec "$handle" -- sh -c '
         env | grep -q "sk-e2e-"; echo upstream_in_env=$?
-        grep -R -a -q "sk-e2e-" /workspace /yard/state /opt/yard/durable-audit; echo upstream_in_files=$?
+        grep -R -a -q "sk-e2e-" /workspace /yard/input /yard/proof /yard/state /opt/yard/durable-audit; echo upstream_in_files=$?
         test -e /yard/state/sentinel; echo sentinel=$?
+        test -e /yard/state/package-executed; echo package_executed=$?
         echo blocked > /workspace/intrusion 2>/dev/null; echo source_write=$?
-        echo blocked > /workspace/trusted/selected.md 2>/dev/null; echo trusted_write=$?
+        echo blocked > /yard/input/trusted/trusted/selected.md 2>/dev/null; echo trusted_write=$?
+        test -e /yard/input/trusted/AGENTS.md; echo unselected_guidance=$?
+        test -e /yard/state/agent/extensions/unselected.js; echo unselected_extension=$?
+        test -e /yard/state/agent/skills/agents/unselected/SKILL.md; echo unselected_skill=$?
+        test -e /yard/input/trusted/candidate/trusted/selected.md; echo candidate_skill=$?
         echo scratch > /yard/state/audit-scratch/probe; echo scratch_write=$?
         echo state > /yard/state/audit-checkpoints/probe; echo checkpoint_write=$?
     ' > '{root}/probe-{attempt}'
+    if [ -f '{root}/hold-completed-{attempt}' ]; then
+        rm '{root}/hold-completed-{attempt}'
+        echo held > '{root}/said-{attempt}'
+        read released < '{root}/release-{attempt}'
+    fi
     exit "$result"
 fi
 "#, root = project.machine.root.display()));
 }
 
-// Outer Pi remains real and owns MCP registration. Controller traffic is
-// identified by its distinct offered tool surface, not by total route traffic.
-fn outer(request: &ModelRequest) -> Option<Reply> {
-    if request.has_tool("read_declared") {
-        return None;
-    }
-    assert!(request.has_tool("yard_run_durable_audit"));
-    if request.opens() {
-        Some(Reply::Tools(vec![tool(
-            "yard_run_durable_audit",
-            json!({}),
-        )]))
-    } else {
-        Some(Reply::Text("Audit child finished.".into()))
-    }
+fn selected_start(project: &Project<'_>, title: &str) {
+    let mut operator = project.machine.operator();
+    operator.initialize();
+    let selected = operator.call(
+        "yard_plan_validate",
+        json!({"project": project.path,
+        "workflow": "plan", "overrides": {"implementer": {"profile": "durable"}}}),
+    );
+    assert!(selected["error"].is_null(), "{selected}");
+    assert_eq!(selected["result"]["shape"], "packaged-audit");
+    project.json(&["ticket", "new", "--title", title, "--workflow", "plan"]);
+}
+
+fn audit_report() -> ToolCall {
+    tool(
+        "yard_publish_report",
+        json!({"outcome": "complete", "report": expected_report()}),
+    )
+}
+
+fn expected_report() -> Value {
+    // Schema-valid test-audit content is supplied by the fixture model.
+    json!({"summary": "Test audit: G8 native publication, G12 route, G13 selected inputs.",
+        "findings": ["Sabotage: candidate launch or broad extensions bypass instruction selection.",
+            "Oracle: fixture markers, Git blobs and boxed probes."]})
 }
 
 fn controller_requests(machine: &Machine) -> Vec<ModelRequest> {
@@ -162,7 +190,7 @@ fn controller_requests(machine: &Machine) -> Vec<ModelRequest> {
 fn ended(project: &Project<'_>, ticket: &str, prompt: &str) -> Value {
     let seq = project.json(&["status"])["seq"].as_i64().unwrap();
     let mut watch = project.watch(seq);
-    project.json(&["ticket", "new", "--title", prompt, "--workflow", "plan"]);
+    selected_start(project, prompt);
     // Successful planners raise no attention. Bind the terminal observation to
     // the admitted execution, so cleanup or another ticket cannot satisfy it.
     let started = watch.until("admitted planner started", |event| {
@@ -208,20 +236,28 @@ fn transcript(project: &Project<'_>, attempt: i64) -> String {
 
 /// G8 pre-call packaging and G12/G13 isolation: remove a sealed Durable
 /// entrypoint, then repair the image in the SAME project. The controller owns
-/// no box; real Pi invokes its trusted child in Yard's box. The fixture supplies
+/// no box; Yard selects its child through real Pi's native input hook. The fixture supplies
 /// report text, selected skill/reference, key, hostile executable/extension
 /// and an oversized source. Expected 32768-byte read comes from the spec.
 /// Sabotage: skip identity checks, load CodingTools or candidate code, ignore
 /// declared files/output bound, omit selected skill, persist the bearer/key,
-/// count report characters instead of bytes, or bypass the injecting route.
+/// count report characters instead of bytes, bypass the injecting route,
+/// restore outer-model election, route native frames through Pi's stdout
+/// handling or ignore the child's terminal status.
+/// Stage broad base guidance/extensions, or stage selected files from the
+/// current canonical/candidate tree instead of admitted blobs: excluded
+/// markers/sentinels or the edited execution's old markers fail.
 /// Existing Pi report tests prove publication,
 /// not this packaged runtime, its preflight, or its bounded read surface.
 /// Declared candidate/../large.txt normalizes to a real fixture file, so
 /// bypassing the declared '..' component guard reaches model requests.
 /// Sabotage: remove that guard. The undeclared traversal tool argument below
 /// exercises a different mechanism: allowlist lookup, not path validation.
-/// G13: edit after the real child publishes but before its outer Pi exits.
-/// Keep its checkpoint on the host while the replacement Pi is held. Reuse
+/// G13: a real pinfold exec wrapper holds after Pi and its child have published
+/// and exited, while their box still exists and the daemon awaits exec end.
+/// Edit there; keep the checkpoint while the replacement controller's model
+/// request is held. The wrapper, not a binary barrier, holds that exact point.
+/// Reuse
 /// attempt state, enable resume, omit the proof mount or make it writable,
 /// or follow checkpoint links during cleanup: fresh state or host sentinels
 /// fail. G14's writable repair tests replacement of a staged models file;
@@ -230,26 +266,32 @@ fn transcript(project: &Project<'_>, attempt: i64) -> String {
 /// `owned` checkpoint becomes visible and the fresh-state assertion fails.
 #[test]
 fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
-    let first = Latch::new();
     let second = Latch::new();
-    let first_held = first.clone();
     let second_held = second.clone();
     let machine = Machine::new("g8-durable-package", move |request| {
-        if let Some(reply) = outer(request) {
-            if request.prompt().contains("Fresh replacement audit") && request.opens() {
-                return Reply::Hold(second_held.clone(), Box::new(reply));
-            }
-            if request.prompt().contains("Corrected packaged asset") && !request.opens() {
-                return Reply::Hold(first_held.clone(), Box::new(reply));
-            }
-            return reply;
-        }
+        assert!(
+            request.has_tool("read_declared"),
+            "outer Pi made a model request"
+        );
         assert!(request.context().contains("TRUSTED_SELECTED_SKILL_Y92"));
+        for marker in [
+            "UNSELECTED_GUIDANCE",
+            "UNSELECTED_SKILL",
+            "CANDIDATE_SKILL",
+            "CANDIDATE_LAUNCH",
+            "LATER_SELECTED_SKILL",
+            "LATER_REFERENCE",
+        ] {
+            assert!(!request.context().contains(marker));
+        }
         assert!(!request.has_tool("bash"));
         if request.opens() {
-            return Reply::Tools(vec![
+            let reply = Reply::Tools(vec![
                 tool("read_declared", json!({"file": "source:large.txt"})),
-                tool("read_declared", json!({"file": "trusted:reference.txt"})),
+                tool(
+                    "read_declared",
+                    json!({"file": "trusted:trusted/reference.txt"}),
+                ),
                 tool("read_declared", json!({"file": "source:candidate.cjs"})),
                 tool(
                     "read_declared",
@@ -258,6 +300,11 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
                 tool("read_declared", json!({"file": "source:../operator.env"})),
                 tool("bash", json!({"command": "node /workspace/candidate.cjs"})),
             ]);
+            return if request.prompt().contains("Fresh replacement audit") {
+                Reply::Hold(second_held.clone(), Box::new(reply))
+            } else {
+                reply
+            };
         }
         let results = request.tool_results();
         if results
@@ -265,7 +312,7 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
             .any(|(name, _)| name == "yard_publish_report")
         {
             assert!(results.iter().any(|(_, s)| s == "invalid_report"));
-            return Reply::Tools(vec![publish_report()]);
+            return Reply::Tools(vec![audit_report()]);
         }
         let read = results
             .iter()
@@ -295,17 +342,17 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     });
     machine.start();
     let project = fixture(&machine);
-    image(&project, true);
+    image(
+        &project,
+        "RUN rm /opt/yard/durable-audit/node_modules/@earendil-works/pi-durable/dist/index.js\n",
+    );
     launch(&project, 1, "Packaged audit");
     let refused = ended(&project, "Y-1", "Missing packaged asset");
     assert!(refused["report"].is_null());
     assert!(controller_requests(&machine).is_empty());
     assert!(
-        machine
-            .model
-            .requests()
-            .iter()
-            .any(|r| r.has_tool("yard_run_durable_audit"))
+        machine.model.requests().is_empty(),
+        "missing asset must precede every model call"
     );
     let log = transcript(&project, 1);
     assert!(log.contains("runner_unavailable"));
@@ -313,7 +360,7 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     project.json(&["ticket", "park", "Y-1"]);
     project.json(&["attempt", "abandon", "Y-1"]);
 
-    image(&project, false);
+    image(&project, "");
     launch_with_source(&project, 2, "Declared traversal", "candidate/../large.txt");
     let traversal = ended(&project, "Y-2", "Declared traversal");
     assert!(traversal["report"].is_null());
@@ -325,19 +372,47 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     project.json(&["attempt", "abandon", "Y-2"]);
 
     launch(&project, 3, "Corrected packaged audit");
+    // A packaged node with topology cannot fall back to ordinary admission.
+    // Sabotage: send packaged shapes through the ordinary linear matcher.
+    let mut operator = machine.operator();
+    operator.initialize();
+    let topology = operator.call(
+        "yard_plan_validate",
+        json!({"project": project.path,
+        "workflow": "plan", "overrides": {"implementer": {"routes": {"complete": []}}}}),
+    );
+    assert_eq!(topology["error"]["code"], "refused");
+    assert_eq!(topology["error"]["data"]["shape"], "custom-graph");
+    let expected_sources = json!([
+        {"path": "trusted/selected.md", "blob": project.git(&["rev-parse", "HEAD:trusted/selected.md"]).trim(), "executable": false},
+        {"path": "trusted/reference.txt", "blob": project.git(&["rev-parse", "HEAD:trusted/reference.txt"]).trim(), "executable": false}
+    ]);
+    for name in ["said-3", "release-3"] {
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(machine.root.join(name))
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    std::fs::write(machine.root.join("hold-completed-3"), "hold").unwrap();
     let sentinel = machine.root.join("host-sentinel");
     std::fs::create_dir(&sentinel).unwrap();
     std::fs::write(sentinel.join("value"), "host-fixture").unwrap();
-    let mut watch = project.watch(0);
-    project.json(&[
-        "ticket",
-        "new",
-        "--title",
-        "Corrected packaged asset",
-        "--workflow",
-        "plan",
-    ]);
-    first.wait_held();
+    let mut watch = project.watch(project.json(&["status"])["seq"].as_i64().unwrap());
+    selected_start(&project, "Corrected packaged asset");
+    assert_eq!(watch.said(&machine.root.join("said-3")), "held\n");
+    let held = project.json(&["attempt", "show", "Y-3"]);
+    assert_eq!(held["attempt"]["admission"]["runtime"], "packaged-audit");
+    assert_eq!(
+        held["attempt"]["admission"]["inputs"]["trusted_staged_sources"],
+        expected_sources
+    );
+    assert_eq!(held["executions"][0]["report"]["report"], expected_report());
+    assert_eq!(held["executions"][0]["result_eligible"], false);
+    assert_eq!(held["executions"][0]["reserved"], true);
+    assert!(held["executions"][0]["result"].is_null());
     let owner = project
         .rows("SELECT id, handle FROM execution WHERE attempt = 3 AND kind = 'implementation'")[0]
         .clone();
@@ -360,6 +435,18 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
         std::fs::read_to_string(&checkpoint).unwrap(),
         "checkpoint-fixture\n"
     );
+    // Later canonical and candidate instructions differ from the admitted
+    // blobs. The edited execution must still load the original selection.
+    project.write("trusted/selected.md", "LATER_SELECTED_SKILL\n");
+    project.write("trusted/reference.txt", "LATER_REFERENCE\n");
+    project.write("candidate/trusted/selected.md", "LATER_CANDIDATE_SKILL\n");
+    project.git(&["add", "-A"]);
+    project.git(&[
+        "commit",
+        "-qm",
+        "Change canonical and candidate instructions after admission",
+    ]);
+    project.json(&["sync"]);
     project.json(&[
         "ticket",
         "edit",
@@ -369,7 +456,7 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
         "--body",
         "Fresh replacement audit",
     ]);
-    first.release();
+    std::fs::write(machine.root.join("release-3"), "go\n").unwrap();
     second.wait_held();
     assert_eq!(
         std::fs::read_to_string(&checkpoint).unwrap(),
@@ -426,10 +513,199 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
         .unwrap()
         .clone();
     assert_eq!(completed["teardown"], true);
-    assert_eq!(
-        completed["report"]["report"],
-        json!({"summary": "Fixture audit", "findings": []})
+    assert_eq!(completed["report"]["report"], expected_report());
+    let native = project.rows(&format!(
+        "SELECT session_id, mcp FROM execution WHERE id = {}",
+        completed["execution"]
+    ));
+    assert!(
+        native[0]["session_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty())
     );
+    assert_eq!(native[0]["mcp"], "registered");
+    assert_eq!(completed["result_eligible"], true);
+
+    // G8: a selected-input refusal creates no work and cannot block other
+    // admissions or cleanup. Sabotage: propagate inputs()'s refusal from
+    // scheduled(), or reserve a lane before validating selected inputs.
+    // Keep higher-priority malformed tickets ready while an independent valid
+    // selection publishes and cleans up in this same project. Earlier package
+    // refusals happen inside an admitted execution, not at this boundary.
+    // Fixture paths/byte limits and host Git blobs are the external oracles.
+    project.write(
+        "trusted/selected.md",
+        "TRUSTED_SELECTED_SKILL_Y92: inspect declared files and publish.\n",
+    );
+    project.write("trusted/reference.txt", "TRUSTED_REFERENCE_Y92\n");
+    std::os::unix::fs::symlink("selected.md", project.path.join("trusted/not-regular.md")).unwrap();
+    project.write("trusted/oversized.txt", &"x".repeat(1024 * 1024 + 1));
+    project.git(&["add", "trusted"]);
+    project.git(&["commit", "-qm", "Canonical malformed selected inputs"]);
+    project.json(&["sync"]);
+    launch(&project, 4, "Independent valid audit");
+    let mut selected = std::fs::read_to_string(project.path.join(".yard/config.toml")).unwrap();
+    let profile = selected
+        .split_once("[profiles.durable]")
+        .unwrap()
+        .1
+        .to_string();
+    for (name, from, to) in [
+        ("linked", "trusted/selected.md", "trusted/not-regular.md"),
+        (
+            "oversized",
+            "trusted/reference.txt",
+            "trusted/oversized.txt",
+        ),
+    ] {
+        selected.push_str(&format!(
+            "\n[workflows.{name}]\naccess = \"read-only\"\nreview = \"none\"\nprofile = \"{name}\"\n\n[profiles.{name}]{}",
+            profile.replace("profiles.durable", &format!("profiles.{name}")).replace(from, to)
+        ));
+    }
+    project.reconfigure(&selected);
+    for (ticket, workflow, path, reason) in [
+        (
+            "Y-4",
+            "linked",
+            "trusted/not-regular.md",
+            "selected_regular_file",
+        ),
+        (
+            "Y-5",
+            "oversized",
+            "trusted/oversized.txt",
+            "selected_input_bound",
+        ),
+    ] {
+        project.json(&[
+            "ticket",
+            "new",
+            "--title",
+            "Malformed selected input",
+            "--workflow",
+            workflow,
+            "--priority",
+            "P0",
+        ]);
+        let refusal = machine.refused(&project.path, &["attempt", "start", ticket]);
+        assert_eq!(refusal["code"], "refused");
+        assert_eq!(refusal["message"], "invalid_input");
+        assert_eq!(refusal["data"], json!({"path": path, "reason": reason}));
+    }
+    let expected_sources = json!([
+        {"path": "trusted/selected.md", "blob": project.git(&["rev-parse", "HEAD:trusted/selected.md"]).trim(), "executable": false},
+        {"path": "trusted/reference.txt", "blob": project.git(&["rev-parse", "HEAD:trusted/reference.txt"]).trim(), "executable": false}
+    ]);
+    let mut independent = project.watch(project.json(&["status"])["seq"].as_i64().unwrap());
+    let valid = ended(&project, "Y-6", "Independent valid audit");
+    assert_eq!(valid["report"]["report"], expected_report());
+    assert_eq!(valid["result_eligible"], true);
+    independent.until(
+        "independent valid audit cleaned with malformed tickets ready",
+        |event| {
+            event["event"] == "execution.ended"
+                && event["attempt"] == 4
+                && event["data"]["kind"] == "cleanup"
+        },
+    );
+    assert_eq!(
+        project.json(&["attempt", "show", "Y-6"])["attempt"]["admission"]["inputs"]["trusted_staged_sources"],
+        expected_sources
+    );
+    for ticket in ["Y-4", "Y-5"] {
+        let shown = project.json(&["ticket", "show", ticket]);
+        assert_eq!(shown["state"], "open");
+        assert!(shown["attempt"].is_null());
+    }
+    assert!(
+        project
+            .rows("SELECT id FROM attempt WHERE ticket IN (4, 5)")
+            .is_empty()
+    );
+    assert!(project.rows("SELECT e.id FROM execution e JOIN attempt a ON a.id = e.attempt WHERE a.ticket IN (4, 5)").is_empty());
+    // Admission and cleanup observations are complete. Close these tickets
+    // before the next fixture config removes the workflows they name.
+    for ticket in ["Y-4", "Y-5"] {
+        project.json(&[
+            "ticket",
+            "abandon",
+            ticket,
+            "--reason",
+            "Malformed-input admission and independent cleanup observed",
+        ]);
+    }
+    // G8 admitted asset integrity: the image owns a changed controller whose
+    // launcher seal is valid. Sabotage: remove runAudit's admitted hash loop.
+    // The missing-module block still refuses through seal/import without that
+    // loop. Here the real package would execute its marker and call the model.
+    // Expected bytes are the fixture prefix plus repository package source;
+    // the real boxed seal, marker probe and host request count are observers.
+    const PREFIX: &str = "import { writeFileSync } from \"node:fs\"; writeFileSync(\"/yard/state/package-executed\", \"image-fixture\");";
+    let original = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../runners/durable-audit/runner.mjs"),
+    )
+    .unwrap();
+    image(
+        &project,
+        &format!(
+            "RUN cd /opt/yard/durable-audit && {{ printf '%s\\n' '{PREFIX}'; cat runner.mjs; }} > changed.mjs && mv changed.mjs runner.mjs && node/bin/node --no-addons seal.mjs && sha256sum --quiet --strict -c identity.sha256\n"
+        ),
+    );
+    let before = machine.model.requests().len();
+    launch(&project, 5, "Changed sealed controller");
+    let changed = ended(&project, "Y-7", "Changed sealed controller");
+    assert_eq!(
+        std::fs::read_to_string(machine.root.join("asset-5")).unwrap(),
+        format!("{PREFIX}\n{original}")
+    );
+    assert!(
+        std::fs::read_to_string(machine.root.join("fresh-5"))
+            .unwrap()
+            .lines()
+            .any(|line| line == "package_seal=0")
+    );
+    assert!(
+        std::fs::read_to_string(machine.root.join("probe-5"))
+            .unwrap()
+            .lines()
+            .any(|line| line == "package_executed=1")
+    );
+    assert_eq!(machine.model.requests().len(), before);
+    assert!(changed["report"].is_null());
+    assert_eq!(changed["result_eligible"], false);
+    assert_eq!(changed["result"]["outputs"], json!({}));
+    assert!(changed["result"]["outcome"].is_null());
+    let terminal = std::fs::read_to_string(machine.root.join("stdout-5"))
+        .unwrap()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|frame| frame["type"] == "yard_audit_terminal")
+        .unwrap();
+    assert_eq!(terminal["exit_code"], 1);
+    assert_eq!(
+        terminal["detail"],
+        "runner_unavailable:/opt/yard/durable-audit/runner.mjs"
+    );
+    project.json(&["ticket", "park", "Y-7"]);
+    project.json(&["attempt", "abandon", "Y-7"]);
+
+    image(&project, "");
+    launch(&project, 6, "Unchanged sealed controller control");
+    let corrected = ended(&project, "Y-8", "Unchanged sealed controller control");
+    assert_eq!(
+        std::fs::read_to_string(machine.root.join("asset-6")).unwrap(),
+        original
+    );
+    assert!(
+        std::fs::read_to_string(machine.root.join("fresh-6"))
+            .unwrap()
+            .lines()
+            .any(|line| line == "package_seal=0")
+    );
+    assert!(machine.model.requests().len() > before);
+    assert_eq!(corrected["report"]["report"], expected_report());
+    assert_eq!(corrected["result_eligible"], true, "{corrected}");
     let requests = controller_requests(&machine);
     for request in requests {
         assert_eq!(
@@ -443,6 +719,10 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
         "upstream_in_env=1",
         "upstream_in_files=1",
         "sentinel=1",
+        "unselected_guidance=1",
+        "unselected_extension=1",
+        "unselected_skill=1",
+        "candidate_skill=1",
         "scratch_write=0",
         "checkpoint_write=0",
     ] {
@@ -457,24 +737,40 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     }
     assert!(!transcript(&project, 3).contains(SECRET));
     assert!(
-        !serde_json::to_string(&project.rows("SELECT report FROM execution"))
+        !serde_json::to_string(&project.rows("SELECT * FROM execution"))
             .unwrap()
             .contains(SECRET)
+    );
+    assert!(
+        !serde_json::to_string(&project.rows("SELECT * FROM attempt"))
+            .unwrap()
+            .contains(SECRET)
+    );
+    assert!(
+        !serde_json::to_string(&project.rows("SELECT * FROM audit"))
+            .unwrap()
+            .contains(SECRET)
+    );
+    assert_eq!(
+        machine.model.requests().len(),
+        controller_requests(&machine).len()
     );
 }
 
 /// G8: a model repeatedly asks to read instead of publishing. The packaged
 /// controller stops at the spec's 12-request bound, not a timeout. A fresh
 /// execution in the same project publishes as its positive control.
-/// Sabotage: remove the request bound or synthesize a report at terminal text.
+/// Sabotage: remove the request bound, synthesize a report at terminal text,
+/// or route the selected terminal frame through Pi's stdout handling.
 /// Existing publication tests exercise neither internal Durable iterations
 /// nor this controller's bare-answer detection. Fixture supplies all replies.
 #[test]
 fn a_packaged_audit_bounds_iterations_and_requires_native_publication() {
     let machine = Machine::new("g8-durable-bound", |request| {
-        if let Some(reply) = outer(request) {
-            return reply;
-        }
+        assert!(
+            request.has_tool("read_declared"),
+            "outer Pi made a model request"
+        );
         if request.prompt().contains("Endless") {
             Reply::Tools(vec![tool(
                 "read_declared",
@@ -483,12 +779,12 @@ fn a_packaged_audit_bounds_iterations_and_requires_native_publication() {
         } else if request.prompt().contains("Bare") {
             Reply::Text("This is not a report.".into())
         } else {
-            Reply::Tools(vec![publish_report()])
+            Reply::Tools(vec![audit_report()])
         }
     });
     machine.start();
     let project = fixture(&machine);
-    image(&project, false);
+    image(&project, "");
     for (attempt, prompt, reason, count) in [
         (1, "Endless", "audit_limit", Some(12)),
         (2, "Bare", "missing_report", None),
@@ -498,6 +794,9 @@ fn a_packaged_audit_bounds_iterations_and_requires_native_publication() {
         let ticket = format!("Y-{attempt}");
         let execution = ended(&project, &ticket, prompt);
         assert!(execution["report"].is_null());
+        assert_eq!(execution["result_eligible"], false);
+        assert_eq!(execution["result"]["outputs"], json!({}));
+        assert!(execution["result"]["outcome"].is_null());
         if let Some(count) = count {
             assert_eq!(controller_requests(&machine).len() - before, count);
         }
@@ -507,8 +806,10 @@ fn a_packaged_audit_bounds_iterations_and_requires_native_publication() {
     }
     launch(&project, 3, "Publish control");
     let control = ended(&project, "Y-3", "Publish control");
+    assert_eq!(control["report"]["report"], expected_report());
+    assert_eq!(control["result_eligible"], true, "{control}");
     assert_eq!(
-        control["report"]["report"],
-        json!({"summary": "Fixture audit", "findings": []})
+        machine.model.requests().len(),
+        controller_requests(&machine).len()
     );
 }

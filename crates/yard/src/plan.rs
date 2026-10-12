@@ -48,8 +48,38 @@ pub enum Output {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
 pub enum Runner {
-    Agent { agent: String, instructions: String },
-    Command { gate: String },
+    Agent {
+        agent: String,
+        instructions: String,
+    },
+    Command {
+        gate: String,
+    },
+    Packaged {
+        package: String,
+        agent: String,
+        instructions: String,
+        skill: String,
+        #[serde(default)]
+        references: Vec<String>,
+        files: Vec<AuditFile>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditFile {
+    pub root: String,
+    pub path: String,
+}
+
+pub fn plain_path(path: &str) -> bool {
+    !path.is_empty()
+        && path.len() <= 1024
+        && !path.contains('\0')
+        && path
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != "..")
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -277,6 +307,19 @@ impl Config {
     /// Ordinary routes; the queue supplies the merged landing input.
     pub fn workflow_plan(&self, name: &str) -> Result<Plan, String> {
         let workflow = self.workflow(name)?;
+        if let Some(profile) = &workflow.profile {
+            let node = self
+                .profiles
+                .get(profile)
+                .ok_or_else(|| {
+                    format!("workflows.{name}.profile names unknown profile {profile:?}")
+                })?
+                .node();
+            return Ok(Plan {
+                inputs: BTreeMap::new(),
+                nodes: BTreeMap::from([("implementer".into(), node)]),
+            });
+        }
         let mut chain = vec![(
             "implementer".to_string(),
             Node {
@@ -412,8 +455,22 @@ impl Config {
             .chain(self.workflows.keys().map(String::as_str))
             .find(|name| {
                 self.workflow_plan(name).is_ok_and(|ordinary| {
-                    plan.ordinary_selection(&ordinary, self.review.max_rounds)
-                        .is_some()
+                    if plan
+                        .nodes
+                        .values()
+                        .any(|node| matches!(node.runner, Runner::Packaged { .. }))
+                    {
+                        plan.packaged().is_some() && self.workflow(name).is_ok_and(|workflow| {
+                            workflow.read_only
+                                && matches!(
+                                    &plan.nodes["implementer"].runner,
+                                    Runner::Packaged { agent, .. } if agent == &workflow.implementer
+                                )
+                        })
+                    } else {
+                        plan.ordinary_selection(&ordinary, self.review.max_rounds)
+                            .is_some()
+                    }
                 })
             })
             .map(str::to_string)
@@ -421,9 +478,34 @@ impl Config {
 }
 
 impl Plan {
+    pub fn packaged(&self) -> Option<&Runner> {
+        let node = self.nodes.get("implementer")?;
+        (self.inputs.is_empty()
+            && self.nodes.len() == 1
+            && !node.operator_failure
+            && node.access == Access::ReadOnly
+            && node.inputs.is_empty()
+            && node.requires.is_empty()
+            && node.routes.is_empty()
+            && node.outputs == BTreeMap::from([("result".into(), Output::Report)])
+            && node.outcomes == ["complete"]
+            && matches!(node.runner, Runner::Packaged { .. }))
+        .then_some(&node.runner)
+    }
+
+    pub fn runtime(&self) -> &'static str {
+        if self.packaged().is_some() {
+            "packaged-audit"
+        } else {
+            "ordinary-linear"
+        }
+    }
     pub fn admitted(admission: &Value) -> Result<Self, serde_json::Error> {
         let mut plan: Self = serde_json::from_value(admission["plan"].clone())?;
-        if admission["runtime"] != "ordinary-linear" && !plan.inputs.contains_key("feedback") {
+        if admission["runtime"] != "ordinary-linear"
+            && admission["runtime"] != "packaged-audit"
+            && !plan.inputs.contains_key("feedback")
+        {
             plan.ordinary_routes(admission["review"]["max_rounds"].as_u64().unwrap_or(3) as u32);
         }
         Ok(plan)
@@ -743,6 +825,55 @@ impl Plan {
 impl Node {
     pub fn validate_runner(&self, config: &Config, path: &str) -> Result<(), Invalid> {
         match &self.runner {
+            Runner::Packaged {
+                package,
+                agent,
+                instructions,
+                skill,
+                references,
+                files,
+            } => {
+                if package != "durable-audit" {
+                    return Err(Invalid::new(
+                        format!("{path}.runner.package"),
+                        "unresolved_reference",
+                    ));
+                }
+                if !config
+                    .agents
+                    .get(agent)
+                    .is_some_and(|agent| agent.harness == "pi")
+                {
+                    return Err(Invalid::new(
+                        format!("{path}.runner.agent"),
+                        "unresolved_reference",
+                    ));
+                }
+                if !plain_path(skill)
+                    || !skill.ends_with(".md")
+                    || references.len() >= 512
+                    || references.iter().any(|path| !plain_path(path))
+                    || references.iter().collect::<BTreeSet<_>>().len() != references.len()
+                    || references.contains(skill)
+                    || instructions.len() > 32768
+                    || files.len() + references.len() + 1 > 512
+                    || files.iter().any(|file| {
+                        !["source", "proof"].contains(&file.root.as_str())
+                            || file.path.is_empty()
+                            || file.path.len() > 1024
+                            || file.path.contains('\0')
+                    })
+                    || files
+                        .iter()
+                        .map(|file| (&file.root, &file.path))
+                        .collect::<BTreeSet<_>>()
+                        .len()
+                        != files.len()
+                {
+                    return Err(Invalid::new(format!("{path}.runner"), "invalid_input"));
+                }
+                Ok(())
+            }
             Runner::Agent { agent, .. } if !config.agents.contains_key(agent) => Err(Invalid::new(
                 format!("{path}.runner.agent"),
                 "unresolved_reference",
