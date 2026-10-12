@@ -36,11 +36,22 @@ pub async fn next(daemon: &Arc<Daemon>, project: &Arc<Project>) -> Result<(), Fa
     for approval in project.read(checks::queue)? {
         let attempt = project.read(|conn| attempts::get(conn, approval.attempt))?;
         let ticket = project.read(|conn| tickets::get(conn, attempt.ticket))?;
-        let blocked = project.read(|conn| {
-            Ok(attempts::open_attention(conn)?
-                .iter()
-                .any(|item| item.ticket == Some(ticket.id) && item.kind == "red"))
+        let (blocked, waiting) = project.read(|conn| {
+            let open = attempts::open_attention(conn)?;
+            Ok((
+                open.iter()
+                    .any(|item| item.ticket == Some(ticket.id) && item.kind == "red"),
+                open.iter().any(|item| {
+                    item.ticket == Some(ticket.id)
+                        && item.kind == "candidate"
+                        && item.reason == "landing"
+                }),
+            ))
         })?;
+        if waiting {
+            busy.insert(crate::git::target_ref(attempt.target_branch()?));
+            continue;
+        }
         if blocked {
             continue;
         }
@@ -65,7 +76,12 @@ pub async fn next(daemon: &Arc<Daemon>, project: &Arc<Project>) -> Result<(), Fa
             )?
             .into_iter()
             .next()
-            .filter(|row| matches!(row.outcome.as_deref(), Some("error" | "interrupted")));
+            .filter(|row| {
+                matches!(
+                    row.outcome.as_deref(),
+                    Some("error" | "interrupted" | "fail")
+                )
+            });
             let id = executions::start(
                 tx,
                 executions::Start {
@@ -123,8 +139,18 @@ fn passing_child(
     target: &str,
     merged: &str,
 ) -> bool {
+    judgment_child(child, row, target, merged, "pass")
+}
+
+fn judgment_child(
+    child: &executions::Execution,
+    row: &executions::Execution,
+    target: &str,
+    merged: &str,
+    verdict: &str,
+) -> bool {
     child.kind == "gate"
-        && child.outcome.as_deref() == Some("pass")
+        && child.outcome.as_deref() == Some(verdict)
         && child.result_eligible
         && child.lock_contract
         && child.base.as_deref() == Some(target)
@@ -139,9 +165,100 @@ fn passing_child(
         })
         && child.result.as_ref().is_some_and(|result| {
             result["infrastructure"]["outcome"] == "completed"
-                && result["judgment"]["verdict"] == "pass"
-                && result["outputs"]["result"]["value"]["verdict"] == "pass"
+                && result["judgment"]["verdict"] == verdict
+                && result["outputs"]["result"]["value"]["verdict"] == verdict
         })
+}
+
+/// A failed merged judgment binds its original preparation, not a successor.
+pub fn failed_evidence(
+    conn: &rusqlite::Connection,
+    child: &executions::Execution,
+    original: &executions::Execution,
+) -> Result<Option<serde_json::Value>, Fail> {
+    let original = executions::get(conn, original.id)?;
+    let Some(prepared) = &original.prepared else {
+        return Ok(None);
+    };
+    let target = prepared["old"].as_str().unwrap_or_default();
+    let merged = prepared["merged"].as_str().unwrap_or_default();
+    if child.attempt != original.attempt
+        || !judgment_child(child, &original, target, merged, "fail")
+        || child
+            .result
+            .as_ref()
+            .is_none_or(|result| result["outcome"] != "failed")
+    {
+        return Ok(None);
+    }
+    let Some(parent) = child.parent else {
+        return Ok(None);
+    };
+    let parent = executions::get(conn, parent)?;
+    let ancestors = history(conn, &parent)?;
+    if ancestors.last().unwrap_or(&parent).id != original.id
+        || parent.attempt != original.attempt
+        || parent.approval != original.approval
+    {
+        return Ok(None);
+    }
+    let attempt = attempts::get(conn, original.attempt)?;
+    let Some(admission) = &attempt.admission else {
+        return Ok(None);
+    };
+    let plan =
+        crate::plan::Plan::admitted(admission).map_err(|error| Fail::refused(error.to_string()))?;
+    if !child
+        .node
+        .as_ref()
+        .and_then(|name| plan.nodes.get(name))
+        .is_some_and(|node| node.operator_failure)
+    {
+        return Ok(None);
+    }
+    let Some(check) = checks::for_execution(conn, child.id)? else {
+        return Ok(None);
+    };
+    if check.verdict != "fail" || check.kind != "gate" {
+        return Ok(None);
+    }
+    let input = checks::Input {
+        attempt: child.attempt,
+        base: target.into(),
+        head: merged.into(),
+        proof: child.proof.clone().unwrap_or_default(),
+        ticket_revision: child.ticket_revision.unwrap_or_default(),
+        plan_revision: child.plan_revision,
+        digest: conn.query_row(
+            "SELECT digest FROM execution WHERE id = ?1",
+            [child.id],
+            |row| row.get(0),
+        )?,
+    };
+    let mut evidence = checks::evidence(conn, &check, &input)?;
+    evidence["inputs"] = json!(child.inputs);
+    evidence["landing"] = json!({"execution": original.id, "approval": original.approval,
+        "target": attempt.target_branch, "base": original.base, "head": original.head,
+        "proof": original.proof, "revision": original.ticket_revision,
+        "plan_revision": original.plan_revision, "prepared": prepared});
+    Ok(Some(evidence))
+}
+
+fn accepted_child(
+    conn: &rusqlite::Connection,
+    child: &executions::Execution,
+    row: &executions::Execution,
+    original: &executions::Execution,
+    target: &str,
+    merged: &str,
+) -> Result<bool, Fail> {
+    if passing_child(child, row, target, merged) {
+        return Ok(true);
+    }
+    let Some(evidence) = failed_evidence(conn, child, original)? else {
+        return Ok(false);
+    };
+    Ok(checks::decision(conn, row.attempt, &evidence)?.as_deref() == Some("accept"))
 }
 
 fn retire_preparation(tx: &rusqlite::Connection, execution: i64, reason: &str) -> Result<(), Fail> {
@@ -408,6 +525,7 @@ pub async fn land(
     let target_lock = project.target_lock(&crate::git::target_ref(attempt.target_branch()?));
 
     let predecessors = project.read(|conn| history(conn, &row))?;
+    let original = predecessors.last().unwrap_or(&row);
     let mut retained = Vec::new();
     let prepared = super::capacity::effect(daemon, project, execution, async {
         let held = target_lock.lock().await;
@@ -527,6 +645,7 @@ pub async fn land(
     let Some((loaded, target_ref, target, merged)) = prepared else {
         return Ok(());
     };
+    let original = project.read(|conn| executions::get(conn, original.id))?;
 
     let plan = match &attempt.admission {
         Some(admission) => crate::plan::Plan::admitted(admission)
@@ -560,12 +679,39 @@ pub async fn land(
             .ok_or_else(|| Fail::refused("admitted landing gate absent"))?;
         if let Some(child) = retained.iter().rev().find(|child| {
             child.name.as_deref() == Some(&gate.name)
-                && passing_child(child, &row, &target, &merged)
+                && matches!(child.outcome.as_deref(), Some("pass" | "fail"))
         }) {
             let admitted = super::capacity::effect(daemon, project, execution, async {
                 let held = target_lock.lock().await;
+                if daemon
+                    .git
+                    .rev_parse(&canonical, &target_ref)
+                    .await?
+                    .as_deref()
+                    != Some(&target)
+                    || daemon
+                        .git
+                        .rev_parse(&canonical, &format!("refs/yard/landings/{}", original.id))
+                        .await?
+                        .as_deref()
+                        != Some(&merged)
+                {
+                    return project.tx(|tx| {
+                        retire_preparation(tx, execution, "prepared_input_changed")?;
+                        Ok(Ok(false))
+                    });
+                }
                 admit(daemon, project, &held, approval.id, execution, |tx, _| {
-                    if !passing_child(&executions::get(tx, child.id)?, &row, &target, &merged) {
+                    let current = executions::get(tx, child.id)?;
+                    if node.operator_failure
+                        && current.outcome.as_deref() == Some("fail")
+                        && let Some(evidence) = failed_evidence(tx, &current, &original)?
+                        && checks::decision(tx, row.attempt, &evidence)?.as_deref()
+                            == Some("repair")
+                    {
+                        return Ok(true);
+                    }
+                    if !accepted_child(tx, &current, &row, &original, &target, &merged)? {
                         retire_preparation(tx, execution, "prepared_child_evidence_changed")?;
                         return Ok(false);
                     }
@@ -587,6 +733,28 @@ pub async fn land(
                         &lapse,
                     );
                 }
+            }
+            if child.outcome.as_deref() == Some("fail")
+                && project
+                    .read(|conn| {
+                        let evidence = failed_evidence(conn, child, &original)?.unwrap_or_default();
+                        checks::decision(conn, row.attempt, &evidence)
+                    })?
+                    .as_deref()
+                    == Some("repair")
+            {
+                let detail = format!(
+                    "The gate {} failed on the merged ref {merged}:\n{}",
+                    gate.name,
+                    child.detail.as_deref().unwrap_or_default()
+                );
+                return super::capacity::effect(
+                    daemon,
+                    project,
+                    execution,
+                    returned(daemon, project, &loaded, execution, &target, "red", &detail),
+                )
+                .await;
             }
             selected.push(child.id);
             continue;
@@ -709,8 +877,38 @@ pub async fn land(
                 let detail = format!(
                     "The gate {} failed on the merged ref {merged}:\n{}",
                     gate.name,
-                    result.detail.unwrap_or_default()
+                    result.detail.as_deref().unwrap_or_default()
                 );
+                if node.operator_failure && judgment_child(&result, &row, &target, &merged, "fail")
+                {
+                    return super::capacity::effect(daemon, project, execution, async {
+                        let held = target_lock.lock().await;
+                        let admitted = admit(daemon, project, &held, approval.id, execution, |tx, now| {
+                            checks::record(tx, checks::Record {
+                                execution: child, kind: "gate", verdict: "fail", ticket: ticket.id,
+                            })?;
+                            let evidence = failed_evidence(tx, &executions::get(tx, child)?, &original)?
+                                .ok_or_else(|| Fail::refused("failed landing evidence is ineligible"))?;
+                            attempts::raise(tx, attempts::Raise {
+                                kind: "candidate", reason: "landing", ticket: Some(ticket.id),
+                                attempt: Some(attempt.id), execution: Some(child),
+                                payload: json!({"actor": "operator", "target": attempt.target_branch,
+                                    "base": approval.base, "head": approval.head, "proof": approval.proof,
+                                    "revision": ticket.revision, "plan_revision": attempt.plan_revision(),
+                                    "gate_digest": now.loaded.gate_digest,
+                                    "review_digest": now.loaded.review_digest(&attempt.workflow)?,
+                                    "evidence": evidence}), text: None,
+                            })?;
+                            executions::end(tx, execution, executions::End {
+                                outcome: "fail", detail: Some(&detail), ticket: Some(ticket.id), ..Default::default()
+                            })
+                        }).await?;
+                        match admitted {
+                            Ok(()) => Ok(()),
+                            Err((now, lapse)) => withdraw(project, &now.loaded, execution, &now.approval, &now.attempt, &lapse),
+                        }
+                    }).await;
+                }
                 return super::capacity::effect(
                     daemon,
                     project,
@@ -763,10 +961,9 @@ pub async fn land(
     let mut held = None;
     let result = super::capacity::effect(daemon, project, execution, async {
         let held = held.insert(target_lock.lock().await);
-        let original = predecessors.last().map_or(execution, |row| row.id);
         if daemon
             .git
-            .rev_parse(&canonical, &format!("refs/yard/landings/{original}"))
+            .rev_parse(&canonical, &format!("refs/yard/landings/{}", original.id))
             .await?
             .as_deref()
             != Some(&merged)
@@ -776,7 +973,9 @@ pub async fn land(
         let admitted = admit(daemon, project, held, approval.id, execution, |tx, now| {
             for child in &selected {
                 let child = executions::get(tx, *child)?;
-                if child.node.is_some() && !passing_child(&child, &row, &target, &merged) {
+                if child.node.is_some()
+                    && !accepted_child(tx, &child, &row, &original, &target, &merged)?
+                {
                     retire_preparation(tx, execution, "prepared_child_evidence_changed")?;
                     return Ok(false);
                 }

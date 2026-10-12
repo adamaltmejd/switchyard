@@ -86,7 +86,7 @@ pub fn current(
         .query_row(
             &format!(
                 "{SELECT}
-                 WHERE c.kind = ?1 AND e.name = ?2 AND e.attempt = ?3
+                 WHERE c.kind = ?1 AND e.name = ?2 AND e.attempt = ?3 AND e.parent IS NULL
                  AND e.base = ?4 AND e.head = ?5 AND e.ticket_revision = ?6 AND e.digest = ?7
                  AND COALESCE(e.proof, '') = ?8 AND e.plan_revision IS ?9
                  AND (c.kind != 'review' OR e.mcp = 'registered')

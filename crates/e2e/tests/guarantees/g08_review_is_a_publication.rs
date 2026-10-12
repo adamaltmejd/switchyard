@@ -239,6 +239,7 @@ fn select_attempt(machine: &Machine, project: &Project, entry: &str) -> Value {
     };
     if entry == "landing-gate-check" {
         overrides["candidate-gate-check"] = json!({"operator_failure": true});
+        overrides[entry]["operator_failure"] = json!(true);
     }
     operator.call(
         "yard_attempt_start",
@@ -1352,6 +1353,37 @@ fn a_gate_errors_start_reruns_that_gate() {
     assert_eq!(approvals.len(), 1);
     assert_eq!(approvals[0]["state"], "active");
 
+    // G8: selecting operator handling cannot accept a merged infrastructure
+    // error. Sabotage: publish a failed judgment on box-up error. The real
+    // same-input retry below supplies the positive control.
+    let item = project.json(&["attempt", "show", "Y-1"])["attention"][0].clone();
+    watch.find("error landing released", |event| {
+        event["event"] == "execution.released" && event["execution"] == child["parent"]
+    });
+    let before = project.rows("SELECT * FROM audit ORDER BY seq");
+    let refused = project.refused(&[
+        "attempt",
+        "accept",
+        "Y-1",
+        "--attention",
+        &item["attention"].to_string(),
+        "--check",
+        "0",
+        "--plan-revision",
+        "1",
+        "--target",
+        "main",
+        "--head",
+        head,
+        "--proof",
+        proof,
+        "--text",
+        "Accept merged infrastructure error",
+    ]);
+    assert_eq!(refused["code"], "stale");
+    assert_eq!(refused["data"]["identity"], "attention");
+    assert_eq!(project.rows("SELECT * FROM audit ORDER BY seq"), before);
+
     std::fs::remove_file(&path).unwrap();
     project.json(&["attempt", "start", "Y-1"]);
     watch.event("landing.recorded", &[]);
@@ -2460,6 +2492,7 @@ fn selected_failures_continue_without_rewriting_judgments() {
         json!({
             "project": project.path, "ticket": "Y-2", "workflow": "default", "overrides": {
                 "candidate-gate-first": {"operator_failure": true},
+                "landing-gate-first": {"operator_failure": true},
                 "review-0": {"operator_failure": true}
             }
         }),
@@ -2588,17 +2621,54 @@ fn selected_failures_continue_without_rewriting_judgments() {
             .len(),
         2
     );
-    // Advancing the target supplies the fixture's successful landing gate,
-    // without changing the accepted candidate or its failed checks.
-    project.write("landing.txt", "landing\n");
-    project.git(&["add", "landing.txt"]);
-    project.git(&["commit", "-qm", "Allow merged gate"]);
+    // G8/G3: the selected merged failure also keeps its failed evidence.
+    // Sabotage: return it for repair, rewrite it to pass or skip remaining gates.
+    project.write("target.txt", "target\n");
+    project.git(&["add", "target.txt"]);
+    project.git(&["commit", "-qm", "Advance target"]);
     project.json(&["sync", "main"]);
     let head = approval["data"]["payload"]["head"].as_str().unwrap();
     project.json(&[
         "attempt", "approve", "Y-2", "--target", "main", "--head", head,
     ]);
+    let landing = watch.attention();
+    assert_eq!(landing["data"]["reason"], "landing");
+    let payload = &landing["data"]["payload"];
+    let evidence = &payload["evidence"];
+    let original_landing = &evidence["landing"];
+    watch.find("failed landing released", |event| {
+        event["event"] == "execution.released"
+            && event["execution"] == original_landing["execution"]
+    });
+    let landing_check = evidence["check"]["check"].as_i64().unwrap();
+    let merged_failure = project.rows(&format!("SELECT c.*, e.result, e.inputs FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE c.id = {landing_check}"));
+    assert_eq!(evidence["check"]["verdict"], "fail");
+    assert_eq!(evidence["result"]["outcome"], "failed");
+    let merged = git(
+        &project.canonical(),
+        &[
+            "rev-parse",
+            &format!("refs/yard/landings/{}", original_landing["execution"]),
+        ],
+    )
+    .trim()
+    .to_string();
+    assert_eq!(evidence["check"]["head"], merged);
+    let merged_answer = json!({
+        "project": project.path, "ticket": "Y-2", "attention": landing["attention"],
+        "check": landing_check, "plan_revision": 1, "target": "main", "head": head,
+        "proof": payload["proof"], "text": "Accept the exact merged failure",
+        "landing": original_landing["execution"], "child": evidence["check"]["execution"],
+        "node": evidence["node"], "base": original_landing["base"], "revision": original_landing["revision"],
+        "old": original_landing["prepared"]["old"], "merged": merged
+    });
+    let accepted = operator.call("yard_attempt_accept", merged_answer.clone());
+    assert_eq!(accepted["result"]["accepted"], true, "{accepted}");
     watch.event("landing.recorded", &[]);
+    assert_eq!(project.canonical_head(), merged);
+    assert_eq!(project.rows("SELECT node, outcome, head FROM execution WHERE attempt = 3 AND parent IS NOT NULL ORDER BY id"),
+        vec![json!({"node": "landing-gate-first", "outcome": "fail", "head": merged}),
+             json!({"node": "landing-gate-remaining", "outcome": "pass", "head": merged})]);
     let cleanup = watch.find("accepted candidate cleanup", |event| {
         event["event"] == "execution.ended"
             && event["data"]["kind"] == "cleanup"
@@ -2625,6 +2695,20 @@ fn selected_failures_continue_without_rewriting_judgments() {
     machine.start();
     project.json(&["status"]);
     assert_eq!(project.rows(&query), original);
+    assert_eq!(project.rows(&format!("SELECT c.*, e.result, e.inputs FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE c.id = {landing_check}")), merged_failure);
+    // G2: a delayed duplicate answer after cleanup and restart cannot name a
+    // new attempt. Sabotage: accept ended-attempt evidence. The first answer
+    // above is its same-project successful control.
+    let mut operator = machine.operator();
+    operator.initialize();
+    let before = project.rows("SELECT * FROM audit ORDER BY seq");
+    let refused = operator.call("yard_attempt_accept", merged_answer);
+    assert_eq!(refused["error"]["code"], "stale");
+    assert_eq!(
+        refused["error"]["data"],
+        json!({"identity": "attempt", "expected": 3, "current": null})
+    );
+    assert_eq!(project.rows("SELECT * FROM audit ORDER BY seq"), before);
     final_hold.release();
 
     // A selected final result may block while its own publication passes.

@@ -4,9 +4,18 @@ use e2e::*;
 use serde_json::json;
 
 fn worker() -> impl Fn(&ModelRequest) -> Reply + Send + Sync + 'static {
-    |request| match request.turn() {
-        0 => Reply::Tools(vec![commit_file("feature.txt", "feature\n", "Add feature")]),
-        _ => Reply::Text("done".into()),
+    |request| {
+        if request
+            .prompt()
+            .contains("Your workspace is read-only. Plan the work")
+        {
+            planned(request)
+        } else {
+            match request.turn() {
+                0 => Reply::Tools(vec![commit_file("feature.txt", "feature\n", "Add feature")]),
+                _ => Reply::Text("done".into()),
+            }
+        }
     }
 }
 
@@ -300,6 +309,8 @@ fn a_landing_retires_when_canonical_moves_before_update_ref() {
 /// G2/G3: a held host child proves the prepared input before restart.
 /// Sabotage: regenerate the unchanged merge, replay its passing child, promote
 /// the interrupted child, or reuse either child after the target advances.
+/// Rewrite an accepted failure to pass, inherit acceptance on fresh preparation,
+/// consume it before teardown, or bypass the final target CAS.
 fn prepared_host_child_restart(advance: bool) {
     let machine = Machine::new(
         if advance {
@@ -330,6 +341,7 @@ fn prepared_host_child_restart(advance: bool) {
         .unwrap();
     let gates = format!(
         "[gates.first]\ncommand = \"git rev-parse HEAD >> {}\"\nstage = \"landing\"\nruns_in = \"host\"\n\
+         [gates.middle]\ncommand = \"false\"\nstage = \"landing\"\nruns_in = \"host\"\n\
          [gates.second]\ncommand = \"if [ -e '{}' ]; then echo $$ > {}; read line < {}; fi\"\nstage = \"landing\"\nruns_in = \"host\"\n",
         observed.display(),
         armed.display(),
@@ -345,7 +357,42 @@ fn prepared_host_child_restart(advance: bool) {
     project.git(&["checkout", "--quiet", "-b", "feature/a"]);
     project.json(&["sync", "feature/a"]);
     let mut watch = project.watch(0);
-    let head = candidate_behind_target(&project, &mut watch);
+    project.json(&[
+        "ticket",
+        "new",
+        "--title",
+        "Selected merged failure",
+        "--target",
+        "feature/a",
+        "--workflow",
+        "plan",
+    ]);
+    watch.event("attempt.ended", &[("outcome", "planned")]);
+    let cleanup = watch.find("planner cleanup", |event| {
+        event["event"] == "execution.ended" && event["data"]["kind"] == "cleanup"
+    });
+    watch.find("planner released", |event| {
+        event["event"] == "execution.released" && event["execution"] == cleanup["execution"]
+    });
+    let mut operator = machine.operator();
+    operator.initialize();
+    let started = operator.call(
+        "yard_attempt_start",
+        json!({
+            "project": project.path, "ticket": "Y-1", "workflow": "default",
+            "overrides": {"landing-gate-middle": {"operator_failure": true}}
+        }),
+    );
+    assert!(started.get("error").is_none(), "{started}");
+    let approval = watch.attention();
+    let head = approval["data"]["payload"]["head"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    project.write("other.txt", "other\n");
+    project.git(&["add", "other.txt"]);
+    project.git(&["commit", "-qm", "Operator change"]);
+    project.json(&["sync", "feature/a"]);
     let target = git(&project.canonical(), &["rev-parse", "refs/heads/feature/a"])
         .trim()
         .to_string();
@@ -359,10 +406,31 @@ fn prepared_host_child_restart(advance: bool) {
         "--head",
         &head,
     ]);
+    let failure = watch.attention();
+    assert_eq!(failure["data"]["reason"], "landing");
+    let evidence = &failure["data"]["payload"]["evidence"];
+    let identity = &evidence["landing"];
+    watch.find("failed preparation released", |event| {
+        event["event"] == "execution.released" && event["execution"] == identity["execution"]
+    });
+    let decision = json!({
+        "project": project.path, "ticket": "Y-1", "attention": failure["attention"],
+        "check": evidence["check"]["check"], "plan_revision": 1, "target": "feature/a", "head": head,
+        "proof": failure["data"]["payload"]["proof"], "text": "Accept pinned merged failure",
+        "landing": identity["execution"], "child": evidence["check"]["execution"], "node": evidence["node"],
+        "base": identity["base"], "revision": identity["revision"],
+        "old": identity["prepared"]["old"], "merged": identity["prepared"]["merged"]
+    });
+    let failure_check = evidence["check"]["check"].as_i64().unwrap();
+    let failure_snapshot = project.rows(&format!("SELECT c.*, e.result, e.inputs FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE c.id = {failure_check}"));
+    assert_eq!(evidence["check"]["verdict"], "fail");
+    assert_eq!(evidence["result"]["outcome"], "failed");
+    let accepted = operator.call("yard_attempt_accept", decision.clone());
+    assert_eq!(accepted["result"]["accepted"], true, "{accepted}");
     let group = watch.said(&said_path).trim().to_string();
     drop(watch);
     let parent = project
-        .rows("SELECT id, prepared, intent_state FROM execution WHERE kind = 'landing'")[0]
+        .rows("SELECT id, prepared, intent_state FROM execution WHERE kind = 'landing' AND prepared IS NOT NULL")[0]
         .clone();
     let parent_id = parent["id"].as_i64().unwrap();
     let merged = git(
@@ -383,9 +451,8 @@ fn prepared_host_child_restart(advance: bool) {
     ));
     assert_eq!(completed[0]["outcome"], "pass");
     assert_eq!(completed[0]["teardown"], 1);
-    let child = project.rows(&format!(
-        "SELECT id FROM execution WHERE parent = {parent_id} AND name = 'second'"
-    ))[0]["id"]
+    let child = project
+        .rows("SELECT id FROM execution WHERE name = 'second' AND status = 'running'")[0]["id"]
         .as_i64()
         .unwrap();
     let lock = std::fs::OpenOptions::new()
@@ -393,7 +460,7 @@ fn prepared_host_child_restart(advance: bool) {
         .open(
             project
                 .path
-                .join(format!(".yard/local/attempts/1/effects/{child}/lock")),
+                .join(format!(".yard/local/attempts/2/effects/{child}/lock")),
         )
         .unwrap();
     assert!(matches!(
@@ -401,6 +468,7 @@ fn prepared_host_child_restart(advance: bool) {
         Err(std::fs::TryLockError::WouldBlock)
     ));
     machine.kill();
+    assert_eq!(project.rows(&format!("SELECT c.*, e.result, e.inputs FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE c.id = {failure_check}")), failure_snapshot);
     // Held until reconciliation kills the recorded host group. Canonical has
     // not moved and there is no mutation intent before restarting.
     assert!(
@@ -449,7 +517,44 @@ fn prepared_host_child_restart(advance: bool) {
     };
     machine.start();
     let mut watch = project.watch(0);
+    if advance {
+        let fresh = watch.find("fresh merged failure", |event| {
+            event["event"] == "attention.raised"
+                && event["data"]["reason"] == "landing"
+                && event["attention"] != failure["attention"]
+        });
+        let evidence = &fresh["data"]["payload"]["evidence"];
+        let identity = &evidence["landing"];
+        watch.find("fresh preparation released", |event| {
+            event["event"] == "execution.released" && event["execution"] == identity["execution"]
+        });
+        let mut operator = machine.operator();
+        operator.initialize();
+        let before = project.rows("SELECT * FROM audit ORDER BY seq");
+        let decisions = project.rows("SELECT * FROM attention ORDER BY id");
+        let refused = operator.call("yard_attempt_accept", decision);
+        assert_eq!(refused["error"]["code"], "stale");
+        assert_eq!(
+            refused["error"]["data"],
+            json!({"identity": "old", "expected": target, "current": expected_target})
+        );
+        assert_eq!(project.rows("SELECT * FROM audit ORDER BY seq"), before);
+        assert_eq!(
+            project.rows("SELECT * FROM attention ORDER BY id"),
+            decisions
+        );
+        let accepted = operator.call("yard_attempt_accept", json!({
+            "project": project.path, "ticket": "Y-1", "attention": fresh["attention"],
+            "check": evidence["check"]["check"], "plan_revision": 1, "target": "feature/a", "head": head,
+            "proof": fresh["data"]["payload"]["proof"], "text": "Accept fresh prepared failure",
+            "landing": identity["execution"], "child": evidence["check"]["execution"], "node": evidence["node"],
+            "base": identity["base"], "revision": identity["revision"],
+            "old": identity["prepared"]["old"], "merged": identity["prepared"]["merged"]
+        }));
+        assert_eq!(accepted["result"]["accepted"], true, "{accepted}");
+    }
     watch.event("landing.recorded", &[]);
+    assert_eq!(project.rows(&format!("SELECT c.*, e.result, e.inputs FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE c.id = {failure_check}")), failure_snapshot);
     assert!(
         !std::process::Command::new("kill")
             .args(["-0", "--", &format!("-{group}")])
@@ -484,29 +589,48 @@ fn prepared_host_child_restart(advance: bool) {
         serde_json::from_str(final_row["inputs"].as_str().unwrap()).unwrap();
     if advance {
         assert_ne!(landed, merged);
-        assert_eq!(final_row["resumed"], serde_json::Value::Null);
+        let fresh_parent = project.rows("SELECT id FROM execution WHERE kind = 'landing' AND prepared IS NOT NULL ORDER BY id DESC LIMIT 1")[0]["id"].clone();
+        assert_eq!(final_row["resumed"], fresh_parent);
         assert!(
             !inputs["children"]
                 .as_array()
                 .unwrap()
                 .contains(&completed[0]["id"])
         );
+        assert!(
+            !inputs["children"]
+                .as_array()
+                .unwrap()
+                .contains(&evidence["check"]["execution"])
+        );
         assert_eq!(
             std::fs::read_to_string(&observed).unwrap(),
             format!("{merged}\n{landed}\n")
         );
         assert_eq!(
-            project.rows("SELECT outcome FROM execution WHERE kind = 'landing' ORDER BY id")[1]["outcome"],
+            project.rows(
+                "SELECT outcome FROM execution WHERE kind = 'landing' AND outcome = 'retired'"
+            )[0]["outcome"],
             "retired"
         );
     } else {
         assert_eq!(landed, merged);
-        assert_eq!(final_row["resumed"], parent_id);
+        let previous = project
+            .rows("SELECT id FROM execution WHERE kind = 'landing' AND outcome = 'interrupted'")[0]
+            ["id"]
+            .clone();
+        assert_eq!(final_row["resumed"], previous);
         assert!(
             inputs["children"]
                 .as_array()
                 .unwrap()
                 .contains(&completed[0]["id"])
+        );
+        assert!(
+            inputs["children"]
+                .as_array()
+                .unwrap()
+                .contains(&evidence["check"]["execution"])
         );
         assert_eq!(
             std::fs::read_to_string(&observed).unwrap(),

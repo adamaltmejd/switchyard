@@ -483,7 +483,9 @@ impl Plan {
             let complete = node.routes.get("complete").cloned();
             let operator_failure = node.operator_failure;
             if operator_failure
-                && !(name.starts_with("candidate-gate-") || name.starts_with("review-"))
+                && !(name.starts_with("candidate-gate-")
+                    || name.starts_with("review-")
+                    || name.starts_with("landing-gate-"))
             {
                 return None;
             }
@@ -519,6 +521,14 @@ impl Plan {
     /// Upgrade the ordinary descriptive chain in memory. Persisted admission
     /// and historical execution evidence remain untouched.
     pub fn ordinary_routes(&mut self, max_rounds: u32) {
+        for (name, node) in &mut self.nodes {
+            if name.starts_with("landing-gate-")
+                && node.operator_failure
+                && !node.outcomes.iter().any(|outcome| outcome == "failed")
+            {
+                node.outcomes.push("failed".into());
+            }
+        }
         if self
             .nodes
             .get("implementer")

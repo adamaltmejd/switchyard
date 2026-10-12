@@ -109,11 +109,16 @@ use `yard_ticket_show`, `yard_attempt_tail` and `yard_attempt_stats` for
 drilldowns. Cancelling a wait releases the request while work continues.
 Workers keep their separate execution-scoped HTTP grants.
 
-Before admission, candidate gate and seat overrides may select
+Before admission, candidate gate, seat and landing gate overrides may select
 `operator_failure = true`. Eligible failures then ask the operator to
 `accept` the named attention with text or take `repair`. Acceptance keeps
 the failed evidence and runs every remaining selected candidate check
-before approval. Landing gates still have to pass.
+before approval. A failed selected merged gate keeps approval active and
+asks the same question on its pinned prepared input. Its answer also names
+the original `landing`, `child`, `node`, candidate `base`, ticket `revision`,
+target `old` and `merged` head. Acceptance runs the remaining landing gates
+before queue landing and compare-and-swap. Infrastructure errors and unknown
+ownership cannot be accepted; fresh preparation inherits no answer.
 
 ## Development
 
