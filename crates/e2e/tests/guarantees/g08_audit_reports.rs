@@ -279,7 +279,31 @@ fn an_unbound_legacy_planner_requires_a_fresh_admitted_attempt() {
         "--workflow",
         "plan",
     ]);
-    hold.wait_held();
+    if let Err(failure) =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hold.wait_held()))
+    {
+        // Capture the old fixture before Machine::drop removes it. Project
+        // only identities, lifecycle and fixed error flags, never raw detail,
+        // audit payloads, model bodies, headers or credentials.
+        let evidence = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let requests = machine.model.requests();
+            json!({
+                "model_requests": requests.len(),
+                "report_tool_requests": requests.iter().filter(|request| request.has_tool("yard_publish_report")).count(),
+                "attempts": project.rows("SELECT id, ticket, state, outcome, cleaned FROM attempt ORDER BY id LIMIT 16"),
+                "executions": project.rows("SELECT id, attempt, parent, kind, reason, status, outcome, ticket_revision, mcp, exit_cause, exit_code, handle IS NOT NULL AS has_handle, length(CAST(detail AS BLOB)) AS detail_bytes, instr(COALESCE(detail, ''), 'image') > 0 AS mentions_image, instr(COALESCE(detail, ''), 'box') > 0 AS mentions_box, instr(COALESCE(detail, ''), 'timed out') > 0 AS mentions_timeout, instr(COALESCE(detail, ''), 'ownership') > 0 AS mentions_ownership, instr(COALESCE(detail, ''), 'registration') > 0 AS mentions_registration FROM execution ORDER BY id LIMIT 16"),
+                "attention": project.rows("SELECT id, ticket, attempt, execution, kind, reason, state FROM attention ORDER BY id LIMIT 16"),
+                "history": project.rows("SELECT seq, event, ticket, attempt, execution, attention FROM audit ORDER BY seq DESC LIMIT 64")
+            })
+        }));
+        match evidence {
+            Ok(evidence) => eprintln!("legacy planner first-hold evidence: {evidence}"),
+            Err(_) => eprintln!(
+                "legacy planner first-hold evidence unavailable: read-only capture failed"
+            ),
+        }
+        std::panic::resume_unwind(failure);
+    }
     project.json(&["attempt", "stop", "Y-1"]);
     watch.find("old planner stopped", |event| {
         event["event"] == "attention.raised" && event["data"]["kind"] == "stopped"
