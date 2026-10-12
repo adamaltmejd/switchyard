@@ -1356,7 +1356,8 @@ fn a_gate_errors_start_reruns_that_gate() {
     // G8: selecting operator handling cannot accept a merged infrastructure
     // error. Sabotage: publish a failed judgment on box-up error. The real
     // same-input retry below supplies the positive control.
-    let item = project.json(&["attempt", "show", "Y-1"])["attention"][0].clone();
+    // Landing infrastructure attention has no attempt, so attempt show omits it.
+    let attention = red["attention"].as_i64().unwrap().to_string();
     watch.find("error landing released", |event| {
         event["event"] == "execution.released" && event["execution"] == child["parent"]
     });
@@ -1366,7 +1367,7 @@ fn a_gate_errors_start_reruns_that_gate() {
         "accept",
         "Y-1",
         "--attention",
-        &item["attention"].to_string(),
+        &attention,
         "--check",
         "0",
         "--plan-revision",
@@ -1382,6 +1383,11 @@ fn a_gate_errors_start_reruns_that_gate() {
     ]);
     assert_eq!(refused["code"], "stale");
     assert_eq!(refused["data"]["identity"], "attention");
+    assert_eq!(refused["data"]["expected"], red["attention"]);
+    assert_eq!(refused["data"]["current"]["attention"], red["attention"]);
+    assert_eq!(refused["data"]["current"]["kind"], "red");
+    assert_eq!(refused["data"]["current"]["reason"], "landing");
+    assert_eq!(refused["data"]["current"]["attempt"], Value::Null);
     assert_eq!(project.rows("SELECT * FROM audit ORDER BY seq"), before);
 
     std::fs::remove_file(&path).unwrap();
