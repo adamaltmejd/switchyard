@@ -316,7 +316,17 @@ profile = "reporter"
         "yard_ticket_new",
         json!({"title": "Report", "workflow": "plan"}),
     );
-    history.event("attempt.ended", &[("outcome", "planned")]);
+    let planner = history.event("attempt.ended", &[("outcome", "planned")]);
+    // Attempt completion precedes checked release. Snapshot only after its
+    // cleanup also releases, so background settlement cannot change the rows.
+    let cleanup = history.find("planner cleanup", |event| {
+        event["event"] == "execution.ended"
+            && event["data"]["kind"] == "cleanup"
+            && event["attempt"] == planner["attempt"]
+    });
+    history.find("planner cleanup released", |event| {
+        event["event"] == "execution.released" && event["execution"] == cleanup["execution"]
+    });
     let attempts = project.rows("SELECT * FROM attempt ORDER BY id");
     let executions = project.rows("SELECT * FROM execution ORDER BY id");
     let requests = machine.model.requests().len();
