@@ -1763,19 +1763,20 @@ async fn host_gate(
     }
 }
 
-pub type Lock = nix::fcntl::Flock<std::fs::File>;
-
 /// Open the directory's lock file and take `flock` on it. Every host child
 /// inherits the descriptor, so the lock is held while any child lives.
-pub fn hold_lock(dir: &Path) -> Result<Lock, String> {
+pub fn hold_lock(dir: &Path) -> Result<std::fs::File, String> {
     std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
     let file = std::fs::File::create(dir.join("lock")).map_err(|error| error.to_string())?;
-    nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusiveNonblock).map_err(|_| {
+    // Flock's Drop explicitly unlocks the shared open file description.
+    // Close only our descriptor; inherited owners must keep the lock.
+    file.try_lock().map_err(|_| {
         format!(
             "{} is held by a child of an earlier daemon",
             dir.join("lock").display()
         )
-    })
+    })?;
+    Ok(file)
 }
 
 /// Whether nothing holds the directory's lock: taken proves no child can
