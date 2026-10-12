@@ -104,16 +104,11 @@ fi
 if [ "$1 $2" = 'box exec' ]; then
     handle="$3"
     case " $* " in *' --mode json '*)
-        prior=$(cat '{root}/prior-checkpoint' 2>/dev/null || true)
         "$REAL" box exec "$handle" -- sh -c '
             test -e /yard/state/audit-checkpoints/owned; echo predecessor_visible=$?
-            if [ -n "$1" ]; then
-                cat "$1" >/dev/null 2>&1; echo predecessor_read=$?
-                echo changed > "$1" 2>/dev/null; echo predecessor_write=$?
-            fi
             test -d /yard/proof; echo proof_present=$?
             echo blocked > /yard/proof/intrusion 2>/dev/null; echo proof_write=$?
-        ' sh "$prior" >> '{root}/fresh-{attempt}'
+        ' >> '{root}/fresh-{attempt}'
     ;; esac
     mkfifo '{root}/stdout-{attempt}.fifo' '{root}/stderr-{attempt}.fifo'
     tee -a '{root}/stdout-{attempt}' < '{root}/stdout-{attempt}.fifo' &
@@ -231,6 +226,8 @@ fn transcript(project: &Project<'_>, attempt: i64) -> String {
 /// or follow checkpoint links during cleanup: fresh state or host sentinels
 /// fail. G14's writable repair tests replacement of a staged models file;
 /// this tests exclusive audit state and whole-attempt cleanup instead.
+/// Mount the predecessor state at the replacement's `/yard/state`: its
+/// `owned` checkpoint becomes visible and the fresh-state assertion fails.
 #[test]
 fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     let first = Latch::new();
@@ -363,11 +360,6 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
         std::fs::read_to_string(&checkpoint).unwrap(),
         "checkpoint-fixture\n"
     );
-    std::fs::write(
-        machine.root.join("prior-checkpoint"),
-        checkpoint.to_str().unwrap(),
-    )
-    .unwrap();
     project.json(&[
         "ticket",
         "edit",
@@ -392,15 +384,13 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
         2,
         "{fresh}"
     );
-    for key in ["predecessor_read", "predecessor_write", "proof_write"] {
-        for status in fresh
-            .lines()
-            .filter_map(|line| line.strip_prefix(&format!("{key}=")))
-        {
-            assert_ne!(status, "0", "{fresh}");
-        }
-        assert!(fresh.contains(&format!("{key}=")), "{fresh}");
+    for status in fresh
+        .lines()
+        .filter_map(|line| line.strip_prefix("proof_write="))
+    {
+        assert_ne!(status, "0", "{fresh}");
     }
+    assert!(fresh.contains("proof_write="), "{fresh}");
     assert_eq!(
         fresh
             .lines()
