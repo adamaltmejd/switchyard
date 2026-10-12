@@ -2157,7 +2157,6 @@ pub async fn attempt_approve(
             proof_digest,
             true,
         )?;
-        let ticket = tickets::get(tx, id)?;
         if accepted_skipped.is_some() && item.kind != "approval" {
             return Err(Fail::refused(
                 "skipped acceptance waits for all selected candidate checks",
