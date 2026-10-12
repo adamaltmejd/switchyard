@@ -334,6 +334,9 @@ trusted staging source paths, blobs and executable bits from that commit.
 For packaged audits those staging identities contain only selected Markdown
 and declared references (Markdown at most 32768 bytes, each reference at most
 1 MiB, the set at most 8 MiB). Admission also records the package identity.
+Configuration reads inventory only the configuration, Dockerfile and ordinary
+agent-environment paths. Packaged resolution reads only selected literal
+paths at the canonical commit; it does not inventory unrelated source trees.
 The Yard runner's version and executable SHA-256 identify its tool implementation.
 These are input identities. Executions separately record observed runtime
 image and result identities. Repairs and restarts leave admission evidence
@@ -753,6 +756,11 @@ blobs and package identity (fixed launcher, Node version, launcher/controller
 and lock hashes). The native Pi bridge verifies that identity before launching
 package code, including an older sealed package; the launcher verifies its
 runtime closure before any model request.
+The recorded package identity stays authoritative after admission, including
+across daemon upgrades. Readback validates original canonical selected-file
+identities independently of the current binary's package bytes. An image
+incompatible with the recorded package refuses as `runner_unavailable`, naming
+the asset, before model requests; it does not invalidate the frozen admission.
 This identity is separate from pinfold's real Pi artifact pin. Selected Markdown and
 declared references are staged from those blobs under `/yard/input/trusted`,
 read-only and separate from source, proof and writable state. Later canonical

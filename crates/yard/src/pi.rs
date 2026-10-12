@@ -58,6 +58,31 @@ pub fn package_identity() -> Value {
         "lock_sha256": crate::config::hex(&Sha256::digest(include_bytes!("../../../runners/durable-audit/package-lock.json")))})
 }
 
+// Admission hashes belong to that attempt, not to a later daemon binary.
+pub fn valid_package_identity(identity: &Value) -> bool {
+    identity.as_object().is_some_and(|fields| {
+        fields.len() == 6
+            && identity["name"] == "durable-audit"
+            && identity["launcher"] == "/opt/yard/durable-audit/launch"
+            && identity["node"].as_str().is_some_and(|version| {
+                version.split('.').count() == 3
+                    && version.split('.').all(|part| {
+                        !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit())
+                    })
+            })
+            && ["launch_sha256", "runner_sha256", "lock_sha256"]
+                .iter()
+                .all(|key| {
+                    identity[key].as_str().is_some_and(|hash| {
+                        hash.len() == 64
+                            && hash
+                                .bytes()
+                                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                    })
+                })
+    })
+}
+
 impl Harness for PackagedAudit {
     fn name(&self) -> &'static str {
         "pi"

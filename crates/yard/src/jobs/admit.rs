@@ -125,13 +125,27 @@ pub async fn scheduled(
     project: &Arc<Project>,
     loaded: &Loaded,
 ) -> Result<(), Fail> {
-    let selected = ready_configs(daemon, project, loaded).await?;
+    let mut selected = Vec::new();
+    let free = project.read(|conn| spare_lanes(conn, project, loaded))?;
+    for (ticket, config) in ready_configs(daemon, project, loaded).await? {
+        if selected.len() as i64 >= free {
+            break;
+        }
+        if !project.read(|conn| admissible(conn, &config, &ticket))? {
+            continue;
+        }
+        let plan = config.config.workflow_plan(&ticket.workflow)?;
+        let inputs = config
+            .inputs(&daemon.git, &project.canonical_dir(), &plan)
+            .await?;
+        selected.push((ticket, config, inputs));
+    }
     let admitted = {
         let _admission = daemon.admission.lock().expect("admission lock");
         project.tx(|tx| {
             let mut admitted = Vec::new();
             let mut free = spare_lanes(tx, project, loaded)?;
-            for (ticket, selected) in &selected {
+            for (ticket, selected, inputs) in &selected {
                 if free <= 0 {
                     break;
                 }
@@ -141,7 +155,7 @@ pub async fn scheduled(
                 {
                     continue;
                 }
-                admitted.push(admit(tx, selected, ticket, None)?);
+                admitted.push(admit(tx, selected, ticket, None, inputs.clone())?);
                 free -= 1;
             }
             Ok(admitted)
@@ -160,6 +174,7 @@ fn admit(
     loaded: &Loaded,
     ticket: &tickets::Ticket,
     selection: Option<&crate::plan::Request>,
+    mut inputs: Value,
 ) -> Result<i64, Fail> {
     let default = crate::plan::Request {
         _project: String::new(),
@@ -212,6 +227,9 @@ fn admit(
         .filter(|name| !plan.nodes.contains_key(*name))
         .collect();
     let unreviewed = !plan.nodes.keys().any(|name| name.starts_with("review-"));
+    if plan.packaged().is_some() {
+        inputs["package"] = crate::pi::package_identity();
+    }
     let admission = json!({
         "status": "recorded",
         "runtime": plan.runtime(),
@@ -228,7 +246,7 @@ fn admit(
         "seats": seats,
         "review": if workflow.read_only { None } else { Some(&loaded.config.review) },
         "gates": if workflow.read_only { &[][..] } else { &loaded.config.gates[..] },
-        "inputs": loaded.inputs(&plan)?,
+        "inputs": inputs,
         "yard_runner": {"version": env!("CARGO_PKG_VERSION"), "sha256": runner_identity()?},
     });
     let attempt = attempts::insert(
@@ -1262,6 +1280,50 @@ pub async fn attempt_start(
     for attempt in project.read(attempts::live)? {
         super::load_attempt(daemon, project, &attempt).await?;
     }
+    let ticket = project.read(|conn| {
+        if let Some(blocker) = tickets::blocker(conn, id)? {
+            return Err(Fail::refused(format!(
+                "{} is not ready: {blocker}",
+                ticket_name(id)
+            )));
+        }
+        if spare_lanes(conn, project, &default)? <= 0 {
+            return Err(Fail::refused("no lane is free").with(json!({"reason": "capacity"})));
+        }
+        tickets::get(conn, id)
+    })?;
+    let revision = ticket.revision;
+    let selection = if selected {
+        let mut fields = serde_json::Map::new();
+        fields.insert("project".into(), params["project"].clone());
+        for key in ["preset", "workflow", "graph", "overrides"] {
+            if let Some(value) = params.get(key) {
+                fields.insert(key.into(), value.clone());
+            }
+        }
+        if !fields.contains_key("preset")
+            && !fields.contains_key("graph")
+            && !fields.contains_key("workflow")
+        {
+            fields.insert("workflow".into(), json!(ticket.workflow));
+        }
+        Some(
+            serde_json::from_value::<crate::plan::Request>(Value::Object(fields))
+                .map_err(|error| Fail::invalid(error.to_string()))?,
+        )
+    } else {
+        None
+    };
+    let plan = match &selection {
+        Some(request) => loaded
+            .config
+            .resolve_plan(request)
+            .map_err(|invalid| Fail::invalid("invalid plan").with(json!(invalid)))?,
+        None => loaded.config.workflow_plan(&ticket.workflow)?,
+    };
+    let inputs = loaded
+        .inputs(&daemon.git, &project.canonical_dir(), &plan)
+        .await?;
     let execution = {
         let _admission = daemon.admission.lock().expect("admission lock");
         project.tx(|tx| {
@@ -1280,31 +1342,17 @@ pub async fn attempt_start(
                     json!(ticket.target_branch),
                 ));
             }
+            if ticket.revision != revision {
+                return Err(Fail::stale(
+                    "the ticket changed before admission",
+                    json!(revision),
+                    json!(ticket.revision),
+                ));
+            }
             if spare_lanes(tx, project, &default)? <= 0 {
                 return Err(Fail::refused("no lane is free").with(json!({ "reason": "capacity" })));
             }
-            let selection = if selected {
-                let mut fields = serde_json::Map::new();
-                fields.insert("project".into(), params["project"].clone());
-                for key in ["preset", "workflow", "graph", "overrides"] {
-                    if let Some(value) = params.get(key) {
-                        fields.insert(key.into(), value.clone());
-                    }
-                }
-                if !fields.contains_key("preset")
-                    && !fields.contains_key("graph")
-                    && !fields.contains_key("workflow")
-                {
-                    fields.insert("workflow".into(), json!(ticket.workflow));
-                }
-                Some(
-                    serde_json::from_value::<crate::plan::Request>(Value::Object(fields))
-                        .map_err(|error| Fail::invalid(error.to_string()))?,
-                )
-            } else {
-                None
-            };
-            admit(tx, &loaded, &ticket, selection.as_ref())
+            admit(tx, &loaded, &ticket, selection.as_ref(), inputs)
         })?
     };
     spawn(daemon, project, "implementation", execution);

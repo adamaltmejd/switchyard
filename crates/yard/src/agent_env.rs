@@ -72,7 +72,7 @@ impl AgentEnv {
     ) -> Result<AgentEnv, String> {
         let mut files = Vec::new();
         let mut total = 0;
-        for entry in git.ls_tree(canonical, base, &PATHS).await? {
+        for entry in git.ls_tree(canonical, base, &PATHS, true).await? {
             if !staged_input(&entry) {
                 continue;
             }
