@@ -1172,6 +1172,10 @@ fn selected_skipped_decisions_bind_identity_without_manufacturing_results() {
     );
     assert_eq!(project.rows(&format!("SELECT node, head, status FROM execution WHERE attempt = {attempt} AND reason = 'landing' AND status = 'running'")),
         vec![json!({"node": "landing-gate-keep", "head": merged, "status": "running"})]);
+    // Resume at the consumed cursor so queued pre-crash events are replayed.
+    let seen = std::mem::take(&mut watch.seen);
+    let since = seen.last().unwrap()["seq"].as_i64().unwrap();
+    drop(watch);
     machine.kill();
     std::fs::OpenOptions::new()
         .write(true)
@@ -1180,6 +1184,8 @@ fn selected_skipped_decisions_bind_identity_without_manufacturing_results() {
         .write_all(b"released\n")
         .unwrap();
     machine.start();
+    watch = project.watch(since);
+    watch.seen = seen;
     let fresh_preparation = watch.find("fresh merged preparation", |event| {
         event["event"] == "landing.prepared"
             && event["attempt"] == attempt
@@ -1252,8 +1258,13 @@ fn selected_skipped_decisions_bind_identity_without_manufacturing_results() {
         "SELECT json_extract(admission, '$.unreviewed') AS unreviewed FROM attempt WHERE id = {attempt}"
     );
     assert_eq!(project.rows(&admission), vec![json!({"unreviewed": 1})]);
+    let seen = std::mem::take(&mut watch.seen);
+    let since = seen.last().unwrap()["seq"].as_i64().unwrap();
+    drop(watch);
     machine.kill();
     machine.start();
+    watch = project.watch(since);
+    watch.seen = seen;
     project.json(&["status"]);
     assert_eq!(project.rows(&evidence), rows);
     assert_eq!(project.rows(&judgments), original);
@@ -1347,8 +1358,13 @@ fn selected_skipped_decisions_bind_identity_without_manufacturing_results() {
             assert!(project.rows(&selected_rows).is_empty());
             assert_eq!(project.rows(&format!("SELECT json_extract(admission, '$.unreviewed') AS unreviewed FROM attempt WHERE id = {attempt}")), vec![json!({"unreviewed": 1})]);
             let pending = project.rows(&omission_rows);
+            let seen = std::mem::take(&mut watch.seen);
+            let since = seen.last().unwrap()["seq"].as_i64().unwrap();
+            drop(watch);
             machine.kill();
             machine.start();
+            watch = project.watch(since);
+            watch.seen = seen;
             project.json(&["status"]);
             assert_eq!(project.rows(&omission_rows), pending);
             let accepted = operator.call("yard_attempt_accept", json!({"project": project.path, "ticket": ticket,
@@ -1371,8 +1387,13 @@ fn selected_skipped_decisions_bind_identity_without_manufacturing_results() {
             watch.find("empty cleanup release", |event| {
                 event["event"] == "execution.released" && event["execution"] == cleanup["execution"]
             });
+            let seen = std::mem::take(&mut watch.seen);
+            let since = seen.last().unwrap()["seq"].as_i64().unwrap();
+            drop(watch);
             machine.kill();
             machine.start();
+            watch = project.watch(since);
+            watch.seen = seen;
             project.json(&["status"]);
             assert_eq!(project.rows(&omission_rows), snapshot);
             assert!(project.rows(&selected_rows).is_empty());
