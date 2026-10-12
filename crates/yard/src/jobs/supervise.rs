@@ -837,7 +837,16 @@ pub async fn implement(
             egress: &egress,
         },
     );
-    let live = up_worker(daemon, project, execution, &spec, &secrets).await?;
+    let live = match up_worker(daemon, project, execution, &spec, &secrets).await {
+        Ok(live) => live,
+        Err(fail) => {
+            return preparation_result::<()>(daemon, project, execution, Err(fail))
+                .await
+                .map(|_| ());
+        }
+    };
+    // A successful startup owns a live controller. Let run_harness consume
+    // any pending stop, then use the normal teardown path below.
     drop(target);
     let deadline = {
         let spent = attempt.work_ms
@@ -1190,8 +1199,8 @@ async fn harness_stopped(daemon: &Daemon, project: &Project, execution: i64) -> 
     })
 }
 
-// Check stop only after the handoff returns, while capacity::effect still
-// holds the inherited lock. Box startup and worker errors do not use this path.
+// Check stop after the handoff returns under capacity::effect's lock.
+// A successful box startup keeps its LiveBox on the normal teardown path.
 async fn preparation_result<T>(
     daemon: &Daemon,
     project: &Project,

@@ -904,7 +904,7 @@ fn stopped_preparation(fail_after_git: bool) {
             .replace(
                 "max_lanes = 2",
                 if fail_after_git {
-                    "max_lanes = 3\nmax_executions = 1"
+                    "max_lanes = 4\nmax_executions = 1"
                 } else {
                     "max_lanes = 2\nmax_executions = 1"
                 },
@@ -1007,5 +1007,327 @@ fn stopped_preparation(fail_after_git: bool) {
         std::fs::remove_dir_all(project.path.join(".yard/local/attempts/3/clone")).unwrap();
         project.json(&["attempt", "start", "Y-3"]);
         approval_of(&mut watch, "Y-3");
+        stopped_box_preparation(&machine, &project, &mut watch);
     }
+}
+
+/// G4/G5/G9: native mount refusal and a lost ready reply are distinct startup
+/// failures. The latter leaves a real box and inherited host owner alive.
+/// Sabotage: propagate up_worker Err before honoring stop, discard a successful
+/// LiveBox at a stop check, or release a failed startup on box absence alone.
+/// Native Pinfold supplies diagnostics and inventory; the fixture holds stdin,
+/// observes the inherited lock, and supplies ticket/execution order.
+fn stopped_box_preparation(machine: &Machine, project: &Project, watch: &mut Watch) {
+    let armed = machine.root.join("startup-armed");
+    let said = machine.root.join("startup-said");
+    let release = machine.root.join("startup-release");
+    let native_failure = machine.root.join("startup-native-failure");
+    fifo(&said);
+    fifo(&release);
+    // Preserve the native rejection as stderr, then exit with its real code.
+    // Yard observes EOF only after this native validation child has finished.
+    machine.wrapper("pinfold", &format!(
+        "if [ -e '{}' ] && [ \"$1 $2\" = 'box up' ]; then echo $$ > '{}'; read line < '{}'; \"$REAL\" \"$@\" > '{}'; code=$?; cat '{}' >&2; exit \"$code\"; fi",
+        armed.display(), said.display(), release.display(), native_failure.display(), native_failure.display()));
+    let clone = project.path.join(".yard/local/attempts/4/clone");
+    let parked = project.path.join(".yard/local/attempts/4/parked-clone");
+    for (execution, stop) in [(6, true), (7, false)] {
+        std::fs::write(&armed, "").unwrap();
+        if execution == 6 {
+            project.json(&["ticket", "new", "--title", "Startup"]);
+        } else {
+            project.json(&["attempt", "start", "Y-4"]);
+        }
+        let pid = watch.said(&said).trim().to_string();
+        let held = vec![json!({"status": "running", "reserved": 1, "handle": null})];
+        assert_eq!(
+            project.rows(&format!(
+                "SELECT status, reserved, handle FROM execution WHERE id = {execution}"
+            )),
+            held
+        );
+        if stop {
+            assert_eq!(
+                project.json(&["attempt", "stop", "Y-4"])["stopping"],
+                execution
+            );
+        }
+        assert!(
+            std::process::Command::new("kill")
+                .args(["-0", &pid])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert_eq!(
+            project.rows(&format!(
+                "SELECT status, reserved, handle FROM execution WHERE id = {execution}"
+            )),
+            held
+        );
+        // Refuse only this fixture's mount, after the real child is held.
+        std::fs::rename(&clone, &parked).unwrap();
+        std::fs::remove_file(&armed).unwrap();
+        std::fs::write(&release, "go\n").unwrap();
+        let attention = watch.attention();
+        std::fs::rename(&parked, &clone).unwrap();
+        assert_eq!(attention["execution"], execution);
+        assert_eq!(
+            attention["data"]["kind"],
+            if stop { "stopped" } else { "red" }
+        );
+        assert_eq!(
+            attention["data"]["reason"],
+            if stop { "unchanged" } else { "error" }
+        );
+        let native_reply = std::fs::read_to_string(&native_failure).unwrap();
+        let native: Value = serde_json::from_str(native_reply.lines().next().unwrap()).unwrap();
+        assert!(matches!(
+            native["event"].as_str(),
+            Some("refused" | "failed")
+        ));
+        let rows = project.rows(&format!(
+            "SELECT status, outcome, handle, detail FROM execution WHERE id = {execution}"
+        ));
+        assert_eq!(rows[0]["status"], "ended");
+        assert_eq!(rows[0]["outcome"], if stop { "unchanged" } else { "error" });
+        assert_eq!(rows[0]["handle"], Value::Null);
+        // Native Pinfold's diagnostic is the external expected value.
+        assert!(
+            rows[0]["detail"]
+                .as_str()
+                .unwrap()
+                .contains(native_reply.trim())
+        );
+        if stop {
+            watch.until("native startup refusal checked release", |event| {
+                event["event"] == "execution.released" && event["execution"] == execution
+            });
+        }
+        assert!(
+            !machine
+                .model
+                .requests()
+                .iter()
+                .any(|r| r.prompt().contains("Startup"))
+        );
+    }
+
+    // Lose the actual ready reply after native startup. Keep native stdin
+    // open with a FIFO, so the box and its controller survive the failed
+    // caller. No protocol frame is invented.
+    let native_output = machine.root.join("startup-ready-ack");
+    let ready = machine.root.join("startup-ready");
+    let owner_release = machine.root.join("startup-owner-release");
+    let down = machine.root.join("startup-down");
+    let host_release = machine.root.join("startup-host-release");
+    let listing_armed = machine.root.join("startup-listing-armed");
+    let listing_said = machine.root.join("startup-listing-said");
+    let listing_release = machine.root.join("startup-listing-release");
+    let spec_path = machine.root.join("startup-spec");
+    for path in [
+        &native_output,
+        &ready,
+        &owner_release,
+        &down,
+        &host_release,
+        &listing_said,
+        &listing_release,
+    ] {
+        fifo(path);
+    }
+    machine.wrapper("pinfold", &format!(r#"
+if [ "$1 $2" = 'box list' ] && [ -e '{listing_armed}' ]; then
+    "$REAL" "$@"; code=$?
+    echo "$code" > '{listing_said}'; read line < '{listing_release}'
+    exit "$code"
+fi
+if [ "$1 $2" = 'box up' ] && [ -e '{armed}' ]; then
+    read -r spec
+    printf '%s\n' "$spec" > '{spec_path}'
+    echo $$ > '{said}'; read line < '{release}'
+    {{ printf '%s\n' "$spec"; read line < '{owner_release}'; }} 2> '{feed_stderr}' |
+        "$REAL" "$@" 2> '{stderr}' |
+        {{ read -r line; printf '%s\n' "$line" > '{ready}'; echo captured > '{native_output}';
+           cat; echo down > '{down}'; read line < '{host_release}'; }} > '{remaining}' 2> '{drain_stderr}' &
+    read line < '{native_output}'
+    exit 73
+fi
+"#,
+        listing_armed = listing_armed.display(), listing_said = listing_said.display(),
+        listing_release = listing_release.display(), armed = armed.display(),
+        spec_path = spec_path.display(), said = said.display(), release = release.display(),
+        owner_release = owner_release.display(), native_output = native_output.display(),
+        stderr = machine.root.join("startup-native-stderr").display(),
+        feed_stderr = machine.root.join("startup-feed-stderr").display(),
+        ready = ready.display(), remaining = machine.root.join("startup-remaining").display(),
+        down = down.display(), host_release = host_release.display(),
+        drain_stderr = machine.root.join("startup-drain-stderr").display()));
+    std::fs::write(&armed, "").unwrap();
+    project.json(&["attempt", "start", "Y-4"]);
+    let pid = watch.said(&said).trim().to_string();
+    assert_eq!(project.json(&["attempt", "stop", "Y-4"])["stopping"], 8);
+    assert!(
+        std::process::Command::new("kill")
+            .args(["-0", &pid])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert_eq!(
+        project.rows("SELECT status, reserved, handle FROM execution WHERE id = 8"),
+        vec![json!({"status": "running", "reserved": 1, "handle": null})]
+    );
+    std::fs::remove_file(&armed).unwrap();
+    std::fs::write(&release, "go\n").unwrap();
+    let native: Value = serde_json::from_str(&watch.said(&ready)).unwrap();
+    assert_eq!(native["event"], "ready");
+    let spec: Value = serde_json::from_slice(&std::fs::read(&spec_path).unwrap()).unwrap();
+    let label = format!(
+        "dev.yard.project={}",
+        spec["labels"]["dev.yard.project"].as_str().unwrap()
+    );
+    let box_name = spec["name"].as_str().unwrap();
+    let boxes = machine.boxes(&label);
+    assert_eq!(boxes.len(), 1);
+    assert_eq!(boxes[0]["name"], box_name);
+    let lock =
+        std::fs::File::open(project.path.join(".yard/local/attempts/4/effects/8/lock")).unwrap();
+    assert!(matches!(
+        lock.try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ));
+    let stopped = watch.attention();
+    assert_eq!(stopped["execution"], 8);
+    assert_eq!(stopped["data"]["kind"], "stopped");
+    assert_eq!(stopped["data"]["reason"], "unchanged");
+    let ownership = watch.attention();
+    assert_eq!(ownership["execution"], 8);
+    assert_eq!(ownership["data"]["kind"], "red");
+    assert_eq!(ownership["data"]["reason"], "ownership");
+    assert_eq!(
+        project.rows("SELECT status, outcome, reserved, handle, length(detail) > 0 AS diagnostic FROM execution WHERE id = 8"),
+        vec![json!({"status": "ended", "outcome": "unchanged", "reserved": 1, "handle": null, "diagnostic": 1})]
+    );
+    assert!(
+        !machine
+            .model
+            .requests()
+            .iter()
+            .any(|r| r.prompt().contains("Startup"))
+    );
+
+    // Box absence alone is insufficient: the drain child retains the same
+    // inherited lock after native down. Two real listing replies prove that
+    // a checked release has actually run with box absence and that host owner.
+    std::fs::write(&owner_release, "go\n").unwrap();
+    assert_eq!(watch.said(&down).trim(), "down");
+    assert!(machine.boxes(&label).is_empty());
+    assert!(matches!(
+        lock.try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ));
+    std::fs::write(&listing_armed, "").unwrap();
+    assert_eq!(watch.said(&listing_said).trim(), "0");
+    std::fs::write(&listing_release, "go\n").unwrap();
+    assert_eq!(watch.said(&listing_said).trim(), "0");
+    assert_eq!(
+        project.rows("SELECT reserved FROM execution WHERE id = 8"),
+        vec![json!({"reserved": 1})]
+    );
+    assert_eq!(
+        project.rows("SELECT id FROM execution WHERE attempt = 4"),
+        vec![json!({"id": 6}), json!({"id": 7}), json!({"id": 8})]
+    );
+    std::fs::write(&host_release, "go\n").unwrap();
+    std::fs::remove_file(&listing_armed).unwrap();
+    std::fs::write(&listing_release, "go\n").unwrap();
+    watch.until("failed startup checked release", |event| {
+        event["event"] == "execution.released" && event["execution"] == 8
+    });
+    assert!(machine.boxes(&label).is_empty());
+    lock.try_lock().unwrap();
+    lock.unlock().unwrap();
+    assert_eq!(
+        project.rows("SELECT reserved FROM execution WHERE id = 8"),
+        vec![json!({"reserved": 0})]
+    );
+    // Unchanged executions retain both operator exits. Answer the exact
+    // ownership item after proof; the stopped item still prevents startup.
+    project.json(&[
+        "attempt",
+        "start",
+        "Y-4",
+        "--attention",
+        &ownership["attention"].as_i64().unwrap().to_string(),
+    ]);
+    // A successful reply must keep its returned owner on the existing
+    // teardown path. Hold real stdin EOF after the pending stop is consumed.
+    machine.wrapper(
+        "pinfold",
+        &format!(
+            r#"
+if [ "$1 $2" = 'box up' ] && [ -e '{armed}' ]; then
+    read -r spec
+    echo $$ > '{said}'; read line < '{release}'
+    {{ printf '%s\n' "$spec"; cat; echo down > '{down}'; read line < '{host_release}'; }} |
+        "$REAL" "$@"
+    exit $?
+fi
+"#,
+            armed = armed.display(),
+            said = said.display(),
+            release = release.display(),
+            down = down.display(),
+            host_release = host_release.display()
+        ),
+    );
+    std::fs::write(&armed, "").unwrap();
+    project.json(&["attempt", "start", "Y-4"]);
+    watch.said(&said);
+    assert_eq!(project.json(&["attempt", "stop", "Y-4"])["stopping"], 9);
+    std::fs::remove_file(&armed).unwrap();
+    std::fs::write(&release, "go\n").unwrap();
+    assert_eq!(watch.said(&down).trim(), "down");
+    let boxes = machine.boxes(&label);
+    assert_eq!(boxes.len(), 1);
+    assert_eq!(
+        project.rows("SELECT status, reserved, handle FROM execution WHERE id = 9"),
+        vec![json!({"status": "running", "reserved": 1, "handle": boxes[0]["name"]})]
+    );
+    let lock =
+        std::fs::File::open(project.path.join(".yard/local/attempts/4/effects/9/lock")).unwrap();
+    assert!(matches!(
+        lock.try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ));
+    assert!(
+        !machine
+            .model
+            .requests()
+            .iter()
+            .any(|r| r.prompt().contains("Startup"))
+    );
+    std::fs::write(&host_release, "go\n").unwrap();
+    let stopped = watch.attention();
+    assert_eq!(stopped["execution"], 9);
+    assert_eq!(stopped["data"]["kind"], "stopped");
+    assert_eq!(stopped["data"]["reason"], "unchanged");
+    watch.until("successful startup checked teardown", |event| {
+        event["event"] == "execution.released" && event["execution"] == 9
+    });
+    assert!(machine.boxes(&label).is_empty());
+    lock.try_lock().unwrap();
+    lock.unlock().unwrap();
+    project.json(&["attempt", "start", "Y-4"]);
+    approval_of(watch, "Y-4");
+    assert_eq!(
+        machine
+            .model
+            .requests()
+            .iter()
+            .filter(|r| r.opens() && r.prompt().contains("Startup"))
+            .count(),
+        1
+    );
 }
