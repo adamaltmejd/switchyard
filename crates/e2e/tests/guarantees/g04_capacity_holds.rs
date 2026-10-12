@@ -871,7 +871,12 @@ fn stopping_failed_preparation_keeps_ownership_and_prevents_the_turn() {
 }
 
 fn stopped_preparation(fail_after_git: bool) {
-    let machine = Machine::new("g4-stop-preparation", |request| {
+    let name = if fail_after_git {
+        "g4-stop-failed-preparation"
+    } else {
+        "g4-stop-preparation"
+    };
+    let machine = Machine::new(name, |request| {
         let file = if request.prompt().contains("Control") {
             "control.txt"
         } else {
@@ -886,8 +891,10 @@ fn stopped_preparation(fail_after_git: bool) {
     fifo(&release);
     let git_exit = machine.root.join("native-git-exit");
     let after_git = if fail_after_git {
+        // The wrapper removes only the clone it just created before refusing.
+        // Later operator starts need no private-state repair by the test.
         format!(
-            "\"$REAL\" \"$@\"; code=$?; echo \"$code\" > '{}'; [ \"$code\" -eq 0 ] || exit \"$code\"; exit 73",
+            "\"$REAL\" \"$@\"; code=$?; echo \"$code\" > '{}'; [ \"$code\" -eq 0 ] || exit \"$code\"; for clone_destination in \"$@\"; do :; done; rm -rf -- \"$clone_destination\" || exit $?; exit 73",
             git_exit.display()
         )
     } else {
@@ -959,9 +966,6 @@ fn stopped_preparation(fail_after_git: bool) {
             ),
             vec![json!({"reported_exit": 1})]
         );
-        // Git clone succeeded but its wrapper refused before checkout and
-        // branch staging. Correct the partial fixture checkout before retry.
-        std::fs::remove_dir_all(project.path.join(".yard/local/attempts/2/clone")).unwrap();
     }
     project.json(&["attempt", "start", "Y-2"]);
     approval_of(&mut watch, "Y-2");
@@ -1004,7 +1008,6 @@ fn stopped_preparation(fail_after_git: bool) {
                 .iter()
                 .any(|r| r.prompt().contains("Failure"))
         );
-        std::fs::remove_dir_all(project.path.join(".yard/local/attempts/3/clone")).unwrap();
         project.json(&["attempt", "start", "Y-3"]);
         approval_of(&mut watch, "Y-3");
         stopped_box_preparation(&machine, &project, &mut watch);
@@ -1252,7 +1255,7 @@ fi
         vec![json!({"reserved": 1})]
     );
     assert_eq!(
-        project.rows("SELECT id FROM execution WHERE attempt = 4"),
+        project.rows("SELECT id FROM execution WHERE attempt = 4 ORDER BY id"),
         vec![json!({"id": 6}), json!({"id": 7}), json!({"id": 8})]
     );
     std::fs::write(&host_release, "go\n").unwrap();
