@@ -511,7 +511,16 @@ pub async fn implement(
 ) -> Result<(), Fail> {
     let row = project.read(|conn| executions::get(conn, execution))?;
     let attempt = project.read(|conn| attempts::for_execution(conn, &row))?;
-    let loaded = super::load_attempt(daemon, project, &attempt).await?;
+    let Some(loaded) = preparation_result(
+        daemon,
+        project,
+        execution,
+        super::load_attempt(daemon, project, &attempt).await,
+    )
+    .await?
+    else {
+        return Ok(());
+    };
     // The prompt carries the body the start transaction recorded; a later edit
     // stays pending for the next execution.
     let mut ticket = project.read(|conn| tickets::get(conn, attempt.ticket))?;
@@ -557,35 +566,42 @@ pub async fn implement(
     } else {
         dir.join("clone")
     };
-    if stop_preparation(daemon, project, execution).await? {
+    if stop_preparation(daemon, project, execution, None).await? {
         return Ok(());
     }
-    if workflow.read_only {
-        // No predecessor can mount this directory. Refuse an existing path
-        // rather than stage into guest-written state after an interruption.
-        std::fs::create_dir_all(audit_dir.parent().expect("audit parent"))
-            .map_err(|error| error.to_string())?;
-        std::fs::create_dir(&audit_dir).map_err(|error| error.to_string())?;
-        daemon
-            .git
-            .clone_detached(
-                &project.canonical_dir(),
-                &clone,
-                row.head.as_deref().unwrap_or(&attempt.base),
-            )
-            .await?;
-    } else if !clone.exists() {
-        daemon
-            .git
-            .clone_branch(
-                &project.canonical_dir(),
-                &clone,
-                &attempt.branch(),
-                &attempt.base,
-            )
-            .await?;
+    let cloned = async {
+        if workflow.read_only {
+            // No predecessor can mount this directory. Refuse an existing path
+            // rather than stage into guest-written state after an interruption.
+            std::fs::create_dir_all(audit_dir.parent().expect("audit parent"))
+                .map_err(|error| error.to_string())?;
+            std::fs::create_dir(&audit_dir).map_err(|error| error.to_string())?;
+            daemon
+                .git
+                .clone_detached(
+                    &project.canonical_dir(),
+                    &clone,
+                    row.head.as_deref().unwrap_or(&attempt.base),
+                )
+                .await?;
+        } else if !clone.exists() {
+            daemon
+                .git
+                .clone_branch(
+                    &project.canonical_dir(),
+                    &clone,
+                    &attempt.branch(),
+                    &attempt.base,
+                )
+                .await?;
+        }
+        Ok(())
     }
-    if stop_preparation(daemon, project, execution).await? {
+    .await;
+    if preparation_result(daemon, project, execution, cloned)
+        .await?
+        .is_none()
+    {
         return Ok(());
     }
     let storage = if workflow.read_only { &audit_dir } else { &dir };
@@ -610,7 +626,7 @@ pub async fn implement(
         live
     };
     let env = if packaged.is_some() {
-        crate::agent_env::AgentEnv::empty(&clone)
+        Ok(crate::agent_env::AgentEnv::empty(&clone))
     } else {
         crate::agent_env::AgentEnv::load(
             &daemon.git,
@@ -623,18 +639,30 @@ pub async fn implement(
             &clone,
         )
         .await
-        .map_err(Fail::refused)?
+        .map_err(Fail::refused)
     };
-    if stop_preparation(daemon, project, execution).await? {
+    let Some(env) = preparation_result(daemon, project, execution, env).await? else {
         return Ok(());
-    }
+    };
     let stage = Stage {
         state: &state,
         input: &input,
         connection,
         env: &env,
     };
-    harness.stage(&stage).map_err(|error| error.to_string())?;
+    if preparation_result(
+        daemon,
+        project,
+        execution,
+        harness
+            .stage(&stage)
+            .map_err(|error| Fail::from(error.to_string())),
+    )
+    .await?
+    .is_none()
+    {
+        return Ok(());
+    }
     if let Some(crate::plan::Runner::Packaged {
         skill,
         references,
@@ -656,7 +684,20 @@ pub async fn implement(
             let blob = source["blob"]
                 .as_str()
                 .ok_or_else(|| Fail::refused("invalid selected blob"))?;
-            let bytes = daemon.git.blob(&project.canonical_dir(), blob).await?;
+            let Some(bytes) = preparation_result(
+                daemon,
+                project,
+                execution,
+                daemon
+                    .git
+                    .blob(&project.canonical_dir(), blob)
+                    .await
+                    .map_err(Fail::from),
+            )
+            .await?
+            else {
+                return Ok(());
+            };
             if path == skill && std::str::from_utf8(&bytes).is_err() {
                 return Err(Fail::refused(
                     "invalid_input: selected Markdown is not UTF-8",
@@ -721,10 +762,10 @@ pub async fn implement(
         resume.as_ref().map(|(id, _)| *id),
         &row,
     )
-    .await?;
-    if stop_preparation(daemon, project, execution).await? {
+    .await;
+    let Some(prompt) = preparation_result(daemon, project, execution, prompt).await? else {
         return Ok(());
-    }
+    };
     let argv = harness
         .argv(&crate::harness::Launch {
             provider,
@@ -734,23 +775,41 @@ pub async fn implement(
             prompt: &prompt,
             env: &env,
         })
-        .map_err(Fail::invalid)?;
-
-    let image = image(daemon, project, &loaded).await?;
-    if stop_preparation(daemon, project, execution).await? {
+        .map_err(Fail::invalid);
+    let Some(argv) = preparation_result(daemon, project, execution, argv).await? else {
         return Ok(());
-    }
+    };
+
+    let Some(image) = preparation_result(
+        daemon,
+        project,
+        execution,
+        image(daemon, project, &loaded).await,
+    )
+    .await?
+    else {
+        return Ok(());
+    };
     // Resolve the route, including a login's token, before any bearer is
     // issued, so a missing credential never leaves a live grant.
     let model = harness
         .route(&stage, &daemon.machine)
-        .map_err(Fail::refused)?;
+        .map_err(Fail::refused);
+    let Some(model) = preparation_result(daemon, project, execution, model).await? else {
+        return Ok(());
+    };
     let target_lock = project.target_lock(&crate::git::target_ref(attempt.target_branch()?));
     let target = target_lock.lock().await;
-    let egress = egress(daemon, project, &loaded).await?;
-    if stop_preparation(daemon, project, execution).await? {
+    let Some(egress) = preparation_result(
+        daemon,
+        project,
+        execution,
+        egress(daemon, project, &loaded).await,
+    )
+    .await?
+    else {
         return Ok(());
-    }
+    };
     let kind = if workflow.read_only {
         crate::mcp::Kind::Audit
     } else {
@@ -1131,12 +1190,28 @@ async fn harness_stopped(daemon: &Daemon, project: &Project, execution: i64) -> 
     })
 }
 
+// Check stop only after the handoff returns, while capacity::effect still
+// holds the inherited lock. Box startup and worker errors do not use this path.
+async fn preparation_result<T>(
+    daemon: &Daemon,
+    project: &Project,
+    execution: i64,
+    result: Result<T, Fail>,
+) -> Result<Option<T>, Fail> {
+    let detail = result.as_ref().err().map(|fail| fail.message.as_str());
+    if stop_preparation(daemon, project, execution, detail).await? {
+        return Ok(None);
+    }
+    result.map(Some)
+}
+
 // A preparation child finishes under the effect lock before this row ends.
 // capacity::effect still requires ownership proof before releasing its slot.
 async fn stop_preparation(
     daemon: &Daemon,
     project: &Project,
     execution: i64,
+    detail: Option<&str>,
 ) -> Result<bool, Fail> {
     let stopped = take_stop(daemon, project, execution).await;
     project.tx(|tx| {
@@ -1147,7 +1222,7 @@ async fn stop_preparation(
         let attempt = attempts::get(tx, row.attempt)?;
         if attempt.state != "live" {
             executions::end(tx, execution, executions::End {
-                outcome: "abandoned", ticket: Some(attempt.ticket), ..Default::default()
+                outcome: "abandoned", ticket: Some(attempt.ticket), detail, ..Default::default()
             })?;
             return Ok(true);
         }
@@ -1155,12 +1230,12 @@ async fn stop_preparation(
             return Ok(false);
         }
         executions::end(tx, execution, executions::End {
-            outcome: "unchanged", ticket: Some(attempt.ticket), ..Default::default()
+            outcome: "unchanged", ticket: Some(attempt.ticket), detail, ..Default::default()
         })?;
         attempts::raise(tx, attempts::Raise {
             kind: "stopped", reason: "unchanged", ticket: Some(attempt.ticket),
             attempt: Some(attempt.id), execution: Some(execution),
-            payload: json!({ "detail": "the operator stopped the execution during preparation" }),
+            payload: json!({ "detail": detail.unwrap_or("the operator stopped the execution during preparation") }),
             text: None,
         })?;
         Ok(true)

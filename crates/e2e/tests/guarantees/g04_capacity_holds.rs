@@ -858,6 +858,19 @@ fn stopping_a_capacity_waiter_prevents_its_turn_until_start() {
 /// and model requests are external observations of the held preparation.
 #[test]
 fn stopping_reserved_preparation_keeps_ownership_and_prevents_the_turn() {
+    stopped_preparation(false);
+}
+
+/// G4/G5/G9: the same held child completes real Git work, then reports 73.
+/// Sabotage: propagate preparation Err before honoring the acknowledged stop.
+/// Success alone cannot expose that error handoff. The fixture supplies the
+/// exits, the host observes the PID and the store retains ownership and detail.
+#[test]
+fn stopping_failed_preparation_keeps_ownership_and_prevents_the_turn() {
+    stopped_preparation(true);
+}
+
+fn stopped_preparation(fail_after_git: bool) {
     let machine = Machine::new("g4-stop-preparation", |request| {
         let file = if request.prompt().contains("Control") {
             "control.txt"
@@ -871,15 +884,31 @@ fn stopping_reserved_preparation_keeps_ownership_and_prevents_the_turn() {
     let release = machine.root.join("release");
     fifo(&said_path);
     fifo(&release);
+    let git_exit = machine.root.join("native-git-exit");
+    let after_git = if fail_after_git {
+        format!(
+            "\"$REAL\" \"$@\"; code=$?; echo \"$code\" > '{}'; [ \"$code\" -eq 0 ] || exit \"$code\"; exit 73",
+            git_exit.display()
+        )
+    } else {
+        String::new()
+    };
     machine.wrapper("git", &format!(
-        "if [ -e '{}' ]; then case \" $* \" in *' clone '*) echo $$ > '{}'; read line < '{}';; esac; fi",
-        armed.display(), said_path.display(), release.display()));
+        "if [ -e '{}' ]; then case \" $* \" in *' clone '*) echo $$ > '{}'; read line < '{}'; {};; esac; fi",
+        armed.display(), said_path.display(), release.display(), after_git));
     machine.start();
     let project = Project::new(
         &machine,
         "p",
         &config("")
-            .replace("max_lanes = 2", "max_lanes = 2\nmax_executions = 1")
+            .replace(
+                "max_lanes = 2",
+                if fail_after_git {
+                    "max_lanes = 3\nmax_executions = 1"
+                } else {
+                    "max_lanes = 2\nmax_executions = 1"
+                },
+            )
             .replace("review = [\"correctness\"]", "review = \"none\""),
     );
     let mut watch = project.watch(0);
@@ -922,6 +951,18 @@ fn stopping_reserved_preparation_keeps_ownership_and_prevents_the_turn() {
             .iter()
             .any(|r| r.prompt().contains("Prepared"))
     );
+    if fail_after_git {
+        assert_eq!(std::fs::read_to_string(&git_exit).unwrap().trim(), "0");
+        assert_eq!(
+            project.rows(
+                "SELECT instr(detail, '73') > 0 AS reported_exit FROM execution WHERE id = 2"
+            ),
+            vec![json!({"reported_exit": 1})]
+        );
+        // Git clone succeeded but its wrapper refused before checkout and
+        // branch staging. Correct the partial fixture checkout before retry.
+        std::fs::remove_dir_all(project.path.join(".yard/local/attempts/2/clone")).unwrap();
+    }
     project.json(&["attempt", "start", "Y-2"]);
     approval_of(&mut watch, "Y-2");
     assert_eq!(
@@ -937,4 +978,34 @@ fn stopping_reserved_preparation_keeps_ownership_and_prevents_the_turn() {
         project.rows("SELECT reserved FROM execution WHERE id = 2"),
         vec![json!({"reserved": 0})]
     );
+    if fail_after_git {
+        // The same child failure without an acknowledged stop remains error.
+        std::fs::write(&armed, "").unwrap();
+        project.json(&["ticket", "new", "--title", "Failure"]);
+        watch.said(&said_path);
+        std::fs::remove_file(&armed).unwrap();
+        std::fs::write(&release, "go\n").unwrap();
+        let failed = watch.attention();
+        assert_eq!(failed["execution"], 4);
+        assert_eq!(failed["data"]["kind"], "red");
+        assert_eq!(failed["data"]["reason"], "error");
+        assert_eq!(std::fs::read_to_string(&git_exit).unwrap().trim(), "0");
+        assert_eq!(
+            project.rows(
+                "SELECT status, outcome, reserved, instr(detail, '73') > 0 AS reported_exit
+                 FROM execution WHERE id = 4"
+            ),
+            vec![json!({"status": "ended", "outcome": "error", "reserved": 0, "reported_exit": 1})]
+        );
+        assert!(
+            !machine
+                .model
+                .requests()
+                .iter()
+                .any(|r| r.prompt().contains("Failure"))
+        );
+        std::fs::remove_dir_all(project.path.join(".yard/local/attempts/3/clone")).unwrap();
+        project.json(&["attempt", "start", "Y-3"]);
+        approval_of(&mut watch, "Y-3");
+    }
 }
