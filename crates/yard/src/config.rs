@@ -61,6 +61,8 @@ pub struct Agent {
 #[derive(Debug, Clone, serde::Serialize, Deserialize)]
 pub struct Workflow {
     pub implementer: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
     /// Seat names in panel order; empty for `none`.
     pub review: Vec<String>,
     pub instructions: String,
@@ -146,6 +148,7 @@ struct RawIsolation {
 #[derive(Deserialize, Default, Clone)]
 #[serde(deny_unknown_fields)]
 struct RawWorkflow {
+    profile: Option<String>,
     implementer: Option<String>,
     review: Option<toml::Value>,
     instructions: Option<String>,
@@ -285,6 +288,7 @@ impl Config {
                 name.clone(),
                 Workflow {
                     implementer,
+                    profile: workflow.profile.clone(),
                     review,
                     instructions: pick(&workflow.instructions, &base.instructions)
                         .unwrap_or_default(),
@@ -354,6 +358,21 @@ impl Config {
             config
                 .resolve_graph(graph)
                 .map_err(|error| format!("presets.{name}: {error}"))?;
+        }
+        for (name, workflow) in &config.workflows {
+            if workflow.profile.is_some() {
+                let plan = config.workflow_plan(name)?;
+                plan.validate(&config)
+                    .map_err(|error| format!("workflows.{name}.profile: {error}"))?;
+                if !workflow.read_only
+                    || !workflow.review.is_empty()
+                    || !matches!(plan.packaged(), Some(crate::plan::Runner::Packaged { agent, .. }) if agent == &workflow.implementer)
+                {
+                    return Err(format!(
+                        "workflows.{name}.profile requires a single packaged audit"
+                    ));
+                }
+            }
         }
         Ok(config)
     }

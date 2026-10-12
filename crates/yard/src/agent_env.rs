@@ -54,6 +54,13 @@ pub struct AgentEnv {
 }
 
 impl AgentEnv {
+    pub fn empty(workspace: &Path) -> Self {
+        Self {
+            files: Vec::new(),
+            workspace: workspace.to_path_buf(),
+        }
+    }
+
     /// The regular files at the named paths of `base`, verbatim. A link or
     /// submodule is left out, never followed, as is a file where a directory
     /// is named or the reverse. A file over a bound refuses the whole read.

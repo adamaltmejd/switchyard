@@ -29,6 +29,7 @@ pub struct Loaded {
     pub head: String,
     pub gate_digest: String,
     pub admission_inputs: Value,
+    pub canonical_sources: Vec<crate::git::TreeEntry>,
 }
 
 #[derive(Default)]
@@ -86,6 +87,39 @@ async fn read_default(daemon: &Daemon, project: &Project) -> Result<Arc<Loaded>,
 }
 
 impl Loaded {
+    pub fn inputs(&self, plan: &crate::plan::Plan) -> Result<Value, Fail> {
+        let mut inputs = self.admission_inputs.clone();
+        if let Some(crate::plan::Runner::Packaged {
+            skill, references, ..
+        }) = plan.packaged()
+        {
+            let mut sources = Vec::new();
+            let mut total = 0;
+            for path in std::iter::once(skill).chain(references) {
+                let entry = self
+                    .canonical_sources
+                    .iter()
+                    .find(|entry| entry.path == *path && entry.regular)
+                    .ok_or_else(|| {
+                        Fail::refused("invalid_input")
+                            .with(json!({"path": path, "reason": "selected_regular_file"}))
+                    })?;
+                total += entry.size;
+                if entry.size > if path == skill { 32768 } else { 1024 * 1024 }
+                    || total > 8 * 1024 * 1024
+                {
+                    return Err(Fail::refused("invalid_input")
+                        .with(json!({"path": path, "reason": "selected_input_bound"})));
+                }
+                sources
+                    .push(json!({"path": entry.path, "blob": entry.oid, "executable": entry.exec}));
+            }
+            inputs["trusted_staged_sources"] = json!(sources);
+            inputs["package"] = crate::pi::package_identity();
+        }
+        Ok(inputs)
+    }
+
     pub fn review_digest(&self, workflow: &str) -> Result<String, Fail> {
         Ok(self.config.review_digest(self.config.workflow(workflow)?))
     }
@@ -168,22 +202,16 @@ pub async fn read_config(
         .await?
         .ok_or_else(|| Fail::invalid(format!("{commit} has no .yard/Dockerfile")))?;
     let tree = daemon.git.root_tree(repo, commit).await?;
-    let entries = daemon
-        .git
-        .ls_tree(
-            repo,
-            commit,
-            &[crate::config::CONFIG_PATH, crate::config::DOCKERFILE_PATH],
-        )
-        .await?;
+    let entries = daemon.git.ls_tree(repo, commit, &[]).await?;
     let objects: std::collections::BTreeMap<_, _> = entries
-        .into_iter()
-        .map(|entry| (entry.path, entry.oid))
+        .iter()
+        .filter(|entry| {
+            [crate::config::CONFIG_PATH, crate::config::DOCKERFILE_PATH]
+                .contains(&entry.path.as_str())
+        })
+        .map(|entry| (entry.path.as_str(), entry.oid.as_str()))
         .collect();
-    let staged: Vec<Value> = daemon
-        .git
-        .ls_tree(repo, commit, &crate::agent_env::PATHS)
-        .await?
+    let staged: Vec<Value> = entries
         .iter()
         .filter(|entry| crate::agent_env::staged_input(entry))
         .map(|entry| json!({"path": entry.path, "blob": entry.oid, "executable": entry.exec}))
@@ -196,6 +224,7 @@ pub async fn read_config(
             "dockerfile_blob": objects[crate::config::DOCKERFILE_PATH],
             "trusted_staged_sources": staged,
         }),
+        canonical_sources: entries,
         gate_digest: config.gate_digest(dockerfile.as_bytes()),
         config,
         branch: branch.to_string(),
@@ -247,19 +276,20 @@ pub async fn load_attempt(
     };
     let admitted =
         crate::plan::Plan::admitted(admission).map_err(|error| Fail::refused(error.to_string()))?;
-    let expected = if admission["runtime"] == "ordinary-linear" {
-        let mut selection = admission["selection"].clone();
-        selection["project"] = json!(project.root);
-        let request =
-            serde_json::from_value(selection).map_err(|error| Fail::refused(error.to_string()))?;
-        loaded
-            .config
-            .resolve_plan(&request)
-            .map_err(|error| Fail::refused(error.to_string()))?
-    } else {
-        loaded.config.workflow_plan(&attempt.workflow)?
-    };
-    if loaded.admission_inputs != admission["inputs"]
+    let expected =
+        if admission["runtime"] == "ordinary-linear" || admission["runtime"] == "packaged-audit" {
+            let mut selection = admission["selection"].clone();
+            selection["project"] = json!(project.root);
+            let request = serde_json::from_value(selection)
+                .map_err(|error| Fail::refused(error.to_string()))?;
+            loaded
+                .config
+                .resolve_plan(&request)
+                .map_err(|error| Fail::refused(error.to_string()))?
+        } else {
+            loaded.config.workflow_plan(&attempt.workflow)?
+        };
+    if loaded.inputs(&admitted)? != admission["inputs"]
         || expected != admitted
         || loaded
             .config
@@ -578,6 +608,9 @@ async fn advance(
                     workflow.review[index].as_str(),
                     review_digest.as_str(),
                 )
+            }
+            crate::plan::Runner::Packaged { .. } => {
+                return Err(Fail::refused("unsupported admitted review node"));
             }
         };
         let input = checks::Input {
@@ -1087,7 +1120,7 @@ async fn inspect_plan(
         .config
         .runnable_workflow(&plan, request.workflow.as_deref());
     let shape = if workflow.is_some() {
-        "ordinary-linear"
+        plan.runtime()
     } else {
         plan.unsupported_shape()
     };
@@ -1100,6 +1133,7 @@ async fn inspect_plan(
         "structurally_valid": true, "runnable": workflow.is_some(), "shape": shape,
         "workflow": workflow,
         "bindings": {"agents": loaded.config.agents, "gates": loaded.config.gates,
+            "selected_inputs": if plan.packaged().is_some() { Some(loaded.inputs(&plan)?) } else { None },
             "review": loaded.config.review,
             "workflow_settings": workflow.as_ref().and_then(|name| loaded.config.workflows.get(name))}}),
     )

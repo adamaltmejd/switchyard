@@ -192,7 +192,9 @@ fn admit(
         seats.insert(name, &loaded.config.seats[name]);
     }
     for node in plan.nodes.values() {
-        if let crate::plan::Runner::Agent { agent, .. } = &node.runner {
+        if let crate::plan::Runner::Agent { agent, .. }
+        | crate::plan::Runner::Packaged { agent, .. } = &node.runner
+        {
             let settings = &loaded.config.agents[agent];
             let harness = crate::harness::get(&settings.harness)
                 .ok_or_else(|| Fail::invalid("selected agent has no harness"))?;
@@ -212,7 +214,7 @@ fn admit(
     let unreviewed = !plan.nodes.keys().any(|name| name.starts_with("review-"));
     let admission = json!({
         "status": "recorded",
-        "runtime": "ordinary-linear",
+        "runtime": plan.runtime(),
         "revision": 1,
         "target": loaded.branch,
         "config_head": loaded.head,
@@ -226,7 +228,7 @@ fn admit(
         "seats": seats,
         "review": if workflow.read_only { None } else { Some(&loaded.config.review) },
         "gates": if workflow.read_only { &[][..] } else { &loaded.config.gates[..] },
-        "inputs": loaded.admission_inputs,
+        "inputs": loaded.inputs(&plan)?,
         "yard_runner": {"version": env!("CARGO_PKG_VERSION"), "sha256": runner_identity()?},
     });
     let attempt = attempts::insert(

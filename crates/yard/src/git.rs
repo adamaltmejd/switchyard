@@ -38,6 +38,7 @@ struct RawOut {
 }
 
 /// One entry of a commit's tree.
+#[derive(Clone)]
 pub struct TreeEntry {
     /// A regular file: not a link, not a submodule.
     pub regular: bool,

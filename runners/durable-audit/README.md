@@ -1,8 +1,9 @@
 # Trusted Durable audit image
 
-This package supplies a controller for a Yard-owned box. Yard does not yet
-select it. Y-93 owns selection, frozen mounts, supervision and checked
-teardown. No process here creates a box or reads the host.
+This package supplies the explicitly selected read-only audit controller for
+a Yard-owned box. Yard freezes selected inputs and owns supervision and
+checked teardown on its existing execution lifecycle. No process here creates
+a box or reads the host.
 
 The operator builds the target image and commits and syncs installed
 `.yard` image/config changes. Workers change none of the installed `.yard`.
@@ -42,45 +43,63 @@ any package code. Missing or changed assets produce `runner_unavailable`
 with the failed asset, before any model request. Runtime uses no npm,
 package discovery, download, candidate entrypoint or candidate extension.
 
-Real Pi registers the execution's native MCP session. Its local
-`yard_run_durable_audit` tool invokes
-`/opt/yard/durable-audit/launch /workspace/audit.json` inside that same box.
-The tool uses anonymous file descriptors 3 and 4 for one report request and
+Real Pi registers the execution's native MCP session. Its native input hook
+deterministically invokes
+`/opt/yard/durable-audit/launch /yard/input/audit.json` inside that same box,
+before outer model dispatch. There is no outer Pi model request. The child
+uses anonymous file descriptors 3 and 4 for one report request and
 reply. Pi forwards it through its existing native audit publication grant.
 Neither the MCP bearer nor the session id enters the child. Direct shell
 invocation supplies no publication bridge and is not the supported launch.
 The box must carry Yard's existing injecting model route; only the guest
 placeholder enters the model client. No upstream key is an input.
 
-Commit and sync operator-reviewed `audit.json` and `trusted/` regular files
-before starting a read-only plan. The existing workflow freezes them into
-its read-only workspace. Candidate-generated configuration or skills are
-not trusted launch inputs. Its exact schema is:
+Commit and sync operator-reviewed Markdown and its declared regular-file
+references. Select a packaged runner through a profile, preset or structured
+operator MCP plan. A profile for an existing Pi agent `worker` is:
 
-```json
-{
-  "provider": "openrouter",
-  "model": "openai/gpt-6-sol",
-  "prompt": "Audit the declared source against the selected skill.",
-  "files": [
-    {"root": "source", "path": "crates/yard/src/pi.rs"},
-    {"root": "proof", "path": "evidence.txt"},
-    {"root": "trusted", "path": "skills/test-audit.md"},
-    {"root": "trusted", "path": "skills/references/policy.md"}
-  ],
-  "skill": "trusted:skills/test-audit.md"
-}
+```toml
+[profiles.durable]
+access = "read-only"
+outcomes = ["complete"]
+[profiles.durable.outputs]
+result = "report"
+[profiles.durable.runner]
+kind = "packaged"
+package = "durable-audit"
+agent = "worker"
+instructions = "Audit the declared source against the selected skill."
+skill = "skills/test-audit.md"
+references = ["skills/references/policy.md"]
+files = [{root = "source", path = "crates/yard/src/pi.rs"}]
 ```
 
-Provider is `openrouter` or `opencode-go`. Their fixed guest base URLs are
+Use `yard_attempt_start` with `workflow` naming an existing read-only workflow
+whose implementer is `worker`, and
+`overrides: {"implementer": {"profile": "durable"}}`. Only one read-only
+`implementer` node with report output and `complete` is supported. Arbitrary
+graphs and delegation remain refused. A read-only workflow with no seats may
+also set `profile = "durable"`; `yard ticket new --workflow NAME` then admits
+that explicit selection. The profile is not inherited from the default.
+Admission freezes selected canonical
+Git blobs, the resolved runner and package identity. Yard generates launch
+JSON from those bindings, provider/model and ticket instructions. Candidate
+`audit.json`, code, skills and extensions never supply launch authority.
+Broad trusted base guidance, skills and extensions are excluded.
+
+Provider is the configured agent's `openrouter` or `opencode-go`. Their fixed guest base URLs are
 `http://openrouter.yard/api/v1` and `http://opencode-go.yard/zen/go/v1`.
 Source, proof and trusted roots are `/workspace`, `/yard/proof` and
-`/workspace/trusted`. Stage the selected trusted Markdown and explicitly declared
-referenced regular files under the trusted root. Only declared regular files
+`/yard/input/trusted`. Yard stages only selected canonical Markdown and explicitly declared
+referenced regular files under the trusted root, separate from source, proof
+and writable state. Only declared regular files
 are readable; links and traversal are refused. No reference is followed
 automatically. The selected Markdown is included in the system instructions.
-The caller supplies frozen, read-only mounts; this package does not freeze
-or mount changing trees.
+Yard supplies frozen, read-only mounts from admitted identities even after
+later canonical or candidate edits. The native Pi bridge checks admitted
+launcher, controller and lock hashes before package code executes; the image
+launcher then verifies its sealed runtime closure before model calls.
+This package identity is separate from pinfold's native Pi artifact pin.
 
 Supply a writable state parent at `/yard/state`. The runner creates
 separate `audit-scratch` and `audit-checkpoints` directories. Existing
@@ -105,9 +124,9 @@ Host acceptance is `cargo test -p e2e --locked`. Set
 architecture-specific Node tar.gz and `packages/` containing all locked npm
 tarballs. The fixture copies them into its isolated build context, then
 builds the packaged image. Real Pi runs its configured command, registers
-MCP, invokes the trusted child tool, then finishes normally. The fixture
-counts child model traffic separately from real outer Pi traffic. Missing
-assets refuse before any child request; a corrected image controls that in
+MCP and invokes the explicitly selected controller through its native input
+hook. The fixture requires every model request to belong to the controller.
+Missing assets refuse before any model request; a corrected image controls that in
 the same project. No fixture writes daemon-private launch inputs.
 CI provisions this directory on both Linux architectures with
 `sh runners/durable-audit/fetch-build-inputs.sh "$YARD_E2E_DURABLE_INPUTS"`
