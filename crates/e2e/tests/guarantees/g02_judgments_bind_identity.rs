@@ -802,6 +802,8 @@ fn delayed_candidate_acceptance_names_the_changed_identity_and_writes_nothing() 
 /// An edit holds the new worker before changing head: delayed decisions name
 /// the old revision, then old head, and write nothing. Wrong plan and retained
 /// node identities also refuse; current identities record the operator's text.
+/// A real worker proof makes omitted and mismatched proof decisions stale;
+/// malformed proof remains invalid. The current proof controls both refusals.
 /// Expected nodes and revisions are fixture literals; base/head come from git.
 /// The pre-decision execution/check snapshot must survive acceptance, landing
 /// and a quiescent reopen. Existing omission coverage has no explicit decision.
@@ -810,6 +812,7 @@ fn delayed_candidate_acceptance_names_the_changed_identity_and_writes_nothing() 
 /// panel reviewed on acceptance. Remove approval evidence persistence to lose
 /// the decision at landing or reopen. Accept blank text to lose the required
 /// operator explanation.
+/// Sabotage: classify missing required proof as invalid or ignore proof binding.
 #[test]
 fn selected_skipped_decisions_bind_identity_without_manufacturing_results() {
     let hold = Latch::new();
@@ -837,7 +840,13 @@ fn selected_skipped_decisions_bind_identity_without_manufacturing_results() {
         } else {
             "full.txt"
         };
-        act(request, vec![commit_file(path, "feature\n", "Feature")])
+        let mut calls = vec![commit_file(path, "feature\n", "Feature")];
+        if path == "reduced.txt" {
+            calls.push(bash(
+                "printf 'selected evidence' > /yard/proof/evidence.txt",
+            ));
+        }
+        act(request, calls)
     });
     machine.start();
     let project = Project::new(
@@ -937,10 +946,16 @@ fn selected_skipped_decisions_bind_identity_without_manufacturing_results() {
         project.json(&["attempt", "show", "Y-2"])["attention"][0]["attention"].clone();
     let head = git(&clone, &["rev-parse", "HEAD"]).trim().to_string();
     assert_ne!(head, first_head);
+    let current_proof = proof(&current);
+    let snapshot = project.path.join(format!(
+        ".yard/local/attempts/{attempt}/proof-snapshots/{current_proof}/evidence.txt"
+    ));
+    assert_eq!(std::fs::read(snapshot).unwrap(), b"selected evidence");
     let mut decision = delayed;
     decision["head"] = json!(head);
     decision["revision"] = json!(2);
     decision["attention"] = current_attention.clone();
+    decision["proof"] = json!(current_proof);
     for (key, old, identity, expected) in [
         ("head", json!(first_head), "head", json!(head)),
         (
@@ -950,6 +965,7 @@ fn selected_skipped_decisions_bind_identity_without_manufacturing_results() {
             current_attention.clone(),
         ),
         ("plan_revision", json!(0), "plan_revision", json!(1)),
+        ("proof", json!("wrong-proof"), "proof", json!(current_proof)),
         (
             "accept_skipped",
             json!(["candidate-gate-keep"]),
@@ -973,17 +989,38 @@ fn selected_skipped_decisions_bind_identity_without_manufacturing_results() {
             approvals
         );
     }
+    let before = project.rows("SELECT * FROM audit ORDER BY seq");
+    let approvals = project.rows("SELECT * FROM approval ORDER BY id");
+    let mut omitted = decision.clone();
+    omitted.as_object_mut().unwrap().remove("proof");
+    let refused = operator.call("yard_attempt_approve", omitted);
+    assert_eq!(refused["error"]["code"], "stale");
+    assert_eq!(
+        refused["error"]["data"],
+        json!({"identity": "proof", "expected": "", "current": current_proof})
+    );
+    let mut malformed = decision.clone();
+    malformed["proof"] = json!(42);
+    let refused = operator.call("yard_attempt_approve", malformed);
+    assert_eq!(refused["error"]["code"], "invalid");
+    assert_eq!(project.rows("SELECT * FROM audit ORDER BY seq"), before);
+    assert_eq!(
+        project.rows("SELECT * FROM approval ORDER BY id"),
+        approvals
+    );
     // This snapshot proves the acceptance adds no execution, result or check.
     // The retained gate already finished; omissions have no rows to accept.
     let judgments = format!(
-        "SELECT e.node, e.head, e.result, c.verdict FROM execution e LEFT JOIN \"check\" c ON c.execution = e.id WHERE e.attempt = {attempt} AND e.kind IN ('gate', 'review') ORDER BY e.id"
+        "SELECT e.node, e.head, e.proof, e.result, c.verdict FROM execution e LEFT JOIN \"check\" c ON c.execution = e.id WHERE e.attempt = {attempt} AND e.kind IN ('gate', 'review') ORDER BY e.id"
     );
     let original = project.rows(&judgments);
     assert_eq!(original.len(), 2); // first candidate, then the edited candidate
     assert!(
         original
             .iter()
-            .all(|row| row["node"] == "candidate-gate-keep" && row["verdict"] == "pass")
+            .all(|row| row["node"] == "candidate-gate-keep"
+                && row["verdict"] == "pass"
+                && row["proof"] == current_proof)
     );
     assert_eq!(current["payload"]["unreviewed"], true);
     let before = project.rows("SELECT * FROM audit ORDER BY seq");

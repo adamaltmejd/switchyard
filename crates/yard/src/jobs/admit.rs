@@ -1775,11 +1775,12 @@ fn skipped_decision(
         "revision",
         "plan_revision",
     ] {
-        let named = if key == "proof"
-            && params[key].is_null()
-            && !proof::required(identity[key].as_str().unwrap_or_default())
-        {
-            identity[key].clone()
+        let named = if key == "proof" && params[key].is_null() {
+            if proof::required(identity[key].as_str().unwrap_or_default()) {
+                json!("")
+            } else {
+                identity[key].clone()
+            }
         } else {
             let valid = if matches!(key, "revision" | "plan_revision") {
                 params[key].as_i64().is_some()
