@@ -624,6 +624,17 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
             .is_empty()
     );
     assert!(project.rows("SELECT e.id FROM execution e JOIN attempt a ON a.id = e.attempt WHERE a.ticket IN (4, 5)").is_empty());
+    // Admission and cleanup observations are complete. Close these tickets
+    // before the next fixture config removes the workflows they name.
+    for ticket in ["Y-4", "Y-5"] {
+        project.json(&[
+            "ticket",
+            "abandon",
+            ticket,
+            "--reason",
+            "Malformed-input admission and independent cleanup observed",
+        ]);
+    }
     // G8 admitted asset integrity: the image owns a changed controller whose
     // launcher seal is valid. Sabotage: remove runAudit's admitted hash loop.
     // The missing-module block still refuses through seal/import without that
