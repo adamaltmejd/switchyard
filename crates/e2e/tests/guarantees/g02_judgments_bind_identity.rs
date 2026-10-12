@@ -13,7 +13,7 @@ const GATE: &str = "[gates.check]\ncommand = \"test -f feature.txt\"\nstage = \"
 /// first seat keeps its evidence despite a changed complete successor, while
 /// the final seat must bind that actual producer instead of the omitted seat.
 /// Hold the revised final worker through the real
-/// host model route to prove live edits refuse, with quiescent edits in the
+/// host model route to prove stale edits refuse, with quiescent edits in the
 /// same project as controls. Revisions/policies come from fixture literals;
 /// candidate identity comes from host git. Store snapshots prove old rows
 /// unchanged and stale edits/decisions write nothing.
@@ -131,12 +131,15 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
     let refused = operator.call(
         "yard_attempt_revise",
         json!({
-            "project": project.path, "ticket": "Y-1", "plan_revision": 2,
+            "project": project.path, "ticket": "Y-1", "plan_revision": 1,
             "overrides": {"review-0": {"profile": "final", "operator_failure": true}}
         }),
     );
-    assert_eq!(refused["error"]["code"], "refused");
-    assert_eq!(refused["error"]["data"]["reason"], "active_plan");
+    assert_eq!(refused["error"]["code"], "stale");
+    assert_eq!(
+        refused["error"]["data"],
+        json!({"identity": "plan_revision", "expected": 1, "current": 2})
+    );
     assert_eq!(project.rows("SELECT * FROM audit ORDER BY seq"), before);
     assert_eq!(
         project.rows("SELECT * FROM plan_revision ORDER BY revision"),
@@ -833,6 +836,173 @@ fn an_edit_stops_a_held_seat_and_costs_no_round() {
     assert_eq!(
         project.rows("SELECT rounds FROM attempt")[0]["rounds"],
         json!(0)
+    );
+    hold.release();
+}
+
+/// G2/G5: revise a published seat while its next real model request is held.
+/// Hold real box-up stdin EOF during teardown. The old box and host owner
+/// remain, with no replacement. The accepted edit controls the stale CAS.
+/// Fixture policy and verdict, pinfold and the host lock are external oracles.
+/// Ticket edits change candidate identity; this changes policy after publication.
+/// Sabotage: count superseded judgment, load startup from latest revision,
+/// or release reservation before checked teardown.
+#[test]
+fn a_live_plan_revision_preserves_publication_and_waits_for_checked_teardown() {
+    let hold = Latch::new();
+    let held = hold.clone();
+    let machine = Machine::new("g2-live-plan", move |request| {
+        if request.has_tool("yard_publish_review") {
+            if request.prompt().contains("Replacement review.") {
+                return act(request, vec![publish(json!([]))]);
+            }
+            if request.opens() {
+                return Reply::Tools(vec![publish(
+                    json!([{"priority": "P1", "body": "old policy block"}]),
+                )]);
+            }
+            return Reply::Hold(held.clone(), Box::new(Reply::Text("done".into())));
+        }
+        act(
+            request,
+            vec![commit_file("feature.txt", "feature\n", "Feature")],
+        )
+    });
+    let said = machine.root.join("down-said");
+    let release = machine.root.join("down-release");
+    let armed = machine.root.join("hold-review-down");
+    for path in [&said, &release] {
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(path)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    let mut writer = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&release)
+        .unwrap();
+    std::fs::write(&armed, "").unwrap();
+    machine.wrapper("pinfold", &format!(
+        "if [ \"$1 $2\" = 'box up' ]; then\nread -r spec\ncase \"$spec\" in *'/reviews/'*)\nif [ -f '{}' ]; then\n{{ printf '%s\\n' \"$spec\"; cat; echo held > '{}'; read released < '{}'; }} | \"$REAL\" \"$@\"\nexit $?\nfi;; esac\n{{ printf '%s\\n' \"$spec\"; cat; }} | \"$REAL\" \"$@\"\nexit $?\nfi",
+        armed.display(), said.display(), release.display()));
+    machine.start();
+    let project = Project::new(
+        &machine,
+        "p",
+        &config(
+            "[profiles.replacement]\nrunner = {kind = \"agent\", agent = \"worker\", instructions = \"Replacement review.\"}\naccess = \"read-only\"\noutputs = {result = \"verdict\"}\noutcomes = [\"complete\", \"blocked\"]\n",
+        ),
+    );
+    let mut watch = project.watch(0);
+    project.json(&["ticket", "new", "--title", "Feature"]);
+    hold.wait_held();
+    let old = project.rows(
+        "SELECT id, attempt, handle, plan_revision, inputs FROM execution WHERE kind = 'review'",
+    )[0]
+    .clone();
+    let publication = project.rows("SELECT * FROM \"check\" WHERE kind = 'review'");
+    assert_eq!(publication[0]["verdict"], "fail");
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .open(project.path.join(format!(
+            ".yard/local/attempts/{}/effects/{}/lock",
+            old["attempt"], old["id"]
+        )))
+        .unwrap();
+    let mut operator = machine.operator();
+    operator.initialize();
+    let adjusted = operator.call(
+        "yard_attempt_revise",
+        json!({
+        "project": project.path, "ticket": "Y-1", "plan_revision": 1,
+        "overrides": {"review-0": {"profile": "replacement"}}}),
+    );
+    assert_eq!(adjusted["result"]["plan_revision"], 2, "{adjusted}");
+    assert_eq!(watch.said(&said), "held\n");
+    assert!(
+        machine
+            .boxes("dev.yard.project")
+            .iter()
+            .any(|row| row["name"] == old["handle"])
+    );
+    assert!(matches!(
+        lock.try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ));
+    assert_eq!(
+        project.rows(
+            "SELECT id, attempt, handle, plan_revision, inputs FROM execution WHERE kind = 'review'"
+        ),
+        vec![old.clone()]
+    );
+    assert_eq!(
+        project.rows("SELECT reserved, teardown, result FROM execution WHERE kind = 'review'"),
+        vec![json!({"reserved": 1, "teardown": 0, "result": null})]
+    );
+    let before = project.rows("SELECT * FROM audit ORDER BY seq");
+    let revisions = project.rows("SELECT * FROM plan_revision ORDER BY revision");
+    let stale = operator.call(
+        "yard_attempt_revise",
+        json!({
+        "project": project.path, "ticket": "Y-1", "plan_revision": 1,
+        "overrides": {"review-0": {"profile": "replacement"}}}),
+    );
+    assert_eq!(stale["error"]["code"], "stale");
+    assert_eq!(
+        stale["error"]["data"],
+        json!({"identity": "plan_revision", "expected": 1, "current": 2})
+    );
+    assert_eq!(project.rows("SELECT * FROM audit ORDER BY seq"), before);
+    assert_eq!(
+        project.rows("SELECT * FROM plan_revision ORDER BY revision"),
+        revisions
+    );
+    std::fs::remove_file(&armed).unwrap();
+    writeln!(writer, "go").unwrap();
+    watch.until("replacement seat", |event| {
+        event["event"] == "execution.started"
+            && event["data"]["kind"] == "review"
+            && event["execution"] != old["id"]
+    });
+    assert!(
+        !machine
+            .boxes("dev.yard.project")
+            .iter()
+            .any(|row| row["name"] == old["handle"])
+    );
+    lock.try_lock().unwrap();
+    lock.unlock().unwrap();
+    let ended = project.rows(&format!(
+        "SELECT plan_revision, inputs, result, reserved, teardown FROM execution WHERE id = {}",
+        old["id"]
+    ))[0]
+        .clone();
+    assert_eq!(ended["plan_revision"], 1);
+    assert_eq!(ended["inputs"], old["inputs"]);
+    assert_eq!(ended["reserved"], 0);
+    assert_eq!(ended["teardown"], 1);
+    let result: Value = serde_json::from_str(ended["result"].as_str().unwrap()).unwrap();
+    assert_eq!(result["judgment"]["publication"], publication[0]["id"]);
+    let approved = approval(&mut watch);
+    assert_eq!(approved["payload"]["plan_revision"], 2);
+    assert_eq!(project.rows("SELECT rounds FROM attempt")[0]["rounds"], 0);
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT * FROM \"check\" WHERE id = {}",
+            publication[0]["id"]
+        )),
+        publication
+    );
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT plan_revision, inputs, result, reserved, teardown FROM execution WHERE id = {}",
+            old["id"]
+        ))[0],
+        ended
     );
     hold.release();
 }

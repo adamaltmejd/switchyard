@@ -173,24 +173,45 @@ fn a_successful_exit_without_an_audit_report_is_an_infrastructure_error() {
 /// do not edit a ticket between registration and publication.
 #[test]
 fn a_superseded_audit_reruns_without_a_missing_report_error() {
+    superseded_audit(false);
+}
+
+/// G2/G9: revise admitted read-only instructions before held publication.
+/// Ticket edits change ticket identity; this keeps it fixed. The replacement
+/// receives the fixture profile and revision diff, and publishes successfully.
+/// Sabotage: accept the superseded report, infer missing_report after supersession,
+/// or load a running worker from the latest plan.
+#[test]
+fn a_plan_revision_hands_off_a_selected_read_only_implementer() {
+    superseded_audit(true);
+}
+
+fn superseded_audit(revise: bool) {
     let hold = Latch::new();
     let held = hold.clone();
-    let machine = Machine::new("g8-audit-edit", move |request| {
-        if request.prompt().contains("Revised audit input") {
-            return planned(request);
-        }
-        if request.opens() {
-            return Reply::Hold(held.clone(), Box::new(Reply::Tools(vec![publish_report()])));
-        }
-        Reply::Text("done".into())
-    });
+    let machine = Machine::new(
+        if revise {
+            "g8-audit-revise"
+        } else {
+            "g8-audit-edit"
+        },
+        move |request| {
+            if request.prompt().contains("Revised audit input") {
+                return planned(request);
+            }
+            if request.opens() {
+                return Reply::Hold(held.clone(), Box::new(Reply::Tools(vec![publish_report()])));
+            }
+            Reply::Text("done".into())
+        },
+    );
     machine.start();
     // A fresh harness conversation makes the new revision's model input
     // independent of the old refused publication.
     let project = Project::new(
         &machine,
         "p",
-        &config("").replace(
+        &config("[profiles.revised]\nrunner = {kind = \"agent\", agent = \"worker\", instructions = \"Revised audit input\"}\naccess = \"read-only\"\noutputs = {result = \"report\"}\noutcomes = [\"complete\"]\n").replace(
             "[workflows.default]\n",
             "[workflows.default]\nmax_session_executions = 1\n",
         ),
@@ -205,17 +226,58 @@ fn a_superseded_audit_reruns_without_a_missing_report_error() {
         "plan",
     ]);
     hold.wait_held();
-    project.json(&[
-        "ticket",
-        "edit",
-        "Y-1",
-        "--revision",
-        "1",
-        "--body",
-        "Revised audit input",
-    ]);
+    let frozen = project
+        .rows("SELECT id, plan_revision, inputs FROM execution WHERE kind = 'implementation'");
+    if revise {
+        let mut operator = machine.operator();
+        operator.initialize();
+        let adjusted = operator.call(
+            "yard_attempt_revise",
+            json!({
+            "project": project.path, "ticket": "Y-1", "plan_revision": 1,
+            "overrides": {"implementer": {"profile": "revised"}}}),
+        );
+        assert_eq!(adjusted["result"]["plan_revision"], 2, "{adjusted}");
+        assert_eq!(
+            project.rows(
+                "SELECT id, plan_revision, inputs FROM execution WHERE kind = 'implementation'"
+            ),
+            frozen
+        );
+    } else {
+        project.json(&[
+            "ticket",
+            "edit",
+            "Y-1",
+            "--revision",
+            "1",
+            "--body",
+            "Revised audit input",
+        ]);
+    }
     hold.release();
     watch.event("attempt.ended", &[("outcome", "planned")]);
+    assert_eq!(project.rows("SELECT id, plan_revision, inputs FROM execution WHERE kind = 'implementation' ORDER BY id LIMIT 1"), frozen);
+    if revise {
+        assert_eq!(
+            project.rows(
+                "SELECT plan_revision FROM execution WHERE kind = 'implementation' ORDER BY id"
+            ),
+            vec![json!({"plan_revision": 1}), json!({"plan_revision": 2})]
+        );
+        let prompt = machine
+            .model
+            .requests()
+            .into_iter()
+            .rfind(|request| request.opens())
+            .unwrap()
+            .last_user();
+        assert!(
+            prompt.contains("The operator revised the plan:"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("Revised audit input"), "{prompt}");
+    }
     let rows = project.rows("SELECT id, ticket_revision, report, result FROM execution WHERE kind = 'implementation' ORDER BY id");
     assert_eq!(rows.len(), 2, "{rows:?}");
     assert_eq!(rows[0]["ticket_revision"], 1);
@@ -223,10 +285,10 @@ fn a_superseded_audit_reruns_without_a_missing_report_error() {
     let old: Value = serde_json::from_str(rows[0]["result"].as_str().unwrap()).unwrap();
     assert_eq!(old["outputs"], json!({}));
     assert!(old["outcome"].is_null());
-    assert_eq!(rows[1]["ticket_revision"], 2);
+    assert_eq!(rows[1]["ticket_revision"], if revise { 1 } else { 2 });
     let publication: Value = serde_json::from_str(rows[1]["report"].as_str().unwrap()).unwrap();
     assert_eq!(publication["execution"], rows[1]["id"]);
-    assert_eq!(publication["ticket_revision"], 2);
+    assert_eq!(publication["ticket_revision"], if revise { 1 } else { 2 });
     assert_eq!(
         publication["report"],
         json!({"summary": "Fixture audit", "findings": []})

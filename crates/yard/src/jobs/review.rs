@@ -13,7 +13,7 @@ use std::time::Duration;
 
 pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -> Result<(), Fail> {
     let row = project.read(|conn| executions::get(conn, execution))?;
-    let attempt = project.read(|conn| attempts::get(conn, row.attempt))?;
+    let attempt = project.read(|conn| attempts::for_execution(conn, &row))?;
     let loaded = super::load_attempt(daemon, project, &attempt).await?;
     let ticket = project.read(|conn| tickets::get(conn, attempt.ticket))?;
     let seat_name = row.name.clone().unwrap_or_default();
@@ -187,10 +187,11 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
         }
         let published = checks::for_execution(tx, execution)?;
         // An edit that landed while the seat ran superseded it: no error, no round.
-        let moved = match row.ticket_revision {
-            Some(read) => attempts::superseded_by_edit(tx, attempt.id, ticket.id, read)?,
-            None => false,
-        };
+        let moved = executions::plan_superseded(tx, &attempts::get(tx, attempt.id)?, &row)?
+            || match row.ticket_revision {
+                Some(read) => attempts::superseded_by_edit(tx, attempt.id, ticket.id, read)?,
+                None => false,
+            };
         let failure = match (&published, &run.registered, &run.terminal) {
             (Some(_), _, _) => None,
             // An edit stopped the seat: it judged nothing and is not an error.
@@ -310,8 +311,10 @@ pub fn publish(grant: &crate::mcp::Grant, arguments: &Value) -> Result<Value, Fa
         if attempt.state != "live" {
             return Err(Fail::refused("the attempt has ended"));
         }
-        if let Some(read) = row.ticket_revision
-            && attempts::superseded_by_edit(tx, attempt.id, attempt.ticket, read)?
+        if executions::plan_superseded(tx, &attempt, &row)?
+            || row.ticket_revision.is_some_and(|read| {
+                attempts::superseded_by_edit(tx, attempt.id, attempt.ticket, read).unwrap_or(true)
+            })
         {
             return Err(Fail::refused(
                 "the ticket was edited; this candidate is superseded and nothing is recorded",

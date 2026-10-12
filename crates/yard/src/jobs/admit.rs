@@ -1262,9 +1262,20 @@ pub async fn attempt_revise(
             .map(|(name, node)| (name.clone(), node.clone()))
             .collect::<std::collections::BTreeMap<_, _>>()
     };
+    // Instructions may change; access, agent and publication grants remain frozen.
+    if let (
+        crate::plan::Runner::Agent { instructions, .. },
+        crate::plan::Runner::Agent {
+            instructions: previous,
+            ..
+        },
+    ) = (&mut implementer.runner, &old_implementer.runner)
+    {
+        *instructions = previous.clone();
+    }
     if implementer != old_implementer || landing(&plan) != landing(&old) {
         return Err(
-            Fail::refused("adjustment changes frozen implementation or landing policy")
+            Fail::refused("adjustment changes frozen grants or landing policy")
                 .with(json!({"reason": "unsupported_revision"})),
         );
     }
@@ -1295,7 +1306,7 @@ pub async fn attempt_revise(
     evidence["selection"] = selection;
     evidence["skipped"] = json!(skipped);
     evidence["unreviewed"] = json!(!plan.nodes.keys().any(|name| name.starts_with("review-")));
-    project.tx(|tx| {
+    let (result, stops) = project.tx(|tx| {
         let current = attempts::live_for(tx, id)?
             .ok_or_else(|| Fail::refused("no live attempt"))?;
         if current.id != attempt.id {
@@ -1303,28 +1314,35 @@ pub async fn attempt_revise(
         }
         attempts::require_plan(tx, current.id, Some(expected))?;
         let executions = executions::for_attempt(tx, current.id)?;
-        if executions.iter().any(|row| row.status == "running" || row.reserved || row.intent_state.as_deref() == Some("open")) {
-            return Err(Fail::refused("plan adjustment requires checked quiescence")
-                .with(json!({"reason": "active_plan", "attempt": current.id})));
-        }
         let open = attempts::open_for_attempt(tx, current.id)?;
-        if current.candidate().is_none() || current.next.is_some()
-            || attempts::edit_pending(tx, current.id)?
-            || open.iter().any(|item| !matches!(item.kind.as_str(), "approval" | "candidate"))
+        let implementing = executions.iter().any(|row| row.kind == "implementation" && row.status == "running");
+        if (current.candidate().is_none() && !implementing)
+            || (current.next.is_some() && !implementing)
+            || open.iter().any(|item| !matches!(item.kind.as_str(), "approval" | "candidate" | "red") || (item.kind == "red" && item.reason != "ownership"))
         {
-            return Err(Fail::refused("plan adjustment requires a quiescent candidate")
+            return Err(Fail::refused("plan adjustment requires implementation or candidate work")
                 .with(json!({"reason": "active_plan", "attempt": current.id})));
         }
         refuse_during_intent(tx, id)?;
+        // A revision during implementation reaches its successor as an operator diff.
+        if let Some(row) = executions.iter().rev().find(|row| row.kind == "implementation" && row.status == "running") {
+            evidence["handoff_from"] = json!(row.id);
+        }
         attempts::append_plan(tx, current.id, expected, &evidence)?;
         if let Some(approval) = checks::active_for(tx, current.id)? {
             checks::set_approval_state(tx, &approval, "withdrawn", id, None)?;
         }
-        for item in open { attempts::resolve(tx, &item, "superseded", None)?; }
+        for item in open { if item.reason != "ownership" { attempts::resolve(tx, &item, "superseded", None)?; } }
+        let revised = attempts::get(tx, current.id)?;
+        let stops = executions.iter().filter(|row| row.status == "running" && row.parent.is_none() && matches!(row.kind.as_str(), "gate" | "review"))
+            .filter_map(|row| match executions::plan_superseded(tx, &revised, row) { Ok(false) => None, _ => Some(row.id) }).collect::<Vec<_>>();
+        if attempts::edit_pending(tx, current.id)? { attempts::set_next(tx, current.id, None)?; }
         super::audit_attempt(tx, "plan.revised", &current, None,
             json!({"expected": expected, "plan_revision": expected + 1, "selection": evidence["selection"]}))?;
-        Ok(attempts::get(tx, current.id)?.to_json())
-    })
+        Ok((attempts::get(tx, current.id)?.to_json(), stops))
+    })?;
+    stop_executions(daemon, project, &stops);
+    Ok(result)
 }
 
 /// `yard attempt start`: the scheduler's admission for one named ticket, or

@@ -44,8 +44,9 @@ pub fn publish(grant: &Grant, arguments: &Value) -> Result<Value, Fail> {
         if row.report.is_some() {
             return Err(Fail::refused("duplicate_report"));
         }
+        let frozen = attempts::for_execution(tx, &row)?;
         let plan = crate::plan::Plan::admitted(
-            attempt
+            frozen
                 .admission
                 .as_ref()
                 .ok_or_else(|| Fail::refused("unbound_report"))?,
@@ -61,8 +62,11 @@ pub fn publish(grant: &Grant, arguments: &Value) -> Result<Value, Fail> {
         {
             return Err(Fail::invalid("undeclared_outcome"));
         }
-        if let Some(revision) = row.ticket_revision
-            && attempts::superseded_by_edit(tx, attempt.id, attempt.ticket, revision)?
+        if executions::plan_superseded(tx, &attempt, &row)?
+            || row.ticket_revision.is_some_and(|revision| {
+                attempts::superseded_by_edit(tx, attempt.id, attempt.ticket, revision)
+                    .unwrap_or(true)
+            })
         {
             return Err(Fail::refused("superseded_report"));
         }

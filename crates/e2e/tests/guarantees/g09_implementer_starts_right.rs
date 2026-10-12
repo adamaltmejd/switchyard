@@ -53,7 +53,9 @@ fn reasons(project: &Project) -> Vec<Value> {
 /// `Rename` commits again.
 ///
 /// Sabotage: make `admit::steer` notify the stop signal of a running
-/// implementer; the held execution ends unchanged. Or make
+/// implementer; the held execution ends unchanged. Load the execution from
+/// the latest plan or omit the successor revision diff; frozen inputs and
+/// the next model prompt fail. Or make
 /// `supervise::implement` ignore the edit after a candidate; the first head
 /// reaches approval and the edit is never delivered. Make
 /// `admit::attempt_stop` skip notifying the execution; it runs on and no
@@ -89,7 +91,8 @@ fn an_edit_reaches_the_next_prompt_and_stop_delivers_it_sooner() {
     });
     machine.start();
     let gate = "[gates.check]\ncommand = \"true\"\nstage = \"candidate\"\nruns_in = \"host\"\n";
-    let edited = Project::new(&machine, "p", &unreviewed(gate));
+    let profile = "[profiles.revised]\nrunner = {kind = \"agent\", agent = \"worker\", instructions = \"Revised implementation.\"}\naccess = \"write-allowed\"\noutputs = {result = \"candidate\"}\noutcomes = [\"complete\"]\n";
+    let edited = Project::new(&machine, "p", &unreviewed(&format!("{gate}{profile}")));
     let stopped = Project::new(&machine, "q", &unreviewed(""));
     let mut edit_watch = edited.watch(0);
     let mut stop_watch = stopped.watch(0);
@@ -98,6 +101,22 @@ fn an_edit_reaches_the_next_prompt_and_stop_delivers_it_sooner() {
     edit_hold.wait_held();
     stop_hold.wait_held();
 
+    let frozen = edited
+        .rows("SELECT id, plan_revision, inputs FROM execution WHERE kind = 'implementation'");
+    let mut operator = machine.operator();
+    operator.initialize();
+    let revised = operator.call(
+        "yard_attempt_revise",
+        json!({
+        "project": edited.path, "ticket": "Y-1", "plan_revision": 1,
+        "overrides": {"implementer": {"profile": "revised"}}}),
+    );
+    assert_eq!(revised["result"]["plan_revision"], 2, "{revised}");
+    assert_eq!(
+        edited
+            .rows("SELECT id, plan_revision, inputs FROM execution WHERE kind = 'implementation'"),
+        frozen
+    );
     edit_body(&edited, "Rename it too");
     edit_hold.release();
     edit_body(&stopped, "Rename it now");
@@ -113,6 +132,17 @@ fn an_edit_reaches_the_next_prompt_and_stop_delivers_it_sooner() {
     // The latest opening is p's second: q opens nothing more until its start.
     let second = openings(&machine).last().unwrap().last_user();
     assert!(second.contains("+Rename it too"), "{second}");
+    assert!(
+        second.contains("The operator revised the plan:"),
+        "{second}"
+    );
+    assert!(second.contains("Revised implementation."), "{second}");
+    assert_eq!(
+        edited
+            .rows("SELECT plan_revision FROM execution WHERE kind = 'implementation' ORDER BY id"),
+        vec![json!({"plan_revision": 1}), json!({"plan_revision": 2})]
+    );
+    assert_eq!(edited.rows("SELECT id, plan_revision, inputs FROM execution WHERE kind = 'implementation' ORDER BY id LIMIT 1"), frozen);
     let clone = edited.path.join(".yard/local/attempts/1/clone");
     let head = git(&clone, &["rev-parse", "HEAD"]).trim().to_string();
     assert_eq!(git(&clone, &["show", "HEAD:renamed.txt"]), "renamed\n");

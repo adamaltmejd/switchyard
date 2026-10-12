@@ -611,12 +611,39 @@ pub fn qualifies(
             proof: execution.proof.as_deref(),
             ticket_revision: execution.ticket_revision,
             digest: Some(digest),
+            feedback: execution
+                .inputs
+                .as_ref()
+                .and_then(|inputs| inputs.get("feedback")),
             ..Default::default()
         },
     )?;
     Ok(expected.is_some_and(|(expected_node, inputs)| {
         expected_node == node && execution.inputs.as_ref() == Some(&inputs)
     }))
+}
+
+/// A live revision affects only changed policy or typed producer bindings.
+pub fn plan_superseded(
+    conn: &Connection,
+    attempt: &super::attempts::Attempt,
+    execution: &Execution,
+) -> Result<bool, Fail> {
+    if execution.plan_revision == attempt.plan_revision() {
+        return Ok(false);
+    }
+    let digest: Option<String> = conn.query_row(
+        "SELECT digest FROM execution WHERE id = ?1",
+        [execution.id],
+        |row| row.get(0),
+    )?;
+    Ok(!qualifies(
+        conn,
+        attempt,
+        execution,
+        digest.as_deref().unwrap_or_default(),
+    )
+    .unwrap_or(false))
 }
 
 /// Observational: no event.
@@ -753,7 +780,7 @@ pub fn end(tx: &Connection, id: i64, end: End) -> Result<(), Fail> {
                 .as_ref()
                 .map(|judgment| json!({"kind": "verdict", "value": judgment}))
         });
-        let attempt = super::attempts::get(tx, execution.attempt)?;
+        let attempt = super::attempts::for_execution(tx, &execution)?;
         let mut outcome = output
             .as_ref()
             .filter(|output| output["kind"] == "report")

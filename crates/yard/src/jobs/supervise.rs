@@ -510,7 +510,7 @@ pub async fn implement(
     execution: i64,
 ) -> Result<(), Fail> {
     let row = project.read(|conn| executions::get(conn, execution))?;
-    let attempt = project.read(|conn| attempts::get(conn, row.attempt))?;
+    let attempt = project.read(|conn| attempts::for_execution(conn, &row))?;
     let loaded = super::load_attempt(daemon, project, &attempt).await?;
     // The prompt carries the body the start transaction recorded; a later edit
     // stays pending for the next execution.
@@ -1173,11 +1173,13 @@ fn notify_if_edited(project: &Project, execution: i64, stop: &tokio::sync::Notif
     let moved = project
         .read(|conn| {
             let row = executions::get(conn, execution)?;
-            let ticket = tickets::get(conn, attempts::get(conn, row.attempt)?.ticket)?;
+            let attempt = attempts::get(conn, row.attempt)?;
+            let ticket = tickets::get(conn, attempt.ticket)?;
             Ok(row.parent.is_none()
                 && row
                     .ticket_revision
-                    .is_some_and(|revision| revision != ticket.revision))
+                    .is_some_and(|revision| revision != ticket.revision)
+                || (row.parent.is_none() && executions::plan_superseded(conn, &attempt, &row)?))
         })
         .unwrap_or(false);
     if moved {
@@ -1204,6 +1206,19 @@ async fn implementer_prompt(
         .or_else(|| attempt.next.clone())
         .unwrap_or(json!({}));
     let workflow = loaded.config.workflow(&attempt.workflow)?;
+    let plan = attempt
+        .admission
+        .as_ref()
+        .map(crate::plan::Plan::admitted)
+        .transpose()
+        .map_err(|error| Fail::refused(error.to_string()))?;
+    let instructions = plan
+        .as_ref()
+        .and_then(|plan| match &plan.nodes["implementer"].runner {
+            crate::plan::Runner::Agent { instructions, .. } => Some(instructions.as_str()),
+            _ => None,
+        })
+        .unwrap_or(&workflow.instructions);
     let mut prompt = String::new();
     // The resumed session's owner launched its harness with this body.
     let body_read: Option<String> = match resumed {
@@ -1224,8 +1239,8 @@ async fn implementer_prompt(
             ticket.title,
             ticket.body
         ));
-        if !workflow.instructions.is_empty() {
-            prompt.push_str(&workflow.instructions);
+        if !instructions.is_empty() {
+            prompt.push_str(instructions);
             prompt.push_str("\n\n");
         }
         prompt.push_str(&format!("Target branch: {}.\n\n", attempt.target_branch()?));
@@ -1295,6 +1310,25 @@ async fn implementer_prompt(
         let diff = body_diff(daemon, project, attempt.id, read, &ticket.body).await?;
         prompt.push_str(&format!("\nThe operator edited the ticket:\n{diff}\n"));
     }
+    let previous = project.read(|conn| {
+        Ok(executions::for_attempt(conn, attempt.id)?
+            .into_iter()
+            .rev()
+            .find(|row| row.kind == "implementation" && row.id < execution.id))
+    })?;
+    if let Some(previous) = previous
+        && previous.plan_revision != execution.plan_revision
+    {
+        let before = project.read(|conn| attempts::for_execution(conn, &previous))?;
+        let old =
+            serde_json::to_string_pretty(&before.admission.as_ref().map(|value| &value["plan"]))
+                .expect("plan serializes");
+        let new =
+            serde_json::to_string_pretty(&attempt.admission.as_ref().map(|value| &value["plan"]))
+                .expect("plan serializes");
+        let diff = body_diff(daemon, project, attempt.id, &old, &new).await?;
+        prompt.push_str(&format!("\nThe operator revised the plan:\n{diff}\n"));
+    }
     if prompt.trim().is_empty() {
         prompt.push_str("Continue the work.\n");
     }
@@ -1339,7 +1373,7 @@ pub async fn gate(
     execution: i64,
 ) -> Result<(), Fail> {
     let row = project.read(|conn| executions::get(conn, execution))?;
-    let attempt = project.read(|conn| attempts::get(conn, row.attempt))?;
+    let attempt = project.read(|conn| attempts::for_execution(conn, &row))?;
     let loaded = super::load_attempt(daemon, project, &attempt).await?;
     let name = row.name.clone().unwrap_or_default();
     let commit = row.head.clone().unwrap_or_default();
@@ -1447,10 +1481,11 @@ pub async fn gate(
         // An edit that landed while the gate ran superseded its check: no
         // decision, red or check comes of it.
         let moved = row.parent.is_none()
-            && row.ticket_revision.is_some_and(|read| {
-                attempts::superseded_by_edit(tx, attempt.id, attempt.ticket, read).unwrap_or(true)
-            });
-        let verdict = if moved { "stopped" } else { verdict };
+            && (executions::plan_superseded(tx, &attempts::get(tx, attempt.id)?, &row)?
+                || row.ticket_revision.is_some_and(|read| {
+                    attempts::superseded_by_edit(tx, attempt.id, attempt.ticket, read)
+                        .unwrap_or(true)
+                }));
         executions::end(
             tx,
             execution,

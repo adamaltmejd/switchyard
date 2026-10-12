@@ -441,10 +441,16 @@ pub fn spawn(daemon: &Arc<Daemon>, project: &Arc<Project>, kind: &str, execution
                     // A gate or seat that read a pre-edit candidate records nothing.
                     let edited = row.parent.is_none()
                         && matches!(row.kind.as_str(), "gate" | "review")
-                        && row.ticket_revision.is_some_and(|revision| {
-                            attempts::superseded_by_edit(tx, attempt.id, attempt.ticket, revision)
+                        && (executions::plan_superseded(tx, &attempt, &row)?
+                            || row.ticket_revision.is_some_and(|revision| {
+                                attempts::superseded_by_edit(
+                                    tx,
+                                    attempt.id,
+                                    attempt.ticket,
+                                    revision,
+                                )
                                 .unwrap_or(false)
-                        });
+                            }));
                     // An edit withdrew the approval a landing ran on.
                     let withdrawn = match (row.kind.as_str(), row.approval) {
                         ("landing", Some(id)) => {

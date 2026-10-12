@@ -145,6 +145,21 @@ pub fn get(conn: &Connection, id: i64) -> Result<Attempt, Fail> {
     .ok_or_else(|| Fail::not_found(format!("attempt {id} does not exist")))
 }
 
+/// Read the definitions this execution consumed, including after a live revision.
+pub fn for_execution(
+    conn: &Connection,
+    execution: &super::executions::Execution,
+) -> Result<Attempt, Fail> {
+    let mut attempt = get(conn, execution.attempt)?;
+    if let Some(revision_id) = execution.plan_revision {
+        attempt.admission = Some(
+            revision(conn, attempt.id, revision_id)?
+                .ok_or_else(|| Fail::refused("missing execution plan revision"))?,
+        );
+    }
+    Ok(attempt)
+}
+
 /// Only recorded evidence is returned; pre-admission history stays unknown.
 pub fn revision(conn: &Connection, attempt: i64, revision: i64) -> Result<Option<Value>, Fail> {
     if revision == 1 {
@@ -491,8 +506,8 @@ pub fn resolve(
     Ok(())
 }
 
-/// A ticket edit is pending while the ticket's revision is newer than the one
-/// the attempt's latest implementer execution read. Derived, never stored.
+/// An edit is pending when the latest implementer has unread ticket changes,
+/// changed policy or a live revision handoff. Derived from immutable rows.
 pub fn edit_pending(tx: &Connection, attempt: i64) -> Result<bool, Fail> {
     let read: Option<i64> = tx
         .query_row(
@@ -511,7 +526,24 @@ pub fn edit_pending(tx: &Connection, attempt: i64) -> Result<bool, Fail> {
         [attempt],
         |row| row.get(0),
     )?;
-    Ok(revision > read)
+    if revision > read {
+        return Ok(true);
+    }
+    let current = get(tx, attempt)?;
+    let execution = super::executions::for_attempt(tx, attempt)?
+        .into_iter()
+        .rev()
+        .find(|row| row.kind == "implementation")
+        .expect("implementation read");
+    if current
+        .admission
+        .as_ref()
+        .and_then(|value| value["handoff_from"].as_i64())
+        .is_some_and(|id| id >= execution.id)
+    {
+        return Ok(true);
+    }
+    super::executions::plan_superseded(tx, &current, &execution)
 }
 
 /// The one guard for every transaction that decides an attempt's next step: a

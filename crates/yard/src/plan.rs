@@ -523,6 +523,21 @@ impl Plan {
         let mut ordinary = ordinary.clone();
         for (name, node) in &self.nodes {
             let defined = ordinary.nodes.get_mut(name)?;
+            if name == "implementer" && node.runner != defined.runner {
+                let same_agent = matches!((&node.runner, &defined.runner),
+                    (Runner::Agent { agent, .. }, Runner::Agent { agent: previous, .. }) if agent == previous);
+                if !same_agent
+                    || !profiles.values().any(|profile| {
+                        profile.runner == node.runner
+                            && profile.access == defined.access
+                            && profile.outputs == defined.outputs
+                            && profile.outcomes == defined.outcomes
+                    })
+                {
+                    return None;
+                }
+                defined.runner = node.runner.clone();
+            }
             if name.starts_with("review-") && node.runner != defined.runner {
                 if !profiles.values().any(|profile| {
                     profile.runner == node.runner
