@@ -313,6 +313,7 @@ fn a_landing_retires_when_canonical_moves_before_update_ref() {
 /// consume it before teardown, or bypass the final target CAS.
 /// Retain the ended parent's reservation: its historical phase release cannot
 /// permit acceptance. Require the final release after the failed end.
+/// Delete admit's predecessor proof or accept while ownership is retained.
 /// Retire an unrelated landing instead of the changed-input continuation.
 fn prepared_host_child_restart(advance: bool) {
     let machine = Machine::new(
@@ -328,6 +329,10 @@ fn prepared_host_child_restart(advance: bool) {
     let said_path = machine.root.join("said");
     let release = machine.root.join("release");
     let observed = machine.root.join("observed-heads");
+    let failed_marker = machine.root.join("failed-middle");
+    let final_probe = machine.root.join("final-probe");
+    let probe_said = machine.root.join("probe-said");
+    let probe_release = machine.root.join("probe-release");
     for fifo in [&said_path, &release] {
         assert!(
             std::process::Command::new("mkfifo")
@@ -342,9 +347,50 @@ fn prepared_host_child_restart(advance: bool) {
         .write(true)
         .open(&release)
         .unwrap();
+    if !advance {
+        for fifo in [&probe_said, &probe_release] {
+            assert!(
+                std::process::Command::new("mkfifo")
+                    .arg(fifo)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        // The failed host child releases first. Hold the following real
+        // inventory reply, which belongs to the failed parent's final release.
+        machine.wrapper(
+            "pinfold",
+            &format!(
+                "if [ \"$1 $2\" = 'box list' ]; then\n\
+               if [ -f '{}' ]; then\n\
+                 mv '{}' '{}';\n\
+               elif [ -f '{}' ]; then\n\
+                 rm '{}';\n\
+                 \"$REAL\" \"$@\"; result=$?\n\
+                 echo \"$$ $result\" > '{}';\n\
+                 read released < '{}';\n\
+                 exit \"$result\"\n\
+               fi\n\
+             fi",
+                failed_marker.display(),
+                failed_marker.display(),
+                final_probe.display(),
+                final_probe.display(),
+                final_probe.display(),
+                probe_said.display(),
+                probe_release.display()
+            ),
+        );
+    }
+    let middle = if advance {
+        "false".to_string()
+    } else {
+        format!("touch '{}'; false", failed_marker.display())
+    };
     let gates = format!(
         "[gates.first]\ncommand = \"git rev-parse HEAD >> {}\"\nstage = \"landing\"\nruns_in = \"host\"\n\
-         [gates.middle]\ncommand = \"false\"\nstage = \"landing\"\nruns_in = \"host\"\n\
+         [gates.middle]\ncommand = \"{middle}\"\nstage = \"landing\"\nruns_in = \"host\"\n\
          [gates.second]\ncommand = \"if [ -e '{}' ]; then echo $$ > {}; read line < {}; fi\"\nstage = \"landing\"\nruns_in = \"host\"\n",
         observed.display(),
         armed.display(),
@@ -419,18 +465,6 @@ fn prepared_host_child_restart(advance: bool) {
             && event["data"]["outcome"] == "fail"
             && event["seq"].as_i64().unwrap() > failure["seq"].as_i64().unwrap()
     });
-    watch.find("failed preparation released after end", |event| {
-        event["event"] == "execution.released"
-            && event["execution"] == identity["execution"]
-            && event["seq"].as_i64().unwrap() > ended["seq"].as_i64().unwrap()
-    });
-    assert_eq!(
-        project.rows(&format!(
-            "SELECT status, outcome, reserved FROM execution WHERE id = {}",
-            identity["execution"]
-        )),
-        vec![json!({"status": "ended", "outcome": "fail", "reserved": 0})]
-    );
     let decision = json!({
         "project": project.path, "ticket": "Y-1", "attention": failure["attention"],
         "check": evidence["check"]["check"], "plan_revision": 1, "target": "feature/a", "head": head,
@@ -443,6 +477,79 @@ fn prepared_host_child_restart(advance: bool) {
     let failure_snapshot = project.rows(&format!("SELECT c.*, e.result, e.inputs FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE c.id = {failure_check}"));
     assert_eq!(evidence["check"]["verdict"], "fail");
     assert_eq!(evidence["result"]["outcome"], "failed");
+    if !advance {
+        let probe = watch.said(&probe_said);
+        let fields = probe.split_whitespace().collect::<Vec<_>>();
+        assert_eq!(fields.len(), 2, "{probe}");
+        assert_eq!(
+            fields[1], "0",
+            "real inventory succeeded before its held reply"
+        );
+        assert!(
+            std::process::Command::new("kill")
+                .args(["-0", fields[0]])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let parent = identity["execution"].as_i64().unwrap();
+        assert_eq!(
+            project.rows(&format!(
+                "SELECT id, status, outcome, reserved FROM execution WHERE id = {parent}"
+            )),
+            vec![json!({"id": parent, "status": "ended", "outcome": "fail", "reserved": 1})]
+        );
+        let parent_lock_path = project
+            .path
+            .join(format!(".yard/local/landings/{parent}/lock"));
+        let parent_lock = std::fs::OpenOptions::new()
+            .read(true)
+            .open(&parent_lock_path)
+            .unwrap();
+        parent_lock.try_lock().unwrap();
+        let competing = std::fs::OpenOptions::new()
+            .read(true)
+            .open(&parent_lock_path)
+            .unwrap();
+        assert!(matches!(
+            competing.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        let before = project.rows("SELECT * FROM audit ORDER BY seq");
+        let questions = project.rows("SELECT * FROM attention ORDER BY id");
+        let refused = operator.call("yard_attempt_accept", decision.clone());
+        assert_eq!(refused["error"]["code"], "stale", "{refused}");
+        let data = &refused["error"]["data"];
+        assert_eq!(data["identity"], "ownership");
+        assert_eq!(
+            data["expected"],
+            json!({"execution": parent, "released": true})
+        );
+        assert_eq!(data["current"]["execution"], parent);
+        assert_eq!(data["current"]["status"], "ended");
+        assert_eq!(data["current"]["outcome"], "fail");
+        assert_eq!(data["current"]["reserved"], true);
+        assert_eq!(data["current"]["prepared"], identity["prepared"]);
+        assert_eq!(project.rows("SELECT * FROM audit ORDER BY seq"), before);
+        assert_eq!(
+            project.rows("SELECT * FROM attention ORDER BY id"),
+            questions
+        );
+        parent_lock.unlock().unwrap();
+        std::fs::write(&probe_release, "go\n").unwrap();
+    }
+    watch.find("failed preparation released after end", |event| {
+        event["event"] == "execution.released"
+            && event["execution"] == identity["execution"]
+            && event["seq"].as_i64().unwrap() > ended["seq"].as_i64().unwrap()
+    });
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT status, outcome, reserved FROM execution WHERE id = {}",
+            identity["execution"]
+        )),
+        vec![json!({"status": "ended", "outcome": "fail", "reserved": 0})]
+    );
     let accepted = operator.call("yard_attempt_accept", decision.clone());
     assert_eq!(accepted["result"]["accepted"], true, "{accepted}");
     let group = watch.said(&said_path).trim().to_string();
