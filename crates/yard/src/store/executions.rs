@@ -682,6 +682,21 @@ pub fn end(tx: &Connection, id: i64, end: End) -> Result<(), Fail> {
             "UPDATE execution SET result = ?2 WHERE id = ?1",
             params![id, result.to_string()],
         )?;
+        // A recovered publication can advance only after checked ownership.
+        // Other failures keep their attention and require their existing exit.
+        if execution.kind == "review"
+            && end.outcome == "interrupted"
+            && execution.lock_contract
+            && registered.as_deref() == Some("registered")
+            && publication.is_some()
+            && get(tx, id)?.result_eligible
+        {
+            for item in super::attempts::open_for_attempt(tx, execution.attempt)? {
+                if item.kind == "red" && item.reason == "ownership" && item.execution == Some(id) {
+                    super::attempts::resolve(tx, &item, "reconciled", None)?;
+                }
+            }
+        }
     }
     audit(
         tx,

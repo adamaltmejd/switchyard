@@ -62,4 +62,10 @@ jobs:
       # The scaffold's Dockerfile starts FROM this local image; a fresh host
       # has none until it is built.
       - run: pinfold build --profile default
+      - name: Fetch verified public Durable image inputs
+        env:
+          YARD_E2E_DURABLE_INPUTS: ${{ runner.temp }}/yard-durable-inputs
+        run: sh runners/durable-audit/fetch-build-inputs.sh "$YARD_E2E_DURABLE_INPUTS"
       - run: cargo test -p e2e --locked
+        env:
+          YARD_E2E_DURABLE_INPUTS: ${{ runner.temp }}/yard-durable-inputs

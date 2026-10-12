@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+cd /opt/yard/durable-audit || {
+    echo '{"reason":"runner_unavailable","asset":"/opt/yard/durable-audit"}' >&2
+    exit 78
+}
+unset NODE_OPTIONS NODE_PATH LD_PRELOAD LD_LIBRARY_PATH
+if [ ! -x node/bin/node ] || [ ! -f identity.sha256 ]; then
+    echo '{"reason":"runner_unavailable","asset":"node/bin/node or identity.sha256"}' >&2
+    exit 78
+fi
+if ! sha256sum --quiet --strict -c identity.sha256 >&2; then
+    echo '{"reason":"runner_unavailable","asset":"identity.sha256 (see failed asset above)"}' >&2
+    exit 78
+fi
+exec node/bin/node --no-addons runner.mjs "$@"

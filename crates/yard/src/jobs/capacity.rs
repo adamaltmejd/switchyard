@@ -16,6 +16,9 @@ tokio::task_local! {
 pub fn dir(project: &Project, row: &executions::Execution) -> PathBuf {
     if row.kind == "landing" {
         super::queue::landing_dir(project, row.id)
+    } else if row.kind == "cleanup" {
+        // Cleanup removes its attempt, so its current lock must survive it.
+        project.local().join("effects").join(row.id.to_string())
     } else {
         project
             .attempt_dir(row.attempt)
@@ -173,7 +176,9 @@ pub async fn release(
         .await
         .is_ok_and(|boxes| !boxes.contains(&super::supervise::box_name(project, row.id)));
     let host_gone = if row.lock_contract {
-        super::supervise::lock_free(&dir(project, row)).unwrap_or(false)
+        (!matches!(row.kind.as_str(), "cleanup" | "review" | "gate")
+            || dir(project, row).join("lock").is_file())
+            && super::supervise::lock_free(&dir(project, row)).unwrap_or(false)
     } else {
         // The old binary never inherited effects/<id>/lock. Only paths
         // whose recorded state reached an old ownership proof may use it.
@@ -207,13 +212,44 @@ pub async fn release(
     } else {
         "external owner not proved gone; capacity retained"
     };
-    project.tx(|tx| {
+    let completed_cleanup = project.tx(|tx| {
+        let current = executions::get(tx, row.id)?;
+        let completed_cleanup = gone
+            && current.kind == "cleanup"
+            && current.lock_contract
+            && current.status == "ended"
+            && current.outcome.as_deref() == Some("removed");
         if gone {
             tx.execute(
                 "UPDATE execution SET teardown = 1 WHERE id = ?1 AND node IS NOT NULL",
                 [row.id],
             )?;
             executions::reserve(tx, row.id, false)?;
+            let released = executions::get(tx, row.id)?;
+            let completed_candidate = released.kind == "implementation"
+                && released.lock_contract
+                && released.outcome.as_deref() == Some("candidate")
+                && released.result_eligible
+                && dir(project, &released).join("lock").is_file();
+            let completed_judgment = matches!(released.kind.as_str(), "review" | "gate")
+                && released.lock_contract
+                && matches!(released.outcome.as_deref(), Some("pass" | "fail"))
+                && released.result_eligible
+                && released
+                    .result
+                    .as_ref()
+                    .is_some_and(|result| result["infrastructure"]["outcome"] == "completed")
+                && dir(project, &released).join("lock").is_file();
+            if completed_cleanup || completed_candidate || completed_judgment {
+                for item in attempts::open_for_attempt(tx, current.attempt)? {
+                    if item.kind == "red"
+                        && item.reason == "ownership"
+                        && item.execution == Some(current.id)
+                    {
+                        attempts::resolve(tx, &item, "reconciled", None)?;
+                    }
+                }
+            }
         } else if !attempts::open_attention(tx)?
             .iter()
             .any(|a| a.reason == "ownership" && a.execution == Some(row.id))
@@ -232,6 +268,10 @@ pub async fn release(
                 },
             )?;
         }
-        Ok(gone)
-    })
+        Ok(completed_cleanup)
+    })?;
+    if completed_cleanup {
+        super::cleanup::remove(&dir(project, row))?;
+    }
+    Ok(gone)
 }
