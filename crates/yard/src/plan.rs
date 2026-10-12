@@ -352,7 +352,9 @@ impl Config {
             for stage in [Stage::Candidate, Stage::Landing] {
                 if stage == Stage::Landing {
                     for (index, seat) in workflow.review.iter().enumerate() {
-                        let seat = &self.seats[seat];
+                        let seat = self.seats.get(seat).ok_or_else(|| {
+                            format!("workflows.{name}.review names unknown seat {seat:?}")
+                        })?;
                         chain.push((
                             format!("review-{index}"),
                             Node {
