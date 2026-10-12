@@ -916,7 +916,7 @@ fn selected_skipped_decisions_bind_identity_without_manufacturing_results() {
         event["event"] == "execution.released" && event["execution"] == cleanup["execution"]
     });
     // Retained gates keep their ordinary failed repair edge even without a successor.
-    let graph = json!({"inputs": {"feedback": "verdict"}, "nodes": {
+    let graph = json!({"inputs": {"feedback": "verdict", "merged": "candidate"}, "nodes": {
         "implementer": {
             "runner": {"kind": "agent", "agent": "worker", "instructions": ""},
             "access": "write-allowed", "inputs": {"feedback": {"output": "feedback", "kind": "verdict"}},
@@ -1074,8 +1074,16 @@ fn selected_skipped_decisions_bind_identity_without_manufacturing_results() {
     assert_eq!(project.rows(&evidence), rows);
     // G2/G3/G8: sabotage by fabricating an omitted pass, inheriting an
     // answer on a new merge, or consuming before checked ownership release.
+    let preparation = watch.find("omission preparation", |event| {
+        event["event"] == "landing.prepared" && event["attempt"] == attempt
+    });
     let omission = watch.find("prepared omissions", |event| {
-        event["event"] == "attention.raised" && event["data"]["reason"] == "landing"
+        event["event"] == "attention.raised"
+            && event["attempt"] == attempt
+            && event["data"]["reason"] == "landing"
+            && event["data"]["payload"]["evidence"]["landing"]["execution"]
+                == preparation["execution"]
+            && event["seq"].as_i64().unwrap() > preparation["seq"].as_i64().unwrap()
     });
     let omission_evidence = omission["data"]["payload"]["evidence"].clone();
     let identity = &omission_evidence["landing"];
@@ -1172,8 +1180,21 @@ fn selected_skipped_decisions_bind_identity_without_manufacturing_results() {
         .write_all(b"released\n")
         .unwrap();
     machine.start();
+    let fresh_preparation = watch.find("fresh merged preparation", |event| {
+        event["event"] == "landing.prepared"
+            && event["attempt"] == attempt
+            && event["execution"] != parent
+            && event["data"]["old"] == moved
+            && event["seq"].as_i64().unwrap() > omission["seq"].as_i64().unwrap()
+    });
     let fresh = watch.find("fresh omission preparation", |event| {
-        event["event"] == "attention.raised" && event["data"]["reason"] == "landing"
+        event["event"] == "attention.raised"
+            && event["attempt"] == attempt
+            && event["data"]["reason"] == "landing"
+            && event["data"]["payload"]["evidence"]["landing"]["execution"]
+                == fresh_preparation["execution"]
+            && event["attention"] != omission["attention"]
+            && event["seq"].as_i64().unwrap() > fresh_preparation["seq"].as_i64().unwrap()
     });
     let fresh_identity = &fresh["data"]["payload"]["evidence"]["landing"];
     let fresh_parent = fresh_identity["execution"].as_i64().unwrap();
@@ -1242,6 +1263,7 @@ fn selected_skipped_decisions_bind_identity_without_manufacturing_results() {
     assert_eq!(project.rows(&accepted_omission), omission_snapshot);
     // Explicit empty selection must expose the host-Git merge before intent.
     let mut empty = graph.clone();
+    empty["inputs"].as_object_mut().unwrap().remove("merged");
     empty["nodes"]
         .as_object_mut()
         .unwrap()
@@ -1275,7 +1297,9 @@ fn selected_skipped_decisions_bind_identity_without_manufacturing_results() {
         let old = project.canonical_head();
         let result = operator.call("yard_attempt_approve", approve);
         assert!(result.get("error").is_none(), "{result}");
-        let attempt = approved["attempt"].as_i64().unwrap();
+        let attempt = project.json(&["attempt", "show", ticket])["attempt"]["attempt"]
+            .as_i64()
+            .unwrap();
         let omission_rows = format!(
             "SELECT * FROM attention WHERE attempt = {attempt} AND json_type(payload, '$.evidence.nodes') = 'array' ORDER BY id"
         );
@@ -1284,8 +1308,20 @@ fn selected_skipped_decisions_bind_identity_without_manufacturing_results() {
         );
         let mut empty_snapshot = None;
         if explicit {
+            let preparation = watch.find("empty merged preparation", |event| {
+                event["event"] == "landing.prepared"
+                    && event["attempt"] == attempt
+                    && event["data"]["old"] == old
+                    && event["seq"].as_i64().unwrap() > fresh["seq"].as_i64().unwrap()
+            });
             let item = watch.find("empty prepared attention", |event| {
-                event["event"] == "attention.raised" && event["data"]["reason"] == "landing"
+                event["event"] == "attention.raised"
+                    && event["attempt"] == attempt
+                    && event["data"]["reason"] == "landing"
+                    && event["data"]["payload"]["evidence"]["landing"]["execution"]
+                        == preparation["execution"]
+                    && event["attention"] != fresh["attention"]
+                    && event["seq"].as_i64().unwrap() > preparation["seq"].as_i64().unwrap()
             });
             let identity = &item["data"]["payload"]["evidence"]["landing"];
             let parent = identity["execution"].as_i64().unwrap();
