@@ -2629,6 +2629,7 @@ fn selected_failures_continue_without_rewriting_judgments() {
     );
     // G8/G3: the selected merged failure also keeps its failed evidence.
     // Sabotage: return it for repair, rewrite it to pass or skip remaining gates.
+    // Retain the ended parent's reservation: only its final release permits acceptance.
     project.write("target.txt", "target\n");
     project.git(&["add", "target.txt"]);
     project.git(&["commit", "-qm", "Advance target"]);
@@ -2642,10 +2643,24 @@ fn selected_failures_continue_without_rewriting_judgments() {
     let payload = &landing["data"]["payload"];
     let evidence = &payload["evidence"];
     let original_landing = &evidence["landing"];
-    watch.find("failed landing released", |event| {
+    let ended = watch.find("failed landing ended", |event| {
+        event["event"] == "execution.ended"
+            && event["execution"] == original_landing["execution"]
+            && event["data"]["outcome"] == "fail"
+            && event["seq"].as_i64().unwrap() > landing["seq"].as_i64().unwrap()
+    });
+    watch.find("failed landing released after end", |event| {
         event["event"] == "execution.released"
             && event["execution"] == original_landing["execution"]
+            && event["seq"].as_i64().unwrap() > ended["seq"].as_i64().unwrap()
     });
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT status, outcome, reserved FROM execution WHERE id = {}",
+            original_landing["execution"]
+        )),
+        vec![json!({"status": "ended", "outcome": "fail", "reserved": 0})]
+    );
     let landing_check = evidence["check"]["check"].as_i64().unwrap();
     let merged_failure = project.rows(&format!("SELECT c.*, e.result, e.inputs FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE c.id = {landing_check}"));
     assert_eq!(evidence["check"]["verdict"], "fail");
