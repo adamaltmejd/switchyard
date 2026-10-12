@@ -144,18 +144,16 @@ fn passing_child(
         })
 }
 
-fn retire_preparation(project: &Project, execution: i64, reason: &str) -> Result<(), Fail> {
-    project.tx(|tx| {
-        executions::end(
-            tx,
-            execution,
-            executions::End {
-                outcome: "retired",
-                detail: Some(reason),
-                ..Default::default()
-            },
-        )
-    })
+fn retire_preparation(tx: &rusqlite::Connection, execution: i64, reason: &str) -> Result<(), Fail> {
+    executions::end(
+        tx,
+        execution,
+        executions::End {
+            outcome: "retired",
+            detail: Some(reason),
+            ..Default::default()
+        },
+    )
 }
 
 /// Why an approval no longer holds. A superseded one's checks count for
@@ -463,7 +461,7 @@ pub async fn land(
                 && retained.iter().all(|child| child.outcome.as_deref() != Some("pass")
                     || passing_child(child, &row, old, merged));
             if !valid {
-                retire_preparation(project, execution, "prepared_input_changed")?;
+                project.tx(|tx| retire_preparation(tx, execution, "prepared_input_changed"))?;
                 return Ok(None);
             }
             project.tx(|tx| store::audit(tx, "landing.continued", store::Target {
@@ -473,7 +471,7 @@ pub async fn land(
             return Ok(Some((loaded, target_ref, target, merged.to_string())));
         }
         if row.resumed.is_some() {
-            retire_preparation(project, execution, "prepared_input_absent")?;
+            project.tx(|tx| retire_preparation(tx, execution, "prepared_input_absent"))?;
             return Ok(None);
         }
         let merged = if daemon
@@ -568,22 +566,27 @@ pub async fn land(
                 let held = target_lock.lock().await;
                 admit(daemon, project, &held, approval.id, execution, |tx, _| {
                     if !passing_child(&executions::get(tx, child.id)?, &row, &target, &merged) {
-                        return Err(Fail::refused("prepared child evidence changed"));
+                        retire_preparation(tx, execution, "prepared_child_evidence_changed")?;
+                        return Ok(false);
                     }
-                    Ok(())
+                    Ok(true)
                 })
                 .await
             })
             .await?;
-            if let Err((now, lapse)) = admitted {
-                return withdraw(
-                    project,
-                    &now.loaded,
-                    execution,
-                    &now.approval,
-                    &now.attempt,
-                    &lapse,
-                );
+            match admitted {
+                Ok(false) => return Ok(()),
+                Ok(true) => {}
+                Err((now, lapse)) => {
+                    return withdraw(
+                        project,
+                        &now.loaded,
+                        execution,
+                        &now.approval,
+                        &now.attempt,
+                        &lapse,
+                    );
+                }
             }
             selected.push(child.id);
             continue;
@@ -768,13 +771,14 @@ pub async fn land(
             .as_deref()
             != Some(&merged)
         {
-            return retire_preparation(project, execution, "prepared_ref_changed");
+            return project.tx(|tx| retire_preparation(tx, execution, "prepared_ref_changed"));
         }
         let admitted = admit(daemon, project, held, approval.id, execution, |tx, now| {
             for child in &selected {
                 let child = executions::get(tx, *child)?;
                 if child.node.is_some() && !passing_child(&child, &row, &target, &merged) {
-                    return Err(Fail::refused("prepared child evidence changed"));
+                    retire_preparation(tx, execution, "prepared_child_evidence_changed")?;
+                    return Ok(false);
                 }
             }
             tx.execute(
@@ -794,18 +798,22 @@ pub async fn land(
             if configs.default.as_deref() == Some(now.loaded.branch.as_str()) {
                 configs.default = None;
             }
-            Ok(())
+            Ok(true)
         })
         .await?;
-        if let Err((now, lapse)) = admitted {
-            return withdraw(
-                project,
-                &now.loaded,
-                execution,
-                &now.approval,
-                &now.attempt,
-                &lapse,
-            );
+        match admitted {
+            Ok(false) => return Ok(()),
+            Ok(true) => {}
+            Err((now, lapse)) => {
+                return withdraw(
+                    project,
+                    &now.loaded,
+                    execution,
+                    &now.approval,
+                    &now.attempt,
+                    &lapse,
+                );
+            }
         }
         let moved = daemon
             .git
