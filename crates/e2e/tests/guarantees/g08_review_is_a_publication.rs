@@ -2844,8 +2844,17 @@ fn selected_failures_continue_without_rewriting_judgments() {
     let payload = &item["data"]["payload"];
     let evidence = &payload["evidence"];
     let parent = &evidence["landing"];
-    watch.find("repair failed parent released", |event| {
-        event["event"] == "execution.released" && event["execution"] == parent["execution"]
+    // Cached releases between gate phases do not prove final ownership release.
+    let ended = watch.find("repair failed parent ended", |event| {
+        event["event"] == "execution.ended"
+            && event["execution"] == parent["execution"]
+            && event["data"]["outcome"] == "fail"
+            && event["seq"].as_i64().unwrap() > item["seq"].as_i64().unwrap()
+    });
+    watch.find("repair failed parent released after end", |event| {
+        event["event"] == "execution.released"
+            && event["execution"] == parent["execution"]
+            && event["seq"].as_i64().unwrap() > ended["seq"].as_i64().unwrap()
     });
     let merged = git(
         &project.canonical(),
