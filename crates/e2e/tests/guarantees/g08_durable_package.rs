@@ -106,6 +106,16 @@ if [ "$1 $2" = 'image build' ]; then
         previous="$arg"
     done
 fi
+if [ "$1 $2" = 'box up' ] && [ -f '{root}/hold-down-{attempt}' ]; then
+    {{ cat; echo held > '{root}/down-said-{attempt}'; read released < '{root}/down-release-{attempt}'; }} | "$REAL" "$@"
+    exit $?
+fi
+if [ "$1 $2" = 'box list' ] && [ -f '{root}/hold-listing' ]; then
+    "$REAL" "$@"; result=$?
+    echo "$result" > '{root}/listing-said'
+    read released < '{root}/listing-release'
+    exit "$result"
+fi
 if [ "$1 $2" = 'box exec' ]; then
     handle="$3"
     case " $* " in *' --mode json '*)
@@ -766,11 +776,22 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
 /// nor this controller's bare-answer detection. Fixture supplies all replies.
 #[test]
 fn a_packaged_audit_bounds_iterations_and_requires_native_publication() {
-    let machine = Machine::new("g8-durable-bound", |request| {
+    let stop = Latch::new();
+    let held_stop = stop.clone();
+    let stop_requests = std::sync::atomic::AtomicUsize::new(0);
+    let machine = Machine::new("g8-durable-bound", move |request| {
         assert!(
             request.has_tool("read_declared"),
             "outer Pi made a model request"
         );
+        if request.prompt().contains("Stop selected controller")
+            && stop_requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0
+        {
+            return Reply::Hold(
+                held_stop.clone(),
+                Box::new(Reply::Tools(vec![audit_report()])),
+            );
+        }
         if request.prompt().contains("Endless") {
             Reply::Tools(vec![tool(
                 "read_declared",
@@ -804,10 +825,237 @@ fn a_packaged_audit_bounds_iterations_and_requires_native_publication() {
         project.json(&["ticket", "park", &ticket]);
         project.json(&["attempt", "abandon", &ticket]);
     }
-    launch(&project, 3, "Publish control");
-    let control = ended(&project, "Y-3", "Publish control");
-    assert_eq!(control["report"]["report"], expected_report());
+    // G8/G13: stop the selected controller while its own host-route reply is
+    // held, with real box-up stdin EOF held externally during teardown.
+    // Sabotage: release before controller/box disappearance, admit a successor
+    // while reserved, or cancel only the wait. Bounds and outer-Pi holds do
+    // not reach this boundary. /proc, pinfold and history are external oracles.
+    launch(&project, 3, "Stop selected controller");
+    for name in [
+        "down-said-3",
+        "down-release-3",
+        "said-4",
+        "release-4",
+        "listing-said",
+        "listing-release",
+    ] {
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(machine.root.join(name))
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    std::fs::write(machine.root.join("hold-down-3"), "hold").unwrap();
+    let target_head = project.git(&["rev-parse", "HEAD"]).trim().to_owned();
+    let mut watch = project.watch(project.json(&["status"])["seq"].as_i64().unwrap());
+    selected_start(&project, "Stop selected controller");
+    stop.wait_held();
+    let before = project.json(&["attempt", "show", "Y-3"]);
+    let old = before["executions"][0].clone();
+    let id = old["execution"].as_i64().unwrap();
+    let handle =
+        project.rows(&format!("SELECT handle FROM execution WHERE id = {id}"))[0]["handle"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+    let process = machine.pinfold(&["box", "exec", &handle, "--", "sh", "-c",
+        r#"for p in /proc/[0-9]*/cmdline; do command=$(tr '\000' ' ' < "$p"); case "$command" in 'node/bin/node --no-addons runner.mjs '*) pid=${p#/proc/}; pid=${pid%/cmdline}; kill -0 "$pid" && echo "$pid";; esac; done"#]);
+    assert!(process.status.success());
+    let pid = String::from_utf8(process.stdout).unwrap();
+    assert_eq!(pid.lines().count(), 1, "{pid}");
+    assert_eq!(old["reserved"], true);
+    assert_eq!(old["binding"]["node"], "implementer");
+    assert_eq!(before["attempt"]["target"], "main");
+    assert_eq!(old["base"], target_head);
+    assert!(old["report"].is_null());
+    assert_eq!(project.json(&["attempt", "stop", "Y-3"])["stopping"], id);
+    assert_eq!(watch.said(&machine.root.join("down-said-3")), "held\n");
+    assert!(
+        machine
+            .boxes("dev.yard.project")
+            .iter()
+            .any(|b| b["name"] == handle)
+    );
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT reserved, teardown FROM execution WHERE id = {id}"
+        )),
+        vec![json!({"reserved": 1, "teardown": 0})]
+    );
+    assert!(
+        project
+            .rows(&format!(
+                "SELECT id FROM execution WHERE attempt = 3 AND id > {id}"
+            ))
+            .is_empty()
+    );
+    std::fs::write(machine.root.join("down-release-3"), "go\n").unwrap();
+    let stopped = watch.until("selected controller stopped", |event| {
+        event["event"] == "attention.raised" && event["execution"] == id
+    });
+    assert_eq!(stopped["data"]["kind"], "stopped");
+    assert_eq!(stopped["data"]["reason"], "unchanged");
+    let released = watch.until("selected stop checked release", |event| {
+        event["event"] == "execution.released" && event["execution"] == id
+    });
+    assert!(
+        !machine
+            .boxes("dev.yard.project")
+            .iter()
+            .any(|b| b["name"] == handle)
+    );
+    let gone = machine.pinfold(&[
+        "box",
+        "exec",
+        &handle,
+        "--",
+        "sh",
+        "-c",
+        &format!("kill -0 {}", pid.trim()),
+    ]);
+    assert!(
+        gone.status.code() == Some(3),
+        "pinfold must report the selected controller's box absent: {gone:?}"
+    );
+    let cancelled = project.json(&["attempt", "show", "Y-3"])["executions"][0].clone();
+    assert_eq!(cancelled["teardown"], true);
+    assert_eq!(cancelled["result_eligible"], false);
+    assert!(cancelled["report"].is_null());
+    assert_eq!(cancelled["result"]["outputs"], json!({}));
+    assert!(cancelled["result"]["outcome"].is_null());
+    assert_eq!(cancelled["binding"], old["binding"]);
+    let old_lock = std::fs::OpenOptions::new()
+        .read(true)
+        .open(
+            project
+                .path
+                .join(format!(".yard/local/attempts/3/effects/{id}/lock")),
+        )
+        .unwrap();
+    old_lock.try_lock().unwrap();
+    old_lock.unlock().unwrap();
+    stop.release();
+
+    // G8: the subsequent selected execution publishes, then a real host lock
+    // refuses ownership despite actual box absence. Sabotage: count native
+    // publication/terminal success before checked ownership, or start cleanup
+    // while reserved. Generic seats do not cross Durable's native terminal
+    // frame. The fixture report and same-inode host lock supply the oracles.
+    launch(&project, 4, "Publish control");
+    std::fs::write(machine.root.join("hold-completed-4"), "hold").unwrap();
+    project.json(&["attempt", "start", "Y-3"]);
+    assert_eq!(watch.said(&machine.root.join("said-4")), "held\n");
+    let started = watch.until("subsequent selected execution started", |event| {
+        event["event"] == "execution.started"
+            && event["attempt"] == 3
+            && event["execution"] != id
+            && event["data"]["kind"] == "implementation"
+    });
+    assert!(started["seq"].as_i64().unwrap() > released["seq"].as_i64().unwrap());
+    let shown = project.json(&["attempt", "show", "Y-3"]);
+    let published = shown["executions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["execution"] == started["execution"])
+        .unwrap()
+        .clone();
+    let current = published["execution"].as_i64().unwrap();
+    assert_eq!(published["binding"], old["binding"]);
+    assert_eq!(
+        shown["attempt"]["admission"],
+        before["attempt"]["admission"]
+    );
+    assert_eq!(published["report"]["report"], expected_report());
+    assert_eq!(published["base"], target_head);
+    let lock_path = project
+        .path
+        .join(format!(".yard/local/attempts/3/effects/{current}/lock"));
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .open(&lock_path)
+        .unwrap();
+    assert!(matches!(
+        lock.try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ));
+    std::fs::write(machine.root.join("hold-listing"), "hold").unwrap();
+    std::fs::write(machine.root.join("release-4"), "go\n").unwrap();
+    assert_eq!(watch.said(&machine.root.join("listing-said")), "0\n");
+    // The work future dropped its lock before issuing this real listing.
+    use std::os::unix::fs::MetadataExt;
+    let inherited = lock.metadata().unwrap();
+    let same = std::fs::metadata(&lock_path).unwrap();
+    assert_eq!((inherited.dev(), inherited.ino()), (same.dev(), same.ino()));
+    lock.try_lock().unwrap();
+    assert!(machine.boxes("dev.yard.project").is_empty());
+    std::fs::write(machine.root.join("listing-release"), "go\n").unwrap();
+    let ownership = watch.until("selected publication ownership refused", |event| {
+        event["event"] == "attention.raised"
+            && event["execution"] == current
+            && event["data"]["reason"] == "ownership"
+    });
+    assert_eq!(ownership["attempt"], 3);
+    assert_eq!(ownership["data"]["kind"], "red");
+    let retained = project.json(&["attempt", "show", "Y-3"]);
+    let retained = retained["executions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["execution"] == current)
+        .unwrap()
+        .clone();
+    assert_eq!(retained["reserved"], true);
+    assert_eq!(retained["teardown"], false);
+    assert_eq!(retained["result_eligible"], false);
+    assert_eq!(retained["report"], published["report"]);
+    assert_eq!(retained["result"]["infrastructure"]["outcome"], "completed");
+    assert_eq!(
+        retained["result"]["outputs"]["result"],
+        json!({"kind": "report", "value": expected_report()})
+    );
+    assert!(
+        project
+            .rows(&format!(
+                "SELECT id FROM execution WHERE attempt = 3 AND id > {current}"
+            ))
+            .is_empty()
+    );
+    // The next real listing holds the reaper after the refused checked probe.
+    assert_eq!(said(&machine.root.join("listing-said")), "0\n");
+    lock.unlock().unwrap();
+    std::fs::remove_file(machine.root.join("hold-listing")).unwrap();
+    std::fs::write(machine.root.join("listing-release"), "go\n").unwrap();
+    let checked = watch.until("selected publication checked release", |event| {
+        event["event"] == "execution.released" && event["execution"] == current
+    });
+    let cleanup = watch.until("selected continuation cleaned", |event| {
+        event["event"] == "execution.started"
+            && event["attempt"] == 3
+            && event["data"]["kind"] == "cleanup"
+    });
+    assert!(cleanup["seq"].as_i64().unwrap() > checked["seq"].as_i64().unwrap());
+    let completed = project.json(&["attempt", "show", "Y-3"]);
+    let control = completed["executions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["execution"] == current)
+        .unwrap();
+    assert_eq!(control["teardown"], true);
+    assert_eq!(control["reserved"], false);
+    assert_eq!(control["report"], published["report"]);
+    assert_eq!(control["binding"], published["binding"]);
+    assert_eq!(control["result"], retained["result"]);
     assert_eq!(control["result_eligible"], true, "{control}");
+    assert_eq!(
+        project
+            .rows("SELECT id FROM execution WHERE attempt = 3 AND kind = 'implementation'")
+            .len(),
+        2
+    );
     assert_eq!(
         machine.model.requests().len(),
         controller_requests(&machine).len()
