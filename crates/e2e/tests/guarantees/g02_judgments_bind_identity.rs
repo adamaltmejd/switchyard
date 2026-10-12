@@ -6,6 +6,288 @@ use std::io::Write;
 
 const GATE: &str = "[gates.check]\ncommand = \"test -f feature.txt\"\nstage = \"candidate\"\n";
 
+/// G2/G5/G9: revise the final policy at manual approval, then change its
+/// producer policy. The first edit retains the completed unrelated seat;
+/// the second must invalidate the final seat's unchanged policy because its
+/// typed producer changed. Hold the revised final worker through the real
+/// host model route to prove live edits refuse, with quiescent edits in the
+/// same project as controls. Revisions/policies come from fixture literals;
+/// candidate identity comes from host git. Store snapshots prove old rows
+/// unchanged and stale edits/decisions write nothing.
+/// Sabotage: overwrite admission, remove plan CAS, qualify by revision alone,
+/// omit node/policy identity, or let panel binding select an obsolete producer.
+/// Existing G2 edits change ticket/head/proof; none revises a plan on the same
+/// candidate or binds a new consumer to an eligible older-revision producer.
+#[test]
+fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
+    let hold = Latch::new();
+    let held = hold.clone();
+    let final_calls = std::sync::Mutex::new(0);
+    let machine = Machine::new("g2-plan-cas", move |request| {
+        if request.has_tool("yard_publish_review") {
+            if request.opens() && request.prompt().contains("You are the final reviewer") {
+                let mut calls = final_calls.lock().unwrap();
+                *calls += 1;
+                if *calls == 2 {
+                    return Reply::Hold(
+                        held.clone(),
+                        Box::new(act(request, vec![publish(json!([]))])),
+                    );
+                }
+            }
+            return act(request, vec![publish(json!([]))]);
+        }
+        act(
+            request,
+            vec![bash(
+                "cd /workspace && printf 'feature\\n' > feature.txt && git add -A && git commit -qm Feature && printf 'proof' > /yard/proof/evidence.txt",
+            )],
+        )
+    });
+    machine.start();
+    let configuration = config(&format!("{GATE}\n[review.seats.final]\nagent = \"worker\"\ninstructions = \"Final review.\"\n\n[profiles.final]\nrunner = {{kind = \"agent\", agent = \"worker\", instructions = \"Final review.\"}}\naccess = \"read-only\"\noutputs = {{result = \"verdict\"}}\noutcomes = [\"complete\", \"blocked\"]\n"))
+        .replace("review = [\"correctness\"]", "review = [\"correctness\", \"final\"]");
+    let project = Project::new(&machine, "p", &configuration);
+    let mut watch = project.watch(0);
+    project.json(&["ticket", "new", "--title", "Plan CAS"]);
+    let first = approval(&mut watch);
+    let candidate = git(
+        &project.path.join(".yard/local/attempts/1/clone"),
+        &["rev-parse", "HEAD"],
+    )
+    .trim()
+    .to_string();
+    let original_admission = project.rows("SELECT admission FROM attempt WHERE id = 1");
+    let original_ticket = project.rows("SELECT * FROM ticket WHERE id = 1");
+    let original_executions = project.rows("SELECT * FROM execution WHERE attempt = 1 ORDER BY id");
+    let original_checks = project.rows("SELECT * FROM \"check\" ORDER BY id");
+    let original_ids: Vec<_> = original_executions
+        .iter()
+        .map(|row| row["id"].as_i64().unwrap().to_string())
+        .collect();
+    let check_ids: Vec<_> = original_checks
+        .iter()
+        .map(|row| row["id"].as_i64().unwrap().to_string())
+        .collect();
+    let unrelated = original_executions
+        .iter()
+        .find(|row| row["node"] == "review-0")
+        .unwrap();
+    let old_final = original_executions
+        .iter()
+        .find(|row| row["node"] == "review-1")
+        .unwrap();
+    let mut operator = machine.operator();
+    operator.initialize();
+    let changed = operator.call(
+        "yard_attempt_revise",
+        json!({
+            "project": project.path, "ticket": "Y-1", "plan_revision": 1,
+            "overrides": {"review-1": {"profile": "final", "operator_failure": true}}
+        }),
+    );
+    assert_eq!(changed["result"]["plan_revision"], 2, "{changed}");
+    hold.wait_held();
+    let before = project.rows("SELECT * FROM audit ORDER BY seq");
+    let revisions = project.rows("SELECT * FROM plan_revision ORDER BY revision");
+    let refused = operator.call(
+        "yard_attempt_revise",
+        json!({
+            "project": project.path, "ticket": "Y-1", "plan_revision": 2,
+            "overrides": {"review-0": {"operator_failure": true}}
+        }),
+    );
+    assert_eq!(refused["error"]["code"], "refused");
+    assert_eq!(refused["error"]["data"]["reason"], "active_plan");
+    assert_eq!(project.rows("SELECT * FROM audit ORDER BY seq"), before);
+    assert_eq!(
+        project.rows("SELECT * FROM plan_revision ORDER BY revision"),
+        revisions
+    );
+    hold.release();
+    let second = approval(&mut watch);
+    assert_eq!(second["payload"]["head"], candidate);
+    assert_eq!(second["payload"]["proof"], first["payload"]["proof"]);
+    assert_eq!(second["payload"]["revision"], 1);
+    assert_eq!(second["payload"]["plan_revision"], 2);
+    let revised = project.rows("SELECT id, plan_revision, inputs FROM execution WHERE node = 'review-1' ORDER BY id DESC LIMIT 1");
+    assert_ne!(revised[0]["id"], old_final["id"]);
+    assert_eq!(revised[0]["plan_revision"], 2);
+    let inputs: Value = serde_json::from_str(revised[0]["inputs"].as_str().unwrap()).unwrap();
+    assert_eq!(inputs["panel"]["source"]["execution"], unrelated["id"]);
+    assert_eq!(
+        project.rows("SELECT plan_revision FROM execution WHERE node = 'review-0' ORDER BY id"),
+        vec![json!({"plan_revision": 1})]
+    );
+    let unrelated_check = original_checks
+        .iter()
+        .find(|row| row["execution"] == unrelated["id"])
+        .unwrap();
+    assert!(
+        second["payload"]["checks"]
+            .as_array()
+            .unwrap()
+            .contains(&unrelated_check["id"])
+    );
+    let old_final_check = original_checks
+        .iter()
+        .find(|row| row["execution"] == old_final["id"])
+        .unwrap();
+    let revised_check = project.rows(&format!(
+        "SELECT id FROM \"check\" WHERE execution = {}",
+        revised[0]["id"].as_i64().unwrap()
+    ));
+    let selected = second["payload"]["checks"].as_array().unwrap();
+    assert!(!selected.contains(&old_final_check["id"]));
+    assert!(selected.contains(&revised_check[0]["id"]));
+
+    let before = project.rows("SELECT * FROM audit ORDER BY seq");
+    let before_attempt = project.rows("SELECT * FROM attempt ORDER BY id");
+    let before_executions = project.rows("SELECT * FROM execution ORDER BY id");
+    let before_checks = project.rows("SELECT * FROM \"check\" ORDER BY id");
+    let before_attention = project.rows("SELECT * FROM attention ORDER BY id");
+    let stale = operator.call(
+        "yard_attempt_revise",
+        json!({
+            "project": project.path, "ticket": "Y-1", "plan_revision": 1,
+            "overrides": {"review-0": {"operator_failure": true}}
+        }),
+    );
+    assert_eq!(stale["error"]["code"], "stale");
+    assert_eq!(
+        stale["error"]["data"],
+        json!({"identity": "plan_revision", "expected": 1, "current": 2})
+    );
+    assert_eq!(project.rows("SELECT * FROM audit ORDER BY seq"), before);
+    assert_eq!(
+        project.rows("SELECT * FROM attempt ORDER BY id"),
+        before_attempt
+    );
+    assert_eq!(
+        project.rows("SELECT * FROM execution ORDER BY id"),
+        before_executions
+    );
+    assert_eq!(
+        project.rows("SELECT * FROM \"check\" ORDER BY id"),
+        before_checks
+    );
+    assert_eq!(
+        project.rows("SELECT * FROM attention ORDER BY id"),
+        before_attention
+    );
+    assert_eq!(
+        project.rows("SELECT * FROM plan_revision ORDER BY revision"),
+        revisions
+    );
+    let changed = operator.call(
+        "yard_attempt_revise",
+        json!({
+            "project": project.path, "ticket": "Y-1", "plan_revision": 2,
+            "overrides": {"review-0": {"operator_failure": true}}
+        }),
+    );
+    assert_eq!(changed["result"]["plan_revision"], 3, "{changed}");
+    let third = approval(&mut watch);
+    assert_eq!(third["payload"]["head"], candidate);
+    assert_eq!(third["payload"]["proof"], first["payload"]["proof"]);
+    let producer =
+        project.rows("SELECT id FROM execution WHERE node = 'review-0' AND plan_revision = 3");
+    let consumer =
+        project.rows("SELECT inputs FROM execution WHERE node = 'review-1' AND plan_revision = 3");
+    let inputs: Value = serde_json::from_str(consumer[0]["inputs"].as_str().unwrap()).unwrap();
+    assert_eq!(inputs["panel"]["source"]["execution"], producer[0]["id"]);
+    assert_ne!(inputs["panel"]["source"]["execution"], unrelated["id"]);
+    assert_eq!(
+        project.rows("SELECT node, plan_revision FROM execution WHERE kind = 'review' ORDER BY id"),
+        vec![
+            json!({"node": "review-0", "plan_revision": 1}),
+            json!({"node": "review-1", "plan_revision": 1}),
+            json!({"node": "review-1", "plan_revision": 2}),
+            json!({"node": "review-0", "plan_revision": 3}),
+            json!({"node": "review-1", "plan_revision": 3}),
+        ]
+    );
+    assert_eq!(
+        project.rows("SELECT * FROM ticket WHERE id = 1"),
+        original_ticket
+    );
+    assert_eq!(
+        project.rows("SELECT admission FROM attempt WHERE id = 1"),
+        original_admission
+    );
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT * FROM execution WHERE id IN ({}) ORDER BY id",
+            original_ids.join(",")
+        )),
+        original_executions
+    );
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT * FROM \"check\" WHERE id IN ({}) ORDER BY id",
+            check_ids.join(",")
+        )),
+        original_checks
+    );
+    let history = project.json(&["attempt", "show", "Y-1"])["plan_revisions"].clone();
+    assert_eq!(
+        history
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|revision| revision["revision"].as_i64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+    assert_eq!(history[0]["ticket_revision"], 1);
+    assert_eq!(history[1]["ticket_revision"], 1);
+    assert_eq!(history[2]["ticket_revision"], 1);
+    assert_eq!(
+        history[0]["plan"]["nodes"]["review-1"].get("operator_failure"),
+        None
+    );
+    assert_eq!(
+        history[1]["plan"]["nodes"]["review-1"]["operator_failure"],
+        true
+    );
+    assert_eq!(
+        history[2]["plan"]["nodes"]["review-0"]["operator_failure"],
+        true
+    );
+    let seq = last_seq(&project);
+    drop(operator);
+    drop(watch);
+    machine.kill();
+    machine.start();
+    let mut watch = project.watch(seq);
+    assert_eq!(
+        project.json(&["attempt", "show", "Y-1"])["plan_revisions"],
+        history
+    );
+    let mut operator = machine.operator();
+    operator.initialize();
+    let before = project.rows("SELECT * FROM audit ORDER BY seq");
+    let decision = json!({"project": project.path, "ticket": "Y-1", "target": "main", "head": candidate,
+        "proof": third["payload"]["proof"], "plan_revision": 1});
+    let stale = operator.call("yard_attempt_approve", decision.clone());
+    assert_eq!(stale["error"]["code"], "stale");
+    assert_eq!(
+        stale["error"]["data"],
+        json!({"identity": "plan_revision", "expected": 1, "current": 3})
+    );
+    assert_eq!(project.rows("SELECT * FROM audit ORDER BY seq"), before);
+    assert!(project.rows("SELECT * FROM approval").is_empty());
+    let mut decision = decision;
+    decision["plan_revision"] = json!(3);
+    let accepted = operator.call("yard_attempt_approve", decision);
+    assert!(accepted.get("error").is_none(), "{accepted}");
+    watch.event("landing.recorded", &[]);
+    git(
+        &project.canonical(),
+        &["merge-base", "--is-ancestor", &candidate, "refs/heads/main"],
+    );
+}
+
 /// Seats publish no findings; the implementer commits feature.txt and writes
 /// its proof, or runs a repair once when its execution's prompt carries that
 /// repair's key. Keys are tried in order, so the newest prompt's key comes

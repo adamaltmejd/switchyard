@@ -487,6 +487,10 @@ fn runnable(
     loaded: &Loaded,
     attempt: &attempts::Attempt,
 ) -> Result<Option<Option<attempts::Attention>>, Fail> {
+    let current = attempts::get(conn, attempt.id)?;
+    if current.state != "live" || current.plan_revision() != attempt.plan_revision() {
+        return Ok(None);
+    }
     if attempt.admission.is_none() && loaded.config.workflow(&attempt.workflow)?.read_only {
         return Ok(None);
     }
@@ -529,7 +533,10 @@ async fn advance(
         return Ok(());
     };
     if let Some(item) = superseded {
-        project.tx(|tx| attempts::resolve(tx, &item, "superseded", None))?;
+        project.tx(|tx| {
+            attempts::require_plan(tx, attempt.id, attempt.plan_revision())?;
+            attempts::resolve(tx, &item, "superseded", None)
+        })?;
     }
     let executions = project.read(|conn| executions::for_attempt(conn, attempt.id))?;
     let edited = project.read(|conn| attempts::edit_pending(conn, attempt.id))?;
@@ -545,15 +552,19 @@ async fn advance(
     }
     if let Some(next) = &attempt.next {
         let reason = next["reason"].as_str().unwrap_or("repair").to_string();
-        let execution = project
-            .tx(|tx| supervise::start_implementation(tx, attempt, &reason, next.get("feedback")))?;
+        let execution = project.tx(|tx| {
+            attempts::require_plan(tx, attempt.id, attempt.plan_revision())?;
+            supervise::start_implementation(tx, attempt, &reason, next.get("feedback"))
+        })?;
         spawn(daemon, project, "implementation", execution);
         return Ok(());
     }
     // A pending edit is derived: the ticket is newer than the last implementer's read.
     if edited {
-        let execution =
-            project.tx(|tx| supervise::start_implementation(tx, attempt, "edit", None))?;
+        let execution = project.tx(|tx| {
+            attempts::require_plan(tx, attempt.id, attempt.plan_revision())?;
+            supervise::start_implementation(tx, attempt, "edit", None)
+        })?;
         spawn(daemon, project, "implementation", execution);
         return Ok(());
     }
@@ -660,6 +671,7 @@ async fn advance(
                 .and_then(|agent| crate::harness::get(&loaded.config.agents[agent].harness))
                 .map(|harness| harness.version());
             let execution = project.tx(|tx| {
+                attempts::require_plan(tx, attempt.id, attempt.plan_revision())?;
                 if attempts::superseded_by_edit(tx, attempt.id, ticket.id, ticket.revision)? {
                     return Ok(None);
                 }
@@ -780,6 +792,7 @@ async fn advance(
                 "external": "feedback", "execution": check.execution, "node": current, "output": "result"},
                 "value": {"verdict": "fail", "gate": name, "detail": result.detail.unwrap_or_default()}});
             project.tx(|tx| {
+                attempts::require_plan(tx, attempt.id, attempt.plan_revision())?;
                 if attempts::superseded_by_edit(tx, attempt.id, ticket.id, ticket.revision)? {
                     return Ok(None);
                 }
@@ -1009,6 +1022,7 @@ pub async fn command(daemon: &Arc<Daemon>, method: &str, params: Value) -> Resul
         "ticket.done" => admit::ticket_close(&project, &params, "done"),
         "ticket.abandon" => admit::ticket_close(&project, &params, "abandoned"),
         "attempt.start" => admit::attempt_start(daemon, &project, &params).await,
+        "attempt.revise" => admit::attempt_revise(daemon, &project, &params).await,
         "attempt.stop" => admit::attempt_stop(daemon, &project, &params),
         "attempt.approve" => admit::attempt_approve(daemon, &project, &params).await,
         "attempt.accept" => admit::candidate_answer(daemon, &project, &params, true).await,

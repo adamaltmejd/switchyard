@@ -241,6 +241,7 @@ fn admit(
         "status": "recorded",
         "runtime": plan.runtime(),
         "revision": 1,
+        "ticket_revision": ticket.revision,
         "target": loaded.branch,
         "config_head": loaded.head,
         "workflow": workflow,
@@ -1184,6 +1185,136 @@ pub fn ticket_close(project: &Project, params: &Value, state: &str) -> Result<Va
     project.read(|conn| Ok(tickets::get(conn, id)?.to_json()))
 }
 
+/// Trusted adjustment uses the admitted source, never the current template.
+pub async fn attempt_revise(
+    daemon: &Daemon,
+    project: &Project,
+    params: &Value,
+) -> Result<Value, Fail> {
+    crate::mcp::strict(
+        params,
+        &[
+            "project",
+            "ticket",
+            "plan_revision",
+            "preset",
+            "workflow",
+            "graph",
+            "overrides",
+        ],
+    )?;
+    let id = ticket_param(params)?;
+    let expected = params["plan_revision"]
+        .as_i64()
+        .ok_or_else(|| Fail::invalid("adjustment names plan_revision"))?;
+    let attempt = project.read(|conn| {
+        let attempt =
+            attempts::live_for(conn, id)?.ok_or_else(|| Fail::refused("no live attempt"))?;
+        attempts::require_plan(conn, attempt.id, Some(expected))?;
+        Ok(attempt)
+    })?;
+    let loaded = super::load_attempt(daemon, project, &attempt).await?;
+    let mut evidence = attempt
+        .admission
+        .clone()
+        .ok_or_else(|| Fail::refused("unrecorded plan"))?;
+    let old =
+        crate::plan::Plan::admitted(&evidence).map_err(|error| Fail::refused(error.to_string()))?;
+    if old.runtime() != "ordinary-linear" {
+        return Err(Fail::refused("adjustment requires an ordinary candidate"));
+    }
+    let mut selection = json!({"project": project.root});
+    for key in ["preset", "workflow", "graph", "overrides"] {
+        if let Some(value) = params.get(key) {
+            selection[key] = value.clone();
+        }
+    }
+    if !["preset", "workflow", "graph"]
+        .iter()
+        .any(|key| params.get(*key).is_some())
+    {
+        selection["graph"] = serde_json::to_value(&old).expect("plan serializes");
+    }
+    let request: crate::plan::Request = serde_json::from_value(selection.clone())
+        .map_err(|error| Fail::invalid(error.to_string()))?;
+    let plan = loaded
+        .config
+        .resolve_plan(&request)
+        .map_err(|invalid| Fail::invalid("invalid plan").with(json!(invalid)))?;
+    if plan.runtime() != "ordinary-linear"
+        || loaded
+            .config
+            .runnable_workflow(&plan, Some(&attempt.workflow))
+            .as_deref()
+            != Some(&attempt.workflow)
+    {
+        return Err(Fail::refused("plan shape has no runtime support")
+            .with(json!({"reason": "unsupported_revision", "shape": plan.unsupported_shape()})));
+    }
+    let mut implementer = plan.nodes["implementer"].clone();
+    let mut old_implementer = old.nodes["implementer"].clone();
+    implementer.routes.remove("complete");
+    old_implementer.routes.remove("complete");
+    let landing = |plan: &crate::plan::Plan| {
+        plan.nodes
+            .iter()
+            .filter(|(name, _)| name.starts_with("landing-gate-"))
+            .map(|(name, node)| (name.clone(), node.clone()))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    if implementer != old_implementer || landing(&plan) != landing(&old) {
+        return Err(
+            Fail::refused("adjustment changes frozen implementation or landing policy")
+                .with(json!({"reason": "unsupported_revision"})),
+        );
+    }
+    let ordinary = loaded.config.workflow_plan(&attempt.workflow)?;
+    let skipped: Vec<_> = ordinary
+        .nodes
+        .keys()
+        .filter(|name| !plan.nodes.contains_key(*name))
+        .collect();
+    evidence["revision"] = json!(
+        expected
+            .checked_add(1)
+            .ok_or_else(|| Fail::invalid("plan revision overflow"))?
+    );
+    evidence["plan"] = json!(plan);
+    evidence["selection"] = selection;
+    evidence["skipped"] = json!(skipped);
+    evidence["unreviewed"] = json!(!plan.nodes.keys().any(|name| name.starts_with("review-")));
+    project.tx(|tx| {
+        let current = attempts::live_for(tx, id)?
+            .ok_or_else(|| Fail::refused("no live attempt"))?;
+        if current.id != attempt.id {
+            return Err(candidate_stale("attempt", json!(attempt.id), json!(current.id)));
+        }
+        attempts::require_plan(tx, current.id, Some(expected))?;
+        let executions = executions::for_attempt(tx, current.id)?;
+        if executions.iter().any(|row| row.status == "running" || row.reserved || row.intent_state.as_deref() == Some("open")) {
+            return Err(Fail::refused("plan adjustment requires checked quiescence")
+                .with(json!({"reason": "active_plan", "attempt": current.id})));
+        }
+        let open = attempts::open_for_attempt(tx, current.id)?;
+        if current.candidate().is_none() || current.next.is_some()
+            || attempts::edit_pending(tx, current.id)?
+            || open.iter().any(|item| !matches!(item.kind.as_str(), "approval" | "candidate"))
+        {
+            return Err(Fail::refused("plan adjustment requires a quiescent candidate")
+                .with(json!({"reason": "active_plan", "attempt": current.id})));
+        }
+        refuse_during_intent(tx, id)?;
+        attempts::append_plan(tx, current.id, expected, &evidence)?;
+        if let Some(approval) = checks::active_for(tx, current.id)? {
+            checks::set_approval_state(tx, &approval, "withdrawn", id, None)?;
+        }
+        for item in open { attempts::resolve(tx, &item, "superseded", None)?; }
+        super::audit_attempt(tx, "plan.revised", &current, None,
+            json!({"expected": expected, "plan_revision": expected + 1, "selection": evidence["selection"]}))?;
+        Ok(attempts::get(tx, current.id)?.to_json())
+    })
+}
+
 /// `yard attempt start`: the scheduler's admission for one named ticket, or
 /// the `start` of its live attempt's stopped or red item.
 pub async fn attempt_start(
@@ -1933,6 +2064,24 @@ fn skipped_decision(
     ))
 }
 
+fn decision_plan(
+    conn: &rusqlite::Connection,
+    attempt: &attempts::Attempt,
+    params: &Value,
+) -> Result<(), Fail> {
+    if let Some(named) = params.get("plan_revision").filter(|value| !value.is_null()) {
+        let named = named
+            .as_i64()
+            .ok_or_else(|| Fail::invalid("decision names plan_revision"))?;
+        attempts::require_plan(conn, attempt.id, Some(named))?;
+    } else if attempt.plan_revision().is_some_and(|revision| revision > 1) {
+        return Err(Fail::invalid(
+            "a revised candidate decision names plan_revision",
+        ));
+    }
+    Ok(())
+}
+
 pub async fn attempt_approve(
     daemon: &Daemon,
     project: &Project,
@@ -1961,6 +2110,8 @@ pub async fn attempt_approve(
             }
         };
         let ticket = tickets::get(tx, id)?;
+        attempts::require_plan(tx, current.id, attempt.plan_revision())?;
+        decision_plan(tx, &current, params)?;
         let accepted_skipped = skipped_decision(params, &current, &ticket)?;
         let (attempt, item) = approval_item(
             tx,
@@ -2113,6 +2264,9 @@ pub fn attempt_reject(project: &Project, params: &Value) -> Result<Value, Fail> 
         return Err(Fail::invalid("a reject carries notes"));
     }
     project.tx(|tx| {
+        let current =
+            attempts::live_for(tx, id)?.ok_or_else(|| Fail::refused("no live attempt"))?;
+        decision_plan(tx, &current, params)?;
         let (attempt, item) = approval_item(
             tx,
             id,
@@ -2189,6 +2343,7 @@ pub fn attempt_show(project: &Project, params: &Value) -> Result<Value, Fail> {
         Ok(json!({
             "ticket": ticket.to_json(),
             "attempt": attempt.to_json(),
+            "plan_revisions": attempts::revisions(conn, attempt.id)?,
             "executions": executions,
             "checks": checks_json,
             "approval": checks::active_for(conn, attempt.id)?.map(|approval| json!({

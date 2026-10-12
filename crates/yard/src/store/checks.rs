@@ -82,33 +82,42 @@ pub fn current(
     name: &str,
     input: &Input,
 ) -> Result<Option<Check>, Fail> {
-    Ok(conn
-        .query_row(
-            &format!(
-                "{SELECT}
+    let candidates = super::all(
+        conn,
+        &format!(
+            "{SELECT}
                  WHERE c.kind = ?1 AND e.name = ?2 AND e.attempt = ?3 AND e.parent IS NULL
                  AND e.base = ?4 AND e.head = ?5 AND e.ticket_revision = ?6 AND e.digest = ?7
-                 AND COALESCE(e.proof, '') = ?8 AND e.plan_revision IS ?9
+                 AND COALESCE(e.proof, '') = ?8
                  AND (c.kind != 'review' OR e.mcp = 'registered')
                  AND e.status = 'ended' AND e.reserved = 0
                  AND (e.node IS NULL OR e.id IN (SELECT id FROM execution WHERE {}))
-                 ORDER BY c.id DESC LIMIT 1",
-                super::executions::RESULT_ELIGIBLE
-            ),
-            params![
-                kind,
-                name,
-                input.attempt,
-                input.base,
-                input.head,
-                input.ticket_revision,
-                input.digest,
-                input.proof,
-                input.plan_revision
-            ],
-            row,
-        )
-        .optional()?)
+                 ORDER BY c.id DESC",
+            super::executions::RESULT_ELIGIBLE
+        ),
+        params![
+            kind,
+            name,
+            input.attempt,
+            input.base,
+            input.head,
+            input.ticket_revision,
+            input.digest,
+            input.proof
+        ],
+        row,
+    )?;
+    let attempt = super::attempts::get(conn, input.attempt)?;
+    if attempt.plan_revision() != input.plan_revision {
+        return Ok(None);
+    }
+    for check in candidates {
+        let execution = super::executions::get(conn, check.execution)?;
+        if super::executions::qualifies(conn, &attempt, &execution, &input.digest)? {
+            return Ok(Some(check));
+        }
+    }
+    Ok(None)
 }
 
 pub fn for_execution(conn: &Connection, execution: i64) -> Result<Option<Check>, Fail> {
@@ -124,8 +133,12 @@ pub fn for_execution(conn: &Connection, execution: i64) -> Result<Option<Check>,
 /// The immutable eligible evidence an operator decision names.
 pub fn evidence(conn: &Connection, check: &Check, input: &Input) -> Result<Value, Fail> {
     let execution = super::executions::get(conn, check.execution)?;
-    Ok(json!({"check": check.to_json(), "node": execution.node,
-        "digest": input.digest, "result": execution.result}))
+    let mut evidence = json!({"check": check.to_json(), "node": execution.node,
+        "digest": input.digest, "result": execution.result});
+    if input.plan_revision != check.plan_revision {
+        evidence["plan_revision"] = json!(input.plan_revision);
+    }
+    Ok(evidence)
 }
 
 /// Attention is the sole persisted decision reading. A different result

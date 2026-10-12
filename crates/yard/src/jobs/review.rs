@@ -337,6 +337,7 @@ pub fn blocked(
         // Write only what the read saw: an edit since then owns the next step.
         let current = attempts::get(tx, attempt.id)?;
         if attempts::superseded_by_edit(tx, attempt.id, ticket.id, ticket.revision)?
+            || current.plan_revision() != attempt.plan_revision()
             || current.rounds != attempt.rounds
         {
             return Ok(None);

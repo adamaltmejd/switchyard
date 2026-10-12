@@ -12,7 +12,9 @@ pub struct Attempt {
     /// The implementer frozen at admission: `{name, harness, provider login,
     /// model, effort}`.
     pub implementer: Value,
+    /// Current plan evidence; original admission is never overwritten.
     pub admission: Option<Value>,
+    pub original_admission: Option<Value>,
     pub base: String,
     pub head: Option<String>,
     /// The digest of the candidate's proof snapshot.
@@ -33,7 +35,9 @@ pub struct Attempt {
 
 const COLUMNS: &str =
     "id, ticket, workflow, implementer, base, head, proof, target, state, outcome,
-    lane, lane_since, work_ms, next, rounds, extra_rounds, landing_reds, target_branch, admission";
+    lane, lane_since, work_ms, next, rounds, extra_rounds, landing_reds, target_branch, admission,
+    COALESCE((SELECT evidence FROM plan_revision WHERE plan_revision.attempt = attempt.id
+              ORDER BY revision DESC LIMIT 1), admission)";
 
 fn row(row: &Row) -> rusqlite::Result<Attempt> {
     let implementer: String = row.get(3)?;
@@ -57,12 +61,24 @@ fn row(row: &Row) -> rusqlite::Result<Attempt> {
         extra_rounds: row.get(15)?,
         landing_reds: row.get(16)?,
         target_branch: row.get(17)?,
-        admission: row
+        original_admission: row
             .get::<_, Option<String>>(18)?
             .map(|text| {
                 serde_json::from_str(&text).map_err(|error| {
                     rusqlite::Error::FromSqlConversionFailure(
                         18,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })
+            })
+            .transpose()?,
+        admission: row
+            .get::<_, Option<String>>(19)?
+            .map(|text| {
+                serde_json::from_str(&text).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        19,
                         rusqlite::types::Type::Text,
                         Box::new(error),
                     )
@@ -85,7 +101,9 @@ impl Attempt {
             "ticket": ticket_name(self.ticket),
             "workflow": self.workflow,
             "implementer": self.implementer,
-            "admission": self.admission.clone().unwrap_or_else(|| json!({"status": "unknown"})),
+            "admission": self.original_admission.clone().unwrap_or_else(|| json!({"status": "unknown"})),
+            "plan": self.admission,
+            "plan_revision": self.plan_revision(),
             "branch": self.branch(),
             "target": self.target_branch,
             "base": self.base,
@@ -125,6 +143,60 @@ pub fn get(conn: &Connection, id: i64) -> Result<Attempt, Fail> {
     )
     .optional()?
     .ok_or_else(|| Fail::not_found(format!("attempt {id} does not exist")))
+}
+
+/// Only recorded evidence is returned; pre-admission history stays unknown.
+pub fn revision(conn: &Connection, attempt: i64, revision: i64) -> Result<Option<Value>, Fail> {
+    if revision == 1 {
+        return Ok(get(conn, attempt)?.original_admission);
+    }
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT evidence FROM plan_revision WHERE attempt = ?1 AND revision = ?2",
+            params![attempt, revision],
+            |row| row.get(0),
+        )
+        .optional()?;
+    raw.map(|raw| serde_json::from_str(&raw).map_err(|error| Fail::refused(error.to_string())))
+        .transpose()
+}
+
+pub fn revisions(conn: &Connection, attempt: i64) -> Result<Vec<Value>, Fail> {
+    let mut history: Vec<Value> = get(conn, attempt)?.original_admission.into_iter().collect();
+    let rows: Vec<String> = all(
+        conn,
+        "SELECT evidence FROM plan_revision WHERE attempt = ?1 ORDER BY revision",
+        [attempt],
+        |row| row.get(0),
+    )?;
+    for raw in rows {
+        history.push(serde_json::from_str(&raw).map_err(|error| Fail::refused(error.to_string()))?);
+    }
+    Ok(history)
+}
+
+pub fn require_plan(conn: &Connection, attempt: i64, expected: Option<i64>) -> Result<(), Fail> {
+    let current = get(conn, attempt)?.plan_revision();
+    if expected != current {
+        return Err(
+            Fail::stale("plan_revision", json!(expected), json!(current)).with(
+                json!({"identity": "plan_revision", "expected": expected, "current": current}),
+            ),
+        );
+    }
+    Ok(())
+}
+
+pub fn append_plan(
+    conn: &Connection,
+    attempt: i64,
+    expected: i64,
+    evidence: &Value,
+) -> Result<(), Fail> {
+    require_plan(conn, attempt, Some(expected))?;
+    conn.execute("INSERT INTO plan_revision (attempt, revision, evidence, created_at) VALUES (?1, ?2, ?3, ?4)",
+        params![attempt, expected + 1, evidence.to_string(), now()])?;
+    Ok(())
 }
 
 pub fn live_for(conn: &Connection, ticket: i64) -> Result<Option<Attempt>, Fail> {

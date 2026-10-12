@@ -246,4 +246,11 @@ CREATE INDEX attention_open ON attention(state) WHERE state = 'open';
 "#,
     "ALTER TABLE approval ADD COLUMN accepted_skipped TEXT;",
     "ALTER TABLE execution ADD COLUMN prepared TEXT;",
+    "CREATE TABLE plan_revision (
+        attempt INTEGER NOT NULL REFERENCES attempt(id),
+        revision INTEGER NOT NULL CHECK (revision > 1),
+        evidence TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (attempt, revision)
+     );",
 ];

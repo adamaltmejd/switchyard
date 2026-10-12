@@ -268,6 +268,8 @@ enum AttemptCommand {
         #[arg(long)]
         proof: Option<String>,
         #[arg(long)]
+        plan_revision: Option<i64>,
+        #[arg(long)]
         text: String,
     },
     Abandon {
@@ -830,6 +832,16 @@ fn exit_bindings(item: &Value) -> Option<String> {
     let digest = item["payload"]["proof"].as_str().unwrap_or_default();
     let target = item["payload"]["target"].as_str().unwrap_or("-");
     let mut line = format!("--head {head} --target {target}");
+    if item["kind"] == "approval"
+        && item["payload"]["plan_revision"]
+            .as_i64()
+            .is_some_and(|revision| revision > 1)
+    {
+        line.push_str(&format!(
+            " --plan-revision {}",
+            item["payload"]["plan_revision"]
+        ));
+    }
     if item["kind"] == "candidate" {
         line.push_str(&format!(
             " --attention {} --plan-revision {} --text TEXT",

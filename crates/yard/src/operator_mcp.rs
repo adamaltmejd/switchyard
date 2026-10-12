@@ -49,6 +49,10 @@ const OPERATIONS: &[(&str, &str)] = &[
     ),
     ("attempt.stop", "project! ticket!"),
     (
+        "attempt.revise",
+        "project! ticket! plan_revision:i! preset workflow graph:o overrides:o",
+    ),
+    (
         "attempt.accept",
         "project! ticket! attention:i! check:i plan_revision:i! target! head! proof text! landing:i child:i base revision:i old merged node accept_skipped:a",
     ),
@@ -62,7 +66,7 @@ const OPERATIONS: &[(&str, &str)] = &[
     ),
     (
         "attempt.reject",
-        "project! ticket! head! target! proof text!",
+        "project! ticket! head! target! proof text! plan_revision:i",
     ),
     ("attempt.abandon", "project! ticket! reason"),
     ("attempt.show", "project! ticket!"),

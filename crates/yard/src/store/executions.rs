@@ -317,6 +317,12 @@ pub fn start(tx: &Connection, start: Start) -> Result<i64, Fail> {
     let attempt = super::attempts::get(tx, start.attempt)?;
     let revision = attempt.plan_revision();
     let binding = binding(tx, &attempt, &start)?;
+    if attempt.admission.is_some()
+        && matches!(start.kind, "implementation" | "gate" | "review")
+        && binding.is_none()
+    {
+        return Err(Fail::refused("node input has no eligible producer"));
+    }
     tx.execute(
         "UPDATE execution SET plan_revision = ?2, node = ?3, inputs = ?4, teardown = ?5 WHERE id = ?1",
         params![id, revision, binding.as_ref().map(|(node, _)| node),
@@ -395,26 +401,26 @@ fn binding(
             .as_str()
             .filter(|node| *node != "implementer")
         {
-            let producer = conn
-                .query_row(
-                    &format!(
-                        "SELECT id FROM execution WHERE attempt = ?1 AND node = ?2
-                    AND {RESULT_ELIGIBLE} AND mcp = 'registered' AND base = ?3 AND head = ?4
-                    AND COALESCE(proof, '') = ?5 AND ticket_revision IS ?6 AND plan_revision IS ?7
-                    ORDER BY id DESC LIMIT 1"
-                    ),
-                    params![
-                        attempt.id,
-                        source,
-                        start.base,
-                        start.head,
-                        start.proof.unwrap_or_default(),
-                        start.ticket_revision,
-                        attempt.plan_revision()
-                    ],
-                    |row| row.get::<_, i64>(0),
-                )
-                .optional()?;
+            let index = source
+                .strip_prefix("review-")
+                .and_then(|index| index.parse::<usize>().ok())
+                .ok_or_else(|| Fail::refused("invalid panel node"))?;
+            let seat = admission["workflow"]["review"][index]
+                .as_str()
+                .ok_or_else(|| Fail::refused("invalid panel seat"))?;
+            let input = super::checks::Input {
+                attempt: attempt.id,
+                base: start.base.unwrap_or_default().into(),
+                head: start.head.unwrap_or_default().into(),
+                proof: start.proof.unwrap_or_default().into(),
+                ticket_revision: start.ticket_revision.unwrap_or_default(),
+                plan_revision: attempt.plan_revision(),
+                digest: start.digest.unwrap_or_default().into(),
+            };
+            let Some(check) = super::checks::current(conn, "review", seat, &input)? else {
+                return Ok(None);
+            };
+            let producer = get(conn, check.execution)?.node.map(|_| check.execution);
             let (supplier, mut value) = match producer {
                 Some(producer) => {
                     let result = get(conn, producer)?
@@ -503,6 +509,62 @@ fn binding(
         );
     }
     Ok(Some((node, Value::Object(inputs))))
+}
+
+/// Reuse an actual producer, never relabel its revision. Complete routing
+/// selects successors; every other node policy and its typed inputs bind evidence.
+pub fn qualifies(
+    conn: &Connection,
+    attempt: &super::attempts::Attempt,
+    execution: &Execution,
+    digest: &str,
+) -> Result<bool, Fail> {
+    let Some(node) = execution.node.as_deref() else {
+        return Ok(execution.plan_revision == attempt.plan_revision());
+    };
+    let Some(revision) = execution.plan_revision else {
+        return Ok(false);
+    };
+    let Some(original) = super::attempts::revision(conn, attempt.id, revision)? else {
+        return Ok(false);
+    };
+    let Some(current) = &attempt.admission else {
+        return Ok(false);
+    };
+    let original =
+        crate::plan::Plan::admitted(&original).map_err(|error| Fail::refused(error.to_string()))?;
+    let current =
+        crate::plan::Plan::admitted(current).map_err(|error| Fail::refused(error.to_string()))?;
+    let Some(mut old) = original.nodes.get(node).cloned() else {
+        return Ok(false);
+    };
+    let Some(mut new) = current.nodes.get(node).cloned() else {
+        return Ok(false);
+    };
+    old.routes.remove("complete");
+    new.routes.remove("complete");
+    if old != new {
+        return Ok(false);
+    }
+    let expected = binding(
+        conn,
+        attempt,
+        &Start {
+            attempt: attempt.id,
+            kind: &execution.kind,
+            name: execution.name.as_deref(),
+            parent: execution.parent,
+            base: execution.base.as_deref(),
+            head: execution.head.as_deref(),
+            proof: execution.proof.as_deref(),
+            ticket_revision: execution.ticket_revision,
+            digest: Some(digest),
+            ..Default::default()
+        },
+    )?;
+    Ok(expected.is_some_and(|(expected_node, inputs)| {
+        expected_node == node && execution.inputs.as_ref() == Some(&inputs)
+    }))
 }
 
 /// Observational: no event.
