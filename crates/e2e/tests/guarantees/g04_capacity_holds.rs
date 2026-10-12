@@ -1136,7 +1136,12 @@ fn stopped_box_preparation(machine: &Machine, project: &Project, watch: &mut Wat
     ] {
         fifo(path);
     }
-    machine.wrapper("pinfold", &format!(r#"
+    // Scoped shell redirections save Yard's pipes on extra descriptors.
+    // Surviving pipeline shells must redirect permanently before they hold.
+    machine.wrapper(
+        "pinfold",
+        &format!(
+            r#"
 if [ "$1 $2" = 'box list' ] && [ -e '{listing_armed}' ]; then
     "$REAL" "$@"; code=$?
     echo "$code" > '{listing_said}'; read line < '{listing_release}'
@@ -1146,23 +1151,34 @@ if [ "$1 $2" = 'box up' ] && [ -e '{armed}' ]; then
     read -r spec
     printf '%s\n' "$spec" > '{spec_path}'
     echo $$ > '{said}'; read line < '{release}'
-    {{ printf '%s\n' "$spec"; read line < '{owner_release}'; }} 2> '{feed_stderr}' |
+    ( exec 2> '{feed_stderr}'
+      printf '%s\n' "$spec"; read line < '{owner_release}' ) |
         "$REAL" "$@" 2> '{stderr}' |
-        {{ read -r line; printf '%s\n' "$line" > '{ready}'; echo captured > '{native_output}';
-           cat; echo down > '{down}'; read line < '{host_release}'; }} > '{remaining}' 2> '{drain_stderr}' &
+        ( exec > '{remaining}' 2> '{drain_stderr}'
+          read -r line; printf '%s\n' "$line" > '{ready}'; echo captured > '{native_output}'
+          cat; echo down > '{down}'; read line < '{host_release}' ) &
     read line < '{native_output}'
     exit 73
 fi
 "#,
-        listing_armed = listing_armed.display(), listing_said = listing_said.display(),
-        listing_release = listing_release.display(), armed = armed.display(),
-        spec_path = spec_path.display(), said = said.display(), release = release.display(),
-        owner_release = owner_release.display(), native_output = native_output.display(),
-        stderr = machine.root.join("startup-native-stderr").display(),
-        feed_stderr = machine.root.join("startup-feed-stderr").display(),
-        ready = ready.display(), remaining = machine.root.join("startup-remaining").display(),
-        down = down.display(), host_release = host_release.display(),
-        drain_stderr = machine.root.join("startup-drain-stderr").display()));
+            listing_armed = listing_armed.display(),
+            listing_said = listing_said.display(),
+            listing_release = listing_release.display(),
+            armed = armed.display(),
+            spec_path = spec_path.display(),
+            said = said.display(),
+            release = release.display(),
+            owner_release = owner_release.display(),
+            native_output = native_output.display(),
+            stderr = machine.root.join("startup-native-stderr").display(),
+            feed_stderr = machine.root.join("startup-feed-stderr").display(),
+            ready = ready.display(),
+            remaining = machine.root.join("startup-remaining").display(),
+            down = down.display(),
+            host_release = host_release.display(),
+            drain_stderr = machine.root.join("startup-drain-stderr").display()
+        ),
+    );
     std::fs::write(&armed, "").unwrap();
     project.json(&["attempt", "start", "Y-4"]);
     let pid = watch.said(&said).trim().to_string();
