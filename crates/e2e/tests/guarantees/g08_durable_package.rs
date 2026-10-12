@@ -1025,7 +1025,7 @@ fn a_packaged_audit_bounds_iterations_and_requires_native_publication() {
     assert_eq!(retained["result"]["infrastructure"]["outcome"], "completed");
     assert_eq!(
         retained["result"]["outputs"]["result"],
-        json!({"kind": "report", "value": expected_report()})
+        json!({"kind": "report", "value": published["report"]})
     );
     assert!(
         project
