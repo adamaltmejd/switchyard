@@ -57,17 +57,12 @@ fn fixture<'a>(machine: &'a Machine) -> Project<'a> {
     project
 }
 
-fn image(project: &Project<'_>, missing: bool) {
+fn image(project: &Project<'_>, sabotage: &str) {
     let source = std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../runners/durable-audit/Dockerfile"),
     )
     .unwrap()
     .replace("\"$TARGETARCH\"", "\"$(uname -m)\"");
-    let sabotage = if missing {
-        "RUN rm /opt/yard/durable-audit/node_modules/@earendil-works/pi-durable/dist/index.js\n"
-    } else {
-        ""
-    };
     project.write(
         ".yard/Dockerfile",
         &format!(
@@ -118,7 +113,10 @@ if [ "$1 $2" = 'box exec' ]; then
             test -e /yard/state/audit-checkpoints/owned; echo predecessor_visible=$?
             test -d /yard/proof; echo proof_present=$?
             echo blocked > /yard/proof/intrusion 2>/dev/null; echo proof_write=$?
+            cd /opt/yard/durable-audit && sha256sum --quiet --strict -c identity.sha256
+            echo package_seal=$?
         ' >> '{root}/fresh-{attempt}'
+        "$REAL" box exec "$handle" -- cat /opt/yard/durable-audit/runner.mjs > '{root}/asset-{attempt}'
     ;; *) exec "$REAL" "$@" ;; esac
     mkfifo '{root}/stdout-{attempt}.fifo' '{root}/stderr-{attempt}.fifo'
     tee -a '{root}/stdout-{attempt}' < '{root}/stdout-{attempt}.fifo' &
@@ -133,6 +131,7 @@ if [ "$1 $2" = 'box exec' ]; then
         env | grep -q "sk-e2e-"; echo upstream_in_env=$?
         grep -R -a -q "sk-e2e-" /workspace /yard/input /yard/proof /yard/state /opt/yard/durable-audit; echo upstream_in_files=$?
         test -e /yard/state/sentinel; echo sentinel=$?
+        test -e /yard/state/package-executed; echo package_executed=$?
         echo blocked > /workspace/intrusion 2>/dev/null; echo source_write=$?
         echo blocked > /yard/input/trusted/trusted/selected.md 2>/dev/null; echo trusted_write=$?
         test -e /yard/input/trusted/AGENTS.md; echo unselected_guidance=$?
@@ -343,7 +342,10 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     });
     machine.start();
     let project = fixture(&machine);
-    image(&project, true);
+    image(
+        &project,
+        "RUN rm /opt/yard/durable-audit/node_modules/@earendil-works/pi-durable/dist/index.js\n",
+    );
     launch(&project, 1, "Packaged audit");
     let refused = ended(&project, "Y-1", "Missing packaged asset");
     assert!(refused["report"].is_null());
@@ -358,7 +360,7 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     project.json(&["ticket", "park", "Y-1"]);
     project.json(&["attempt", "abandon", "Y-1"]);
 
-    image(&project, false);
+    image(&project, "");
     launch_with_source(&project, 2, "Declared traversal", "candidate/../large.txt");
     let traversal = ended(&project, "Y-2", "Declared traversal");
     assert!(traversal["report"].is_null());
@@ -622,6 +624,77 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
             .is_empty()
     );
     assert!(project.rows("SELECT e.id FROM execution e JOIN attempt a ON a.id = e.attempt WHERE a.ticket IN (4, 5)").is_empty());
+    // G8 admitted asset integrity: the image owns a changed controller whose
+    // launcher seal is valid. Sabotage: remove runAudit's admitted hash loop.
+    // The missing-module block still refuses through seal/import without that
+    // loop. Here the real package would execute its marker and call the model.
+    // Expected bytes are the fixture prefix plus repository package source;
+    // the real boxed seal, marker probe and host request count are observers.
+    const PREFIX: &str = "import { writeFileSync } from \"node:fs\"; writeFileSync(\"/yard/state/package-executed\", \"image-fixture\");";
+    let original = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../runners/durable-audit/runner.mjs"),
+    )
+    .unwrap();
+    image(
+        &project,
+        &format!(
+            "RUN cd /opt/yard/durable-audit && {{ printf '%s\\n' '{PREFIX}'; cat runner.mjs; }} > changed.mjs && mv changed.mjs runner.mjs && node/bin/node --no-addons seal.mjs && sha256sum --quiet --strict -c identity.sha256\n"
+        ),
+    );
+    let before = machine.model.requests().len();
+    launch(&project, 5, "Changed sealed controller");
+    let changed = ended(&project, "Y-7", "Changed sealed controller");
+    assert_eq!(
+        std::fs::read_to_string(machine.root.join("asset-5")).unwrap(),
+        format!("{PREFIX}\n{original}")
+    );
+    assert!(
+        std::fs::read_to_string(machine.root.join("fresh-5"))
+            .unwrap()
+            .lines()
+            .any(|line| line == "package_seal=0")
+    );
+    assert!(
+        std::fs::read_to_string(machine.root.join("probe-5"))
+            .unwrap()
+            .lines()
+            .any(|line| line == "package_executed=1")
+    );
+    assert_eq!(machine.model.requests().len(), before);
+    assert!(changed["report"].is_null());
+    assert_eq!(changed["result_eligible"], false);
+    assert_eq!(changed["result"]["outputs"], json!({}));
+    assert!(changed["result"]["outcome"].is_null());
+    let terminal = std::fs::read_to_string(machine.root.join("stdout-5"))
+        .unwrap()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|frame| frame["type"] == "yard_audit_terminal")
+        .unwrap();
+    assert_eq!(terminal["exit_code"], 1);
+    assert_eq!(
+        terminal["detail"],
+        "runner_unavailable:/opt/yard/durable-audit/runner.mjs"
+    );
+    project.json(&["ticket", "park", "Y-7"]);
+    project.json(&["attempt", "abandon", "Y-7"]);
+
+    image(&project, "");
+    launch(&project, 6, "Unchanged sealed controller control");
+    let corrected = ended(&project, "Y-8", "Unchanged sealed controller control");
+    assert_eq!(
+        std::fs::read_to_string(machine.root.join("asset-6")).unwrap(),
+        original
+    );
+    assert!(
+        std::fs::read_to_string(machine.root.join("fresh-6"))
+            .unwrap()
+            .lines()
+            .any(|line| line == "package_seal=0")
+    );
+    assert!(machine.model.requests().len() > before);
+    assert_eq!(corrected["report"]["report"], expected_report());
+    assert_eq!(corrected["result_eligible"], true, "{corrected}");
     let requests = controller_requests(&machine);
     for request in requests {
         assert_eq!(
@@ -700,7 +773,7 @@ fn a_packaged_audit_bounds_iterations_and_requires_native_publication() {
     });
     machine.start();
     let project = fixture(&machine);
-    image(&project, false);
+    image(&project, "");
     for (attempt, prompt, reason, count) in [
         (1, "Endless", "audit_limit", Some(12)),
         (2, "Bare", "missing_report", None),
