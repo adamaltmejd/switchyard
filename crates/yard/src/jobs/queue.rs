@@ -291,6 +291,37 @@ pub fn failed_evidence(
     Ok(Some(evidence))
 }
 
+/// Omission evidence has no child, check or judgment result.
+pub fn skipped_evidence(
+    conn: &rusqlite::Connection,
+    original: &executions::Execution,
+) -> Result<Option<serde_json::Value>, Fail> {
+    use rusqlite::OptionalExtension;
+    let request: Option<String> = conn
+        .query_row(
+            "SELECT json_extract(payload, '$.landing_skipped_request') FROM attention
+         WHERE kind = 'approval' AND state = 'resolved' AND resolution = 'approve'
+         AND json_extract(payload, '$.approval') = ?1",
+            [original.approval.unwrap_or_default()],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    let Some(request) = request else {
+        return Ok(None);
+    };
+    let nodes: serde_json::Value = serde_json::from_str(&request).map_err(|e| e.to_string())?;
+    let attempt = attempts::get(conn, original.attempt)?;
+    let ticket = tickets::get(conn, attempt.ticket)?;
+    let mut identity = super::skipped_identity(&attempt, &ticket);
+    identity["skipped"] = json!(super::landing_skipped(&attempt));
+    Ok(Some(json!({"nodes": nodes, "identity": identity,
+        "landing": {"execution": original.id, "approval": original.approval,
+            "target": attempt.target_branch, "base": original.base, "head": original.head,
+            "proof": original.proof, "revision": original.ticket_revision,
+            "plan_revision": original.plan_revision, "prepared": original.prepared}})))
+}
+
 fn accepted_child(
     conn: &rusqlite::Connection,
     child: &executions::Execution,
@@ -687,6 +718,58 @@ pub async fn land(
             .map_err(|error| Fail::refused(error.to_string()))?,
         None => loaded.config.workflow_plan(&attempt.workflow)?,
     };
+    let omission = project.read(|conn| skipped_evidence(conn, &original))?;
+    if let Some(evidence) = &omission
+        && project
+            .read(|conn| checks::decision(conn, attempt.id, evidence))?
+            .as_deref()
+            != Some("accept")
+    {
+        return super::capacity::effect(daemon, project, execution, async {
+            let held = target_lock.lock().await;
+            let admitted = admit(daemon, project, &held, approval.id, execution, |tx, now| {
+                attempts::raise(
+                    tx,
+                    attempts::Raise {
+                        kind: "candidate",
+                        reason: "landing",
+                        ticket: Some(ticket.id),
+                        attempt: Some(attempt.id),
+                        execution: Some(execution),
+                        payload: json!({"actor": "operator", "target": attempt.target_branch,
+                        "base": approval.base, "head": approval.head, "proof": approval.proof,
+                        "revision": ticket.revision, "plan_revision": attempt.plan_revision(),
+                        "gate_digest": now.loaded.gate_digest,
+                        "review_digest": now.loaded.review_digest(&attempt.workflow)?,
+                        "evidence": evidence}),
+                        text: None,
+                    },
+                )?;
+                executions::end(
+                    tx,
+                    execution,
+                    executions::End {
+                        outcome: "fail",
+                        ticket: Some(ticket.id),
+                        ..Default::default()
+                    },
+                )
+            })
+            .await?;
+            match admitted {
+                Ok(()) => Ok(()),
+                Err((now, lapse)) => withdraw(
+                    project,
+                    &now.loaded,
+                    execution,
+                    &now.approval,
+                    &now.attempt,
+                    &lapse,
+                ),
+            }
+        })
+        .await;
+    }
     let mut selected = Vec::new();
     let mut current = "implementer";
     while let Some(route) = plan.nodes[current]
@@ -1006,6 +1089,13 @@ pub async fn land(
             return project.tx(|tx| retire_preparation(tx, execution, "prepared_ref_changed"));
         }
         let admitted = admit(daemon, project, held, approval.id, execution, |tx, now| {
+            if let Some(evidence) = &omission
+                && (skipped_evidence(tx, &original)?.as_ref() != Some(evidence)
+                    || checks::decision(tx, attempt.id, evidence)?.as_deref() != Some("accept"))
+            {
+                retire_preparation(tx, execution, "prepared_omission_changed")?;
+                return Ok(false);
+            }
             for child in &selected {
                 let child = executions::get(tx, *child)?;
                 if child.node.is_some()

@@ -120,6 +120,14 @@ target `old` and `merged` head. Acceptance runs the remaining landing gates
 before queue landing and compare-and-swap. Infrastructure errors and unknown
 ownership cannot be accepted; fresh preparation inherits no answer.
 
+To explicitly accept landing omissions, approve with repeated
+`--observe-landing-skipped NODE`. This requests a decision after merge
+preparation, including an empty landing selection. Answer its attention with
+`attempt accept --accept-skipped NODE` for each requested node, the candidate
+bindings, `--landing`, `--base`, `--revision`, `--old`, `--merged` and nonempty
+`--text`. Omitted nodes keep no execution or result. Every retained landing
+gate still runs. Ordinary omissions record no explicit acceptance.
+
 ## Development
 
     cargo fmt --check

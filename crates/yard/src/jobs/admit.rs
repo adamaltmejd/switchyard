@@ -1635,9 +1635,7 @@ pub async fn candidate_answer(
     let attention = params["attention"]
         .as_i64()
         .ok_or_else(|| Fail::invalid("a candidate decision names attention"))?;
-    let named_check = params["check"]
-        .as_i64()
-        .ok_or_else(|| Fail::invalid("a candidate decision names its check"))?;
+    let named_check = params["check"].as_i64();
     let named_plan = params["plan_revision"]
         .as_i64()
         .ok_or_else(|| Fail::invalid("a candidate decision names its plan revision"))?;
@@ -1656,6 +1654,15 @@ pub async fn candidate_answer(
             }
         })?;
     let loaded = super::load_attempt(daemon, project, &attempt).await?;
+    let omission = item.payload["evidence"]["nodes"].is_array();
+    if omission && !accept {
+        return Err(Fail::refused(
+            "landing omissions have no failed result to repair",
+        ));
+    }
+    if !omission && named_check.is_none() {
+        return Err(Fail::invalid("a candidate decision names its check"));
+    }
     let landing = if item.kind == "candidate" && item.reason == "landing" {
         Some(item.payload["evidence"]["landing"].clone())
     } else {
@@ -1677,6 +1684,9 @@ pub async fn candidate_answer(
             ("merged", &identity["prepared"]["merged"]),
             ("node", &item.payload["evidence"]["node"]),
         ] {
+            if omission && matches!(key, "child" | "node") {
+                continue;
+            }
             if &params[key] != expected {
                 return Err(candidate_stale(key, params[key].clone(), expected.clone()));
             }
@@ -1702,17 +1712,29 @@ pub async fn candidate_answer(
                 return Err(candidate_stale(key, expected, current));
             }
         }
-        let parent = project
-            .read(|conn| {
-                executions::get(
-                    conn,
-                    item.payload["evidence"]["check"]["execution"]
-                        .as_i64()
-                        .unwrap_or_default(),
-                )
-            })?
-            .parent
-            .ok_or_else(|| Fail::refused("landing child has no parent"))?;
+        let parent = if omission {
+            item.execution
+                .ok_or_else(|| Fail::refused("omission has no landing"))?
+        } else {
+            project
+                .read(|conn| {
+                    executions::get(
+                        conn,
+                        item.payload["evidence"]["check"]["execution"]
+                            .as_i64()
+                            .unwrap_or_default(),
+                    )
+                })?
+                .parent
+                .ok_or_else(|| Fail::refused("landing child has no parent"))?
+        };
+        if omission && params["accept_skipped"] != item.payload["evidence"]["nodes"] {
+            return Err(candidate_stale(
+                "skipped",
+                params["accept_skipped"].clone(),
+                item.payload["evidence"]["nodes"].clone(),
+            ));
+        }
         super::queue::prove_predecessors(daemon, project, parent).await?;
     }
     project.tx(|tx| {
@@ -1777,7 +1799,7 @@ pub async fn candidate_answer(
                 json!(now.plan_revision()),
             ));
         }
-        if item.payload["evidence"]["check"]["check"] != named_check {
+        if !omission && item.payload["evidence"]["check"]["check"] != json!(named_check) {
             return Err(candidate_stale(
                 "selected_result",
                 json!(named_check),
@@ -1805,8 +1827,12 @@ pub async fn candidate_answer(
                     json!(approval.state),
                 ));
             }
-            let child = executions::get(tx, check["execution"].as_i64().unwrap_or_default())?;
-            super::queue::failed_evidence(tx, &child, &original)?.unwrap_or(Value::Null)
+            if omission {
+                super::queue::skipped_evidence(tx, &original)?.unwrap_or(Value::Null)
+            } else {
+                let child = executions::get(tx, check["execution"].as_i64().unwrap_or_default())?;
+                super::queue::failed_evidence(tx, &child, &original)?.unwrap_or(Value::Null)
+            }
         } else {
             checks::current(
                 tx,
@@ -2032,6 +2058,43 @@ pub async fn attempt_approve(
                 overrode,
             },
         )?;
+        if !params["observe_landing_skipped"].is_null()
+            && !params["observe_landing_skipped"].is_array()
+        {
+            return Err(Fail::invalid(
+                "observe_landing_skipped names omitted landing nodes",
+            ));
+        }
+        if let Some(nodes) = params["observe_landing_skipped"]
+            .as_array()
+            .filter(|nodes| !nodes.is_empty())
+        {
+            let skipped = super::landing_skipped(&attempt);
+            let mut distinct = std::collections::HashSet::new();
+            for node in nodes {
+                let name = node
+                    .as_str()
+                    .ok_or_else(|| Fail::invalid("skipped node is a name"))?;
+                if !distinct.insert(name) {
+                    return Err(Fail::invalid("skipped nodes must be distinct"));
+                }
+                if !skipped.contains(node) {
+                    return Err(candidate_stale("skipped", json!(nodes), json!(skipped)));
+                }
+            }
+            if item.kind != "approval" {
+                return Err(Fail::refused(
+                    "landing omission observation waits for candidate checks",
+                ));
+            }
+            let mut payload = item.payload.clone();
+            payload["landing_skipped_request"] = json!(nodes);
+            payload["approval"] = json!(approval);
+            tx.execute(
+                "UPDATE attention SET payload = ?2 WHERE id = ?1",
+                rusqlite::params![item.id, payload.to_string()],
+            )?;
+        }
         attempts::resolve(tx, &item, "approve", text.as_deref())?;
         attempts::set_lane(tx, attempt.id, false)?;
         Ok(approval)

@@ -50,7 +50,7 @@ const OPERATIONS: &[(&str, &str)] = &[
     ("attempt.stop", "project! ticket!"),
     (
         "attempt.accept",
-        "project! ticket! attention:i! check:i! plan_revision:i! target! head! proof text! landing:i child:i base revision:i old merged node",
+        "project! ticket! attention:i! check:i plan_revision:i! target! head! proof text! landing:i child:i base revision:i old merged node accept_skipped:a",
     ),
     (
         "attempt.repair",
@@ -58,7 +58,7 @@ const OPERATIONS: &[(&str, &str)] = &[
     ),
     (
         "attempt.approve",
-        "project! ticket! head! target! proof text accept_skipped:a attention:i base revision:i plan_revision:i",
+        "project! ticket! head! target! proof text accept_skipped:a observe_landing_skipped:a attention:i base revision:i plan_revision:i",
     ),
     (
         "attempt.reject",

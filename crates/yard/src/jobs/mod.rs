@@ -893,6 +893,21 @@ pub fn stale_part(
     Ok(None)
 }
 
+pub fn landing_skipped(attempt: &attempts::Attempt) -> Vec<Value> {
+    attempt
+        .admission
+        .as_ref()
+        .and_then(|a| a["skipped"].as_array())
+        .into_iter()
+        .flatten()
+        .filter(|node| {
+            node.as_str()
+                .is_some_and(|n| n.starts_with("landing-gate-"))
+        })
+        .cloned()
+        .collect()
+}
+
 pub fn skipped_identity(attempt: &attempts::Attempt, ticket: &tickets::Ticket) -> Value {
     let skipped: Vec<_> = attempt
         .admission

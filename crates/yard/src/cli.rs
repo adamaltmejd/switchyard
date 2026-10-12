@@ -170,7 +170,7 @@ enum AttemptCommand {
         #[arg(long)]
         attention: i64,
         #[arg(long)]
-        check: i64,
+        check: Option<i64>,
         #[arg(long)]
         plan_revision: i64,
         #[arg(long)]
@@ -195,6 +195,8 @@ enum AttemptCommand {
         proof: Option<String>,
         #[arg(long)]
         text: String,
+        #[arg(long)]
+        accept_skipped: Vec<String>,
     },
     Repair {
         ticket: String,
@@ -241,6 +243,9 @@ enum AttemptCommand {
         /// Omitted candidate nodes explicitly accepted with this approval.
         #[arg(long)]
         accept_skipped: Vec<String>,
+        /// Request an exact merged decision before consuming named landing omissions.
+        #[arg(long)]
+        observe_landing_skipped: Vec<String>,
         #[arg(long)]
         attention: Option<i64>,
         #[arg(long)]
@@ -827,11 +832,38 @@ fn exit_bindings(item: &Value) -> Option<String> {
     let mut line = format!("--head {head} --target {target}");
     if item["kind"] == "candidate" {
         line.push_str(&format!(
-            " --attention {} --check {} --plan-revision {} --text TEXT",
-            item["attention"],
-            item["payload"]["evidence"]["check"]["check"],
-            item["payload"]["plan_revision"]
+            " --attention {} --plan-revision {} --text TEXT",
+            item["attention"], item["payload"]["plan_revision"]
         ));
+        let evidence = &item["payload"]["evidence"];
+        if let Some(nodes) = evidence["nodes"].as_array() {
+            for node in nodes {
+                line.push_str(&format!(
+                    " --accept-skipped {}",
+                    node.as_str().unwrap_or_default()
+                ));
+            }
+        } else {
+            line.push_str(&format!(" --check {}", evidence["check"]["check"]));
+        }
+        if item["reason"] == "landing" {
+            let identity = &evidence["landing"];
+            line.push_str(&format!(
+                " --landing {} --base {} --revision {} --old {} --merged {}",
+                identity["execution"],
+                identity["base"].as_str().unwrap_or_default(),
+                identity["revision"],
+                identity["prepared"]["old"].as_str().unwrap_or_default(),
+                identity["prepared"]["merged"].as_str().unwrap_or_default()
+            ));
+            if !evidence["nodes"].is_array() {
+                line.push_str(&format!(
+                    " --child {} --node {}",
+                    evidence["check"]["execution"],
+                    evidence["node"].as_str().unwrap_or_default()
+                ));
+            }
+        }
     }
     if crate::jobs::proof::required(digest) {
         line.push_str(&format!(" --proof {digest}"));
