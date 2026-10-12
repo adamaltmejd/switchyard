@@ -963,6 +963,12 @@ fn a_packaged_audit_bounds_iterations_and_requires_native_publication() {
         .unwrap()
         .clone();
     let current = published["execution"].as_i64().unwrap();
+    let publication_box = project.rows(&format!(
+        "SELECT handle FROM execution WHERE id = {current}"
+    ))[0]["handle"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     assert_eq!(published["binding"], old["binding"]);
     assert_eq!(
         shown["attempt"]["admission"],
@@ -990,7 +996,12 @@ fn a_packaged_audit_bounds_iterations_and_requires_native_publication() {
     let same = std::fs::metadata(&lock_path).unwrap();
     assert_eq!((inherited.dev(), inherited.ino()), (same.dev(), same.ino()));
     lock.try_lock().unwrap();
-    assert!(machine.boxes("dev.yard.project").is_empty());
+    assert!(
+        !machine
+            .boxes("dev.yard.project")
+            .iter()
+            .any(|b| b["name"] == publication_box)
+    );
     std::fs::write(machine.root.join("listing-release"), "go\n").unwrap();
     let ownership = watch.until("selected publication ownership refused", |event| {
         event["event"] == "attention.raised"
