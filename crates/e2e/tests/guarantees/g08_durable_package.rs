@@ -522,6 +522,105 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     );
     assert_eq!(native[0]["mcp"], "registered");
     assert_eq!(completed["result_eligible"], true);
+
+    // G8: a selected-input refusal creates no work and cannot block other
+    // admissions or cleanup. Sabotage: propagate inputs()'s refusal from
+    // scheduled(), or reserve a lane before validating selected inputs.
+    // Keep higher-priority malformed tickets ready while an independent valid
+    // selection publishes and cleans up in this same project. Earlier package
+    // refusals happen inside an admitted execution, not at this boundary.
+    // Fixture paths/byte limits and host Git blobs are the external oracles.
+    project.write(
+        "trusted/selected.md",
+        "TRUSTED_SELECTED_SKILL_Y92: inspect declared files and publish.\n",
+    );
+    project.write("trusted/reference.txt", "TRUSTED_REFERENCE_Y92\n");
+    std::os::unix::fs::symlink("selected.md", project.path.join("trusted/not-regular.md")).unwrap();
+    project.write("trusted/oversized.txt", &"x".repeat(1024 * 1024 + 1));
+    project.git(&["add", "trusted"]);
+    project.git(&["commit", "-qm", "Canonical malformed selected inputs"]);
+    project.json(&["sync"]);
+    launch(&project, 4, "Independent valid audit");
+    let mut selected = std::fs::read_to_string(project.path.join(".yard/config.toml")).unwrap();
+    let profile = selected
+        .split_once("[profiles.durable]")
+        .unwrap()
+        .1
+        .to_string();
+    for (name, from, to) in [
+        ("linked", "trusted/selected.md", "trusted/not-regular.md"),
+        (
+            "oversized",
+            "trusted/reference.txt",
+            "trusted/oversized.txt",
+        ),
+    ] {
+        selected.push_str(&format!(
+            "\n[workflows.{name}]\naccess = \"read-only\"\nreview = \"none\"\nprofile = \"{name}\"\n\n[profiles.{name}]{}",
+            profile.replace("profiles.durable", &format!("profiles.{name}")).replace(from, to)
+        ));
+    }
+    project.reconfigure(&selected);
+    for (ticket, workflow, path, reason) in [
+        (
+            "Y-4",
+            "linked",
+            "trusted/not-regular.md",
+            "selected_regular_file",
+        ),
+        (
+            "Y-5",
+            "oversized",
+            "trusted/oversized.txt",
+            "selected_input_bound",
+        ),
+    ] {
+        project.json(&[
+            "ticket",
+            "new",
+            "--title",
+            "Malformed selected input",
+            "--workflow",
+            workflow,
+            "--priority",
+            "P0",
+        ]);
+        let refusal = machine.refused(&project.path, &["attempt", "start", ticket]);
+        assert_eq!(refusal["code"], "refused");
+        assert_eq!(refusal["message"], "invalid_input");
+        assert_eq!(refusal["data"], json!({"path": path, "reason": reason}));
+    }
+    let expected_sources = json!([
+        {"path": "trusted/selected.md", "blob": project.git(&["rev-parse", "HEAD:trusted/selected.md"]).trim(), "executable": false},
+        {"path": "trusted/reference.txt", "blob": project.git(&["rev-parse", "HEAD:trusted/reference.txt"]).trim(), "executable": false}
+    ]);
+    let mut independent = project.watch(project.json(&["status"])["seq"].as_i64().unwrap());
+    let valid = ended(&project, "Y-6", "Independent valid audit");
+    assert_eq!(valid["report"]["report"], expected_report());
+    assert_eq!(valid["result_eligible"], true);
+    independent.until(
+        "independent valid audit cleaned with malformed tickets ready",
+        |event| {
+            event["event"] == "execution.ended"
+                && event["attempt"] == 4
+                && event["data"]["kind"] == "cleanup"
+        },
+    );
+    assert_eq!(
+        project.json(&["attempt", "show", "Y-6"])["attempt"]["admission"]["inputs"]["trusted_staged_sources"],
+        expected_sources
+    );
+    for ticket in ["Y-4", "Y-5"] {
+        let shown = project.json(&["ticket", "show", ticket]);
+        assert_eq!(shown["state"], "open");
+        assert!(shown["attempt"].is_null());
+    }
+    assert!(
+        project
+            .rows("SELECT id FROM attempt WHERE ticket IN (4, 5)")
+            .is_empty()
+    );
+    assert!(project.rows("SELECT e.id FROM execution e JOIN attempt a ON a.id = e.attempt WHERE a.ticket IN (4, 5)").is_empty());
     let requests = controller_requests(&machine);
     for request in requests {
         assert_eq!(

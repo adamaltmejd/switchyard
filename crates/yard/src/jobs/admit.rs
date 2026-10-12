@@ -135,9 +135,16 @@ pub async fn scheduled(
             continue;
         }
         let plan = config.config.workflow_plan(&ticket.workflow)?;
-        let inputs = config
+        let inputs = match config
             .inputs(&daemon.git, &project.canonical_dir(), &plan)
-            .await?;
+            .await
+        {
+            Ok(inputs) => inputs,
+            // Like an unavailable ticket target, refused selected inputs
+            // leave this ticket unadmitted. Explicit start returns the refusal.
+            Err(fail) if fail.code == "refused" => continue,
+            Err(fail) => return Err(fail),
+        };
         selected.push((ticket, config, inputs));
     }
     let admitted = {
