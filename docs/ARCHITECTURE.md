@@ -146,7 +146,7 @@ cross-reference resolves at load; an unknown name is a load error.
 | `[target]` | `ref` (project default branch), `protected_paths` |
 | `[isolation]` | `egress` (hosts implementer and gate boxes may reach beyond their routes, typically package registries) |
 | `[agents.<name>]` | `harness` (`pi`, `claude`, `codex`), `provider` or `login`, `model`, `effort`; a key the harness has no control for is a load error |
-| `[workflows.<name>]` | `implementer`, `review` (seat names in panel order, or `none`), `instructions`, `access` (`write` or `read-only`), `max_session_executions`, `inactivity_timeout_minutes`, `total_work_timeout_minutes`; every workflow inherits unset keys from `default` |
+| `[workflows.<name>]` | `implementer`, `review` (seat names in panel order, or `none`), `instructions`, `access` (`write` or `read-only`), `max_session_executions`, `inactivity_timeout_minutes`, `total_work_timeout_minutes`; unset keys inherit from `default`, except optional `profile`, which explicitly selects a packaged audit and never inherits |
 | `[gates.<name>]` | `command`, `timeout_minutes`, `stage` (`landing` default, or `candidate`), `runs_in` (`box` default, or `host`), `env` (host variables a host gate receives, by name) |
 | `[review]` | `max_rounds`, `timeout_minutes`, `blocking` (P0–P3) |
 | `[review.seats.<name>]` | `agent`, `instructions` |
@@ -828,8 +828,7 @@ Markdown must fit. Tool results serialize only that bounded read or a named
 publication/refusal. Launch JSON is at most 128 KiB and its prompt at most
 32768 bytes. Report bounds remain the publication contract above. Logs emit
 only named completion/refusal frames; ambient client environment except
-guest proxy routing is removed before package imports. Runner selection
-remains integration work on the existing execution lifecycle.
+guest proxy routing is removed before package imports.
 
 A live legacy attempt without admission evidence cannot continue as a
 read-only workflow. `attempt start` refuses with `unbound_report` and the
