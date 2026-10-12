@@ -311,6 +311,8 @@ fn a_landing_retires_when_canonical_moves_before_update_ref() {
 /// the interrupted child, or reuse either child after the target advances.
 /// Rewrite an accepted failure to pass, inherit acceptance on fresh preparation,
 /// consume it before teardown, or bypass the final target CAS.
+/// Retain the ended parent's reservation: its historical phase release cannot
+/// permit acceptance. Require the final release after the failed end.
 /// Retire an unrelated landing instead of the changed-input continuation.
 fn prepared_host_child_restart(advance: bool) {
     let machine = Machine::new(
@@ -411,9 +413,24 @@ fn prepared_host_child_restart(advance: bool) {
     assert_eq!(failure["data"]["reason"], "landing");
     let evidence = &failure["data"]["payload"]["evidence"];
     let identity = &evidence["landing"];
-    watch.find("failed preparation released", |event| {
-        event["event"] == "execution.released" && event["execution"] == identity["execution"]
+    let ended = watch.find("failed preparation ended", |event| {
+        event["event"] == "execution.ended"
+            && event["execution"] == identity["execution"]
+            && event["data"]["outcome"] == "fail"
+            && event["seq"].as_i64().unwrap() > failure["seq"].as_i64().unwrap()
     });
+    watch.find("failed preparation released after end", |event| {
+        event["event"] == "execution.released"
+            && event["execution"] == identity["execution"]
+            && event["seq"].as_i64().unwrap() > ended["seq"].as_i64().unwrap()
+    });
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT status, outcome, reserved FROM execution WHERE id = {}",
+            identity["execution"]
+        )),
+        vec![json!({"status": "ended", "outcome": "fail", "reserved": 0})]
+    );
     let decision = json!({
         "project": project.path, "ticket": "Y-1", "attention": failure["attention"],
         "check": evidence["check"]["check"], "plan_revision": 1, "target": "feature/a", "head": head,
@@ -533,9 +550,24 @@ fn prepared_host_child_restart(advance: bool) {
         });
         let evidence = &fresh["data"]["payload"]["evidence"];
         let identity = &evidence["landing"];
-        watch.find("fresh preparation released", |event| {
-            event["event"] == "execution.released" && event["execution"] == identity["execution"]
+        let ended = watch.find("fresh failed preparation ended", |event| {
+            event["event"] == "execution.ended"
+                && event["execution"] == identity["execution"]
+                && event["data"]["outcome"] == "fail"
+                && event["seq"].as_i64().unwrap() > fresh["seq"].as_i64().unwrap()
         });
+        watch.find("fresh preparation released after end", |event| {
+            event["event"] == "execution.released"
+                && event["execution"] == identity["execution"]
+                && event["seq"].as_i64().unwrap() > ended["seq"].as_i64().unwrap()
+        });
+        assert_eq!(
+            project.rows(&format!(
+                "SELECT status, outcome, reserved FROM execution WHERE id = {}",
+                identity["execution"]
+            )),
+            vec![json!({"status": "ended", "outcome": "fail", "reserved": 0})]
+        );
         let mut operator = machine.operator();
         operator.initialize();
         let before = project.rows("SELECT * FROM audit ORDER BY seq");
