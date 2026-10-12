@@ -83,27 +83,29 @@ No worker sabotage or host execution was run to settle these mechanisms.
 ## Fresh validation still required
 
 The landed runtime implementations and combined Y-104 host evidence cover
-the original behavior. They do not substitute for fresh Y-96 exact-head
-operator validation, published review and approved actual merged-tree gates.
-Before accepting this integration candidate, the operator must:
+the original behavior. Evidence may be reused when its real inputs match.
+Fresh Y-96 exact-head operator validation, published review and approved
+actual merged-tree gates remain required. The operator must:
 
 1. Read the complete candidate and original Y-96 contract, compare exact
-   head/proof and all dependency ancestry, and validate this evidence mapping
-   against the retained external records.
-2. On separate operator-owned state/socket/runtime, run the unchanged G1
-   reduced control, G2 skipped-decisions control, both G3 prepared-child
-   restart scenarios, G3 surviving-Git-owner and CAS/intent scenarios, and
-   G8 selected-failures and infrastructure-retry scenarios at the exact head.
-3. Demonstrate direct assertion failures for rewriting accepted failed
-   check/result evidence, inheriting acceptance after changed preparation,
-   bypassing predecessor teardown and bypassing final CAS. Restore exact
-   source after each experiment. Earlier Y-105/Y-106 ownership and Y-104
-   feedback/CAS experiments cover only their stated mutations; no independent
-   failure-rewrite or changed-identity sabotage is claimed by this record.
+   head/proof and verify dependency ancestry. Verify equality of relevant
+   production, test and spec inputs to the actual validated Y-104 merged tree
+   and source-restored controls. Validate this mapping against the retained
+   external records and evaluate their meaningful named sabotage evidence.
+2. Reuse matching evidence from the Y-105/Y-106 ownership and Y-104
+   feedback/CAS experiments only for their stated mechanisms. No independent
+   failure-rewrite or changed-identity mutation is claimed by this record.
+3. Run a new focused experiment only for a remaining doubtful mechanism or
+   changed relevant input, on separate operator-owned state/socket/runtime.
+   Old evidence cannot validate a changed input. Restore exact source after
+   any mutation. This documentation-only correction requires no repeat of
+   unchanged focused experiments or additional identical suite before approval.
 4. Publish exact-head review, then approve the concrete candidate through
    the supported queue. Run fmt, clippy, build and the full real host e2e
-   gate on its actual prepared merged tree. Record the actual canonical
-   landing and resolved intent before consuming it and completing Y-96.
+   gate on its actual prepared merged tree. That fresh full host gate exercises
+   the existing scenario set at Y-96's exact prepared tree. Record the actual
+   canonical landing, resolved intent and checked cleanup before consuming
+   it and completing Y-96.
 
 Worker `cargo fmt --check` and
 `cargo clippy --all-targets --locked -- -D warnings` passed before this
