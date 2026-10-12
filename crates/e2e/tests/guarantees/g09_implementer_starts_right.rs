@@ -32,7 +32,7 @@ fn edit_body(project: &Project, body: &str) {
 
 fn reasons(project: &Project) -> Vec<Value> {
     project
-        .rows("SELECT reason FROM execution WHERE kind = 'implementation' ORDER BY id")
+        .rows("SELECT reason FROM execution WHERE kind = 'implementation' AND attempt IN (SELECT id FROM attempt WHERE ticket = 1) ORDER BY id")
         .into_iter()
         .map(|row| row["reason"].clone())
         .collect()
@@ -48,14 +48,18 @@ fn reasons(project: &Project) -> Vec<Value> {
 /// raises `stopped` and starts nothing, and that item's `start` runs the
 /// implementer with the edit's diff.
 ///
-/// Each first execution's opening request is held on its project's latch
-/// and, once released, commits; a later execution whose prompt carries
-/// `Rename` commits again.
+/// In `p`, a real worker holds the sole capacity slot before Y-1 starts.
+/// Y-1's unreserved execution waits while its instruction profile is revised.
+/// Releasing the owner lets that same execution open with its original
+/// instructions. Its model request is then held for the ticket edit and,
+/// once released, commits; a later prompt carrying `Rename` commits again.
 ///
 /// Sabotage: make `admit::steer` notify the stop signal of a running
 /// implementer; the held execution ends unchanged. Load the execution from
-/// the latest plan or omit the successor revision diff; frozen inputs and
-/// the next model prompt fail. Or make
+/// the latest plan by replacing only the startup `attempts::for_execution`
+/// in `supervise::implement` with `attempts::get`: the initial model prompt
+/// after the capacity wait loses the original instructions. Omit the
+/// successor revision diff; the next model prompt fails. Or make
 /// `supervise::implement` ignore the edit after a candidate; the first head
 /// reaches approval and the edit is never delivered. Make
 /// `admit::attempt_stop` skip notifying the execution; it runs on and no
@@ -64,8 +68,17 @@ fn reasons(project: &Project) -> Vec<Value> {
 #[test]
 fn an_edit_reaches_the_next_prompt_and_stop_delivers_it_sooner() {
     let (edit_hold, stop_hold) = (Latch::new(), Latch::new());
+    let owner_hold = Latch::new();
+    let owner_held = owner_hold.clone();
     let holds = (edit_hold.clone(), stop_hold.clone());
     let machine = Machine::new("g9-edit", move |request| {
+        if request.prompt().contains("Hold capacity") {
+            return if request.opens() {
+                Reply::Hold(owner_held.clone(), Box::new(Reply::Text("done".into())))
+            } else {
+                Reply::Text("done".into())
+            };
+        }
         if request.last_user().contains("Rename") {
             return act(
                 request,
@@ -92,17 +105,42 @@ fn an_edit_reaches_the_next_prompt_and_stop_delivers_it_sooner() {
     machine.start();
     let gate = "[gates.check]\ncommand = \"true\"\nstage = \"candidate\"\nruns_in = \"host\"\n";
     let profile = "[profiles.revised]\nrunner = {kind = \"agent\", agent = \"worker\", instructions = \"Revised implementation.\"}\naccess = \"write-allowed\"\noutputs = {result = \"candidate\"}\noutcomes = [\"complete\"]\n";
-    let edited = Project::new(&machine, "p", &unreviewed(&format!("{gate}{profile}")));
+    let edited = Project::new(
+        &machine,
+        "p",
+        &unreviewed(&format!("{gate}{profile}"))
+            .replace("max_lanes = 2", "max_lanes = 2\nmax_executions = 1")
+            .replace(
+                "implementer = \"worker\"",
+                "implementer = \"worker\"\ninstructions = \"Original implementation.\"",
+            ),
+    );
     let stopped = Project::new(&machine, "q", &unreviewed(""));
     let mut edit_watch = edited.watch(0);
     let mut stop_watch = stopped.watch(0);
-    edited.json(&["ticket", "new", "--title", "Add feature"]);
+    edited.json(&["ticket", "new", "--title", "Add feature", "--parked"]);
+    edited.json(&["ticket", "new", "--title", "Hold capacity"]);
+    owner_hold.wait_held();
+    edited.json(&["ticket", "unpark", "Y-1"]);
+    let waiting = edit_watch.until("Y-1 waits before implementation startup", |event| {
+        event["event"] == "execution.waiting"
+            && event["ticket"] == "Y-1"
+            && event["data"]["reason"] == "capacity"
+    });
     stopped.json(&["ticket", "new", "--title", "Add widget"]);
-    edit_hold.wait_held();
     stop_hold.wait_held();
 
-    let frozen = edited
-        .rows("SELECT id, plan_revision, inputs FROM execution WHERE kind = 'implementation'");
+    let execution = waiting["execution"].as_i64().unwrap();
+    let frozen_query =
+        format!("SELECT id, attempt, plan_revision, inputs FROM execution WHERE id = {execution}");
+    let frozen = edited.rows(&frozen_query);
+    assert_eq!(frozen[0]["plan_revision"], 1);
+    assert_eq!(
+        edited.rows(&format!(
+            "SELECT status, reserved FROM execution WHERE id = {execution}"
+        )),
+        vec![json!({"status": "running", "reserved": 0})]
+    );
     let mut operator = machine.operator();
     operator.initialize();
     let revised = operator.call(
@@ -112,11 +150,21 @@ fn an_edit_reaches_the_next_prompt_and_stop_delivers_it_sooner() {
         "overrides": {"implementer": {"profile": "revised"}}}),
     );
     assert_eq!(revised["result"]["plan_revision"], 2, "{revised}");
-    assert_eq!(
-        edited
-            .rows("SELECT id, plan_revision, inputs FROM execution WHERE kind = 'implementation'"),
-        frozen
-    );
+    assert_eq!(edited.rows(&frozen_query), frozen);
+    owner_hold.release();
+    let owner_end = edit_watch.until("capacity owner stops", |event| {
+        event["event"] == "attention.raised" && event["ticket"] == "Y-2"
+    });
+    assert_eq!(owner_end["data"]["kind"], "stopped", "{owner_end}");
+    edit_hold.wait_held();
+    let initial = openings(&machine)
+        .into_iter()
+        .find(|request| request.prompt().contains("Add feature"))
+        .unwrap()
+        .prompt();
+    assert!(initial.contains("Original implementation."), "{initial}");
+    assert!(!initial.contains("Revised implementation."), "{initial}");
+    assert_eq!(edited.rows(&frozen_query), frozen);
     edit_body(&edited, "Rename it too");
     edit_hold.release();
     edit_body(&stopped, "Rename it now");
@@ -126,7 +174,7 @@ fn an_edit_reaches_the_next_prompt_and_stop_delivers_it_sooner() {
     assert_eq!(approval["data"]["kind"], "approval", "{approval}");
     assert_eq!(reasons(&edited), [json!("first"), json!("edit")]);
     let first = edit_watch.find("the first execution ended", |event| {
-        event["event"] == "execution.ended" && event["data"]["kind"] == "implementation"
+        event["event"] == "execution.ended" && event["execution"] == waiting["execution"]
     });
     assert_eq!(first["data"]["outcome"], "candidate", "{first}");
     // The latest opening is p's second: q opens nothing more until its start.
@@ -139,11 +187,14 @@ fn an_edit_reaches_the_next_prompt_and_stop_delivers_it_sooner() {
     assert!(second.contains("Revised implementation."), "{second}");
     assert_eq!(
         edited
-            .rows("SELECT plan_revision FROM execution WHERE kind = 'implementation' ORDER BY id"),
+            .rows("SELECT plan_revision FROM execution WHERE kind = 'implementation' AND attempt IN (SELECT id FROM attempt WHERE ticket = 1) ORDER BY id"),
         vec![json!({"plan_revision": 1}), json!({"plan_revision": 2})]
     );
-    assert_eq!(edited.rows("SELECT id, plan_revision, inputs FROM execution WHERE kind = 'implementation' ORDER BY id LIMIT 1"), frozen);
-    let clone = edited.path.join(".yard/local/attempts/1/clone");
+    assert_eq!(edited.rows(&frozen_query), frozen);
+    let attempt = frozen[0]["attempt"].as_i64().unwrap();
+    let clone = edited
+        .path
+        .join(format!(".yard/local/attempts/{attempt}/clone"));
     let head = git(&clone, &["rev-parse", "HEAD"]).trim().to_string();
     assert_eq!(git(&clone, &["show", "HEAD:renamed.txt"]), "renamed\n");
     // No gate ran on the first candidate: every gate ran on the second head.
