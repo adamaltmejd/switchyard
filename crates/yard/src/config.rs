@@ -421,7 +421,7 @@ impl Config {
     }
 }
 
-fn digest(parts: &[&[u8]]) -> String {
+pub(crate) fn digest(parts: &[&[u8]]) -> String {
     let mut hasher = Sha256::new();
     for part in parts {
         hasher.update((part.len() as u64).to_be_bytes());

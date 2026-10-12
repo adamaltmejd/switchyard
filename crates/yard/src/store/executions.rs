@@ -285,6 +285,11 @@ pub struct Start<'a> {
 
 /// The intent: the row exists before any effect.
 pub fn start(tx: &Connection, start: Start) -> Result<i64, Fail> {
+    let attempt = super::attempts::get(tx, start.attempt)?;
+    let digest = start
+        .digest
+        .map(|digest| check_digest(&attempt, start.kind, start.name.unwrap_or_default(), digest))
+        .transpose()?;
     let settings = start.agent.map(|(_, settings)| settings);
     let field = |key: &str| settings.and_then(|value| value[key].as_str().map(str::to_string));
     tx.execute(
@@ -300,7 +305,7 @@ pub fn start(tx: &Connection, start: Start) -> Result<i64, Fail> {
             start.head,
             start.proof,
             start.ticket_revision,
-            start.digest,
+            digest,
             start.name,
             start.round,
             start.approval,
@@ -314,7 +319,6 @@ pub fn start(tx: &Connection, start: Start) -> Result<i64, Fail> {
         ],
     )?;
     let id = tx.last_insert_rowid();
-    let attempt = super::attempts::get(tx, start.attempt)?;
     let revision = attempt.plan_revision();
     let binding = binding(tx, &attempt, &start)?;
     if attempt.admission.is_some()
@@ -342,6 +346,54 @@ pub fn start(tx: &Connection, start: Start) -> Result<i64, Fail> {
                 "head": start.head, "proof": start.proof, "parent": start.parent }),
     )?;
     Ok(id)
+}
+
+/// The frozen panel digest remains the baseline. A selected reviewer runner
+/// adds its own source-bound settings without changing unrelated seat digests.
+pub fn check_digest(
+    attempt: &super::attempts::Attempt,
+    kind: &str,
+    name: &str,
+    baseline: &str,
+) -> Result<String, Fail> {
+    if kind != "review" {
+        return Ok(baseline.into());
+    }
+    let Some(admission) = &attempt.admission else {
+        return Ok(baseline.into());
+    };
+    let index = admission["workflow"]["review"]
+        .as_array()
+        .and_then(|seats| seats.iter().position(|seat| seat.as_str() == Some(name)))
+        .ok_or_else(|| Fail::refused("seat absent from admitted panel"))?;
+    let plan =
+        crate::plan::Plan::admitted(admission).map_err(|error| Fail::refused(error.to_string()))?;
+    let Some(node) = plan.nodes.get(&format!("review-{index}")) else {
+        return Ok(baseline.into());
+    };
+    let crate::plan::Runner::Agent {
+        agent,
+        instructions,
+    } = &node.runner
+    else {
+        return Err(Fail::refused("review has no admitted agent runner"));
+    };
+    if admission["seats"][name]["agent"] == *agent
+        && admission["seats"][name]["instructions"] == *instructions
+    {
+        return Ok(baseline.into());
+    }
+    let settings = &admission["agents"][agent]["settings"];
+    if settings.is_null() {
+        return Err(Fail::refused("selected reviewer has no admitted settings"));
+    }
+    let policy = serde_json::to_vec(&json!({"runner": node.runner, "settings": settings}))
+        .expect("review policy serializes");
+    Ok(crate::config::digest(&[
+        b"selected-review",
+        baseline.as_bytes(),
+        &policy,
+    ]))
 }
 
 /// Bind only the admitted ordinary chain. Merge, cleanup and old history have no node.

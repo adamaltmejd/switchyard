@@ -1280,6 +1280,18 @@ pub async fn attempt_revise(
             .ok_or_else(|| Fail::invalid("plan revision overflow"))?
     );
     evidence["plan"] = json!(plan);
+    for node in plan.nodes.values() {
+        if let crate::plan::Runner::Agent { agent, .. } = &node.runner {
+            let settings = &loaded.config.agents[agent];
+            let harness = crate::harness::get(&settings.harness)
+                .ok_or_else(|| Fail::invalid("selected agent has no harness"))?;
+            evidence["agents"][agent] = json!({
+                "settings": settings,
+                "runner": {"name": settings.harness, "version": harness.version()},
+                "login_name": settings.login.and_then(|_| harness.login().map(|login| login.name)),
+            });
+        }
+    }
     evidence["selection"] = selection;
     evidence["skipped"] = json!(skipped);
     evidence["unreviewed"] = json!(!plan.nodes.keys().any(|name| name.starts_with("review-")));
@@ -1946,7 +1958,11 @@ pub async fn candidate_answer(
             proof: now.proof.clone().unwrap_or_default(),
             ticket_revision: ticket.revision,
             plan_revision: now.plan_revision(),
-            digest: named["digest"].as_str().unwrap_or_default().to_string(),
+            digest: if check["kind"] == "review" {
+                loaded.review_digest(&now.workflow)?
+            } else {
+                loaded.gate_digest.clone()
+            },
         };
         let current = if let Some(identity) = &landing {
             let original = executions::get(tx, identity["execution"].as_i64().unwrap_or_default())?;

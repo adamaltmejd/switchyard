@@ -17,12 +17,34 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
     let loaded = super::load_attempt(daemon, project, &attempt).await?;
     let ticket = project.read(|conn| tickets::get(conn, attempt.ticket))?;
     let seat_name = row.name.clone().unwrap_or_default();
-    let seat = loaded
-        .config
-        .seats
-        .get(&seat_name)
-        .ok_or_else(|| Fail::invalid(format!("seat {seat_name} is no longer configured")))?;
-    let agent = &loaded.config.agents[&seat.agent];
+    let plan = match &attempt.admission {
+        Some(admission) => crate::plan::Plan::admitted(admission)
+            .map_err(|error| Fail::refused(error.to_string()))?,
+        None => loaded.config.workflow_plan(&attempt.workflow)?,
+    };
+    let node = match &row.node {
+        Some(node) => node.clone(),
+        None => {
+            let index = loaded
+                .config
+                .workflow(&attempt.workflow)?
+                .review
+                .iter()
+                .position(|name| name == &seat_name)
+                .ok_or_else(|| {
+                    Fail::invalid(format!("seat {seat_name} is no longer configured"))
+                })?;
+            format!("review-{index}")
+        }
+    };
+    let Some(crate::plan::Runner::Agent {
+        agent: selected,
+        instructions,
+    }) = plan.nodes.get(&node).map(|node| &node.runner)
+    else {
+        return Err(Fail::refused("review has no admitted agent runner"));
+    };
+    let agent = &loaded.config.agents[selected];
     let connection = match &agent.provider {
         Some(name) => Some(
             crate::harness::connection(name)
@@ -89,7 +111,7 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
         ticket_name(ticket.id),
         ticket.title,
         ticket.body,
-        seat.instructions
+        instructions
     );
     let argv = harness
         .argv(&crate::harness::Launch {

@@ -269,7 +269,8 @@ impl Config {
     fn normalize_ordinary(&self, plan: &mut Plan) {
         for name in std::iter::once("default").chain(self.workflows.keys().map(String::as_str)) {
             if let Ok(ordinary) = self.workflow_plan(name)
-                && let Some(selected) = plan.ordinary_selection(&ordinary, self.review.max_rounds)
+                && let Some(selected) =
+                    plan.ordinary_selection(&ordinary, self.review.max_rounds, &self.profiles)
             {
                 *plan = selected;
                 break;
@@ -468,7 +469,7 @@ impl Config {
                                 )
                         })
                     } else {
-                        plan.ordinary_selection(&ordinary, self.review.max_rounds)
+                        plan.ordinary_selection(&ordinary, self.review.max_rounds, &self.profiles)
                             .is_some()
                     }
                 })
@@ -513,7 +514,32 @@ impl Plan {
 
     /// Retained definitions and repair bounds stay ordinary. Panel links follow
     /// retained seats, even when their original predecessor is omitted.
-    fn ordinary_selection(&self, ordinary: &Self, max_rounds: u32) -> Option<Self> {
+    fn ordinary_selection(
+        &self,
+        ordinary: &Self,
+        max_rounds: u32,
+        profiles: &BTreeMap<String, Profile>,
+    ) -> Option<Self> {
+        let mut ordinary = ordinary.clone();
+        for (name, node) in &self.nodes {
+            let defined = ordinary.nodes.get_mut(name)?;
+            if name.starts_with("review-") && node.runner != defined.runner {
+                if !profiles.values().any(|profile| {
+                    profile.runner == node.runner
+                        && matches!(profile.runner, Runner::Agent { .. })
+                        && profile.access == Access::ReadOnly
+                        && profile.outputs == defined.outputs
+                        && profile.outcomes.iter().any(|outcome| outcome == "complete")
+                        && profile
+                            .outcomes
+                            .iter()
+                            .all(|outcome| matches!(outcome.as_str(), "complete" | "blocked"))
+                }) {
+                    return None;
+                }
+                defined.runner = node.runner.clone();
+            }
+        }
         if self
             .inputs
             .iter()

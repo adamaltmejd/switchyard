@@ -82,6 +82,11 @@ pub fn current(
     name: &str,
     input: &Input,
 ) -> Result<Option<Check>, Fail> {
+    let attempt = super::attempts::get(conn, input.attempt)?;
+    if attempt.plan_revision() != input.plan_revision {
+        return Ok(None);
+    }
+    let digest = super::executions::check_digest(&attempt, kind, name, &input.digest)?;
     let candidates = super::all(
         conn,
         &format!(
@@ -102,15 +107,11 @@ pub fn current(
             input.base,
             input.head,
             input.ticket_revision,
-            input.digest,
+            digest,
             input.proof
         ],
         row,
     )?;
-    let attempt = super::attempts::get(conn, input.attempt)?;
-    if attempt.plan_revision() != input.plan_revision {
-        return Ok(None);
-    }
     for check in candidates {
         let execution = super::executions::get(conn, check.execution)?;
         if super::executions::qualifies(conn, &attempt, &execution, &input.digest)? {
@@ -133,8 +134,11 @@ pub fn for_execution(conn: &Connection, execution: i64) -> Result<Option<Check>,
 /// The immutable eligible evidence an operator decision names.
 pub fn evidence(conn: &Connection, check: &Check, input: &Input) -> Result<Value, Fail> {
     let execution = super::executions::get(conn, check.execution)?;
+    let attempt = super::attempts::get(conn, input.attempt)?;
+    let digest =
+        super::executions::check_digest(&attempt, &check.kind, &check.name, &input.digest)?;
     let mut evidence = json!({"check": check.to_json(), "node": execution.node,
-        "digest": input.digest, "result": execution.result});
+        "digest": digest, "result": execution.result});
     if input.plan_revision != check.plan_revision {
         evidence["plan_revision"] = json!(input.plan_revision);
     }

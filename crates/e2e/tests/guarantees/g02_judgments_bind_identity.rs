@@ -15,7 +15,8 @@ const GATE: &str = "[gates.check]\ncommand = \"test -f feature.txt\"\nstage = \"
 /// candidate identity comes from host git. Store snapshots prove old rows
 /// unchanged and stale edits/decisions write nothing.
 /// Sabotage: overwrite admission, remove plan CAS, qualify by revision alone,
-/// omit node/policy identity, or let panel binding select an obsolete producer.
+/// omit node/policy identity, run the old seat instead of the selected profile,
+/// keep the ordinary-seat digest for a different runner, or select an obsolete producer.
 /// Existing G2 edits change ticket/head/proof; none revises a plan on the same
 /// candidate or binds a new consumer to an eligible older-revision producer.
 #[test]
@@ -28,6 +29,16 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
             if request.opens() && request.prompt().contains("You are the final reviewer") {
                 let mut calls = final_calls.lock().unwrap();
                 *calls += 1;
+                let instructions = if *calls == 1 {
+                    "Final review."
+                } else {
+                    "Alternate final review."
+                };
+                assert!(
+                    request
+                        .prompt()
+                        .contains(&format!("\n\n{instructions}\n\n"))
+                );
                 if *calls == 2 {
                     return Reply::Hold(
                         held.clone(),
@@ -45,7 +56,7 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
         )
     });
     machine.start();
-    let configuration = config(&format!("{GATE}\n[review.seats.final]\nagent = \"worker\"\ninstructions = \"Final review.\"\n\n[profiles.final]\nrunner = {{kind = \"agent\", agent = \"worker\", instructions = \"Final review.\"}}\naccess = \"read-only\"\noutputs = {{result = \"verdict\"}}\noutcomes = [\"complete\", \"blocked\"]\n"))
+    let configuration = config(&format!("{GATE}\n[review.seats.final]\nagent = \"worker\"\ninstructions = \"Final review.\"\n\n[profiles.final]\nrunner = {{kind = \"agent\", agent = \"worker\", instructions = \"Alternate final review.\"}}\naccess = \"read-only\"\noutputs = {{result = \"verdict\"}}\noutcomes = [\"complete\", \"blocked\"]\n"))
         .replace("review = [\"correctness\"]", "review = [\"correctness\", \"final\"]");
     let project = Project::new(&machine, "p", &configuration);
     let mut watch = project.watch(0);
@@ -110,9 +121,10 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
     assert_eq!(second["payload"]["proof"], first["payload"]["proof"]);
     assert_eq!(second["payload"]["revision"], 1);
     assert_eq!(second["payload"]["plan_revision"], 2);
-    let revised = project.rows("SELECT id, plan_revision, inputs FROM execution WHERE node = 'review-1' ORDER BY id DESC LIMIT 1");
+    let revised = project.rows("SELECT id, plan_revision, inputs, digest FROM execution WHERE node = 'review-1' ORDER BY id DESC LIMIT 1");
     assert_ne!(revised[0]["id"], old_final["id"]);
     assert_eq!(revised[0]["plan_revision"], 2);
+    assert_ne!(revised[0]["digest"], old_final["digest"]);
     let inputs: Value = serde_json::from_str(revised[0]["inputs"].as_str().unwrap()).unwrap();
     assert_eq!(inputs["panel"]["source"]["execution"], unrelated["id"]);
     assert_eq!(
