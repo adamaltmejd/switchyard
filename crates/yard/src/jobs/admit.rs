@@ -1656,31 +1656,7 @@ pub async fn candidate_answer(
             })?
             .parent
             .ok_or_else(|| Fail::refused("landing child has no parent"))?;
-        let boxes = daemon
-            .pinfold
-            .list(&format!("dev.yard.project={}", project.key))
-            .await?;
-        let mut previous = Some(parent);
-        while let Some(id) = previous {
-            let row = project.read(|conn| executions::get(conn, id))?;
-            let children = project.read(|conn| executions::query(conn, "parent = ?1", [id]))?;
-            for owner in std::iter::once(&row).chain(children.iter()) {
-                if owner.status != "ended"
-                    || owner.reserved
-                    || !owner.lock_contract
-                    || owner.intent_state.as_deref() == Some("open")
-                    || boxes.contains(&super::supervise::box_name(project, owner.id))
-                    || !super::supervise::lock_free(&super::capacity::dir(project, owner))?
-                {
-                    return Err(candidate_stale(
-                        "ownership",
-                        json!({"execution": owner.id, "released": true}),
-                        owner.to_json(),
-                    ));
-                }
-            }
-            previous = row.resumed;
-        }
+        super::queue::prove_predecessors(daemon, project, parent).await?;
     }
     project.tx(|tx| {
         let item = attempts::attention(tx, attention)?;
@@ -1718,6 +1694,13 @@ pub async fn candidate_answer(
         }
         let now = attempts::get(tx, attempt.id)?;
         let ticket = tickets::get(tx, ticket)?;
+        if landing.is_some() && now.state != "live" {
+            return Err(candidate_stale(
+                "attempt",
+                json!(attempt.id),
+                json!(attempts::live_for(tx, ticket.id)?.map(|current| current.id)),
+            ));
+        }
         if let Some((key, expected, current)) =
             super::stale_part(&item.payload, &now, &ticket, &loaded)?
         {
@@ -1758,7 +1741,7 @@ pub async fn candidate_answer(
         let current = if let Some(identity) = &landing {
             let original = executions::get(tx, identity["execution"].as_i64().unwrap_or_default())?;
             let approval = checks::approval(tx, original.approval.unwrap_or_default())?;
-            if approval.state != "active" || now.state != "live" {
+            if approval.state != "active" {
                 return Err(candidate_stale(
                     "approval",
                     json!("active"),

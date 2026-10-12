@@ -620,10 +620,11 @@ names the original landing and the parents of retained child evidence. The
 original row alone records `prepared`: target ref, exact old target and merged
 head, pinned by `refs/yard/landings/<original execution>`. Preparation opens no
 canonical mutation intent. Migration leaves old preparation unknown.
-Before continuation, every predecessor landing and child must have ended with
-no reservation, no live box and a free inherited host lock under the current
-ownership contract. Unknown ownership blocks. Completed passing or explicitly
-accepted failed children also
+Answers and continuation use one predecessor ownership proof. Every predecessor
+landing and child must have ended with no reservation, no unresolved mutation
+intent, no live box and a free inherited host lock under the current ownership
+contract. Failed box inventory leaves ownership unknown and blocks. Completed
+passing or explicitly accepted failed children also
 require eligible results, checked teardown and exact candidate, proof, ticket,
 admitted plan and approval identity. Their rows and parents stay unchanged.
 Infrastructure-error and interrupted children rerun; neither becomes passing

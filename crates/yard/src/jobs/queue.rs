@@ -133,6 +133,53 @@ fn history(
     Ok(rows)
 }
 
+/// Prove the existing landing provenance and all its child owners released.
+pub async fn prove_predecessors(
+    daemon: &Daemon,
+    project: &Project,
+    landing: i64,
+) -> Result<Vec<executions::Execution>, Fail> {
+    let parents = project.read(|conn| {
+        let row = executions::get(conn, landing)?;
+        let mut parents = history(conn, &row)?;
+        parents.insert(0, row);
+        Ok(parents)
+    })?;
+    let boxes = daemon
+        .pinfold
+        .list(&format!("dev.yard.project={}", project.key))
+        .await
+        .map_err(|detail| {
+            Fail::refused("landing continuation ownership is unknown")
+                .with(json!({"identity": "ownership", "detail": detail}))
+        })?;
+    let mut retained = Vec::new();
+    for parent in &parents {
+        let children =
+            project.read(|conn| executions::query(conn, "parent = ?1 ORDER BY id", [parent.id]))?;
+        for owner in std::iter::once(parent).chain(children.iter()) {
+            if owner.status != "ended"
+                || owner.reserved
+                || !owner.lock_contract
+                || owner.intent_state.as_deref() == Some("open")
+                || boxes.contains(&super::supervise::box_name(project, owner.id))
+                || !super::supervise::lock_free(&super::capacity::dir(project, owner))?
+            {
+                return Err(Fail::stale(
+                    "landing continuation ownership is unknown",
+                    json!({"execution": owner.id, "released": true}),
+                    owner.to_json(),
+                )
+                .with(json!({"identity": "ownership",
+                    "expected": {"execution": owner.id, "released": true},
+                    "current": owner.to_json()})));
+            }
+        }
+        retained.extend(children);
+    }
+    Ok(retained)
+}
+
 fn passing_child(
     child: &executions::Execution,
     row: &executions::Execution,
@@ -558,19 +605,7 @@ pub async fn land(
             let old = prepared["old"].as_str().ok_or_else(|| Fail::refused("invalid prepared target"))?;
             let merged = prepared["merged"].as_str().ok_or_else(|| Fail::refused("invalid prepared head"))?;
             // Never consume evidence until every predecessor owner is proved gone.
-            let boxes = daemon.pinfold.list(&format!("dev.yard.project={}", project.key)).await?;
-            for parent in &predecessors {
-                let children = project.read(|conn| executions::query(conn, "parent = ?1 ORDER BY id", [parent.id]))?;
-                for owner in std::iter::once(parent).chain(children.iter()) {
-                    if owner.status != "ended" || owner.reserved || !owner.lock_contract
-                        || boxes.contains(&super::supervise::box_name(project, owner.id))
-                        || !super::supervise::lock_free(&super::capacity::dir(project, owner))?
-                    {
-                        return Err(Fail::refused("landing continuation ownership is unknown"));
-                    }
-                }
-                retained.extend(children);
-            }
+            retained = prove_predecessors(daemon, project, predecessors[0].id).await?;
             let valid = target == old && prepared["target_ref"] == target_ref
                 && daemon.git.rev_parse(&canonical, &format!("refs/yard/landings/{}", original.id)).await?.as_deref() == Some(merged)
                 && predecessors.iter().all(|old| old.attempt == row.attempt && old.base == row.base
