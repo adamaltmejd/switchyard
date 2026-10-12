@@ -311,6 +311,7 @@ fn a_landing_retires_when_canonical_moves_before_update_ref() {
 /// the interrupted child, or reuse either child after the target advances.
 /// Rewrite an accepted failure to pass, inherit acceptance on fresh preparation,
 /// consume it before teardown, or bypass the final target CAS.
+/// Retire an unrelated landing instead of the changed-input continuation.
 fn prepared_host_child_restart(advance: bool) {
     let machine = Machine::new(
         if advance {
@@ -451,10 +452,17 @@ fn prepared_host_child_restart(advance: bool) {
     ));
     assert_eq!(completed[0]["outcome"], "pass");
     assert_eq!(completed[0]["teardown"], 1);
-    let child = project
-        .rows("SELECT id FROM execution WHERE name = 'second' AND status = 'running'")[0]["id"]
-        .as_i64()
-        .unwrap();
+    let held_child = project
+        .rows("SELECT id, parent FROM execution WHERE name = 'second' AND status = 'running'")[0]
+        .clone();
+    let child = held_child["id"].as_i64().unwrap();
+    let old_continuation = held_child["parent"].as_i64().unwrap();
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT resumed FROM execution WHERE id = {old_continuation}"
+        )),
+        vec![json!({"resumed": parent_id})]
+    );
     let lock = std::fs::OpenOptions::new()
         .read(true)
         .open(
@@ -607,11 +615,18 @@ fn prepared_host_child_restart(advance: bool) {
             std::fs::read_to_string(&observed).unwrap(),
             format!("{merged}\n{landed}\n")
         );
+        // The held parent is interrupted by restart. Its exact successor
+        // must retire the old preparation, regardless of other retired rows.
+        let continuation = project.rows(&format!(
+            "SELECT id FROM execution WHERE kind = 'landing' AND resumed = {old_continuation}"
+        ));
+        assert_eq!(continuation.len(), 1, "{continuation:?}");
         assert_eq!(
-            project.rows(
-                "SELECT outcome FROM execution WHERE kind = 'landing' AND outcome = 'retired'"
-            )[0]["outcome"],
-            "retired"
+            project.rows(&format!(
+                "SELECT outcome FROM execution WHERE id = {}",
+                continuation[0]["id"]
+            )),
+            vec![json!({"outcome": "retired"})]
         );
     } else {
         assert_eq!(landed, merged);
