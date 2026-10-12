@@ -751,8 +751,9 @@ input hook launches the fixed image-owned controller in the same box before
 model dispatch. Selection makes no outer Pi model request. Anonymous pipes
 carry one bounded report to Pi's native
 `yard_publish_report` client. The child inherits routing variables only,
-never the bearer or session. Child terminal status is read separately from
-report outcome. A bare successful exit is `missing_report`; no eligible report
+never the bearer or session. The native bridge writes session and terminal
+frames directly to stdout before its input hook returns. Child terminal status
+is read separately from report outcome. A bare successful exit is `missing_report`; no eligible report
 exists without native publication and checked teardown. Package completion
 alone supplies no result eligibility.
 

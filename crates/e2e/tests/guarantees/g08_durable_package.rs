@@ -243,7 +243,8 @@ fn transcript(project: &Project<'_>, attempt: i64) -> String {
 /// Sabotage: skip identity checks, load CodingTools or candidate code, ignore
 /// declared files/output bound, omit selected skill, persist the bearer/key,
 /// count report characters instead of bytes, bypass the injecting route,
-/// restore outer-model election or ignore the child's terminal status.
+/// restore outer-model election, route native frames through Pi's stdout
+/// handling or ignore the child's terminal status.
 /// Stage broad base guidance/extensions, or stage selected files from the
 /// current canonical/candidate tree instead of admitted blobs: excluded
 /// markers/sentinels or the edited execution's old markers fail.
@@ -397,7 +398,7 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     let sentinel = machine.root.join("host-sentinel");
     std::fs::create_dir(&sentinel).unwrap();
     std::fs::write(sentinel.join("value"), "host-fixture").unwrap();
-    let mut watch = project.watch(0);
+    let mut watch = project.watch(project.json(&["status"])["seq"].as_i64().unwrap());
     selected_start(&project, "Corrected packaged asset");
     assert_eq!(watch.said(&machine.root.join("said-3")), "held\n");
     let held = project.json(&["attempt", "show", "Y-3"]);
@@ -675,7 +676,8 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
 /// G8: a model repeatedly asks to read instead of publishing. The packaged
 /// controller stops at the spec's 12-request bound, not a timeout. A fresh
 /// execution in the same project publishes as its positive control.
-/// Sabotage: remove the request bound or synthesize a report at terminal text.
+/// Sabotage: remove the request bound, synthesize a report at terminal text,
+/// or route the selected terminal frame through Pi's stdout handling.
 /// Existing publication tests exercise neither internal Durable iterations
 /// nor this controller's bare-answer detection. Fixture supplies all replies.
 #[test]
@@ -721,7 +723,7 @@ fn a_packaged_audit_bounds_iterations_and_requires_native_publication() {
     launch(&project, 3, "Publish control");
     let control = ended(&project, "Y-3", "Publish control");
     assert_eq!(control["report"]["report"], expected_report());
-    assert_eq!(control["result_eligible"], true);
+    assert_eq!(control["result_eligible"], true, "{control}");
     assert_eq!(
         machine.model.requests().len(),
         controller_requests(&machine).len()

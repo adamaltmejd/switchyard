@@ -20,6 +20,7 @@ import { spawn } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
 import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
+import { writeSync } from "node:fs";
 
 const SELECTED_AUDIT = false;
 
@@ -171,15 +172,23 @@ async function register(pi: ExtensionAPI, client: McpClient): Promise<string[]> 
       try {
         const sessionId = context.sessionManager.getSessionId();
         if (sessionId) {
-          process.stdout.write(JSON.stringify({ type: "yard_audit_started", session_id: sessionId }) + "\n");
+          auditFrame({ type: "yard_audit_started", session_id: sessionId });
           terminal = await runAudit(client);
         }
       } catch { terminal = { exit_code: 1, detail: "audit_failed" }; }
-      process.stdout.write(JSON.stringify({ type: "yard_audit_terminal", ...terminal }) + "\n");
+      auditFrame({ type: "yard_audit_terminal", ...terminal });
       return { action: "handled" };
     });
   }
   return names;
+}
+
+// Native protocol frames must bypass Pi's stdout handling and finish before
+// print mode can exit after a handled input.
+function auditFrame(frame: Record<string, unknown>): void {
+  const wire = Buffer.from(JSON.stringify(frame) + "\n");
+  let offset = 0;
+  while (offset < wire.length) offset += writeSync(1, wire, offset);
 }
 
 // The real Pi harness owns registration and the one MCP session. A trusted
