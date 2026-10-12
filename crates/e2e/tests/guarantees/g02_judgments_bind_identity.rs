@@ -1237,8 +1237,30 @@ fn selected_skipped_decisions_bind_identity_without_manufacturing_results() {
     assert!(answer.get("error").is_none(), "{answer}");
     watch.event("landing.recorded", &[]);
     assert_eq!(project.canonical_head(), fresh_head);
-    assert_eq!(project.rows(&format!("SELECT node, head, outcome, result_eligible FROM execution WHERE attempt = {attempt} AND reason = 'landing' AND head = '{fresh_head}'")),
-        vec![json!({"node": "landing-gate-keep", "head": fresh_head, "outcome": "pass", "result_eligible": 1})]);
+    assert_eq!(project.rows(&format!("SELECT node, head, outcome FROM execution WHERE attempt = {attempt} AND reason = 'landing' AND head = '{fresh_head}'")),
+        vec![json!({"node": "landing-gate-keep", "head": fresh_head, "outcome": "pass"})]);
+    // G3/G8: sabotage by landing with an ineligible retained gate result.
+    let shown = project.json(&["attempt", "show", "Y-2"]);
+    let fresh_gates: Vec<_> = shown["executions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|execution| {
+            execution["kind"] == "gate"
+                && execution["reason"] == "landing"
+                && execution["head"] == fresh_head
+        })
+        .map(|execution| {
+            json!({"node": execution["binding"]["node"],
+            "head": execution["head"], "outcome": execution["outcome"],
+            "result_eligible": execution["result_eligible"]})
+        })
+        .collect();
+    assert_eq!(
+        fresh_gates,
+        vec![json!({"node": "landing-gate-keep", "head": fresh_head,
+        "outcome": "pass", "result_eligible": true})]
+    );
     assert!(project.rows(&omissions).is_empty());
     let cleanup = watch.find("accepted candidate cleanup", |event| {
         event["event"] == "execution.ended"
