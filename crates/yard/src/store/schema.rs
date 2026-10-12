@@ -245,4 +245,5 @@ ALTER TABLE attention_next RENAME TO attention;
 CREATE INDEX attention_open ON attention(state) WHERE state = 'open';
 "#,
     "ALTER TABLE approval ADD COLUMN accepted_skipped TEXT;",
+    "ALTER TABLE execution ADD COLUMN prepared TEXT;",
 ];

@@ -930,7 +930,7 @@ export default async function () {
 /// target advance separates candidate and merged inputs. Re-arm before
 /// approval: a landing child cannot come up, records error with no judgment
 /// or repair and leaves canonical unchanged. Supported start under the same
-/// approval lands a fresh exact merge of those parents. A second ticket's host gate is held, abandoned,
+/// approval lands the pinned merge and retains a completed host child. A second ticket's host gate is held, abandoned,
 /// then released to fail: it ends abandoned, records no check and raises
 /// nothing. This gives the abandonment a same-project successful control.
 /// No review runs, so the approval follows the gate alone.
@@ -944,6 +944,8 @@ export default async function () {
 /// Classify a landing box-up error as fail in supervise::gate's Err arm,
 /// or route queue::land's error to returned: the child gains a judgment or
 /// repair instead of retaining approval for the successful requeue.
+/// Regenerate an unchanged prepared merge or rerun its passing child: host
+/// Git's pinned head or the retained execution/result identity changes.
 /// After the original controls, hold a real listing reply at landing-child
 /// admission and acquire the parent's external lock before checked release.
 /// Sabotage: return on release refusal without ending the unstarted child;
@@ -976,6 +978,7 @@ fn a_gate_errors_start_reruns_that_gate() {
     });
     let path = machine.root.join("armed");
     *armed.lock().unwrap() = Some(path.clone());
+    machine.wrapper("git", &distinct_merge_dates(&machine));
     machine.wrapper(
         "pinfold",
         &format!(
@@ -987,7 +990,7 @@ fn a_gate_errors_start_reruns_that_gate() {
     let project = Project::new(
         &machine,
         "p",
-        &config(&format!("[gates.check]\ncommand = \"test -f feature.txt\"\nstage = \"candidate\"\n{SELECTED_LANDING}"))
+        &config(&format!("[gates.before]\ncommand = \"true\"\nstage = \"landing\"\nruns_in = \"host\"\n[gates.check]\ncommand = \"test -f feature.txt\"\nstage = \"candidate\"\n{SELECTED_LANDING}"))
             .replace("review = [\"correctness\"]", "review = \"none\""),
     );
     // Parallel fixtures retire their image names. Give this scenario distinct
@@ -1302,8 +1305,14 @@ fn a_gate_errors_start_reruns_that_gate() {
         json_extract(result, '$.outputs') AS outputs
         FROM execution WHERE kind = 'gate' AND parent IS NOT NULL ORDER BY id",
     );
-    assert_eq!(children.len(), 1, "no successor after the refused child");
-    let child = &children[0];
+    assert_eq!(children.len(), 2, "no successor after the refused child");
+    let retained = project.rows(&format!(
+        "SELECT * FROM execution WHERE id = {}",
+        children[0]["id"]
+    ));
+    assert_eq!(children[0]["node"], "landing-gate-before");
+    assert_eq!(children[0]["outcome"], "pass");
+    let child = &children[1];
     let landing_ref = format!("refs/yard/landings/{}", child["parent"]);
     let merged = git(&project.canonical(), &["rev-parse", &landing_ref])
         .trim()
@@ -1326,7 +1335,14 @@ fn a_gate_errors_start_reruns_that_gate() {
     assert_eq!(child["route"], Value::Null);
     assert_eq!(child["judgment"], Value::Null);
     assert_eq!(child["outputs"], "{}");
-    assert!(project.rows("SELECT c.id FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE e.parent IS NOT NULL").is_empty());
+    assert!(
+        project
+            .rows(&format!(
+                "SELECT id FROM \"check\" WHERE execution = {}",
+                child["id"]
+            ))
+            .is_empty()
+    );
     assert_eq!(project.canonical_head(), target);
     assert_eq!(kinds(&project, "implementation").len(), 2);
     assert_eq!(
@@ -1344,6 +1360,26 @@ fn a_gate_errors_start_reruns_that_gate() {
         event["event"] == "execution.ended" && event["data"]["kind"] == "cleanup"
     });
     let landed = project.canonical_head();
+    assert_eq!(landed, merged, "retry must land host Git's pinned input");
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT * FROM execution WHERE id = {}",
+            children[0]["id"]
+        )),
+        retained
+    );
+    let continuation = project.rows(
+        "SELECT resumed, inputs FROM execution WHERE kind = 'landing' ORDER BY id DESC LIMIT 1",
+    );
+    assert_eq!(continuation[0]["resumed"], child["parent"]);
+    let selected: Value =
+        serde_json::from_str(continuation[0]["inputs"].as_str().unwrap()).unwrap();
+    assert!(
+        selected["children"]
+            .as_array()
+            .unwrap()
+            .contains(&children[0]["id"])
+    );
     assert_eq!(
         git(&project.canonical(), &["rev-parse", &format!("{landed}^1")]).trim(),
         target
@@ -1360,7 +1396,8 @@ fn a_gate_errors_start_reruns_that_gate() {
         ]
     );
     assert_eq!(project.rows("SELECT node, outcome, head FROM execution WHERE kind = 'gate' AND parent IS NOT NULL ORDER BY id"),
-        vec![json!({"node": "landing-gate-check", "outcome": "error", "head": merged}),
+        vec![json!({"node": "landing-gate-before", "outcome": "pass", "head": merged}),
+             json!({"node": "landing-gate-check", "outcome": "error", "head": merged}),
              json!({"node": "landing-gate-check", "outcome": "pass", "head": landed}),
              json!({"node": "landing-gate-second", "outcome": "pass", "head": landed}),
              json!({"node": "landing-gate-first", "outcome": "pass", "head": landed})]);

@@ -380,6 +380,17 @@ pub struct Project<'a> {
     pub path: PathBuf,
 }
 
+/// Distinct real merge commits expose regeneration without relying on the clock.
+pub fn distinct_merge_dates(machine: &Machine) -> String {
+    format!(
+        "case \" $* \" in *' commit-tree '*)\n\
+         merge_date='2000-01-01T00:00:00Z'; if [ -e '{}' ]; then merge_date='2000-01-02T00:00:00Z'; fi\n\
+         touch '{}'; export GIT_AUTHOR_DATE=\"$merge_date\" GIT_COMMITTER_DATE=\"$merge_date\";; esac\n",
+        machine.root.join("merged-once").display(),
+        machine.root.join("merged-once").display()
+    )
+}
+
 /// A configuration naming one Pi agent on the fake model.
 pub fn config(extra: &str) -> String {
     agent_config(

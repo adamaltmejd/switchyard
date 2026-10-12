@@ -30,6 +30,7 @@ pub struct Execution {
     pub handle: Option<String>,
     pub session_id: Option<String>,
     pub approval: Option<i64>,
+    pub prepared: Option<Value>,
     pub intent_old: Option<String>,
     pub intent_ref: Option<String>,
     pub intent_merged: Option<String>,
@@ -47,7 +48,7 @@ pub struct Execution {
 const COLUMNS: &str = "id, attempt, parent, kind, reason, status, outcome, detail, base, head,
     proof, ticket_revision, name, round, handle, session_id, approval, intent_old, intent_merged,
     intent_state, progress, harness_version, resumed, reserved, lock_contract, intent_ref, plan_revision,
-    tokens_in, tokens_out, cost, usage_fields, harness, model, node, inputs, result, teardown, report";
+    tokens_in, tokens_out, cost, usage_fields, harness, model, node, inputs, result, teardown, report, prepared";
 
 pub const RESULT_ELIGIBLE: &str = "status = 'ended' AND reserved = 0 AND teardown = 1
     AND json_extract(result, '$.outputs.result') IS NOT NULL";
@@ -119,7 +120,8 @@ fn row(row: &Row) -> rusqlite::Result<Execution> {
         result: json_column(row, 35)?,
         teardown: row.get(36)?,
         report: json_column(row, 37)?,
-        result_eligible: row.get(38)?,
+        prepared: json_column(row, 38)?,
+        result_eligible: row.get(39)?,
     })
 }
 
@@ -167,6 +169,7 @@ impl Execution {
             "harness_version": self.harness_version,
             "model": self.model,
             "resumed": self.resumed,
+            "prepared": self.prepared,
             "intent": self.intent_state.as_ref().map(|state| json!({
                 "state": state, "target_ref": self.intent_ref, "old": self.intent_old, "merged": self.intent_merged,
             })),
@@ -710,6 +713,30 @@ pub fn end(tx: &Connection, id: i64, end: End) -> Result<(), Fail> {
         end.detail,
         json!({ "kind": execution.kind, "outcome": end.outcome, "name": execution.name,
                 "exit_cause": end.exit_cause }),
+    )?;
+    Ok(())
+}
+
+/// Preparation is immutable input evidence, never canonical mutation authority.
+pub fn prepare(tx: &Connection, id: i64, prepared: &Value) -> Result<(), Fail> {
+    if tx.execute(
+        "UPDATE execution SET prepared = ?2 WHERE id = ?1 AND prepared IS NULL AND resumed IS NULL",
+        params![id, prepared.to_string()],
+    )? != 1
+    {
+        return Err(Fail::refused("landing already has a prepared identity"));
+    }
+    let row = get(tx, id)?;
+    audit(
+        tx,
+        "landing.prepared",
+        Target {
+            attempt: Some(row.attempt),
+            execution: Some(id),
+            ..Default::default()
+        },
+        None,
+        prepared.clone(),
     )?;
     Ok(())
 }

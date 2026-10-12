@@ -58,7 +58,15 @@ pub async fn next(daemon: &Arc<Daemon>, project: &Arc<Project>) -> Result<(), Fa
             {
                 return Ok(None);
             }
-            executions::start(
+            let previous = executions::query(
+                tx,
+                "kind = 'landing' AND approval = ?1 ORDER BY id DESC LIMIT 1",
+                [approval.id],
+            )?
+            .into_iter()
+            .next()
+            .filter(|row| matches!(row.outcome.as_deref(), Some("error" | "interrupted")));
+            let id = executions::start(
                 tx,
                 executions::Start {
                     attempt: attempt.id,
@@ -72,8 +80,14 @@ pub async fn next(daemon: &Arc<Daemon>, project: &Arc<Project>) -> Result<(), Fa
                     ticket: Some(ticket.id),
                     ..Default::default()
                 },
-            )
-            .map(Some)
+            )?;
+            if let Some(previous) = previous {
+                tx.execute(
+                    "UPDATE execution SET resumed = ?2 WHERE id = ?1",
+                    rusqlite::params![id, previous.id],
+                )?;
+            }
+            Ok(Some(id))
         })?;
         if let Some(execution) = execution {
             busy.insert(crate::git::target_ref(attempt.target_branch()?));
@@ -81,6 +95,67 @@ pub async fn next(daemon: &Arc<Daemon>, project: &Arc<Project>) -> Result<(), Fa
         }
     }
     Ok(())
+}
+
+/// Follow existing execution provenance back to the one prepared input.
+fn history(
+    conn: &rusqlite::Connection,
+    row: &executions::Execution,
+) -> Result<Vec<executions::Execution>, Fail> {
+    let mut rows = Vec::new();
+    let mut previous = row.resumed;
+    let mut boundary = row.id;
+    while let Some(id) = previous {
+        let old = executions::get(conn, id)?;
+        if id >= boundary || old.kind != "landing" || old.approval != row.approval {
+            return Err(Fail::refused("invalid landing continuation provenance"));
+        }
+        boundary = id;
+        previous = old.resumed;
+        rows.push(old);
+    }
+    Ok(rows)
+}
+
+fn passing_child(
+    child: &executions::Execution,
+    row: &executions::Execution,
+    target: &str,
+    merged: &str,
+) -> bool {
+    child.kind == "gate"
+        && child.outcome.as_deref() == Some("pass")
+        && child.result_eligible
+        && child.lock_contract
+        && child.base.as_deref() == Some(target)
+        && child.head.as_deref() == Some(merged)
+        && child.proof == row.proof
+        && child.ticket_revision == row.ticket_revision
+        && child.plan_revision == row.plan_revision
+        && child.name.as_ref().is_some_and(|name| child.node.as_deref() == Some(&format!("landing-gate-{name}")))
+        && child.inputs.as_ref().is_some_and(|inputs| {
+            inputs["merged"]["source"] == json!({"external": "merged", "execution": child.parent})
+                && inputs["merged"]["value"] == json!({"base": target, "head": merged, "proof": row.proof.as_deref().unwrap_or_default()})
+        })
+        && child.result.as_ref().is_some_and(|result| {
+            result["infrastructure"]["outcome"] == "completed"
+                && result["judgment"]["verdict"] == "pass"
+                && result["outputs"]["result"]["value"]["verdict"] == "pass"
+        })
+}
+
+fn retire_preparation(project: &Project, execution: i64, reason: &str) -> Result<(), Fail> {
+    project.tx(|tx| {
+        executions::end(
+            tx,
+            execution,
+            executions::End {
+                outcome: "retired",
+                detail: Some(reason),
+                ..Default::default()
+            },
+        )
+    })
 }
 
 /// Why an approval no longer holds. A superseded one's checks count for
@@ -334,6 +409,8 @@ pub async fn land(
     let head = approval.head.clone();
     let target_lock = project.target_lock(&crate::git::target_ref(attempt.target_branch()?));
 
+    let predecessors = project.read(|conn| history(conn, &row))?;
+    let mut retained = Vec::new();
     let prepared = super::capacity::effect(daemon, project, execution, async {
         let held = target_lock.lock().await;
         let loaded = match admit(daemon, project, &held, approval.id, execution, |_, now| {
@@ -360,6 +437,45 @@ pub async fn land(
             .rev_parse(&canonical, &target_ref)
             .await?
             .ok_or_else(|| Fail::refused("canonical has no target"))?;
+        if let Some(original) = predecessors.last().filter(|old| old.prepared.is_some()) {
+            let prepared = original.prepared.as_ref().expect("prepared input");
+            let old = prepared["old"].as_str().ok_or_else(|| Fail::refused("invalid prepared target"))?;
+            let merged = prepared["merged"].as_str().ok_or_else(|| Fail::refused("invalid prepared head"))?;
+            // Never consume evidence until every predecessor owner is proved gone.
+            let boxes = daemon.pinfold.list(&format!("dev.yard.project={}", project.key)).await?;
+            for parent in &predecessors {
+                let children = project.read(|conn| executions::query(conn, "parent = ?1 ORDER BY id", [parent.id]))?;
+                for owner in std::iter::once(parent).chain(children.iter()) {
+                    if owner.status != "ended" || owner.reserved || !owner.lock_contract
+                        || boxes.contains(&super::supervise::box_name(project, owner.id))
+                        || !super::supervise::lock_free(&super::capacity::dir(project, owner))?
+                    {
+                        return Err(Fail::refused("landing continuation ownership is unknown"));
+                    }
+                }
+                retained.extend(children);
+            }
+            let valid = target == old && prepared["target_ref"] == target_ref
+                && daemon.git.rev_parse(&canonical, &format!("refs/yard/landings/{}", original.id)).await?.as_deref() == Some(merged)
+                && predecessors.iter().all(|old| old.attempt == row.attempt && old.base == row.base
+                    && old.head == row.head && old.proof == row.proof && old.ticket_revision == row.ticket_revision
+                    && old.plan_revision == row.plan_revision)
+                && retained.iter().all(|child| child.outcome.as_deref() != Some("pass")
+                    || passing_child(child, &row, old, merged));
+            if !valid {
+                retire_preparation(project, execution, "prepared_input_changed")?;
+                return Ok(None);
+            }
+            project.tx(|tx| store::audit(tx, "landing.continued", store::Target {
+                attempt: Some(row.attempt), execution: Some(execution), ..Default::default()
+            }, None, json!({"original": original.id, "prepared": prepared,
+                "children": retained.iter().filter(|child| passing_child(child, &row, old, merged)).map(|child| child.id).collect::<Vec<_>>()})))?;
+            return Ok(Some((loaded, target_ref, target, merged.to_string())));
+        }
+        if row.resumed.is_some() {
+            retire_preparation(project, execution, "prepared_input_absent")?;
+            return Ok(None);
+        }
         let merged = if daemon
             .git
             .is_ancestor(&canonical, &target, &head, None)
@@ -393,7 +509,10 @@ pub async fn land(
                 }
             }
         };
-        // Keep the merged commit reachable for the gate checkouts.
+        // A crash after pinning must not lose which merge was prepared.
+        project.tx(|tx| executions::prepare(tx, execution, &json!({
+            "target_ref": target_ref, "old": target, "merged": merged,
+        })))?;
         daemon
             .git
             .update_ref(
@@ -416,6 +535,7 @@ pub async fn land(
             .map_err(|error| Fail::refused(error.to_string()))?,
         None => loaded.config.workflow_plan(&attempt.workflow)?,
     };
+    let mut selected = Vec::new();
     let mut current = "implementer";
     while let Some(route) = plan.nodes[current]
         .routes
@@ -440,6 +560,34 @@ pub async fn land(
             .iter()
             .find(|gate| &gate.name == name)
             .ok_or_else(|| Fail::refused("admitted landing gate absent"))?;
+        if let Some(child) = retained.iter().rev().find(|child| {
+            child.name.as_deref() == Some(&gate.name)
+                && passing_child(child, &row, &target, &merged)
+        }) {
+            let admitted = super::capacity::effect(daemon, project, execution, async {
+                let held = target_lock.lock().await;
+                admit(daemon, project, &held, approval.id, execution, |tx, _| {
+                    if !passing_child(&executions::get(tx, child.id)?, &row, &target, &merged) {
+                        return Err(Fail::refused("prepared child evidence changed"));
+                    }
+                    Ok(())
+                })
+                .await
+            })
+            .await?;
+            if let Err((now, lapse)) = admitted {
+                return withdraw(
+                    project,
+                    &now.loaded,
+                    execution,
+                    &now.approval,
+                    &now.attempt,
+                    &lapse,
+                );
+            }
+            selected.push(child.id);
+            continue;
+        }
         let mut pending_child = None;
         let admitted = super::capacity::effect(daemon, project, execution, async {
             let held = target_lock.lock().await;
@@ -538,7 +686,9 @@ pub async fn land(
         }
         let result = project.read(|conn| executions::get(conn, child))?;
         match result.outcome.as_deref() {
-            Some("pass") if result.node.is_none() || result.result_eligible => {}
+            Some("pass") if result.node.is_none() || result.result_eligible => {
+                selected.push(child);
+            }
             Some("abandoned") => {
                 return project.tx(|tx| {
                     executions::end(
@@ -610,7 +760,27 @@ pub async fn land(
     let mut held = None;
     let result = super::capacity::effect(daemon, project, execution, async {
         let held = held.insert(target_lock.lock().await);
+        let original = predecessors.last().map_or(execution, |row| row.id);
+        if daemon
+            .git
+            .rev_parse(&canonical, &format!("refs/yard/landings/{original}"))
+            .await?
+            .as_deref()
+            != Some(&merged)
+        {
+            return retire_preparation(project, execution, "prepared_ref_changed");
+        }
         let admitted = admit(daemon, project, held, approval.id, execution, |tx, now| {
+            for child in &selected {
+                let child = executions::get(tx, *child)?;
+                if child.node.is_some() && !passing_child(&child, &row, &target, &merged) {
+                    return Err(Fail::refused("prepared child evidence changed"));
+                }
+            }
+            tx.execute(
+                "UPDATE execution SET inputs = ?2 WHERE id = ?1",
+                rusqlite::params![execution, json!({"children": selected}).to_string()],
+            )?;
             executions::set_intent(
                 tx,
                 execution,

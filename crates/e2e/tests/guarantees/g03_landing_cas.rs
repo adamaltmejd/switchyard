@@ -296,3 +296,364 @@ fn a_landing_retires_when_canonical_moves_before_update_ref() {
     git(&canonical, &["merge-base", "--is-ancestor", &head, merged]);
     git(&canonical, &["merge-base", "--is-ancestor", moved, merged]);
 }
+
+/// G2/G3: a held host child proves the prepared input before restart.
+/// Sabotage: regenerate the unchanged merge, replay its passing child, promote
+/// the interrupted child, or reuse either child after the target advances.
+fn prepared_host_child_restart(advance: bool) {
+    let machine = Machine::new(
+        if advance {
+            "g2-prepared-moved"
+        } else {
+            "g3-prepared-child"
+        },
+        worker(),
+    );
+    machine.wrapper("git", &distinct_merge_dates(&machine));
+    let armed = machine.root.join("armed");
+    let said_path = machine.root.join("said");
+    let release = machine.root.join("release");
+    let observed = machine.root.join("observed-heads");
+    for fifo in [&said_path, &release] {
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    let _writer = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&release)
+        .unwrap();
+    let gates = format!(
+        "[gates.first]\ncommand = \"git rev-parse HEAD >> {}\"\nstage = \"landing\"\nruns_in = \"host\"\n\
+         [gates.second]\ncommand = \"if [ -e '{}' ]; then echo $$ > {}; read line < {}; fi\"\nstage = \"landing\"\nruns_in = \"host\"\n",
+        observed.display(),
+        armed.display(),
+        said_path.display(),
+        release.display()
+    );
+    machine.start();
+    let project = Project::new(
+        &machine,
+        "p",
+        &config(&gates).replace("review = [\"correctness\"]", "review = \"none\""),
+    );
+    project.git(&["checkout", "--quiet", "-b", "feature/a"]);
+    project.json(&["sync", "feature/a"]);
+    let mut watch = project.watch(0);
+    let head = candidate_behind_target(&project, &mut watch);
+    let target = git(&project.canonical(), &["rev-parse", "refs/heads/feature/a"])
+        .trim()
+        .to_string();
+    std::fs::write(&armed, "").unwrap();
+    project.json(&[
+        "attempt",
+        "approve",
+        "Y-1",
+        "--target",
+        "feature/a",
+        "--head",
+        &head,
+    ]);
+    let group = watch.said(&said_path).trim().to_string();
+    drop(watch);
+    let parent = project
+        .rows("SELECT id, prepared, intent_state FROM execution WHERE kind = 'landing'")[0]
+        .clone();
+    let parent_id = parent["id"].as_i64().unwrap();
+    let merged = git(
+        &project.canonical(),
+        &["rev-parse", &format!("refs/yard/landings/{parent_id}")],
+    )
+    .trim()
+    .to_string();
+    let prepared: serde_json::Value =
+        serde_json::from_str(parent["prepared"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        prepared,
+        json!({"target_ref": "refs/heads/feature/a", "old": target, "merged": merged})
+    );
+    assert_eq!(parent["intent_state"], serde_json::Value::Null);
+    let completed = project.rows(&format!(
+        "SELECT * FROM execution WHERE parent = {parent_id} AND name = 'first'"
+    ));
+    assert_eq!(completed[0]["outcome"], "pass");
+    assert_eq!(completed[0]["teardown"], 1);
+    let child = project.rows(&format!(
+        "SELECT id FROM execution WHERE parent = {parent_id} AND name = 'second'"
+    ))[0]["id"]
+        .as_i64()
+        .unwrap();
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .open(
+            project
+                .path
+                .join(format!(".yard/local/attempts/1/effects/{child}/lock")),
+        )
+        .unwrap();
+    assert!(matches!(
+        lock.try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ));
+    machine.kill();
+    // Held until reconciliation kills the recorded host group. Canonical has
+    // not moved and there is no mutation intent before restarting.
+    assert!(
+        std::process::Command::new("kill")
+            .args(["-0", "--", &format!("-{group}")])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(matches!(
+        lock.try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ));
+    assert_eq!(
+        git(&project.canonical(), &["rev-parse", "refs/heads/feature/a"]).trim(),
+        target
+    );
+    assert_eq!(
+        std::fs::read_to_string(&observed).unwrap(),
+        format!("{merged}\n")
+    );
+    std::fs::remove_file(&armed).unwrap();
+    let expected_target = if advance {
+        let tree = git(
+            &project.canonical(),
+            &["rev-parse", &format!("{target}^{{tree}}")],
+        );
+        let moved = git(
+            &project.canonical(),
+            &[
+                "commit-tree",
+                tree.trim(),
+                "-p",
+                &target,
+                "-m",
+                "Advance before continuation",
+            ],
+        );
+        git(
+            &project.canonical(),
+            &["update-ref", "refs/heads/feature/a", moved.trim(), &target],
+        );
+        moved.trim().to_string()
+    } else {
+        target.clone()
+    };
+    machine.start();
+    let mut watch = project.watch(0);
+    watch.event("landing.recorded", &[]);
+    assert!(
+        !std::process::Command::new("kill")
+            .args(["-0", "--", &format!("-{group}")])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(lock.try_lock().is_ok());
+    let landed = git(&project.canonical(), &["rev-parse", "refs/heads/feature/a"])
+        .trim()
+        .to_string();
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT * FROM execution WHERE id = {}",
+            completed[0]["id"]
+        )),
+        completed
+    );
+    let interrupted = project.rows(&format!(
+        "SELECT outcome, teardown, result FROM execution WHERE id = {child}"
+    ));
+    assert_eq!(interrupted[0]["outcome"], "interrupted");
+    assert_eq!(interrupted[0]["teardown"], 1);
+    let result: serde_json::Value =
+        serde_json::from_str(interrupted[0]["result"].as_str().unwrap()).unwrap();
+    assert_eq!(result["outputs"], json!({}));
+    assert_eq!(result["judgment"], serde_json::Value::Null);
+    let final_row = project.rows("SELECT id, resumed, inputs, intent_old FROM execution WHERE kind = 'landing' AND outcome = 'landed'")[0].clone();
+    assert_eq!(final_row["intent_old"], expected_target);
+    let inputs: serde_json::Value =
+        serde_json::from_str(final_row["inputs"].as_str().unwrap()).unwrap();
+    if advance {
+        assert_ne!(landed, merged);
+        assert_eq!(final_row["resumed"], serde_json::Value::Null);
+        assert!(
+            !inputs["children"]
+                .as_array()
+                .unwrap()
+                .contains(&completed[0]["id"])
+        );
+        assert_eq!(
+            std::fs::read_to_string(&observed).unwrap(),
+            format!("{merged}\n{landed}\n")
+        );
+        assert_eq!(
+            project.rows("SELECT outcome FROM execution WHERE kind = 'landing' ORDER BY id")[1]["outcome"],
+            "retired"
+        );
+    } else {
+        assert_eq!(landed, merged);
+        assert_eq!(final_row["resumed"], parent_id);
+        assert!(
+            inputs["children"]
+                .as_array()
+                .unwrap()
+                .contains(&completed[0]["id"])
+        );
+        assert_eq!(
+            std::fs::read_to_string(&observed).unwrap(),
+            format!("{merged}\n")
+        );
+    }
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT outcome, head FROM execution WHERE parent = {} AND name = 'second'",
+            final_row["id"]
+        )),
+        vec![json!({"outcome": "pass", "head": landed})]
+    );
+    git(
+        &project.canonical(),
+        &["merge-base", "--is-ancestor", &head, &landed],
+    );
+}
+
+#[test]
+fn prepared_input_and_completed_child_survive_host_child_restart() {
+    prepared_host_child_restart(false);
+}
+
+#[test]
+fn target_advance_retires_prepared_input_and_requires_fresh_children() {
+    prepared_host_child_restart(true);
+}
+
+/// G3: the final prepared-ref Git read is held with no mutation intent.
+/// Sabotage: consume prepared evidence before checked parent teardown, or
+/// regenerate its head when the surviving Git owner finally releases.
+#[test]
+fn prepared_input_waits_for_its_surviving_git_owner() {
+    let machine = Machine::new("g3-prepared-owner", worker());
+    let armed = machine.root.join("armed");
+    let said_path = machine.root.join("said");
+    let release = machine.root.join("release");
+    let done = machine.root.join("done");
+    for fifo in [&said_path, &release, &done] {
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    machine.wrapper("git", &format!(
+        "{}if [ -e '{}' ]; then case \" $* \" in *' rev-parse --verify --quiet --end-of-options refs/yard/landings/'*) \"$REAL\" \"$@\"; status=$?; echo $$ > '{}'; read line < '{}'; echo done > '{}'; exit $status;; esac; fi",
+        distinct_merge_dates(&machine), armed.display(), said_path.display(), release.display(), done.display()
+    ));
+    machine.start();
+    let project = Project::new(&machine, "p", &unreviewed());
+    project.git(&["checkout", "--quiet", "-b", "feature/a"]);
+    project.json(&["sync", "feature/a"]);
+    let mut watch = project.watch(0);
+    let head = candidate_behind_target(&project, &mut watch);
+    let target = git(&project.canonical(), &["rev-parse", "refs/heads/feature/a"])
+        .trim()
+        .to_string();
+    std::fs::write(&armed, "").unwrap();
+    project.json(&[
+        "attempt",
+        "approve",
+        "Y-1",
+        "--target",
+        "feature/a",
+        "--head",
+        &head,
+    ]);
+    let pid = watch.said(&said_path).trim().to_string();
+    drop(watch);
+    machine.kill();
+    let parent = project.rows(
+        "SELECT id, prepared, status, reserved, intent_state FROM execution WHERE kind = 'landing'",
+    )[0]
+    .clone();
+    let id = parent["id"].as_i64().unwrap();
+    let merged = git(
+        &project.canonical(),
+        &["rev-parse", &format!("refs/yard/landings/{id}")],
+    )
+    .trim()
+    .to_string();
+    assert_eq!(parent["intent_state"], serde_json::Value::Null);
+    assert_eq!(parent["status"], "running");
+    assert_eq!(parent["reserved"], 1);
+    assert_eq!(
+        git(&project.canonical(), &["rev-parse", "refs/heads/feature/a"]).trim(),
+        target
+    );
+    assert!(
+        std::process::Command::new("kill")
+            .args(["-0", &pid])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .open(project.path.join(format!(".yard/local/landings/{id}/lock")))
+        .unwrap();
+    assert!(matches!(
+        lock.try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ));
+    std::fs::remove_file(&armed).unwrap();
+    machine.start();
+    let status = project.json(&["status"]);
+    assert!(
+        status["attention"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["reason"] == "ownership" && item["execution"] == id)
+    );
+    assert_eq!(
+        project
+            .rows("SELECT id FROM execution WHERE kind = 'landing'")
+            .len(),
+        1
+    );
+    assert_eq!(
+        git(&project.canonical(), &["rev-parse", "refs/heads/feature/a"]).trim(),
+        target
+    );
+    assert!(matches!(
+        lock.try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ));
+    // The same project supplies the successful checked-teardown control.
+    std::fs::write(&release, "go\n").unwrap();
+    std::fs::read_to_string(&done).unwrap();
+    let mut watch = project.watch(0);
+    watch.until("old owner released", |event| {
+        event["event"] == "execution.released" && event["execution"] == id
+    });
+    project.json(&["attempt", "start", "Y-1"]);
+    watch.event("landing.recorded", &[]);
+    assert_eq!(
+        git(&project.canonical(), &["rev-parse", "refs/heads/feature/a"]).trim(),
+        merged
+    );
+    assert_eq!(
+        project.rows("SELECT resumed FROM execution WHERE kind = 'landing' AND outcome = 'landed'")
+            [0]["resumed"],
+        id
+    );
+}
