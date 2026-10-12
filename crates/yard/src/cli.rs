@@ -174,6 +174,20 @@ enum AttemptCommand {
         #[arg(long)]
         plan_revision: i64,
         #[arg(long)]
+        landing: Option<i64>,
+        #[arg(long)]
+        child: Option<i64>,
+        #[arg(long)]
+        base: Option<String>,
+        #[arg(long)]
+        revision: Option<i64>,
+        #[arg(long)]
+        old: Option<String>,
+        #[arg(long)]
+        merged: Option<String>,
+        #[arg(long)]
+        node: Option<String>,
+        #[arg(long)]
         target: String,
         #[arg(long)]
         head: String,
@@ -190,6 +204,20 @@ enum AttemptCommand {
         check: i64,
         #[arg(long)]
         plan_revision: i64,
+        #[arg(long)]
+        landing: Option<i64>,
+        #[arg(long)]
+        child: Option<i64>,
+        #[arg(long)]
+        base: Option<String>,
+        #[arg(long)]
+        revision: Option<i64>,
+        #[arg(long)]
+        old: Option<String>,
+        #[arg(long)]
+        merged: Option<String>,
+        #[arg(long)]
+        node: Option<String>,
         #[arg(long)]
         target: String,
         #[arg(long)]

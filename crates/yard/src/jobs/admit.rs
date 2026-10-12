@@ -1645,10 +1645,76 @@ pub async fn candidate_answer(
         .as_str()
         .filter(|text| !text.trim().is_empty())
         .ok_or_else(|| Fail::invalid("a candidate decision carries nonempty text"))?;
+    let item = project.read(|conn| attempts::attention(conn, attention))?;
     let attempt = project
         .read(|conn| attempts::live_for(conn, ticket))?
-        .ok_or_else(|| Fail::refused("no live attempt"))?;
+        .ok_or_else(|| {
+            if item.kind == "candidate" && item.reason == "landing" {
+                candidate_stale("attempt", json!(item.attempt), Value::Null)
+            } else {
+                Fail::refused("no live attempt")
+            }
+        })?;
     let loaded = super::load_attempt(daemon, project, &attempt).await?;
+    let landing = if item.kind == "candidate" && item.reason == "landing" {
+        Some(item.payload["evidence"]["landing"].clone())
+    } else {
+        None
+    };
+    let target_lock = project.target_lock(&crate::git::target_ref(attempt.target_branch()?));
+    let _held = if landing.is_some() {
+        Some(target_lock.lock().await)
+    } else {
+        None
+    };
+    if let Some(identity) = &landing {
+        for (key, expected) in [
+            ("landing", &identity["execution"]),
+            ("child", &item.payload["evidence"]["check"]["execution"]),
+            ("base", &identity["base"]),
+            ("revision", &identity["revision"]),
+            ("old", &identity["prepared"]["old"]),
+            ("merged", &identity["prepared"]["merged"]),
+            ("node", &item.payload["evidence"]["node"]),
+        ] {
+            if &params[key] != expected {
+                return Err(candidate_stale(key, params[key].clone(), expected.clone()));
+            }
+        }
+        let canonical = project.canonical_dir();
+        let target = identity["prepared"]["target_ref"]
+            .as_str()
+            .unwrap_or_default();
+        for (key, reference, expected) in [
+            (
+                "old",
+                target.to_string(),
+                identity["prepared"]["old"].clone(),
+            ),
+            (
+                "merged",
+                format!("refs/yard/landings/{}", identity["execution"]),
+                identity["prepared"]["merged"].clone(),
+            ),
+        ] {
+            let current = json!(daemon.git.rev_parse(&canonical, &reference).await?);
+            if current != expected {
+                return Err(candidate_stale(key, expected, current));
+            }
+        }
+        let parent = project
+            .read(|conn| {
+                executions::get(
+                    conn,
+                    item.payload["evidence"]["check"]["execution"]
+                        .as_i64()
+                        .unwrap_or_default(),
+                )
+            })?
+            .parent
+            .ok_or_else(|| Fail::refused("landing child has no parent"))?;
+        super::queue::prove_predecessors(daemon, project, parent).await?;
+    }
     project.tx(|tx| {
         let item = attempts::attention(tx, attention)?;
         if item.kind != "candidate"
@@ -1685,6 +1751,13 @@ pub async fn candidate_answer(
         }
         let now = attempts::get(tx, attempt.id)?;
         let ticket = tickets::get(tx, ticket)?;
+        if landing.is_some() && now.state != "live" {
+            return Err(candidate_stale(
+                "attempt",
+                json!(attempt.id),
+                json!(attempts::live_for(tx, ticket.id)?.map(|current| current.id)),
+            ));
+        }
         if let Some((key, expected, current)) =
             super::stale_part(&item.payload, &now, &ticket, &loaded)?
         {
@@ -1722,15 +1795,29 @@ pub async fn candidate_answer(
             plan_revision: now.plan_revision(),
             digest: named["digest"].as_str().unwrap_or_default().to_string(),
         };
-        let current = checks::current(
-            tx,
-            check["kind"].as_str().unwrap_or_default(),
-            check["name"].as_str().unwrap_or_default(),
-            &input,
-        )?
-        .map(|check| checks::evidence(tx, &check, &input))
-        .transpose()?
-        .unwrap_or(Value::Null);
+        let current = if let Some(identity) = &landing {
+            let original = executions::get(tx, identity["execution"].as_i64().unwrap_or_default())?;
+            let approval = checks::approval(tx, original.approval.unwrap_or_default())?;
+            if approval.state != "active" {
+                return Err(candidate_stale(
+                    "approval",
+                    json!("active"),
+                    json!(approval.state),
+                ));
+            }
+            let child = executions::get(tx, check["execution"].as_i64().unwrap_or_default())?;
+            super::queue::failed_evidence(tx, &child, &original)?.unwrap_or(Value::Null)
+        } else {
+            checks::current(
+                tx,
+                check["kind"].as_str().unwrap_or_default(),
+                check["name"].as_str().unwrap_or_default(),
+                &input,
+            )?
+            .map(|check| checks::evidence(tx, &check, &input))
+            .transpose()?
+            .unwrap_or(Value::Null)
+        };
         if &current != named {
             return Err(candidate_stale("selected_result", named.clone(), current));
         }

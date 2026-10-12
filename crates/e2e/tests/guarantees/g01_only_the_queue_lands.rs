@@ -189,6 +189,7 @@ command = "git rev-parse HEAD"
             "routes": {"complete": [{"to": "landing-gate-final"}], "blocked": [{"to": "implementer", "repeat": 3}]}
         },
         "landing-gate-final": {
+            "operator_failure": true,
             "runner": {"kind": "command", "gate": "final"}, "access": "write-allowed",
             "inputs": {"merged": {"output": "merged", "kind": "candidate"}},
             "outputs": {"result": "verdict"}, "outcomes": ["complete"], "requires": ["merged"], "routes": {}
@@ -304,8 +305,7 @@ command = "git rev-parse HEAD"
             _ => vec![],
         };
         assert_eq!(gates, expected);
-        // Checks are candidate/review publications. Landing children carry
-        // their judgments on execution; their exact nodes and heads are above.
+        // Passing landing children need no operator evidence check.
         let checks = project.rows(&format!(
             "SELECT e.node, c.verdict FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE e.attempt = {attempt} ORDER BY c.id"
         ));

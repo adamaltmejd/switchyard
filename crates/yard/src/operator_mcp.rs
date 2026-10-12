@@ -50,11 +50,11 @@ const OPERATIONS: &[(&str, &str)] = &[
     ("attempt.stop", "project! ticket!"),
     (
         "attempt.accept",
-        "project! ticket! attention:i! check:i! plan_revision:i! target! head! proof text!",
+        "project! ticket! attention:i! check:i! plan_revision:i! target! head! proof text! landing:i child:i base revision:i old merged node",
     ),
     (
         "attempt.repair",
-        "project! ticket! attention:i! check:i! plan_revision:i! target! head! proof text!",
+        "project! ticket! attention:i! check:i! plan_revision:i! target! head! proof text! landing:i child:i base revision:i old merged node",
     ),
     (
         "attempt.approve",
