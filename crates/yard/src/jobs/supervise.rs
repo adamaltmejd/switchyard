@@ -607,23 +607,28 @@ pub async fn implement(
     let storage = if workflow.read_only { &audit_dir } else { &dir };
     let state = storage.join("state");
     let input = storage.join("input");
-    let proof_dir = if workflow.read_only {
-        let snapshots = audit_dir.join("proof-snapshots");
-        let source = row
-            .proof
-            .as_deref()
-            .filter(|digest| !digest.is_empty())
-            .map(|digest| proof::snapshot_path(project, attempt.id, digest));
-        let empty = audit_dir.join("empty-proof");
-        if source.is_none() {
-            std::fs::create_dir(&empty).map_err(|error| error.to_string())?;
+    let proof_dir = (|| {
+        if workflow.read_only {
+            let snapshots = audit_dir.join("proof-snapshots");
+            let source = row
+                .proof
+                .as_deref()
+                .filter(|digest| !digest.is_empty())
+                .map(|digest| proof::snapshot_path(project, attempt.id, digest));
+            let empty = audit_dir.join("empty-proof");
+            if source.is_none() {
+                std::fs::create_dir(&empty).map_err(|error| error.to_string())?;
+            }
+            let digest = proof::snapshot(source.as_deref().unwrap_or(&empty), &snapshots)?;
+            Ok::<_, Fail>(snapshots.join(digest))
+        } else {
+            let live = dir.join("proof");
+            std::fs::create_dir_all(&live).map_err(|error| error.to_string())?;
+            Ok(live)
         }
-        let digest = proof::snapshot(source.as_deref().unwrap_or(&empty), &snapshots)?;
-        snapshots.join(digest)
-    } else {
-        let live = dir.join("proof");
-        std::fs::create_dir_all(&live).map_err(|error| error.to_string())?;
-        live
+    })();
+    let Some(proof_dir) = preparation_result(daemon, project, execution, proof_dir).await? else {
+        return Ok(());
     };
     let env = if packaged.is_some() {
         Ok(crate::agent_env::AgentEnv::empty(&clone))
@@ -671,62 +676,59 @@ pub async fn implement(
         ..
     }) = packaged
     {
-        let trusted = input.join("trusted");
-        std::fs::create_dir(&trusted).map_err(|error| error.to_string())?;
-        let admitted = attempt.admission.as_ref().expect("admitted plan");
-        for source in admitted["inputs"]["trusted_staged_sources"]
-            .as_array()
-            .ok_or_else(|| Fail::refused("missing selected inputs"))?
-        {
-            let path = source["path"]
-                .as_str()
-                .ok_or_else(|| Fail::refused("invalid selected path"))?;
-            let blob = source["blob"]
-                .as_str()
-                .ok_or_else(|| Fail::refused("invalid selected blob"))?;
-            let Some(bytes) = preparation_result(
-                daemon,
-                project,
-                execution,
-                daemon
-                    .git
-                    .blob(&project.canonical_dir(), blob)
-                    .await
-                    .map_err(Fail::from),
-            )
-            .await?
-            else {
-                return Ok(());
-            };
-            if path == skill && std::str::from_utf8(&bytes).is_err() {
-                return Err(Fail::refused(
-                    "invalid_input: selected Markdown is not UTF-8",
-                ));
+        let staged = async {
+            let trusted = input.join("trusted");
+            std::fs::create_dir(&trusted).map_err(|error| error.to_string())?;
+            let admitted = attempt.admission.as_ref().expect("admitted plan");
+            for source in admitted["inputs"]["trusted_staged_sources"]
+                .as_array()
+                .ok_or_else(|| Fail::refused("missing selected inputs"))?
+            {
+                let path = source["path"]
+                    .as_str()
+                    .ok_or_else(|| Fail::refused("invalid selected path"))?;
+                let blob = source["blob"]
+                    .as_str()
+                    .ok_or_else(|| Fail::refused("invalid selected blob"))?;
+                let bytes = daemon.git.blob(&project.canonical_dir(), blob).await?;
+                if path == skill && std::str::from_utf8(&bytes).is_err() {
+                    return Err(Fail::refused(
+                        "invalid_input: selected Markdown is not UTF-8",
+                    ));
+                }
+                let dest = trusted.join(path);
+                std::fs::create_dir_all(dest.parent().expect("selected parent"))
+                    .map_err(|error| error.to_string())?;
+                std::fs::write(dest, bytes).map_err(|error| error.to_string())?;
             }
-            let dest = trusted.join(path);
-            std::fs::create_dir_all(dest.parent().expect("selected parent"))
-                .map_err(|error| error.to_string())?;
-            std::fs::write(dest, bytes).map_err(|error| error.to_string())?;
-        }
-        let mut declared = files.clone();
-        declared.extend(std::iter::once(skill).chain(references).map(|path| {
-            crate::plan::AuditFile {
-                root: "trusted".into(),
-                path: path.clone(),
+            let mut declared = files.clone();
+            declared.extend(std::iter::once(skill).chain(references).map(|path| {
+                crate::plan::AuditFile {
+                    root: "trusted".into(),
+                    path: path.clone(),
+                }
+            }));
+            let prompt = format!("{instructions}\n{}\n{}", ticket.title, ticket.body);
+            if prompt.len() > 32768 {
+                return Err(Fail::refused("invalid_input: audit prompt bound"));
             }
-        }));
-        let prompt = format!("{instructions}\n{}\n{}", ticket.title, ticket.body);
-        if prompt.len() > 32768 {
-            return Err(Fail::refused("invalid_input: audit prompt bound"));
-        }
-        let launch = json!({"provider": provider, "model": attempt.implementer["model"],
+            let launch = json!({"provider": provider, "model": attempt.implementer["model"],
             "prompt": prompt, "files": declared, "skill": format!("trusted:{skill}"),
             "identity": admitted["inputs"]["package"]});
-        let bytes = launch.to_string();
-        if bytes.len() > 131072 {
-            return Err(Fail::refused("invalid_input: audit launch bound"));
+            let bytes = launch.to_string();
+            if bytes.len() > 131072 {
+                return Err(Fail::refused("invalid_input: audit launch bound"));
+            }
+            std::fs::write(input.join("audit.json"), bytes).map_err(|error| error.to_string())?;
+            Ok::<_, Fail>(())
         }
-        std::fs::write(input.join("audit.json"), bytes).map_err(|error| error.to_string())?;
+        .await;
+        if preparation_result(daemon, project, execution, staged)
+            .await?
+            .is_none()
+        {
+            return Ok(());
+        }
     }
 
     // Writable sessions resume until their execution bound or version changes.
