@@ -103,6 +103,13 @@ if [ "$1 $2" = 'image build' ]; then
 fi
 if [ "$1 $2" = 'box exec' ]; then
     handle="$3"
+    case " $* " in *' --mode json '*)
+        "$REAL" box exec "$handle" -- sh -c '
+            test -e /yard/state/audit-checkpoints/owned; echo predecessor_visible=$?
+            test -d /yard/proof; echo proof_present=$?
+            echo blocked > /yard/proof/intrusion 2>/dev/null; echo proof_write=$?
+        ' >> '{root}/fresh-{attempt}'
+    ;; esac
     mkfifo '{root}/stdout-{attempt}.fifo' '{root}/stderr-{attempt}.fifo'
     tee -a '{root}/stdout-{attempt}' < '{root}/stdout-{attempt}.fifo' &
     stdout_observer=$!
@@ -213,10 +220,28 @@ fn transcript(project: &Project<'_>, attempt: i64) -> String {
 /// bypassing the declared '..' component guard reaches model requests.
 /// Sabotage: remove that guard. The undeclared traversal tool argument below
 /// exercises a different mechanism: allowlist lookup, not path validation.
+/// G13: edit after the real child publishes but before its outer Pi exits.
+/// Keep its checkpoint on the host while the replacement Pi is held. Reuse
+/// attempt state, enable resume, omit the proof mount or make it writable,
+/// or follow checkpoint links during cleanup: fresh state or host sentinels
+/// fail. G14's writable repair tests replacement of a staged models file;
+/// this tests exclusive audit state and whole-attempt cleanup instead.
+/// Mount the predecessor state at the replacement's `/yard/state`: its
+/// `owned` checkpoint becomes visible and the fresh-state assertion fails.
 #[test]
 fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
-    let machine = Machine::new("g8-durable-package", |request| {
+    let first = Latch::new();
+    let second = Latch::new();
+    let first_held = first.clone();
+    let second_held = second.clone();
+    let machine = Machine::new("g8-durable-package", move |request| {
         if let Some(reply) = outer(request) {
+            if request.prompt().contains("Fresh replacement audit") && request.opens() {
+                return Reply::Hold(second_held.clone(), Box::new(reply));
+            }
+            if request.prompt().contains("Corrected packaged asset") && !request.opens() {
+                return Reply::Hold(first_held.clone(), Box::new(reply));
+            }
             return reply;
         }
         assert!(request.context().contains("TRUSTED_SELECTED_SKILL_Y92"));
@@ -300,7 +325,107 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     project.json(&["attempt", "abandon", "Y-2"]);
 
     launch(&project, 3, "Corrected packaged audit");
-    let completed = ended(&project, "Y-3", "Corrected packaged asset");
+    let sentinel = machine.root.join("host-sentinel");
+    std::fs::create_dir(&sentinel).unwrap();
+    std::fs::write(sentinel.join("value"), "host-fixture").unwrap();
+    let mut watch = project.watch(0);
+    project.json(&[
+        "ticket",
+        "new",
+        "--title",
+        "Corrected packaged asset",
+        "--workflow",
+        "plan",
+    ]);
+    first.wait_held();
+    let owner = project
+        .rows("SELECT id, handle FROM execution WHERE attempt = 3 AND kind = 'implementation'")[0]
+        .clone();
+    let old = owner["id"].as_i64().unwrap();
+    // The real child has created its checkpoint directory. Plant through
+    // the live box, without editing any daemon-owned launch input.
+    let planted = machine.pinfold(&[
+        "box", "exec", owner["handle"].as_str().unwrap(), "--", "sh", "-c",
+        &format!("echo checkpoint-fixture > /yard/state/audit-checkpoints/owned && ln -s '{}' /yard/state/audit-checkpoints/host-link", sentinel.display()),
+    ]);
+    assert!(
+        planted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&planted.stderr)
+    );
+    let checkpoint = project.path.join(format!(
+        ".yard/local/attempts/3/audits/{old}/state/audit-checkpoints/owned"
+    ));
+    assert_eq!(
+        std::fs::read_to_string(&checkpoint).unwrap(),
+        "checkpoint-fixture\n"
+    );
+    project.json(&[
+        "ticket",
+        "edit",
+        "Y-3",
+        "--revision",
+        "1",
+        "--body",
+        "Fresh replacement audit",
+    ]);
+    first.release();
+    second.wait_held();
+    assert_eq!(
+        std::fs::read_to_string(&checkpoint).unwrap(),
+        "checkpoint-fixture\n"
+    );
+    let fresh = std::fs::read_to_string(machine.root.join("fresh-3")).unwrap();
+    assert_eq!(
+        fresh
+            .lines()
+            .filter(|line| *line == "predecessor_visible=1")
+            .count(),
+        2,
+        "{fresh}"
+    );
+    for status in fresh
+        .lines()
+        .filter_map(|line| line.strip_prefix("proof_write="))
+    {
+        assert_ne!(status, "0", "{fresh}");
+    }
+    assert!(fresh.contains("proof_write="), "{fresh}");
+    assert_eq!(
+        fresh
+            .lines()
+            .filter(|line| *line == "proof_present=0")
+            .count(),
+        2,
+        "{fresh}"
+    );
+    let rows = project
+        .rows("SELECT resumed, node FROM execution WHERE attempt = 3 AND kind = 'implementation'");
+    assert_eq!(
+        rows,
+        vec![json!({"resumed": null, "node": "implementer"}); 2]
+    );
+    second.release();
+    watch.until("replacement audit ended", |event| {
+        event["event"] == "attempt.ended" && event["ticket"] == "Y-3"
+    });
+    watch.until("audit state cleaned", |event| {
+        event["event"] == "execution.ended"
+            && event["attempt"] == 3
+            && event["data"]["kind"] == "cleanup"
+    });
+    assert_eq!(
+        std::fs::read_to_string(sentinel.join("value")).unwrap(),
+        "host-fixture"
+    );
+    let completed = project.json(&["attempt", "show", "Y-3"])["executions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["kind"] == "implementation" && row["execution"] != old)
+        .unwrap()
+        .clone();
+    assert_eq!(completed["teardown"], true);
     assert_eq!(
         completed["report"]["report"],
         json!({"summary": "Fixture audit", "findings": []})

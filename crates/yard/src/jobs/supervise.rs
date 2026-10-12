@@ -183,8 +183,8 @@ pub struct Worker<'a> {
     pub workspace: &'a Path,
     pub read_only: bool,
     /// The proof directory mounted at `/yard/proof`: the implementer's live
-    /// worker-written directory (writable), or the reviewer's candidate
-    /// snapshot (read-only, matching the workspace).
+    /// worker-written directory (writable), or a review/audit snapshot
+    /// (read-only, matching the workspace).
     pub proof: Option<&'a Path>,
     pub harness: &'static dyn Harness,
     pub stage: Stage<'a>,
@@ -541,11 +541,30 @@ pub async fn implement(
             ))
         })?;
     let dir = project.attempt_dir(attempt.id);
-    let clone = dir.join("clone");
+    let audit_dir = dir.join("audits").join(execution.to_string());
+    let clone = if workflow.read_only {
+        audit_dir.join("checkout")
+    } else {
+        dir.join("clone")
+    };
     if stop_preparation(daemon, project, execution).await? {
         return Ok(());
     }
-    if !clone.exists() {
+    if workflow.read_only {
+        // No predecessor can mount this directory. Refuse an existing path
+        // rather than stage into guest-written state after an interruption.
+        std::fs::create_dir_all(audit_dir.parent().expect("audit parent"))
+            .map_err(|error| error.to_string())?;
+        std::fs::create_dir(&audit_dir).map_err(|error| error.to_string())?;
+        daemon
+            .git
+            .clone_detached(
+                &project.canonical_dir(),
+                &clone,
+                row.head.as_deref().unwrap_or(&attempt.base),
+            )
+            .await?;
+    } else if !clone.exists() {
         daemon
             .git
             .clone_branch(
@@ -559,14 +578,27 @@ pub async fn implement(
     if stop_preparation(daemon, project, execution).await? {
         return Ok(());
     }
-    let state = dir.join("state");
-    let input = dir.join("input");
-    // The worker-written proof directory exists before the box so the mount
-    // always has a host directory. A read-only workflow gets none.
-    let proof_dir = dir.join("proof");
-    if !workflow.read_only {
-        std::fs::create_dir_all(&proof_dir).map_err(|error| error.to_string())?;
-    }
+    let storage = if workflow.read_only { &audit_dir } else { &dir };
+    let state = storage.join("state");
+    let input = storage.join("input");
+    let proof_dir = if workflow.read_only {
+        let snapshots = audit_dir.join("proof-snapshots");
+        let source = row
+            .proof
+            .as_deref()
+            .filter(|digest| !digest.is_empty())
+            .map(|digest| proof::snapshot_path(project, attempt.id, digest));
+        let empty = audit_dir.join("empty-proof");
+        if source.is_none() {
+            std::fs::create_dir(&empty).map_err(|error| error.to_string())?;
+        }
+        let digest = proof::snapshot(source.as_deref().unwrap_or(&empty), &snapshots)?;
+        snapshots.join(digest)
+    } else {
+        let live = dir.join("proof");
+        std::fs::create_dir_all(&live).map_err(|error| error.to_string())?;
+        live
+    };
     let env = crate::agent_env::AgentEnv::load(
         &daemon.git,
         &project.canonical_dir(),
@@ -590,9 +622,14 @@ pub async fn implement(
     };
     harness.stage(&stage).map_err(|error| error.to_string())?;
 
-    // Resume the session unless it has run its executions or the harness
-    // version changed under it.
-    let resume = match project.read(|conn| executions::session(conn, attempt.id, execution))? {
+    // Writable sessions resume until their execution bound or version changes.
+    let resume = match project.read(|conn| {
+        if workflow.read_only {
+            Ok(None)
+        } else {
+            executions::session(conn, attempt.id, execution)
+        }
+    })? {
         Some((previous, count))
             if count < i64::from(workflow.max_session_executions)
                 && previous.harness_version.as_deref() == Some(harness.version()) =>
@@ -668,7 +705,7 @@ pub async fn implement(
             image: &image,
             workspace: &clone,
             read_only: workflow.read_only,
-            proof: (!workflow.read_only).then_some(proof_dir.as_path()),
+            proof: Some(proof_dir.as_path()),
             harness,
             stage,
             model: &model,
@@ -741,7 +778,9 @@ pub async fn implement(
     let teardown = live.down(DOWN_TIMEOUT).await;
 
     // Take the candidate's objects by a fetch run in canonical.
-    let fetched = {
+    let fetched = if workflow.read_only {
+        Ok(())
+    } else {
         let _canonical = project.canonical.lock().await;
         daemon
             .git
@@ -756,17 +795,21 @@ pub async fn implement(
             )
             .await
     };
-    let head = match &fetched {
-        Ok(()) => {
-            daemon
-                .git
-                .rev_parse(
-                    &project.canonical_dir(),
-                    &crate::git::candidate_ref(attempt.id),
-                )
-                .await?
+    let head = if workflow.read_only {
+        Some(row.head.clone().unwrap_or_else(|| attempt.base.clone()))
+    } else {
+        match &fetched {
+            Ok(()) => {
+                daemon
+                    .git
+                    .rev_parse(
+                        &project.canonical_dir(),
+                        &crate::git::candidate_ref(attempt.id),
+                    )
+                    .await?
+            }
+            Err(_) => None,
         }
-        Err(_) => None,
     };
     // The base moves to a target handed to the attempt once the head
     // contains it.

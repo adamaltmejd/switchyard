@@ -518,7 +518,7 @@ split and stops.
    a dirty clone goes back to the implementer once with the listing, and
    raises `stopped:dirty` if still dirty; an unchanged head raises
    `stopped`, except that an edit-started execution ending clean on the attempt's
-   current head sends that candidate to judgment at the current revision. The next implementer execution resumes the session where the
+   current head sends that candidate to judgment at the current revision. A writable implementer's next execution resumes the session where the
    harness offers one. Context is the harness's business: Yard stages each
    harness's own automatic-compaction threshold with the launch and never
    compacts a session itself. After `max_session_executions` executions on
@@ -733,6 +733,15 @@ those files. The caller supplies frozen read-only mounts; this package
 supplies no mount lifecycle. Only the trusted
 selected Markdown becomes instructions. Candidate code and extensions are
 never loaded. There is no shell, write, arbitrary host-read or delegation tool.
+Every read-only audit execution receives a fresh detached source checkout
+at its recorded head (or admission base) and a bounded, link-refusing copy
+of its available proof, both mounted read-only. Absent proof is an empty
+read-only directory. Its writable harness, scratch and checkpoint state
+and read-only launch input belong only to that execution and its admitted
+node. The execution row retains that identity. No audit resumes a session
+or mounts predecessor writable state. Host staging uses fresh execution
+paths, and cleanup never follows guest links. Execution reservation,
+checked teardown and whole-attempt cleanup govern these paths.
 The runner creates distinct fresh writable `/yard/state/audit-scratch` and
 `/yard/state/audit-checkpoints` paths. SQLite checkpoints remain untrusted
 boxed data, never host-evaluated or workflow evidence; no resume is provided.
@@ -745,8 +754,8 @@ Markdown must fit. Tool results serialize only that bounded read or a named
 publication/refusal. Launch JSON is at most 128 KiB and its prompt at most
 32768 bytes. Report bounds remain the publication contract above. Logs emit
 only named completion/refusal frames; ambient client environment except
-guest proxy routing is removed before package imports. Box teardown and
-daemon selection remain integration work on the existing execution lifecycle.
+guest proxy routing is removed before package imports. Runner selection
+remains integration work on the existing execution lifecycle.
 
 A live legacy attempt without admission evidence cannot continue as a
 read-only workflow. `attempt start` refuses with `unbound_report` and the
@@ -978,6 +987,8 @@ history keeps no target.
 Files live outside the clone while an attempt is live, under
 `.yard/local/attempts/<id>/`: transcripts, gate logs, harness state, the
 worker's live `proof/` directory and its `proof-snapshots/<digest>` copies.
+Read-only audits use `audits/<execution>/` for checkout, proof copies,
+state and input; none is reused by another execution.
 Cleanup removes the directory. A surface that needs a log
 after cleanup does not get one; it gets the rows.
 
@@ -1087,7 +1098,8 @@ box spec names mounts, env, the harness, egress and memory.
 
 | Box | `/workspace` | Harness state | Egress | Env |
 |---|---|---|---|---|
-| implementer | the attempt's clone, writable, or read-only where the workflow's `access` says so; `/yard/proof` writable (no proof mount when read-only) | writable | model route, MCP route, `isolation.egress` | the harness's env, git identity, `YARD_MCP_BEARER` (from) |
+| implementer | the attempt's clone, writable; `/yard/proof` writable | writable | model route, MCP route, `isolation.egress` | the harness's env, git identity, `YARD_MCP_BEARER` (from) |
+| read-only audit | a fresh detached checkout of its recorded head or admission base, read-only; `/yard/proof` is its frozen available proof or empty directory, read-only | exclusive to its execution and admitted node, writable; no resume | model route, MCP route, `isolation.egress` | the harness's env, git identity, `YARD_MCP_BEARER` (from) |
 | reviewer | a fresh checkout of the head, read-only; `/yard/proof` is the candidate's snapshot, read-only | its own, writable | model route, MCP route | the harness's env, git identity, `YARD_MCP_BEARER` (from) |
 | gate | a private disposable checkout of the exact commit, writable; `/yard/proof` is the candidate's snapshot, read-only | none | `isolation.egress` only | `HOME`, `PATH`, `YARD_BASE` |
 
@@ -1386,7 +1398,7 @@ G15. Each is shown by one or more end-to-end scenarios; testing policy is in
 | 10 | The queue lands one at a time per target and re-judges what does not merge | A feature/a Git child held after intent: feature/b lands while the second feature/a waits; releasing the child permits both feature/a candidates to land in order. Named sync refuses feature/a by intent identity while feature/b sync succeeds. Two approved candidates, the second red on its merged ref: the first lands, the second gets one repair and a second red raises `red`. A red's detail is the end of the gate's output in the order written: a gate that writes over 8000 bytes to stderr and then a marker to stdout leaves a detail ending with the marker. A candidate that does not merge gets a repair naming the paths, and its next head takes gates, review and approval again. A feature/a conflict against a target that changed `.yard/config.toml` and its Dockerfile, in a clone made before it: the worker fetches the target from its feature/a bundle, merges, and the new candidate's base is the target; admitted feature gates, image and review judge it before approval and landing on feature/a while main stays fixed, so it passes the `.yard` refusal and lands with the operator's configuration intact. |
 | 11 | Only the operator's sync changes `.yard` and canonical from outside | A worker commit under `.yard` comes back with the reason and no gate runs; the same change through `yard sync` is in force for a future admission. A checkout and canonical that each hold a commit the other lacks: both directions refuse naming both heads; a fast-forward passes. Named feature/a import and consume move its committed history while main and feature/b stay fixed; named divergence refuses both heads and a clean fast-forward controls it. Dirty or different checked-out destinations refuse by identity and preserve their heads and host files; the clean matching checkout consumes. Named import leaves symbolic HEAD unchanged. Explicit validated default selection succeeds while a real default-bound worker is held; its admitted main base and frozen branch stay unchanged, the held attempt finishes on main, a future admission starts from feature/a, and omitted sync uses the selected default. An open intent held at its real update-ref refuses selection naming its execution before the child is released; after the landing completes, selection succeeds. Selection from a different or dirty checkout uses imported canonical history, including with a behind or absent checkout branch, without moving the checkout. Consuming an imported branch whose config names a former default still fast-forwards the clean matching checkout. |
 | 12 | Boxes hold nothing secret | The key is absent from the box's environment and clone; the fixture behind the injecting route receives it. The direct Anthropic Claude API key is absent from the seat environment, files and clone; the host fixture receives `x-api-key` and `anthropic-version: 2023-06-01` on messages for `claude-opus-5-5`. The claude token is absent from the box's environment, files and clone; the fixture behind the login route receives it as `Authorization: Bearer`. The codex host login is absent from the box's environment, files and clone; the fixture behind the login route receives it as `Authorization: Bearer` with `ChatGPT-Account-ID`. The packaged Durable route receives the host fixture key while guest environment, source, checkpoint/scratch state, package assets, logs, model body and stored report lack it. |
-| 13 | Every gate and seat runs where its row says | A seat that writes to `/workspace` fails and the head is unchanged. A gate box and a seat read the candidate's proof snapshot at `/yard/proof` and their writes there fail; control: the implementer wrote the live proof. A gate box that calls the model or MCP route gets nothing, and an ignored file the implementer left is absent from its checkout; control: the worker box reaches the route. A host candidate gate runs on the head before any review and sees `YARD_BASE`, `YARD_PROOF`, the snapshot it judges, and only the variables its `env` names; a host landing gate runs on the merged ref, reads the approved candidate's proof snapshot and never for a candidate whose approval was superseded, even by an edit while its landing merges. The packaged controller executes only inside a Yard-owned box; its fixture source and trusted input writes fail while distinct scratch and checkpoint writes succeed. |
+| 13 | Every gate, seat and read-only audit runs where its row says | A seat that writes to `/workspace` fails and the head is unchanged. A gate box and a seat read the candidate's proof snapshot at `/yard/proof` and their writes there fail; control: the implementer wrote the live proof. A gate box that calls the model or MCP route gets nothing, and an ignored file the implementer left is absent from its checkout; control: the worker box reaches the route. A host candidate gate runs on the head before any review and sees `YARD_BASE`, `YARD_PROOF`, the snapshot it judges, and only the variables its `env` names; a host landing gate runs on the merged ref, reads the approved candidate's proof snapshot and never for a candidate whose approval was superseded, even by an edit while its landing merges. The packaged controller executes only inside a Yard-owned box; its frozen fixture source, trusted input and proof writes fail while distinct scratch and checkpoint writes succeed. An edit starts a fresh audit on the same attempt while the predecessor checkpoint remains on the host: it cannot read or modify that checkpoint, resumes no session and retains its admitted node identity. Guest-planted checkpoint links survive until checked whole-attempt cleanup without changing a host sentinel. |
 | 14 | Worker git is untrusted, and Yard stays local | A worker that plants `core.fsmonitor`, a hook, a clean filter and a remote in its clone, corrupts an object and links its harness's models file to a host path: none of them acts on the host, canonical's objects are intact, the candidate is refused by name. A worker that leaves a symlink in `/yard/proof` is refused by name and no gate runs; a regular file is accepted. Across G7's path every request the model's fixture receives came through the model route, and the daemon listens on its unix socket and the MCP listener only. |
 | 15 | Plans and proposals resolve | Main and feature/a declare opposite access for the same workflow names. A feature/a ticket on `plan`: its clone refuses writes, it proposes children and a body edit, and the attempt ends with nothing raised; accepting them blocks the parent, which the scheduler does not start once they are done; `yard ticket done` then closes it and its dependents become ready. A writable feature/a parent gains no automatic child edge despite the default's read-only workflow; its accepted child keeps an omitted target for future default resolution. Closing a ticket with a live attempt is refused. One execution proposing A and B, B depending on A: accepting both mints A first and B's edge names it. An ended pre-target planner's open child proposal remains acceptable after upgrade, adds its parent edge using legacy default classification, and keeps its ended target unknown and the child's override absent. |
 
