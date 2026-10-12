@@ -2383,6 +2383,8 @@ fn assert_own_session_only(
 /// write an acceptance. Consume publication before teardown; a held item opens.
 #[test]
 fn selected_failures_continue_without_rewriting_judgments() {
+    let repair_hold = Latch::new();
+    let repair_held = repair_hold.clone();
     let hold = Latch::new();
     let held = hold.clone();
     let final_hold = Latch::new();
@@ -2419,7 +2421,20 @@ fn selected_failures_continue_without_rewriting_judgments() {
             );
         }
         let prompt = request.last_user();
-        let command = if prompt.contains("The gate first failed") {
+        if request.prompt().contains("Merged repair")
+            && request.opens()
+            && prompt.contains("failed to land")
+        {
+            return Reply::Hold(
+                repair_held.clone(),
+                Box::new(Reply::Tools(vec![bash(
+                    "cd /workspace && git fetch -q /yard/input/target.bundle refs/heads/main && git merge -q --no-edit FETCH_HEAD && touch repair-ready.txt && git add -A && git commit -qm Repaired",
+                )])),
+            );
+        }
+        let command = if request.prompt().contains("Merged repair") {
+            "cd /workspace && touch ready.txt reviewed.txt repair-selected.txt && git add -A && git commit --allow-empty -qm RepairCandidate"
+        } else if prompt.contains("The gate first failed") {
             "cd /workspace && touch ready.txt && git add -A && git commit -qm Ready"
         } else if prompt.contains("Review blocked") {
             "cd /workspace && touch reviewed.txt && git add -A && git commit -qm Reviewed"
@@ -2432,7 +2447,7 @@ fn selected_failures_continue_without_rewriting_judgments() {
     });
     machine.start();
     let configuration = config(
-        "[gates.first]\ncommand = \"test -f ready.txt || test -f landing.txt\"\nstage = \"candidate\"\n\
+        "[gates.first]\ncommand = \"(test -f ready.txt || test -f landing.txt) && { test ! -f repair-selected.txt || test ! -f repair-target.txt || test -f repair-ready.txt || { echo merged-repair-fixture; exit 1; }; }\"\nstage = \"candidate\"\n\
          [gates.remaining]\ncommand = \"true\"\nstage = \"candidate\"\n\
          [review.seats.final]\nagent = \"worker\"\ninstructions = \"Final seat.\"\n",
     ).replace("review = [\"correctness\"]\n\n[workflows.plan]", "review = [\"correctness\", \"final\"]\n\n[workflows.plan]")
@@ -2786,4 +2801,163 @@ fn selected_failures_continue_without_rewriting_judgments() {
     let failed = project.rows("SELECT c.id, c.verdict FROM \"check\" c JOIN execution e ON e.id = c.execution JOIN attempt a ON a.id = e.attempt WHERE a.ticket = 3 AND c.kind = 'review' AND e.name = 'correctness'");
     assert_eq!(failed[0]["verdict"], "fail");
     assert!(checks.as_array().unwrap().contains(&failed[0]["id"]));
+
+    let cleanup = watch.find("carried candidate cleanup", |event| {
+        event["event"] == "execution.ended"
+            && event["data"]["kind"] == "cleanup"
+            && event["attempt"] == 5
+    });
+    watch.find("carried cleanup released", |event| {
+        event["event"] == "execution.released" && event["execution"] == cleanup["execution"]
+    });
+    project.json(&["sync", "main"]);
+    project.json(&[
+        "ticket",
+        "new",
+        "--title",
+        "Merged repair",
+        "--workflow",
+        "plan",
+    ]);
+    watch.event("attempt.ended", &[("outcome", "planned")]);
+    let started = operator.call(
+        "yard_attempt_start",
+        json!({
+            "project": project.path, "ticket": "Y-4", "workflow": "default",
+            "overrides": {"landing-gate-first": {"operator_failure": true}}
+        }),
+    );
+    assert!(started.get("error").is_none(), "{started}");
+    let approval = watch.attention();
+    assert_eq!(approval["data"]["kind"], "approval");
+    let head = approval["data"]["payload"]["head"].as_str().unwrap();
+    project.write("repair-target.txt", "target\n");
+    project.git(&["add", "repair-target.txt"]);
+    project.git(&["commit", "-qm", "Repair target advance"]);
+    project.json(&["sync", "main"]);
+    let old = project.canonical_head();
+    project.json(&[
+        "attempt", "approve", "Y-4", "--target", "main", "--head", head,
+    ]);
+    let item = watch.attention();
+    assert_eq!(item["data"]["reason"], "landing");
+    let payload = &item["data"]["payload"];
+    let evidence = &payload["evidence"];
+    let parent = &evidence["landing"];
+    watch.find("repair failed parent released", |event| {
+        event["event"] == "execution.released" && event["execution"] == parent["execution"]
+    });
+    let merged = git(
+        &project.canonical(),
+        &[
+            "rev-parse",
+            &format!("refs/yard/landings/{}", parent["execution"]),
+        ],
+    )
+    .trim()
+    .to_string();
+    assert_eq!(parent["prepared"]["old"], old);
+    assert_eq!(evidence["check"]["head"], merged);
+    assert_eq!(evidence["check"]["verdict"], "fail");
+    assert_eq!(evidence["result"]["outcome"], "failed");
+    let check = evidence["check"]["check"].as_i64().unwrap();
+    let snapshot_query = format!(
+        "SELECT c.*, e.result, e.inputs FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE c.id = {check}"
+    );
+    let snapshot = project.rows(&snapshot_query);
+    // G2/G3/G8: explicit repair is a different decision from acceptance.
+    // Sabotage: treat repair as accept in queue::land, retain its approval,
+    // drop the failed feedback binding, or rewrite the original failure.
+    // The real resumed Pi turn holds until these return-route observations.
+    let repaired = operator.call(
+        "yard_attempt_repair",
+        json!({
+            "project": project.path, "ticket": "Y-4", "attention": item["attention"],
+            "check": check, "plan_revision": 1, "target": "main", "head": head,
+            "proof": payload["proof"], "text": "Repair this exact merged failure",
+            "landing": parent["execution"], "child": evidence["check"]["execution"],
+            "node": evidence["node"], "base": parent["base"], "revision": parent["revision"],
+            "old": old, "merged": merged
+        }),
+    );
+    assert_eq!(repaired["result"]["accepted"], false, "{repaired}");
+    let route = watch.find("explicit repair route or incorrect landing", |event| {
+        event["attempt"] == item["attempt"]
+            && event["seq"].as_i64().unwrap() > item["seq"].as_i64().unwrap()
+            && (event["event"] == "landing.recorded"
+                || (event["event"] == "execution.started"
+                    && event["data"]["kind"] == "implementation"))
+    });
+    assert_eq!(route["event"], "execution.started");
+    assert_eq!(route["data"]["reason"], "repair");
+    repair_hold.wait_held();
+    assert_eq!(project.canonical_head(), old);
+    let shown = project.json(&["attempt", "show", "Y-4"]);
+    let executions = shown["executions"].as_array().unwrap();
+    let repair = executions
+        .iter()
+        .rev()
+        .find(|row| row["kind"] == "implementation")
+        .unwrap();
+    assert_eq!(repair["reason"], "repair");
+    let feedback = &repair["binding"]["inputs"]["feedback"];
+    assert_eq!(
+        feedback["source"]["execution"],
+        evidence["check"]["execution"]
+    );
+    assert_eq!(feedback["value"]["verdict"], "fail");
+    assert_eq!(&feedback["value"]["evidence"], evidence);
+    assert!(
+        feedback["value"]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("merged-repair-fixture")
+    );
+    let attempt = repair["attempt"].as_i64().unwrap();
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT state FROM approval WHERE attempt = {attempt}"
+        )),
+        vec![json!({"state": "retired"})]
+    );
+    assert_eq!(project.rows(&format!("SELECT outcome FROM execution WHERE attempt = {attempt} AND kind = 'landing' ORDER BY id DESC LIMIT 1")), vec![json!({"outcome": "red"})]);
+    assert!(
+        project
+            .rows(&format!(
+                "SELECT id FROM execution WHERE attempt = {attempt} AND intent_state IS NOT NULL"
+            ))
+            .is_empty()
+    );
+    assert_eq!(project.rows(&snapshot_query), snapshot);
+    repair_hold.release();
+    let approval = watch.attention();
+    assert_eq!(approval["data"]["kind"], "approval");
+    let fresh = approval["data"]["payload"]["head"].as_str().unwrap();
+    assert_ne!(fresh, head);
+    assert_eq!(project.rows(&format!("SELECT node, outcome FROM execution WHERE attempt = {attempt} AND parent IS NULL AND kind IN ('gate', 'review') AND head = '{fresh}' ORDER BY id")),
+        vec![json!({"node": "candidate-gate-first", "outcome": "pass"}),
+             json!({"node": "candidate-gate-remaining", "outcome": "pass"}),
+             json!({"node": "review-0", "outcome": "pass"}),
+             json!({"node": "review-1", "outcome": "pass"})]);
+    project.json(&[
+        "attempt", "approve", "Y-4", "--target", "main", "--head", fresh,
+    ]);
+    watch.event("landing.recorded", &[]);
+    assert_eq!(project.canonical_head(), fresh);
+    assert_eq!(
+        git(
+            &project.canonical(),
+            &["show", &format!("{fresh}:repair-target.txt")]
+        ),
+        "target\n"
+    );
+    git(
+        &project.canonical(),
+        &["cat-file", "-e", &format!("{fresh}:repair-ready.txt")],
+    );
+    assert_eq!(project.rows(&format!("SELECT node, outcome, head FROM execution WHERE attempt = {attempt} AND parent IS NOT NULL ORDER BY id")),
+        vec![json!({"node": "landing-gate-first", "outcome": "fail", "head": merged}),
+             json!({"node": "landing-gate-first", "outcome": "pass", "head": fresh}),
+             json!({"node": "landing-gate-remaining", "outcome": "pass", "head": fresh})]);
+    assert_eq!(project.rows(&snapshot_query), snapshot);
 }

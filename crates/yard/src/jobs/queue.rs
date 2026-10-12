@@ -7,7 +7,7 @@ use crate::config::Approve;
 use crate::daemon::{Daemon, Project};
 use crate::git::Merge;
 use crate::store::{self, attempts, checks, executions, ticket_name, tickets};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -670,7 +670,6 @@ pub async fn land(
                     returned(
                         daemon,
                         project,
-                        &loaded,
                         execution,
                         &target,
                         "conflict",
@@ -678,6 +677,7 @@ pub async fn land(
                             "The candidate does not merge cleanly. Conflicting paths:\n{}",
                             paths.join("\n")
                         ),
+                        None,
                     )
                     .await?;
                     return Ok(None);
@@ -866,11 +866,22 @@ pub async fn land(
                     gate.name,
                     child.detail.as_deref().unwrap_or_default()
                 );
+                let evidence = project
+                    .read(|conn| failed_evidence(conn, child, &original))?
+                    .ok_or_else(|| Fail::refused("selected repair evidence absent"))?;
                 return super::capacity::effect(
                     daemon,
                     project,
                     execution,
-                    returned(daemon, project, &loaded, execution, &target, "red", &detail),
+                    returned(
+                        daemon,
+                        project,
+                        execution,
+                        &target,
+                        "red",
+                        &detail,
+                        Some(&evidence),
+                    ),
                 )
                 .await;
             }
@@ -1031,7 +1042,7 @@ pub async fn land(
                     daemon,
                     project,
                     execution,
-                    returned(daemon, project, &loaded, execution, &target, "red", &detail),
+                    returned(daemon, project, execution, &target, "red", &detail, None),
                 )
                 .await;
             }
@@ -1293,11 +1304,11 @@ fn withdraw(
 async fn returned(
     daemon: &Daemon,
     project: &Project,
-    loaded: &Loaded,
     execution: i64,
     target: &str,
     outcome: &str,
     detail: &str,
+    evidence: Option<&Value>,
 ) -> Result<(), Fail> {
     let (attempt, approval) = project.read(|conn| {
         let row = executions::get(conn, execution)?;
@@ -1319,7 +1330,7 @@ async fn returned(
                     "create",
                     "--quiet",
                     bundle.to_str().unwrap_or_default(),
-                    &crate::git::target_ref(&loaded.branch),
+                    &crate::git::target_ref(attempt.target_branch()?),
                     &format!("^{}", attempt.base),
                 ],
             )
@@ -1365,12 +1376,17 @@ async fn returned(
             )?;
             return Ok(());
         }
-        attempts::set_next(
-            tx,
-            attempt.id,
-            Some(&json!({
-                "reason": "repair", "detail": detail, "target": target, "branch": loaded.branch,
-            })),
-        )
+        let mut next = json!({
+            "reason": "repair", "detail": detail, "target": target,
+            "branch": attempt.target_branch()?,
+        });
+        if let Some(evidence) = evidence {
+            next["feedback"] = json!({"kind": "verdict", "source": {
+                "external": "feedback", "execution": evidence["check"]["execution"],
+                "node": evidence["node"], "output": "result"},
+                "value": {"verdict": "fail", "detail": detail, "target": target,
+                    "branch": attempt.target_branch()?, "evidence": evidence}});
+        }
+        attempts::set_next(tx, attempt.id, Some(&next))
     })
 }

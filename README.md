@@ -119,6 +119,9 @@ the original `landing`, `child`, `node`, candidate `base`, ticket `revision`,
 target `old` and `merged` head. Acceptance runs the remaining landing gates
 before queue landing and compare-and-swap. Infrastructure errors and unknown
 ownership cannot be accepted; fresh preparation inherits no answer.
+Repair retires approval and binds the exact failed evidence to the next
+implementer execution. The original failure stays failed. Its fresh candidate
+must pass selected verification and gain approval before landing.
 
 To explicitly accept landing omissions, approve with repeated
 `--observe-landing-skipped NODE`. This requests a decision after merge

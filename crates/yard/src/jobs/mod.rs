@@ -545,8 +545,8 @@ async fn advance(
     }
     if let Some(next) = &attempt.next {
         let reason = next["reason"].as_str().unwrap_or("repair").to_string();
-        let execution =
-            project.tx(|tx| supervise::start_implementation(tx, attempt, &reason, None))?;
+        let execution = project
+            .tx(|tx| supervise::start_implementation(tx, attempt, &reason, next.get("feedback")))?;
         spawn(daemon, project, "implementation", execution);
         return Ok(());
     }
