@@ -619,6 +619,23 @@ impl Plan {
             defined.routes.remove("complete");
             let mut retained = selected.nodes[name].clone();
             retained.routes.remove("complete");
+            // A profile declares reviewer capabilities. Its seat position
+            // determines which ordinary outcomes and bounded routes run.
+            if name.starts_with("review-")
+                && profiles.values().any(|profile| {
+                    profile.runner == node.runner
+                        && profile.access == Access::ReadOnly
+                        && profile.outputs == node.outputs
+                        && profile.outcomes == node.outcomes
+                        && profile.outcomes.iter().any(|outcome| outcome == "complete")
+                        && profile
+                            .outcomes
+                            .iter()
+                            .all(|outcome| matches!(outcome.as_str(), "complete" | "blocked"))
+                })
+            {
+                provided.outcomes = retained.outcomes.clone();
+            }
             if provided != defined && provided != retained {
                 return None;
             }

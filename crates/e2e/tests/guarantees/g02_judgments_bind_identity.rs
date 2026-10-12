@@ -8,15 +8,19 @@ const GATE: &str = "[gates.check]\ncommand = \"test -f feature.txt\"\nstage = \"
 
 /// G2/G5/G9: revise the final policy at manual approval, then change its
 /// producer policy. The first edit retains the completed unrelated seat;
-/// the second must invalidate the final seat's unchanged policy because its
-/// typed producer changed. Hold the revised final worker through the real
+/// the second selects that profile for the non-final producer and invalidates
+/// its typed consumers. Routing then omits the middle seat: the completed
+/// first seat keeps its evidence despite a changed complete successor, while
+/// the final seat must bind that actual producer instead of the omitted seat.
+/// Hold the revised final worker through the real
 /// host model route to prove live edits refuse, with quiescent edits in the
 /// same project as controls. Revisions/policies come from fixture literals;
 /// candidate identity comes from host git. Store snapshots prove old rows
 /// unchanged and stale edits/decisions write nothing.
 /// Sabotage: overwrite admission, remove plan CAS, qualify by revision alone,
 /// omit node/policy identity, run the old seat instead of the selected profile,
-/// keep the ordinary-seat digest for a different runner, or select an obsolete producer.
+/// keep the ordinary-seat digest for a different runner, bind complete routing
+/// into completed evidence, or select an obsolete producer.
 /// Existing G2 edits change ticket/head/proof; none revises a plan on the same
 /// candidate or binds a new consumer to an eligible older-revision producer.
 #[test]
@@ -24,8 +28,27 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
     let hold = Latch::new();
     let held = hold.clone();
     let final_calls = std::sync::Mutex::new(0);
+    let correctness_calls = std::sync::Mutex::new(0);
     let machine = Machine::new("g2-plan-cas", move |request| {
         if request.has_tool("yard_publish_review") {
+            if request.opens()
+                && request
+                    .prompt()
+                    .contains("You are the correctness reviewer")
+            {
+                let mut calls = correctness_calls.lock().unwrap();
+                *calls += 1;
+                let instructions = if *calls == 1 {
+                    "Review for correctness."
+                } else {
+                    "Alternate final review."
+                };
+                assert!(
+                    request
+                        .prompt()
+                        .contains(&format!("\n\n{instructions}\n\n"))
+                );
+            }
             if request.opens() && request.prompt().contains("You are the final reviewer") {
                 let mut calls = final_calls.lock().unwrap();
                 *calls += 1;
@@ -56,8 +79,8 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
         )
     });
     machine.start();
-    let configuration = config(&format!("{GATE}\n[review.seats.final]\nagent = \"worker\"\ninstructions = \"Final review.\"\n\n[profiles.final]\nrunner = {{kind = \"agent\", agent = \"worker\", instructions = \"Alternate final review.\"}}\naccess = \"read-only\"\noutputs = {{result = \"verdict\"}}\noutcomes = [\"complete\", \"blocked\"]\n"))
-        .replace("review = [\"correctness\"]", "review = [\"correctness\", \"final\"]");
+    let configuration = config(&format!("{GATE}\n[review.seats.middle]\nagent = \"worker\"\ninstructions = \"Middle review.\"\n\n[review.seats.final]\nagent = \"worker\"\ninstructions = \"Final review.\"\n\n[profiles.final]\nrunner = {{kind = \"agent\", agent = \"worker\", instructions = \"Alternate final review.\"}}\naccess = \"read-only\"\noutputs = {{result = \"verdict\"}}\noutcomes = [\"complete\", \"blocked\"]\n"))
+        .replace("review = [\"correctness\"]", "review = [\"correctness\", \"middle\", \"final\"]");
     let project = Project::new(&machine, "p", &configuration);
     let mut watch = project.watch(0);
     project.json(&["ticket", "new", "--title", "Plan CAS"]);
@@ -86,6 +109,10 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
         .unwrap();
     let old_final = original_executions
         .iter()
+        .find(|row| row["node"] == "review-2")
+        .unwrap();
+    let middle = original_executions
+        .iter()
         .find(|row| row["node"] == "review-1")
         .unwrap();
     let mut operator = machine.operator();
@@ -94,7 +121,7 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
         "yard_attempt_revise",
         json!({
             "project": project.path, "ticket": "Y-1", "plan_revision": 1,
-            "overrides": {"review-1": {"profile": "final", "operator_failure": true}}
+            "overrides": {"review-2": {"profile": "final", "operator_failure": true}}
         }),
     );
     assert_eq!(changed["result"]["plan_revision"], 2, "{changed}");
@@ -105,7 +132,7 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
         "yard_attempt_revise",
         json!({
             "project": project.path, "ticket": "Y-1", "plan_revision": 2,
-            "overrides": {"review-0": {"operator_failure": true}}
+            "overrides": {"review-0": {"profile": "final", "operator_failure": true}}
         }),
     );
     assert_eq!(refused["error"]["code"], "refused");
@@ -121,12 +148,12 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
     assert_eq!(second["payload"]["proof"], first["payload"]["proof"]);
     assert_eq!(second["payload"]["revision"], 1);
     assert_eq!(second["payload"]["plan_revision"], 2);
-    let revised = project.rows("SELECT id, plan_revision, inputs, digest FROM execution WHERE node = 'review-1' ORDER BY id DESC LIMIT 1");
+    let revised = project.rows("SELECT id, plan_revision, inputs, digest FROM execution WHERE node = 'review-2' ORDER BY id DESC LIMIT 1");
     assert_ne!(revised[0]["id"], old_final["id"]);
     assert_eq!(revised[0]["plan_revision"], 2);
     assert_ne!(revised[0]["digest"], old_final["digest"]);
     let inputs: Value = serde_json::from_str(revised[0]["inputs"].as_str().unwrap()).unwrap();
-    assert_eq!(inputs["panel"]["source"]["execution"], unrelated["id"]);
+    assert_eq!(inputs["panel"]["source"]["execution"], middle["id"]);
     assert_eq!(
         project.rows("SELECT plan_revision FROM execution WHERE node = 'review-0' ORDER BY id"),
         vec![json!({"plan_revision": 1})]
@@ -162,7 +189,7 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
         "yard_attempt_revise",
         json!({
             "project": project.path, "ticket": "Y-1", "plan_revision": 1,
-            "overrides": {"review-0": {"operator_failure": true}}
+            "overrides": {"review-0": {"profile": "final", "operator_failure": true}}
         }),
     );
     assert_eq!(stale["error"]["code"], "stale");
@@ -195,28 +222,121 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
         "yard_attempt_revise",
         json!({
             "project": project.path, "ticket": "Y-1", "plan_revision": 2,
-            "overrides": {"review-0": {"operator_failure": true}}
+            "overrides": {"review-0": {"profile": "final", "operator_failure": true}}
         }),
     );
     assert_eq!(changed["result"]["plan_revision"], 3, "{changed}");
     let third = approval(&mut watch);
     assert_eq!(third["payload"]["head"], candidate);
     assert_eq!(third["payload"]["proof"], first["payload"]["proof"]);
-    let producer =
-        project.rows("SELECT id FROM execution WHERE node = 'review-0' AND plan_revision = 3");
-    let consumer =
-        project.rows("SELECT inputs FROM execution WHERE node = 'review-1' AND plan_revision = 3");
+    let producer = project
+        .rows("SELECT id, digest FROM execution WHERE node = 'review-0' AND plan_revision = 3");
+    assert_ne!(producer[0]["digest"], unrelated["digest"]);
+    let consumer = project
+        .rows("SELECT id, inputs FROM execution WHERE node = 'review-1' AND plan_revision = 3");
     let inputs: Value = serde_json::from_str(consumer[0]["inputs"].as_str().unwrap()).unwrap();
     assert_eq!(inputs["panel"]["source"]["execution"], producer[0]["id"]);
     assert_ne!(inputs["panel"]["source"]["execution"], unrelated["id"]);
+    let final_consumer = project.rows(
+        "SELECT id, inputs, digest FROM execution WHERE node = 'review-2' AND plan_revision = 3",
+    );
+    let inputs: Value =
+        serde_json::from_str(final_consumer[0]["inputs"].as_str().unwrap()).unwrap();
+    assert_eq!(inputs["panel"]["source"]["execution"], consumer[0]["id"]);
+    assert_eq!(final_consumer[0]["digest"], revised[0]["digest"]);
+    let affected = project.rows(&format!(
+        "SELECT id FROM \"check\" WHERE execution = {}",
+        producer[0]["id"].as_i64().unwrap()
+    ));
+    let selected = third["payload"]["checks"].as_array().unwrap();
+    assert!(selected.contains(&affected[0]["id"]));
+    assert!(!selected.contains(&unrelated_check["id"]));
+    // Fixture routing removes only the middle seat. The first reviewer keeps
+    // its policy and inputs; the final reviewer now consumes it directly.
+    let graph = json!({"inputs": {"feedback": "verdict", "merged": "candidate"}, "nodes": {
+        "implementer": {
+            "runner": {"kind": "agent", "agent": "worker", "instructions": ""},
+            "access": "write-allowed", "inputs": {"feedback": {"output": "feedback", "kind": "verdict"}},
+            "outputs": {"result": "candidate"}, "outcomes": ["complete"],
+            "routes": {"complete": [{"to": "candidate-gate-check"}]}
+        },
+        "candidate-gate-check": {
+            "runner": {"kind": "command", "gate": "check"}, "access": "write-allowed",
+            "inputs": {"candidate": {"node": "implementer", "output": "result", "kind": "candidate"}},
+            "outputs": {"result": "verdict"}, "outcomes": ["complete", "failed"], "requires": ["candidate"],
+            "routes": {"complete": [{"to": "review-0"}], "failed": [{"to": "implementer", "repeat": 1}]}
+        },
+        "review-0": {
+            "profile": "final", "operator_failure": true,
+            "inputs": {"candidate": {"node": "implementer", "output": "result", "kind": "candidate"}},
+            "requires": ["candidate"], "routes": {"complete": [{"to": "review-2"}]}
+        },
+        "review-2": {
+            "profile": "final", "operator_failure": true,
+            "inputs": {
+                "candidate": {"node": "implementer", "output": "result", "kind": "candidate"},
+                "panel": {"node": "review-0", "output": "result", "kind": "verdict"}
+            },
+            "requires": ["candidate", "panel"],
+            "routes": {"complete": [{"to": "landing-gate-check"}], "blocked": [{"to": "implementer", "repeat": 3}]}
+        },
+        "landing-gate-check": {
+            "runner": {"kind": "command", "gate": "check"}, "access": "write-allowed",
+            "inputs": {"merged": {"output": "merged", "kind": "candidate"}},
+            "outputs": {"result": "verdict"}, "outcomes": ["complete"], "requires": ["merged"]
+        }
+    }});
+    let before_routing = project.rows("SELECT * FROM execution WHERE attempt = 1 ORDER BY id");
+    let routed = operator.call(
+        "yard_attempt_revise",
+        json!({
+            "project": project.path, "ticket": "Y-1", "plan_revision": 3, "graph": graph
+        }),
+    );
+    assert_eq!(routed["result"]["plan_revision"], 4, "{routed}");
+    let fourth = approval(&mut watch);
+    let selected = fourth["payload"]["checks"].as_array().unwrap();
+    assert!(selected.contains(&affected[0]["id"]));
+    let final_check = project.rows(&format!(
+        "SELECT id FROM \"check\" WHERE execution = {}",
+        final_consumer[0]["id"].as_i64().unwrap()
+    ));
+    assert!(!selected.contains(&final_check[0]["id"]));
+    let routed_consumer = project.rows(
+        "SELECT id, inputs, digest FROM execution WHERE node = 'review-2' AND plan_revision = 4",
+    );
+    let inputs: Value =
+        serde_json::from_str(routed_consumer[0]["inputs"].as_str().unwrap()).unwrap();
+    assert_eq!(inputs["panel"]["source"]["execution"], producer[0]["id"]);
+    assert_ne!(inputs["panel"]["source"]["execution"], consumer[0]["id"]);
+    assert_eq!(routed_consumer[0]["digest"], final_consumer[0]["digest"]);
+    let routed_check = project.rows(&format!(
+        "SELECT id FROM \"check\" WHERE execution = {}",
+        routed_consumer[0]["id"].as_i64().unwrap()
+    ));
+    assert!(selected.contains(&routed_check[0]["id"]));
+    let old_ids: Vec<_> = before_routing
+        .iter()
+        .map(|row| row["id"].as_i64().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT * FROM execution WHERE id IN ({}) ORDER BY id",
+            old_ids.join(",")
+        )),
+        before_routing
+    );
     assert_eq!(
         project.rows("SELECT node, plan_revision FROM execution WHERE kind = 'review' ORDER BY id"),
         vec![
             json!({"node": "review-0", "plan_revision": 1}),
             json!({"node": "review-1", "plan_revision": 1}),
-            json!({"node": "review-1", "plan_revision": 2}),
+            json!({"node": "review-2", "plan_revision": 1}),
+            json!({"node": "review-2", "plan_revision": 2}),
             json!({"node": "review-0", "plan_revision": 3}),
             json!({"node": "review-1", "plan_revision": 3}),
+            json!({"node": "review-2", "plan_revision": 3}),
+            json!({"node": "review-2", "plan_revision": 4}),
         ]
     );
     assert_eq!(
@@ -249,18 +369,31 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
             .iter()
             .map(|revision| revision["revision"].as_i64().unwrap())
             .collect::<Vec<_>>(),
-        vec![1, 2, 3]
+        vec![1, 2, 3, 4]
     );
     assert_eq!(history[0]["ticket_revision"], 1);
     assert_eq!(history[1]["ticket_revision"], 1);
     assert_eq!(history[2]["ticket_revision"], 1);
+    assert_eq!(history[3]["ticket_revision"], 1);
     assert_eq!(
-        history[0]["plan"]["nodes"]["review-1"].get("operator_failure"),
+        history[0]["plan"]["nodes"]["review-2"].get("operator_failure"),
         None
     );
     assert_eq!(
-        history[1]["plan"]["nodes"]["review-1"]["operator_failure"],
+        history[1]["plan"]["nodes"]["review-2"]["operator_failure"],
         true
+    );
+    assert_eq!(
+        history[2]["plan"]["nodes"]["review-0"]["outcomes"],
+        json!(["complete"])
+    );
+    assert_eq!(
+        history[2]["plan"]["nodes"]["review-0"]["routes"]["complete"],
+        json!([{"to": "review-1", "repeat": null}])
+    );
+    assert_eq!(
+        history[3]["plan"]["nodes"]["review-0"]["routes"]["complete"],
+        json!([{"to": "review-2", "repeat": null}])
     );
     assert_eq!(
         history[2]["plan"]["nodes"]["review-0"]["operator_failure"],
@@ -280,17 +413,17 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
     operator.initialize();
     let before = project.rows("SELECT * FROM audit ORDER BY seq");
     let decision = json!({"project": project.path, "ticket": "Y-1", "target": "main", "head": candidate,
-        "proof": third["payload"]["proof"], "plan_revision": 1});
+        "proof": fourth["payload"]["proof"], "plan_revision": 1});
     let stale = operator.call("yard_attempt_approve", decision.clone());
     assert_eq!(stale["error"]["code"], "stale");
     assert_eq!(
         stale["error"]["data"],
-        json!({"identity": "plan_revision", "expected": 1, "current": 3})
+        json!({"identity": "plan_revision", "expected": 1, "current": 4})
     );
     assert_eq!(project.rows("SELECT * FROM audit ORDER BY seq"), before);
     assert!(project.rows("SELECT * FROM approval").is_empty());
     let mut decision = decision;
-    decision["plan_revision"] = json!(3);
+    decision["plan_revision"] = json!(4);
     let accepted = operator.call("yard_attempt_approve", decision);
     assert!(accepted.get("error").is_none(), "{accepted}");
     watch.event("landing.recorded", &[]);
