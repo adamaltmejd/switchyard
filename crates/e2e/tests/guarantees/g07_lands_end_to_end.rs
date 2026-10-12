@@ -482,6 +482,7 @@ fn a_ticket_lands_end_to_end_and_leaves_only_rows() {
     );
     // Handles and usage are column writes, never events: every event is
     // one of the spec's closed list (ARCHITECTURE.md, Store).
+    // Sabotage: emit an unlisted handle or usage audit event on completion.
     let spec = [
         "sync.imported",
         "sync.consumed",
@@ -506,6 +507,8 @@ fn a_ticket_lands_end_to_end_and_leaves_only_rows() {
         "check.recorded",
         "approval.given",
         "approval.ended",
+        "landing.prepared",
+        "landing.continued",
         "landing.intent",
         "landing.recorded",
         "attention.raised",
