@@ -947,7 +947,7 @@ fn a_packaged_audit_bounds_iterations_and_requires_native_publication() {
     std::fs::write(machine.root.join("hold-completed-4"), "hold").unwrap();
     project.json(&["attempt", "start", "Y-3"]);
     assert_eq!(watch.said(&machine.root.join("said-4")), "held\n");
-    let started = watch.until("subsequent selected execution started", |event| {
+    let started = watch.find("subsequent selected execution started", |event| {
         event["event"] == "execution.started"
             && event["attempt"] == 3
             && event["execution"] != id
