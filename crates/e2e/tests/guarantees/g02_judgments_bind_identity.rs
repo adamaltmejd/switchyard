@@ -1219,7 +1219,7 @@ fn an_attempt_abandoned_while_its_landing_rereads_policy_raises_nothing() {
     assert_eq!(approved["data"]["head"], head);
     watch.event("execution.started", &[("name", "held")]);
     let judgments = format!(
-        "SELECT e.*, c.id AS check_id, c.verdict, c.digest AS check_digest FROM execution e LEFT JOIN \"check\" c ON c.execution = e.id WHERE e.attempt = {attempt} AND e.kind IN ('gate', 'review') AND e.reason = 'candidate' ORDER BY e.id"
+        "SELECT e.*, c.id AS check_id, c.execution AS check_execution, c.kind AS check_kind, c.verdict, c.created_at AS check_created_at FROM execution e LEFT JOIN \"check\" c ON c.execution = e.id WHERE e.attempt = {attempt} AND e.kind IN ('gate', 'review') AND e.reason = 'candidate' ORDER BY e.id"
     );
     let checks = project.rows(&judgments);
     assert_eq!(checks.len(), 1);
