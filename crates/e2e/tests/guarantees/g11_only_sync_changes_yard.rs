@@ -27,6 +27,8 @@ const EXTRA_GATE: &str =
 /// worker's commit becomes the candidate and the gate runs on it. Make
 /// `admit::sync` import whenever the heads differ; the operator's commit
 /// replaces the landing in canonical.
+/// Omit `.yard` from supervise's returned refusal detail while retaining
+/// the guard and repair route: the stored reason loses the resource identity.
 #[test]
 fn only_the_operators_sync_changes_yard_and_canonical() {
     let gated = format!("{}{BASE_GATE}", unreviewed());
@@ -87,6 +89,15 @@ fn only_the_operators_sync_changes_yard_and_canonical() {
     assert_eq!(
         project.rows("SELECT name, head, outcome FROM execution WHERE kind = 'gate'"),
         vec![json!({ "name": "base", "head": head, "outcome": "pass" })]
+    );
+    // G11's reason names the reserved resource changed by the fixture's
+    // `.yard/config.toml` commit, independently of refusal and gate routing.
+    let refusal = project.rows(
+        "SELECT detail FROM execution WHERE kind = 'implementation' AND reason = 'first' AND outcome = 'refused'",
+    );
+    assert!(
+        refusal[0]["detail"].as_str().unwrap().contains(".yard"),
+        "{refusal:?}"
     );
 
     project.reconfigure(&configured);
