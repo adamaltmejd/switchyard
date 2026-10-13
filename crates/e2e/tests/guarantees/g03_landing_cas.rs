@@ -200,8 +200,9 @@ fn hold_update_ref(
 /// The same adjustment succeeds before the intent; another ticket edits
 /// successfully. After canonical moves, the resolved intent still refuses
 /// a selected landing-definition change while the requeue's merge-tree holds.
-/// Before the first intent, a selected gate fails once. Its actual red evidence
-/// binds the committed command before exact acceptance continues preparation.
+/// Before the first intent, a selected gate fails once. Its candidate:landing
+/// failure evidence binds the committed command before exact acceptance
+/// continues preparation.
 /// Sabotage original-landing-decision-evidence: use original_admission in
 /// checks::evidence for parented checks instead of their recorded admission.
 ///
