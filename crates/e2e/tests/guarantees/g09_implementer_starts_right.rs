@@ -38,6 +38,48 @@ fn reasons(project: &Project) -> Vec<Value> {
         .collect()
 }
 
+fn assert_operator_diff(prompt: &str, removed: &[&str], added: &[&str]) {
+    let mut lines = prompt.lines().peekable();
+    let mut annotation = "";
+    while let Some(line) = lines.next() {
+        if !line.starts_with("diff --git ") {
+            if !line.trim().is_empty() {
+                annotation = line;
+            }
+            continue;
+        }
+        let diff: Vec<_> = std::iter::from_fn(|| {
+            lines.next_if(|line| {
+                line.starts_with([' ', '+', '-', '\\'])
+                    || line.starts_with("index ")
+                    || line.starts_with("@@ ")
+            })
+        })
+        .collect();
+        let contains = |prefix: char, identities: &[&str]| {
+            identities.iter().all(|identity| {
+                diff.iter().any(|line| {
+                    line.starts_with(prefix)
+                        && !line.starts_with("--- ")
+                        && !line.starts_with("+++ ")
+                        && line.contains(identity)
+                })
+            })
+        };
+        if contains('-', removed) && contains('+', added) {
+            assert!(
+                annotation
+                    .split(|character: char| !character.is_alphanumeric() && character != '_')
+                    .any(|word| word.eq_ignore_ascii_case("operator")),
+                "diff must attribute the change to operator: {annotation:?}"
+            );
+            return;
+        }
+        annotation = "";
+    }
+    panic!("missing operator diff deleting {removed:?} and adding {added:?}: {prompt}");
+}
+
 /// Two projects on one machine. In `p` an edit mid-execution lets the
 /// execution end on its own and reaches the next prompt as a diff of the
 /// body: the held worker commits only once released, so its execution ends
@@ -49,10 +91,13 @@ fn reasons(project: &Project) -> Vec<Value> {
 /// implementer with the edit's diff.
 ///
 /// In `p`, a real worker holds the sole capacity slot before Y-1 starts.
-/// Y-1's unreserved execution waits while its instruction profile, consumed definitions, model/effort and staged bytes are revised.
+/// Y-1's unreserved execution waits while consumed definitions, model/effort
+/// and staged bytes are adopted without a plan or ticket change.
 /// Releasing the owner lets that same execution open with its original
-/// instructions. Its model request is then held for the ticket edit and,
-/// once released, commits; a later prompt carrying `Rename` commits again.
+/// instructions. It commits; its source-only successor has the identical plan,
+/// opens with adopted values and an operator diff, and is held before a real
+/// second commit. Only then are its instruction profile and ticket revised.
+/// A third execution carrying `Rename` commits again before any gate runs.
 ///
 /// Sabotage: make `admit::steer` notify the stop signal of a running
 /// implementer; the held execution ends unchanged. Load the execution from
@@ -76,8 +121,9 @@ fn reasons(project: &Project) -> Vec<Value> {
 /// definition-only changes are adopted independently while p waits. Sabotages:
 /// return the original attempt implementer from implementation_settings;
 /// load the current attempt at held old startup; delete the consumed-definition
-/// map from plan_handoff. Host model/system observations and Git blobs catch
-/// each independently; instruction diffs alone cannot prove these bindings.
+/// map from plan_handoff; or return no handoff when the actual predecessor and
+/// successor plan objects are equal. Host model/system observations and Git
+/// blobs catch each independently; instruction diffs alone cannot prove these bindings.
 #[test]
 fn an_edit_reaches_the_next_prompt_and_stop_delivers_it_sooner() {
     let (edit_hold, stop_hold) = (Latch::new(), Latch::new());
@@ -95,11 +141,17 @@ fn an_edit_reaches_the_next_prompt_and_stop_delivers_it_sooner() {
             };
         }
         if request.last_user().contains("Rename") {
-            let reply = act(
+            return act(
                 request,
                 vec![commit_file("renamed.txt", "renamed\n", "Rename")],
             );
-            return if request.opens() && request.last_user().contains("Rename it too") {
+        }
+        if request.system().contains("startup-bytes-v2") {
+            let reply = act(
+                request,
+                vec![commit_file("adopted.txt", "adopted\n", "Adopt source")],
+            );
+            return if request.opens() {
                 Reply::Hold(successor_held.clone(), Box::new(reply))
             } else {
                 reply
@@ -192,13 +244,6 @@ fn an_edit_reaches_the_next_prompt_and_stop_delivers_it_sooner() {
     );
     let mut operator = machine.operator();
     operator.initialize();
-    let revised = operator.call(
-        "yard_attempt_revise",
-        json!({
-        "project": edited.path, "ticket": "Y-1", "plan_revision": 1,
-        "overrides": {"implementer": {"profile": "revised"}}}),
-    );
-    assert_eq!(revised["result"]["plan_revision"], 2, "{revised}");
     edited.write(
         ".yard/config.toml",
         &configuration
@@ -222,16 +267,11 @@ fn an_edit_reaches_the_next_prompt_and_stop_delivers_it_sooner() {
     let adopted = operator.call(
         "yard_attempt_revise",
         json!({
-            "project": edited.path, "ticket": "Y-1", "plan_revision": 2,
+            "project": edited.path, "ticket": "Y-1", "plan_revision": 1,
             "definition_commit": adopted_commit, "staging_commit": adopted_commit
         }),
     );
-    assert_eq!(adopted["result"]["plan_revision"], 3, "{adopted}");
-    // Only consumed definitions/settings/bytes changed, not the plan.
-    assert_eq!(
-        adopted["result"]["plan"]["plan"],
-        revised["result"]["plan"]["plan"]
-    );
+    assert_eq!(adopted["result"]["plan_revision"], 2, "{adopted}");
     assert_eq!(edited.rows(&frozen_query), frozen);
     owner_hold.release();
     let owner_end = edit_watch.until("capacity owner stops", |event| {
@@ -255,7 +295,6 @@ fn an_edit_reaches_the_next_prompt_and_stop_delivers_it_sooner() {
     assert!(!initial.contains("Revised implementation."), "{initial}");
     assert_eq!(edited.rows(&frozen_query), frozen);
     assert_eq!(edited.rows(&original_query), original);
-    edit_body(&edited, "Rename it too");
     edit_hold.release();
     successor_hold.wait_held();
     // Host route holds the successor before its commit. Checked predecessor
@@ -266,17 +305,50 @@ fn an_edit_reaches_the_next_prompt_and_stop_delivers_it_sooner() {
     assert_eq!(ended[0]["reserved"], 0);
     assert_eq!(ended[0]["outcome"], "candidate");
     let revisions_query = format!(
-        "SELECT * FROM plan_revision WHERE attempt = {} ORDER BY revision",
+        "SELECT * FROM plan_revision WHERE attempt = {} AND revision = 2",
         frozen[0]["attempt"]
     );
     let revisions = edited.rows(&revisions_query);
+    // Bind equality to the two executions that actually started, not to
+    // unexecuted intermediate revisions. No instruction/profile edit yet.
+    assert_eq!(edited.rows(&format!("SELECT plan_revision, ticket_revision FROM execution WHERE attempt = {} AND kind = 'implementation' ORDER BY id", frozen[0]["attempt"])),
+        vec![json!({"plan_revision": 1, "ticket_revision": 1}), json!({"plan_revision": 2, "ticket_revision": 1})]);
+    let admission: Value =
+        serde_json::from_str(original[0]["admission"].as_str().unwrap()).unwrap();
+    let source_revision: Value =
+        serde_json::from_str(revisions[0]["evidence"].as_str().unwrap()).unwrap();
+    assert_eq!(admission["plan"], source_revision["plan"]);
+    let second_request = openings(&machine).last().unwrap().clone();
+    assert_eq!(second_request.body["model"], "adopted-model");
+    assert!(
+        second_request
+            .system()
+            .contains("startup-bytes-v2 effort=high")
+    );
+    assert_operator_diff(
+        &second_request.last_user(),
+        &[&original_blob, "fake-model"],
+        &[&adopted_blob, "adopted-model", "test -f feature.txt"],
+    );
+    let revised = operator.call(
+        "yard_attempt_revise",
+        json!({
+            "project": edited.path, "ticket": "Y-1", "plan_revision": 2,
+            "overrides": {"implementer": {"profile": "revised"}}
+        }),
+    );
+    assert_eq!(revised["result"]["plan_revision"], 3, "{revised}");
+    edit_body(&edited, "Rename it too");
     successor_hold.release();
     edit_body(&stopped, "Rename it now");
     stopped.json(&["attempt", "stop", "Y-1"]);
 
     let approval = edit_watch.attention();
     assert_eq!(approval["data"]["kind"], "approval", "{approval}");
-    assert_eq!(reasons(&edited), [json!("first"), json!("edit")]);
+    assert_eq!(
+        reasons(&edited),
+        [json!("first"), json!("edit"), json!("edit")]
+    );
     let first = edit_watch.find("the first execution ended", |event| {
         event["event"] == "execution.ended" && event["execution"] == waiting["execution"]
     });
@@ -287,86 +359,25 @@ fn an_edit_reaches_the_next_prompt_and_stop_delivers_it_sooner() {
     assert_eq!(
         edited.rows("SELECT agent, model, effort FROM execution WHERE kind = 'implementation' AND attempt IN (SELECT id FROM attempt WHERE ticket = 1) ORDER BY id"),
         vec![json!({"agent": "worker", "model": "fake-model", "effort": "low"}),
+             json!({"agent": "worker", "model": "adopted-model", "effort": "high"}),
              json!({"agent": "worker", "model": "adopted-model", "effort": "high"})]
     );
-    assert_eq!(
-        openings(&machine).last().unwrap().body["model"],
-        "adopted-model"
-    );
-    // The latest opening is p's second: q opens nothing more until its start.
-    let second = openings(&machine).last().unwrap().last_user();
-    assert!(
-        openings(&machine)
-            .last()
-            .unwrap()
-            .system()
-            .contains("startup-bytes-v2 effort=high")
-    );
-    // These identities are absent from the plan-only diff. Git supplies blobs.
-    for identity in [
-        &original_blob,
-        &adopted_blob,
-        "fake-model",
-        "adopted-model",
-        "test -f feature.txt",
-    ] {
-        assert!(
-            second.contains(identity),
-            "missing handoff identity {identity}: {second}"
-        );
-    }
-    assert!(second.contains("+Rename it too"), "{second}");
-    let mut lines = second.lines().peekable();
-    let mut annotation = "";
-    let mut plan_annotation = None;
-    while let Some(line) = lines.next() {
-        if !line.starts_with("diff --git ") {
-            if !line.trim().is_empty() {
-                annotation = line;
-            }
-            continue;
-        }
-        // Consume native Git lines so no previous diff supplies the actor.
-        let diff: Vec<_> = std::iter::from_fn(|| {
-            lines.next_if(|line| {
-                line.starts_with([' ', '+', '-', '\\'])
-                    || line.starts_with("index ")
-                    || line.starts_with("@@ ")
-            })
-        })
-        .collect();
-        if diff.iter().any(|line| {
-            line.starts_with('-')
-                && !line.starts_with("--- ")
-                && line.contains("Original implementation.")
-        }) && diff.iter().any(|line| {
-            line.starts_with('+')
-                && !line.starts_with("+++ ")
-                && line.contains("Revised implementation.")
-        }) {
-            plan_annotation = Some(annotation);
-            break;
-        }
-        annotation = "";
-    }
-    let annotation =
-        plan_annotation.expect("plan Git diff must delete original and add revised instructions");
-    assert!(
-        annotation
-            .split(|character: char| !character.is_alphanumeric() && character != '_')
-            .any(|word| word.eq_ignore_ascii_case("operator")),
-        "plan diff annotation must attribute the change to operator: {annotation:?}"
+    // The latest opening is p's third: q opens nothing more until its start.
+    let third = openings(&machine).last().unwrap().last_user();
+    assert!(third.contains("+Rename it too"), "{third}");
+    assert_operator_diff(
+        &third,
+        &["Original implementation."],
+        &["Revised implementation."],
     );
     assert_eq!(
         edited
             .rows("SELECT plan_revision FROM execution WHERE kind = 'implementation' AND attempt IN (SELECT id FROM attempt WHERE ticket = 1) ORDER BY id"),
-        vec![json!({"plan_revision": 1}), json!({"plan_revision": 3})]
+        vec![json!({"plan_revision": 1}), json!({"plan_revision": 2}), json!({"plan_revision": 3})]
     );
     assert_eq!(edited.rows(&frozen_query), frozen);
     let attempt = frozen[0]["attempt"].as_i64().unwrap();
     let current = &adopted["result"]["plan"]["inputs"];
-    let admission: Value =
-        serde_json::from_str(original[0]["admission"].as_str().unwrap()).unwrap();
     for (inputs, blob) in [
         (&admission["inputs"], &original_blob),
         (current, &adopted_blob),
@@ -380,14 +391,24 @@ fn an_edit_reaches_the_next_prompt_and_stop_delivers_it_sooner() {
         assert_eq!(staged["blob"], *blob);
     }
     assert_eq!(current["image_commit"], original_commit);
+    for (key, revision) in [
+        ("build_context_tree", format!("{original_commit}^{{tree}}")),
+        (
+            "dockerfile_blob",
+            format!("{original_commit}:.yard/Dockerfile"),
+        ),
+    ] {
+        assert_eq!(current[key], edited.git(&["rev-parse", &revision]).trim());
+    }
     assert_eq!(current["definition_commit"], adopted_commit);
     assert_eq!(current["staging_commit"], adopted_commit);
     let clone = edited
         .path
         .join(format!(".yard/local/attempts/{attempt}/clone"));
     let head = git(&clone, &["rev-parse", "HEAD"]).trim().to_string();
+    assert_eq!(git(&clone, &["show", "HEAD:adopted.txt"]), "adopted\n");
     assert_eq!(git(&clone, &["show", "HEAD:renamed.txt"]), "renamed\n");
-    // No gate ran on the first candidate: every gate ran on the second head.
+    // No gate ran on either earlier candidate: every gate ran on the third head.
     // Sabotage: retain the first candidate head after delivering the edit;
     // approval and gates agree with each other but differ from the worker's Git.
     assert_eq!(
