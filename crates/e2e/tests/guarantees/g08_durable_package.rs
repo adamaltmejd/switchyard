@@ -837,6 +837,7 @@ fn a_packaged_audit_bounds_iterations_and_requires_native_publication() {
     for name in [
         "down-said-3",
         "down-release-3",
+        "lock-said-3",
         "said-4",
         "release-4",
         "listing-said",
@@ -913,12 +914,13 @@ fn a_packaged_audit_bounds_iterations_and_requires_native_publication() {
     assert_eq!(stopped["data"]["kind"], "stopped");
     assert_eq!(stopped["data"]["reason"], "unchanged");
     assert_eq!(watch.said(&machine.root.join("listing-said")), "0\n");
-    // Real teardown ended and the controller dropped its inherited lock.
+    // A listing reply does not order the stopped streaming child's exit.
+    // Keep the probe held while a native blocking lock takes ownership only
+    // after every inherited descriptor releases this same inode.
     use std::os::unix::fs::MetadataExt;
     let inherited = old_lock.metadata().unwrap();
     let same = std::fs::metadata(&old_lock_path).unwrap();
     assert_eq!((inherited.dev(), inherited.ino()), (same.dev(), same.ino()));
-    old_lock.try_lock().unwrap();
     assert!(
         !machine
             .boxes("dev.yard.project")
@@ -938,6 +940,16 @@ fn a_packaged_audit_bounds_iterations_and_requires_native_publication() {
         gone.status.code() == Some(3),
         "pinfold must report the selected controller's box absent: {gone:?}"
     );
+    let lock_said = machine.root.join("lock-said-3");
+    let owner = std::thread::spawn(move || {
+        old_lock.lock().unwrap();
+        std::fs::write(lock_said, "held\n").unwrap();
+        old_lock
+    });
+    assert_eq!(watch.said(&machine.root.join("lock-said-3")), "held\n");
+    let old_lock = owner.join().unwrap();
+    let same = std::fs::metadata(&old_lock_path).unwrap();
+    assert_eq!((inherited.dev(), inherited.ino()), (same.dev(), same.ino()));
     std::fs::write(machine.root.join("listing-release"), "go\n").unwrap();
     let refused = watch.until("selected stop ownership refused", |event| {
         event["event"] == "attention.raised"
