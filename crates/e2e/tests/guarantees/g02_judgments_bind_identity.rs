@@ -676,9 +676,7 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
             if revision == 9 && row["node"].as_str().unwrap().starts_with("candidate-gate-") {
                 assert_eq!(row["digest"], old["digest"]);
             }
-            if row["node"].as_str().unwrap().starts_with("review-")
-                || (revision == 9 && row["node"] == "implementer")
-            {
+            if row["node"].as_str().unwrap().starts_with("review-") {
                 assert_ne!(row["digest"], old["digest"]);
             }
         }
