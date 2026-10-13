@@ -47,6 +47,12 @@ fn fixture<'a>(machine: &'a Machine) -> Project<'a> {
         "TRUSTED_SELECTED_SKILL_Y92: inspect declared files and publish.\n",
     );
     project.write("trusted/reference.txt", "TRUSTED_REFERENCE_Y92\n");
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(
+        project.path.join("trusted/reference.txt"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
     project.git(&["add", "-A"]);
     project.git(&[
         "commit",
@@ -58,6 +64,7 @@ fn fixture<'a>(machine: &'a Machine) -> Project<'a> {
 }
 
 fn image(project: &Project<'_>, sabotage: &str) {
+    project.write("image-input", "PACKAGED_IMAGE_INPUT\n");
     let source = std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../runners/durable-audit/Dockerfile"),
     )
@@ -66,11 +73,11 @@ fn image(project: &Project<'_>, sabotage: &str) {
     project.write(
         ".yard/Dockerfile",
         &format!(
-            "{source}\nLABEL dev.yard.e2e-machine=\"{}\"\n{sabotage}",
+            "{source}\nCOPY image-input /admitted-image-input\nLABEL dev.yard.e2e-machine=\"{}\"\n{sabotage}",
             project.machine.root.display()
         ),
     );
-    project.git(&["add", ".yard/Dockerfile"]);
+    project.git(&["add", ".yard/Dockerfile", "image-input"]);
     project.git(&["commit", "-qm", "Configure isolated packaged image"]);
     project.json(&["sync"]);
 }
@@ -257,6 +264,10 @@ fn transcript(project: &Project<'_>, attempt: i64) -> String {
 /// Stage broad base guidance/extensions, or stage selected files from the
 /// current canonical/candidate tree instead of admitted blobs: excluded
 /// markers/sentinels or the edited execution's old markers fail.
+/// G6: omit separate input commits or executable bits: committed host Git
+/// expectations fail. Build from another context or stage another blob: box
+/// image bytes and host staged bytes fail. Sync and quiescent reopen must
+/// preserve the original admission and completed report, without backfill.
 /// Existing Pi report tests prove publication,
 /// not this packaged runtime, its preflight, or its bounded read surface.
 /// Declared candidate/../large.txt normalizes to a real fixture file, so
@@ -394,7 +405,7 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     assert_eq!(topology["error"]["data"]["shape"], "custom-graph");
     let expected_sources = json!([
         {"path": "trusted/selected.md", "blob": project.git(&["rev-parse", "HEAD:trusted/selected.md"]).trim(), "executable": false},
-        {"path": "trusted/reference.txt", "blob": project.git(&["rev-parse", "HEAD:trusted/reference.txt"]).trim(), "executable": false}
+        {"path": "trusted/reference.txt", "blob": project.git(&["rev-parse", "HEAD:trusted/reference.txt"]).trim(), "executable": true}
     ]);
     for name in ["said-3", "release-3"] {
         assert!(
@@ -413,6 +424,23 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     selected_start(&project, "Corrected packaged asset");
     assert_eq!(watch.said(&machine.root.join("said-3")), "held\n");
     let held = project.json(&["attempt", "show", "Y-3"]);
+    let source = project.git(&["rev-parse", "HEAD"]).trim().to_string();
+    let inputs = &held["attempt"]["admission"]["inputs"];
+    for key in ["definition_commit", "staging_commit", "image_commit"] {
+        assert_eq!(inputs[key], source);
+    }
+    for (key, suffix) in [
+        ("config_blob", ":.yard/config.toml"),
+        ("dockerfile_blob", ":.yard/Dockerfile"),
+        ("build_context_tree", "^{tree}"),
+    ] {
+        assert_eq!(
+            inputs[key],
+            project
+                .git(&["rev-parse", &format!("{source}{suffix}")])
+                .trim()
+        );
+    }
     assert_eq!(held["attempt"]["admission"]["runtime"], "packaged-audit");
     assert_eq!(
         held["attempt"]["admission"]["inputs"]["trusted_staged_sources"],
@@ -426,6 +454,32 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
         .rows("SELECT id, handle FROM execution WHERE attempt = 3 AND kind = 'implementation'")[0]
         .clone();
     let old = owner["id"].as_i64().unwrap();
+    let image_bytes = machine.pinfold(&[
+        "box",
+        "exec",
+        owner["handle"].as_str().unwrap(),
+        "--",
+        "cat",
+        "/admitted-image-input",
+    ]);
+    assert!(image_bytes.status.success());
+    assert_eq!(
+        image_bytes.stdout,
+        project
+            .git(&["show", &format!("{source}:image-input")])
+            .as_bytes()
+    );
+    for path in ["trusted/selected.md", "trusted/reference.txt"] {
+        assert_eq!(
+            std::fs::read(project.path.join(format!(
+                ".yard/local/attempts/3/audits/{old}/input/trusted/{path}"
+            )))
+            .unwrap(),
+            project
+                .git(&["show", &format!("{source}:{path}")])
+                .as_bytes()
+        );
+    }
     // The real child has created its checkpoint directory. Plant through
     // the live box, without editing any daemon-owned launch input.
     let planted = machine.pinfold(&[
@@ -448,6 +502,7 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     // blobs. The edited execution must still load the original selection.
     project.write("trusted/selected.md", "LATER_SELECTED_SKILL\n");
     project.write("trusted/reference.txt", "LATER_REFERENCE\n");
+    project.write("image-input", "LATER_IMAGE_INPUT\n");
     project.write("candidate/trusted/selected.md", "LATER_CANDIDATE_SKILL\n");
     project.git(&["add", "-A"]);
     project.git(&[
@@ -505,7 +560,7 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     watch.until("replacement audit ended", |event| {
         event["event"] == "attempt.ended" && event["ticket"] == "Y-3"
     });
-    watch.until("audit state cleaned", |event| {
+    let cleanup = watch.until("audit state cleaned", |event| {
         event["event"] == "execution.ended"
             && event["attempt"] == 3
             && event["data"]["kind"] == "cleanup"
@@ -534,6 +589,27 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     );
     assert_eq!(native[0]["mcp"], "registered");
     assert_eq!(completed["result_eligible"], true);
+    watch.until("audit cleanup released", |event| {
+        event["event"] == "execution.released" && event["execution"] == cleanup["execution"]
+    });
+    let evidence = project.json(&["attempt", "show", "Y-3"]);
+    assert!(
+        project
+            .rows("SELECT id FROM execution WHERE status = 'running' OR reserved = 1")
+            .is_empty()
+    );
+    assert_eq!(
+        evidence["attempt"]["admission"],
+        held["attempt"]["admission"]
+    );
+    machine.kill();
+    machine.start();
+    let reopened = project.json(&["attempt", "show", "Y-3"]);
+    assert_eq!(
+        reopened["attempt"]["admission"],
+        held["attempt"]["admission"]
+    );
+    assert_eq!(reopened["executions"], evidence["executions"]);
 
     // G8: a selected-input refusal creates no work and cannot block other
     // admissions or cleanup. Sabotage: propagate inputs()'s refusal from
@@ -604,7 +680,7 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     }
     let expected_sources = json!([
         {"path": "trusted/selected.md", "blob": project.git(&["rev-parse", "HEAD:trusted/selected.md"]).trim(), "executable": false},
-        {"path": "trusted/reference.txt", "blob": project.git(&["rev-parse", "HEAD:trusted/reference.txt"]).trim(), "executable": false}
+        {"path": "trusted/reference.txt", "blob": project.git(&["rev-parse", "HEAD:trusted/reference.txt"]).trim(), "executable": true}
     ]);
     let mut independent = project.watch(project.json(&["status"])["seq"].as_i64().unwrap());
     let valid = ended(&project, "Y-6", "Independent valid audit");

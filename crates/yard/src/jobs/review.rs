@@ -79,11 +79,11 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
     let env = crate::agent_env::AgentEnv::load(
         &daemon.git,
         &project.canonical_dir(),
-        attempt
-            .admission
-            .as_ref()
-            .and_then(|input| input["inputs"]["source_commit"].as_str())
-            .unwrap_or(&base),
+        if attempt.admission.is_some() {
+            &loaded.staging_commit
+        } else {
+            &base
+        },
         &checkout,
     )
     .await

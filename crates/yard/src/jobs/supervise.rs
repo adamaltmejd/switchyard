@@ -109,16 +109,16 @@ pub async fn image(daemon: &Daemon, project: &Project, loaded: &Loaded) -> Resul
     }
     if let Some((branch, head, reference)) =
         daemon.images.lock().expect("images lock").get(&project.key)
-        && *head == loaded.head
+        && *head == loaded.image_commit
         && *branch == loaded.branch
     {
         return Ok(reference.clone());
     }
-    let context = project.local().join("build").join(&loaded.head);
+    let context = project.local().join("build").join(&loaded.image_commit);
     let _ = std::fs::remove_dir_all(&context);
     daemon
         .git
-        .clone_detached(&project.canonical_dir(), &context, &loaded.head)
+        .clone_detached(&project.canonical_dir(), &context, &loaded.image_commit)
         .await?;
     std::fs::remove_dir_all(context.join(".git")).map_err(|error| error.to_string())?;
     let built = daemon
@@ -135,7 +135,11 @@ pub async fn image(daemon: &Daemon, project: &Project, loaded: &Loaded) -> Resul
         .map_err(|error| Fail::new("image", format!("the project image did not build: {error}")))?;
     daemon.images.lock().expect("images lock").insert(
         project.key.clone(),
-        (loaded.branch.clone(), loaded.head.clone(), built.clone()),
+        (
+            loaded.branch.clone(),
+            loaded.image_commit.clone(),
+            built.clone(),
+        ),
     );
     Ok(built)
 }
@@ -636,11 +640,11 @@ pub async fn implement(
         crate::agent_env::AgentEnv::load(
             &daemon.git,
             &project.canonical_dir(),
-            attempt
-                .admission
-                .as_ref()
-                .and_then(|input| input["inputs"]["source_commit"].as_str())
-                .unwrap_or(&attempt.base),
+            if attempt.admission.is_some() {
+                &loaded.staging_commit
+            } else {
+                &attempt.base
+            },
             &clone,
         )
         .await

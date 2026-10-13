@@ -27,6 +27,8 @@ pub struct Loaded {
     pub config: Config,
     pub branch: String,
     pub head: String,
+    pub staging_commit: String,
+    pub image_commit: String,
     pub gate_digest: String,
     pub admission_inputs: Value,
 }
@@ -35,7 +37,7 @@ pub struct Loaded {
 pub struct Configurations {
     pub targets: HashMap<String, Arc<Loaded>>,
     pub default: Option<String>,
-    pub sources: HashMap<String, Arc<Loaded>>,
+    pub sources: HashMap<(String, String, String), Arc<Loaded>>,
 }
 
 /// Automatic readers cannot restore an input an uncertain mutation invalidated.
@@ -103,7 +105,9 @@ impl Loaded {
                 .chain(references)
                 .map(String::as_str)
                 .collect();
-            let entries = git.ls_tree(canonical, &self.head, &paths, false).await?;
+            let entries = git
+                .ls_tree(canonical, &self.staging_commit, &paths, false)
+                .await?;
             for path in std::iter::once(skill).chain(references) {
                 let entry = entries
                     .iter()
@@ -187,6 +191,23 @@ pub async fn read_config(
     default: Option<&str>,
     commit: &str,
 ) -> Result<Loaded, Fail> {
+    read_sources(daemon, repo, branch, default, commit, commit, commit).await
+}
+
+async fn read_sources(
+    daemon: &Daemon,
+    repo: &std::path::Path,
+    branch: &str,
+    default: Option<&str>,
+    commit: &str,
+    staging_commit: &str,
+    image_commit: &str,
+) -> Result<Loaded, Fail> {
+    for source in [commit, staging_commit, image_commit] {
+        if daemon.git.rev_parse(repo, source).await?.as_deref() != Some(source) {
+            return Err(Fail::refused("invalid committed source").with(json!({"source": source})));
+        }
+    }
     let text = daemon
         .git
         .show(repo, commit, crate::config::CONFIG_PATH)
@@ -205,30 +226,25 @@ pub async fn read_config(
     }
     let dockerfile = daemon
         .git
-        .show(repo, commit, crate::config::DOCKERFILE_PATH)
+        .show(repo, image_commit, crate::config::DOCKERFILE_PATH)
         .await?
-        .ok_or_else(|| Fail::invalid(format!("{commit} has no .yard/Dockerfile")))?;
-    let tree = daemon.git.root_tree(repo, commit).await?;
-    let entries = daemon
-        .git
-        .ls_tree(
-            repo,
-            commit,
-            &[crate::config::CONFIG_PATH, crate::config::DOCKERFILE_PATH],
-            true,
-        )
-        .await?;
-    let objects: std::collections::BTreeMap<_, _> = entries
-        .iter()
-        .filter(|entry| {
-            [crate::config::CONFIG_PATH, crate::config::DOCKERFILE_PATH]
-                .contains(&entry.path.as_str())
-        })
-        .map(|entry| (entry.path.as_str(), entry.oid.as_str()))
-        .collect();
+        .ok_or_else(|| Fail::invalid(format!("{image_commit} has no .yard/Dockerfile")))?;
+    let tree = daemon.git.root_tree(repo, image_commit).await?;
+    let mut objects = std::collections::BTreeMap::new();
+    for (source, path) in [
+        (commit, crate::config::CONFIG_PATH),
+        (image_commit, crate::config::DOCKERFILE_PATH),
+    ] {
+        let entries = daemon.git.ls_tree(repo, source, &[path], false).await?;
+        let entry = entries
+            .iter()
+            .find(|entry| entry.path == path && entry.regular)
+            .ok_or_else(|| Fail::refused("invalid committed input").with(json!({"path": path})))?;
+        objects.insert(path, entry.oid.clone());
+    }
     let staged: Vec<Value> = daemon
         .git
-        .ls_tree(repo, commit, &crate::agent_env::PATHS, true)
+        .ls_tree(repo, staging_commit, &crate::agent_env::PATHS, true)
         .await?
         .iter()
         .filter(|entry| crate::agent_env::staged_input(entry))
@@ -237,6 +253,9 @@ pub async fn read_config(
     Ok(Loaded {
         admission_inputs: json!({
             "source_commit": commit,
+            "definition_commit": commit,
+            "staging_commit": staging_commit,
+            "image_commit": image_commit,
             "build_context_tree": tree,
             "config_blob": objects[crate::config::CONFIG_PATH],
             "dockerfile_blob": objects[crate::config::DOCKERFILE_PATH],
@@ -246,7 +265,25 @@ pub async fn read_config(
         config,
         branch: branch.to_string(),
         head: commit.to_string(),
+        staging_commit: staging_commit.to_string(),
+        image_commit: image_commit.to_string(),
     })
+}
+
+fn source_commits(inputs: &Value) -> Result<(&str, &str, &str), Fail> {
+    let separate = ["definition_commit", "staging_commit", "image_commit"]
+        .iter()
+        .any(|key| inputs.get(key).is_some());
+    let source = |key: &str| {
+        inputs[if separate { key } else { "source_commit" }]
+            .as_str()
+            .ok_or_else(|| Fail::refused("missing admitted source"))
+    };
+    Ok((
+        source("definition_commit")?,
+        source("staging_commit")?,
+        source("image_commit")?,
+    ))
 }
 
 /// Resolve recorded work from its immutable admission source. Legacy work
@@ -259,26 +296,32 @@ pub async fn load_attempt(
     let Some(admission) = &attempt.admission else {
         return load_target(daemon, project, attempt.target_branch()?).await;
     };
-    let head = admission["inputs"]["source_commit"]
-        .as_str()
-        .ok_or_else(|| Fail::refused("missing admitted source"))?;
+    let (head, staging_commit, image_commit) = source_commits(&admission["inputs"])?;
+    let separate = admission["inputs"].get("definition_commit").is_some();
+    let key = (
+        head.to_string(),
+        staging_commit.to_string(),
+        image_commit.to_string(),
+    );
     let cached = project
         .loaded
         .lock()
         .expect("loaded lock")
         .sources
-        .get(head)
+        .get(&key)
         .cloned();
     let loaded = match cached {
         Some(loaded) => loaded,
         None => {
             let loaded = Arc::new(
-                read_config(
+                read_sources(
                     daemon,
                     &project.canonical_dir(),
                     attempt.target_branch()?,
                     None,
                     head,
+                    staging_commit,
+                    image_commit,
                 )
                 .await?,
             );
@@ -287,10 +330,11 @@ pub async fn load_attempt(
                 .lock()
                 .expect("loaded lock")
                 .sources
-                .insert(head.to_string(), loaded.clone());
+                .insert(key, loaded.clone());
             loaded
         }
     };
+
     let admitted =
         crate::plan::Plan::admitted(admission).map_err(|error| Fail::refused(error.to_string()))?;
     let expected =
@@ -316,10 +360,18 @@ pub async fn load_attempt(
             .expect("admitted inputs")
             .remove("package");
     }
-    if loaded
+    let mut expected_inputs = loaded
         .inputs(&daemon.git, &project.canonical_dir(), &admitted)
-        .await?
-        != recorded_inputs
+        .await?;
+    if !separate {
+        for key in ["definition_commit", "staging_commit", "image_commit"] {
+            expected_inputs
+                .as_object_mut()
+                .expect("source inputs")
+                .remove(key);
+        }
+    }
+    if expected_inputs != recorded_inputs
         || expected != admitted
         || loaded
             .config

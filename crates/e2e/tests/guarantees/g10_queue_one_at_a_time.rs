@@ -140,6 +140,9 @@ fn the_queue_lands_in_order_and_rejudges_a_red_merge() {
 /// Substitute parser defaults for selected definitions: literal expectations
 /// fail against the explicit non-default limits, timeouts and instructions
 /// declared in configured(), independently of admission or inspection output.
+/// G6: omit separate committed provenance, lose staging executable bits, or
+/// build from a different whole context: host Git, staged bytes/mode and the
+/// boxed COPY gate fail. Repair, sync and reopen exercise the changed-base case.
 #[test]
 fn a_ticket_binds_feature_inputs_repairs_and_lands_on_its_target() {
     let hold = Latch::new();
@@ -190,10 +193,12 @@ fn a_ticket_binds_feature_inputs_repairs_and_lands_on_its_target() {
     };
     let project = Project::new(&machine, "p", &configured("main"));
     let dockerfile = project.git(&["show", "HEAD:.yard/Dockerfile"]);
+    project.write("image-input", "main\n");
     project.write(
         ".yard/Dockerfile",
-        &format!("{dockerfile}RUN echo main > /target-input\n"),
+        &format!("{dockerfile}COPY image-input /target-input\nLABEL dev.yard.input=main\n"),
     );
+    project.git(&["add", "image-input"]);
     project.git(&["commit", "--quiet", "-am", "Main image"]);
     project.json(&["sync"]);
     let mut watch = project.watch(0);
@@ -208,14 +213,21 @@ fn a_ticket_binds_feature_inputs_repairs_and_lands_on_its_target() {
 
     project.git(&["checkout", "--quiet", "-b", "feature/a"]);
     project.write("shared.txt", "base\n");
+    project.write("image-input", "feature-v1\n");
     project.write(
         ".agents/skills/admission/SKILL.md",
         "---\nname: admission\ndescription: Admission skill v1.\n---\nBody.\n",
     );
     project.write(".yard/config.toml", &configured("feature-v1"));
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(
+        project.path.join(".agents/skills/admission/SKILL.md"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
     project.write(
         ".yard/Dockerfile",
-        &format!("{dockerfile}RUN echo feature-v1 > /target-input\n"),
+        &format!("{dockerfile}COPY image-input /target-input\nLABEL dev.yard.input=feature-v1\n"),
     );
     project.git(&["add", "-A"]);
     project.git(&["commit", "--quiet", "-m", "Feature inputs"]);
@@ -223,12 +235,15 @@ fn a_ticket_binds_feature_inputs_repairs_and_lands_on_its_target() {
     let object = |revision: &str| project.git(&["rev-parse", revision]).trim().to_string();
     let expected_inputs = json!({
         "source_commit": base,
+        "definition_commit": base,
+        "staging_commit": base,
+        "image_commit": base,
         "build_context_tree": object(&format!("{base}^{{tree}}")),
         "config_blob": object(&format!("{base}:.yard/config.toml")),
         "dockerfile_blob": object(&format!("{base}:.yard/Dockerfile")),
         "trusted_staged_sources": [
             {"path": ".agents/skills/admission/SKILL.md",
-             "blob": object(&format!("{base}:.agents/skills/admission/SKILL.md")), "executable": false},
+             "blob": object(&format!("{base}:.agents/skills/admission/SKILL.md")), "executable": true},
             {"path": ".agents/skills/yard-drive/SKILL.md",
              "blob": object(&format!("{base}:.agents/skills/yard-drive/SKILL.md")), "executable": false},
             {"path": ".agents/skills/yard-file/SKILL.md",
@@ -284,6 +299,17 @@ fn a_ticket_binds_feature_inputs_repairs_and_lands_on_its_target() {
     assert_eq!(admission["target"], "feature/a");
     assert_eq!(admission["config_head"], base);
     assert_eq!(admission["inputs"], expected_inputs);
+    let staged = project
+        .path
+        .join(".yard/local/attempts/2/state/agent/skills/agents/admission/SKILL.md");
+    assert_eq!(
+        std::fs::read_to_string(&staged).unwrap(),
+        project.git(&["show", &format!("{base}:.agents/skills/admission/SKILL.md")])
+    );
+    assert_ne!(
+        std::fs::metadata(&staged).unwrap().permissions().mode() & 0o111,
+        0
+    );
     assert_eq!(
         admission["workflow"],
         json!({
@@ -394,6 +420,7 @@ fn a_ticket_binds_feature_inputs_repairs_and_lands_on_its_target() {
     // G2: template sync keeps judgments; conflict repair keeps admitted inputs.
     // Sabotage: late gate/reviewer/image lookup or staging from repaired base.
     project.write("shared.txt", "operator\n");
+    project.write("image-input", "feature-v2\n");
     project.write(
         ".agents/skills/admission/SKILL.md",
         "---\nname: admission\ndescription: Admission skill v2.\n---\nBody.\n",
@@ -401,7 +428,7 @@ fn a_ticket_binds_feature_inputs_repairs_and_lands_on_its_target() {
     project.write(".yard/config.toml", &configured("feature-v2"));
     project.write(
         ".yard/Dockerfile",
-        &format!("{dockerfile}RUN echo feature-v2 > /target-input\n"),
+        &format!("{dockerfile}COPY image-input /target-input\nLABEL dev.yard.input=feature\n"),
     );
     project.git(&["commit", "--quiet", "-am", "Conflict and feature inputs"]);
     let target = project.git(&["rev-parse", "HEAD"]).trim().to_string();

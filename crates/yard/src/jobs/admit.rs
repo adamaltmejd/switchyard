@@ -57,11 +57,14 @@ fn spare_lanes(
     for attempt in attempts::live(conn)? {
         let configs = project.loaded.lock().expect("loaded lock");
         let selected = match &attempt.admission {
-            Some(input) => configs.sources.get(
-                input["inputs"]["source_commit"]
-                    .as_str()
-                    .ok_or_else(|| Fail::refused("missing admitted source"))?,
-            ),
+            Some(input) => {
+                let (definition, staging, image) = super::source_commits(&input["inputs"])?;
+                configs.sources.get(&(
+                    definition.to_string(),
+                    staging.to_string(),
+                    image.to_string(),
+                ))
+            }
             None => configs.targets.get(attempt.target_branch()?),
         }
         .map(Arc::as_ref)
