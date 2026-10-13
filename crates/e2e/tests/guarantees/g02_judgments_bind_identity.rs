@@ -670,7 +670,7 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
             result["outputs"]["result"]["value"]
         );
         let show = project.json(&["attempt", "show", "Y-1"]);
-        let evidence = &show["plan"];
+        let evidence = &show["attempt"]["plan"];
         assert_eq!(evidence["inputs"]["image_commit"], image_commit);
         assert_eq!(evidence["inputs"]["build_context_tree"], image_tree);
         assert_eq!(evidence["inputs"]["dockerfile_blob"], dockerfile_blob);
