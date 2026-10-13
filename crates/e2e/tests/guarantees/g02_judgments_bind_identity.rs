@@ -33,6 +33,9 @@ const GATE: &str = "[gates.check]\ncommand = \"test -f feature.txt\"\nstage = \"
 /// must rerun the implementer and both reviews; its fresh candidate supplier
 /// also invalidates both host gates. Sabotage: ignore staged inputs for a
 /// completed implementer merely because its old candidate tuple still matches.
+/// Image adoption is observed through the image ENV marker and COPY bytes in
+/// real consumers, not optional runtime image IDs. Sabotage: build current HEAD
+/// instead of the selected image context, or reuse the prior consumer image.
 #[test]
 fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
     let hold = Latch::new();
@@ -108,17 +111,17 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
                     );
                 }
             }
-            return act(
-                request,
-                if image {
-                    vec![
-                        bash("test \"$(cat /image-input)\" = image-v2"),
-                        publish(json!([])),
-                    ]
-                } else {
-                    vec![publish(json!([]))]
-                },
-            );
+            if image {
+                return match request.tool_results().len() {
+                    0 => Reply::Tools(vec![bash("cat /image-input")]),
+                    1 => {
+                        assert_eq!(request.last_tool_result().unwrap().1.trim(), "image-v2");
+                        Reply::Tools(vec![publish(json!([]))])
+                    }
+                    _ => Reply::Text("done".into()),
+                };
+            }
+            return act(request, vec![publish(json!([]))]);
         }
         if request.opens() && request.prompt().contains("Capacity holder") {
             return Reply::Hold(capacity_held.clone(), Box::new(Reply::Text("Held".into())));
@@ -645,7 +648,7 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
         assert_eq!(adopt["result"]["plan_revision"], revision, "{adopt}");
         let item = approval(&mut watch);
         assert_eq!(item["payload"]["plan_revision"], revision);
-        let rows = project.rows(&format!("SELECT id, node, digest, image_id, inputs, result, teardown, reserved FROM execution WHERE attempt = 1 AND plan_revision = {revision} ORDER BY id"));
+        let rows = project.rows(&format!("SELECT id, node, digest, inputs, result, teardown, reserved FROM execution WHERE attempt = 1 AND plan_revision = {revision} ORDER BY id"));
         assert_eq!(
             rows.iter()
                 .map(|row| row["node"].clone())
@@ -670,12 +673,8 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
             assert_ne!(row["id"], old["id"]);
             assert_eq!(row["teardown"], 1);
             assert_eq!(row["reserved"], 0);
-            if revision == 9 {
-                if row["node"].as_str().unwrap().starts_with("candidate-gate-") {
-                    assert_eq!(row["digest"], old["digest"]);
-                } else {
-                    assert_ne!(row["image_id"], old["image_id"]);
-                }
+            if revision == 9 && row["node"].as_str().unwrap().starts_with("candidate-gate-") {
+                assert_eq!(row["digest"], old["digest"]);
             }
             if row["node"].as_str().unwrap().starts_with("review-")
                 || (revision == 9 && row["node"] == "implementer")
