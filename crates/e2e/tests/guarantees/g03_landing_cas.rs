@@ -149,14 +149,23 @@ fn a_landing_whose_update_ref_is_held_stays_undecided_until_released() {
 
 /// A git wrapper that, while `armed` exists, holds the landing's
 /// `update-ref` of the target: it says `held` on one FIFO and waits for a
-/// line on another before running the real command. The daemon lives.
+/// line on another before running the real command. It can then hold the
+/// requeue's merge-tree before successor gates and intent. The daemon lives.
 fn hold_update_ref(
     machine: &Machine,
+    requeue_armed: &std::path::Path,
+    requeue_said: &std::path::Path,
+    requeue_release: &std::path::Path,
 ) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
     let armed = machine.root.join("armed");
     let said = machine.root.join("said");
     let release = machine.root.join("release");
-    for fifo in [&said, &release] {
+    for fifo in [
+        said.as_path(),
+        release.as_path(),
+        requeue_said,
+        requeue_release,
+    ] {
         assert!(
             std::process::Command::new("mkfifo")
                 .arg(fifo)
@@ -169,10 +178,16 @@ fn hold_update_ref(
         "git",
         &format!(
             "if [ -e '{}' ]; then case \" $* \" in *' update-ref --no-deref refs/heads/main '*)\n\
-             echo held > '{}'; read line < '{}';; esac; fi",
+             echo held > '{}'; read line < '{}';; esac; fi\n\
+             if [ -e '{}' ]; then case \" $* \" in *' merge-tree --write-tree '*)\n\
+             rm '{}'; echo held > '{}'; read line < '{}';; esac; fi",
             armed.display(),
             said.display(),
-            release.display()
+            release.display(),
+            requeue_armed.display(),
+            requeue_armed.display(),
+            requeue_said.display(),
+            requeue_release.display()
         ),
     );
     (armed, said, release)
@@ -183,7 +198,8 @@ fn hold_update_ref(
 /// The landing is held at its `update-ref`, after its gates and intent,
 /// while ticket edits and a valid plan adjustment refuse naming the intent.
 /// The same adjustment succeeds before the intent; another ticket edits
-/// successfully. Then the operator moves canonical.
+/// successfully. After canonical moves, the resolved intent still refuses
+/// a selected landing-definition change while the requeue's merge-tree holds.
 ///
 /// Sabotage: make `queue::land` record the landing when `update_ref`
 /// reports the old value did not match; the first landing is recorded
@@ -192,13 +208,17 @@ fn hold_update_ref(
 #[test]
 fn a_landing_retires_when_canonical_moves_before_update_ref() {
     let machine = Machine::new("g3-moved", worker());
-    let (armed, said, release) = hold_update_ref(&machine);
+    let requeue_armed = machine.root.join("requeue-armed");
+    let requeue_said = machine.root.join("requeue-said");
+    let requeue_release = machine.root.join("requeue-release");
+    let (armed, said, release) =
+        hold_update_ref(&machine, &requeue_armed, &requeue_said, &requeue_release);
     machine.start();
     let project = Project::new(
         &machine,
         "p",
         &config(concat!(
-            "[gates.check]\ncommand = \"test -f feature.txt\"\nruns_in = \"host\"\n",
+            "[gates.check]\ncommand = \"test -f feature.txt\"\nstage = \"candidate\"\nruns_in = \"host\"\n",
             "\n[profiles.revised]\n",
             "runner = {kind = \"agent\", agent = \"worker\", instructions = \"Keep the feature.\"}\n",
             "access = \"write-allowed\"\noutputs = {result = \"candidate\"}\noutcomes = [\"complete\"]\n",
@@ -216,11 +236,10 @@ fn a_landing_retires_when_canonical_moves_before_update_ref() {
     // Sabotage: freeze landing nodes or read original landing definitions.
     let landing_head = machine.root.join("selected-landing-head");
     let configuration = project.git(&["show", "HEAD:.yard/config.toml"]);
+    let selected_definition = format!("{configuration}\n[gates.future]\nstage = 'landing'\nruns_in = 'host'\ncommand = 'test -f feature.txt && test -f other.txt && git rev-parse HEAD >> {}'\n", landing_head.display())
+        .replace("test -f feature.txt\"", "test -s feature.txt\"");
     project.write("other.txt", "target-only\n");
-    project.write(
-        ".yard/config.toml",
-        &format!("{configuration}\n[gates.future]\nstage = 'landing'\nruns_in = 'host'\ncommand = 'test -f feature.txt && test -f other.txt && git rev-parse HEAD >> {}'\n", landing_head.display()),
-    );
+    project.write(".yard/config.toml", &selected_definition);
     project.git(&["add", "-A"]);
     project.git(&["commit", "--quiet", "-m", "Future landing requirement"]);
     project.json(&["sync"]);
@@ -249,6 +268,24 @@ fn a_landing_retires_when_canonical_moves_before_update_ref() {
         .as_str()
         .unwrap()
         .to_string();
+
+    // A supported candidate-stage definition is also a selected landing
+    // requirement. Commit its next change without adopting it.
+    project.write(
+        ".yard/config.toml",
+        &selected_definition.replace(
+            "test -s feature.txt\"",
+            "test -s feature.txt && test -f feature.txt\"",
+        ),
+    );
+    project.git(&[
+        "commit",
+        "--quiet",
+        "-am",
+        "Later candidate and landing definition",
+    ]);
+    project.json(&["sync"]);
+    let later_definition = project.git(&["rev-parse", "HEAD"]).trim().to_string();
 
     project.json(&["ticket", "new", "--title", "Other", "--parked"]);
 
@@ -299,39 +336,43 @@ fn a_landing_retires_when_canonical_moves_before_update_ref() {
     // It must fail first at structured refusal, before identity and no-write
     // observations. The FIFO holds real Git after the mutation intent;
     // store snapshots supply the outside oracle.
-    let plan = project.json(&["attempt", "show", "Y-1"]);
-    let revisions = project.rows("SELECT * FROM plan_revision ORDER BY attempt, revision");
-    let approvals = project.rows("SELECT * FROM approval ORDER BY id");
-    let attention = project.rows("SELECT * FROM attention ORDER BY id");
-    let audit = project.rows("SELECT * FROM audit ORDER BY seq");
-    let refused = operator.call(
-        "yard_attempt_revise",
+    let refuse_adjustment = |operator: &mut Operator, mut request: serde_json::Value| {
+        let plan = project.json(&["attempt", "show", "Y-1"]);
+        let revisions = project.rows("SELECT * FROM plan_revision ORDER BY attempt, revision");
+        let approvals = project.rows("SELECT * FROM approval ORDER BY id");
+        let attention = project.rows("SELECT * FROM attention ORDER BY id");
+        let audit = project.rows("SELECT * FROM audit ORDER BY seq");
+        request["plan_revision"] = plan["attempt"]["plan_revision"].clone();
+        let refused = operator.call("yard_attempt_revise", request);
+        assert_eq!(refused["error"]["code"], "refused", "{refused}");
+        assert_eq!(refused["error"]["data"]["intent"], intent[0]["id"]);
+        let unchanged = project.json(&["attempt", "show", "Y-1"]);
+        assert_eq!(
+            unchanged["attempt"]["plan_revision"],
+            plan["attempt"]["plan_revision"]
+        );
+        assert_eq!(unchanged["attempt"]["plan"], plan["attempt"]["plan"]);
+        assert_eq!(unchanged["plan_revisions"], plan["plan_revisions"]);
+        assert_eq!(
+            project.rows("SELECT * FROM plan_revision ORDER BY attempt, revision"),
+            revisions
+        );
+        assert_eq!(
+            project.rows("SELECT * FROM approval ORDER BY id"),
+            approvals
+        );
+        assert_eq!(
+            project.rows("SELECT * FROM attention ORDER BY id"),
+            attention
+        );
+        assert_eq!(project.rows("SELECT * FROM audit ORDER BY seq"), audit);
+    };
+    refuse_adjustment(
+        &mut operator,
         json!({"project": project.path, "ticket": "Y-1",
-            "plan_revision": plan["attempt"]["plan_revision"], "overrides": adjustment,
-            "definition_commit": definition_commit, "image_commit": definition_commit}),
+        "overrides": adjustment, "definition_commit": definition_commit,
+        "image_commit": definition_commit}),
     );
-    assert_eq!(refused["error"]["code"], "refused", "{refused}");
-    assert_eq!(refused["error"]["data"]["intent"], intent[0]["id"]);
-    let unchanged = project.json(&["attempt", "show", "Y-1"]);
-    assert_eq!(
-        unchanged["attempt"]["plan_revision"],
-        plan["attempt"]["plan_revision"]
-    );
-    assert_eq!(unchanged["attempt"]["plan"], plan["attempt"]["plan"]);
-    assert_eq!(unchanged["plan_revisions"], plan["plan_revisions"]);
-    assert_eq!(
-        project.rows("SELECT * FROM plan_revision ORDER BY attempt, revision"),
-        revisions
-    );
-    assert_eq!(
-        project.rows("SELECT * FROM approval ORDER BY id"),
-        approvals
-    );
-    assert_eq!(
-        project.rows("SELECT * FROM attention ORDER BY id"),
-        attention
-    );
-    assert_eq!(project.rows("SELECT * FROM audit ORDER BY seq"), audit);
     // An edit on the intent is refused; the other ticket can be edited.
     // Sabotage: drop admit::edit's refuse_during_intent guard.
     let revision = project.json(&["ticket", "show", "Y-1"])["revision"].to_string();
@@ -395,7 +436,50 @@ fn a_landing_retires_when_canonical_moves_before_update_ref() {
         &canonical,
         &["update-ref", "refs/heads/main", moved, &target],
     );
+    std::fs::write(&requeue_armed, "").unwrap();
     std::fs::write(&release, "go\n").unwrap();
+
+    assert_eq!(watch.said(&requeue_said), "held\n");
+    // G3: the predecessor's real intent is resolved and retired, but the
+    // live attempt still cannot change its selected landing definitions.
+    // The successor's real merge-tree holds before gates and intent.
+    // Sabotage Y144-historical-landing-intent: delete only attempt_revise's historical
+    // landing_requirements/intent_state guard, retaining refuse_during_intent.
+    // The direct refused identity must fail, not a timeout or active_plan.
+    // Store snapshots and host Git supply state and identity from outside.
+    assert_eq!(project.rows("SELECT id, outcome, intent_state, intent_old, intent_merged FROM execution WHERE kind = 'landing' AND intent_state IS NOT NULL"),
+        vec![json!({"id": intent[0]["id"], "outcome": "retired",
+            "intent_state": "resolved", "intent_old": target, "intent_merged": merged})]);
+    assert!(
+        project
+            .rows("SELECT id FROM execution WHERE intent_state = 'open'")
+            .is_empty()
+    );
+    assert!(project.rows("SELECT id FROM execution WHERE attempt = 1 AND status = 'running' AND kind IN ('gate', 'review')").is_empty());
+    assert_eq!(
+        project.rows("SELECT state, next FROM attempt WHERE id = 1"),
+        vec![json!({"state": "live", "next": null})]
+    );
+    assert_eq!(
+        project.json(&["attempt", "show", "Y-1"])["attempt"]["head"],
+        head
+    );
+    assert!(
+        project
+            .rows("SELECT id FROM attention WHERE attempt = 1 AND state = 'open'")
+            .is_empty()
+    );
+    assert_eq!(
+        project.rows("SELECT state FROM approval"),
+        vec![json!({"state": "active"})]
+    );
+    assert_eq!(project.canonical_head(), moved);
+    refuse_adjustment(
+        &mut operator,
+        json!({"project": project.path, "ticket": "Y-1",
+        "overrides": adjustment, "definition_commit": later_definition}),
+    );
+    std::fs::write(&requeue_release, "go\n").unwrap();
 
     watch.event("landing.recorded", &[]);
     let landings = project.rows(
