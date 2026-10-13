@@ -1210,6 +1210,7 @@ fn an_attempt_abandoned_while_its_landing_rereads_policy_raises_nothing() {
     let candidate_base = project.canonical_head();
     project.json(&["ticket", "new", "--title", "Live notes"]);
     let approved = watch.event("approval.given", &[("actor", "auto")]);
+    let ticket = approved["ticket"].as_str().unwrap();
     let attempt = approved["attempt"].as_i64().unwrap();
     let clone = project
         .path
@@ -1245,7 +1246,7 @@ fn an_attempt_abandoned_while_its_landing_rereads_policy_raises_nothing() {
     let payload = &raised["data"]["payload"];
     assert_eq!(payload["head"], head);
     assert_eq!(payload["base"], candidate_base);
-    assert_eq!(payload["proof"], Value::Null);
+    assert_eq!(payload["proof"], approved["data"]["proof"]);
     assert_eq!(payload["target"], "main");
     assert_eq!(payload["revision"], 1);
     assert_eq!(payload["plan_revision"], 1);
@@ -1268,7 +1269,7 @@ fn an_attempt_abandoned_while_its_landing_rereads_policy_raises_nothing() {
         turns
     );
     project.json(&[
-        "attempt", "approve", "--target", "main", "Y-2", "--head", &head,
+        "attempt", "approve", "--target", "main", ticket, "--head", &head,
     ]);
     release.write_all(b"go\n").unwrap();
     let landed = watch.event("landing.recorded", &[]);
@@ -1277,7 +1278,7 @@ fn an_attempt_abandoned_while_its_landing_rereads_policy_raises_nothing() {
         &project.canonical(),
         &["merge-base", "--is-ancestor", &head, "refs/heads/main"],
     );
-    assert_eq!(project.json(&["ticket", "show", "Y-2"])["state"], "done");
+    assert_eq!(project.json(&["ticket", "show", ticket])["state"], "done");
     assert_eq!(project.rows(&judgments), checks);
     assert_eq!(
         machine
