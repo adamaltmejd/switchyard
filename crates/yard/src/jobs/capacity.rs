@@ -251,6 +251,11 @@ pub async fn release(
                 && released.lock_contract
                 && released.status == "ended"
                 && released.outcome.as_deref() == Some("unchanged")
+                && released.node.as_deref() == Some("implementer")
+                && attempts::get(tx, released.attempt)?
+                    .admission
+                    .as_ref()
+                    .is_some_and(|admission| admission["runtime"] == "packaged-audit")
                 && dir(project, &released).join("lock").is_file();
             if completed_cleanup
                 || completed_candidate

@@ -1021,11 +1021,12 @@ ownership retains capacity and raises `red:ownership`; startup and later
 scheduler probes release only after that proof. A recovered registered
 published review resolves its obsolete ownership item only when its
 interrupted result is eligible; no legacy quiescence is inferred.
-A supported implementation ended as `unchanged` after stop resolves only
+A supported packaged implementation ended as `unchanged` after stop resolves only
 its exact `red:ownership` item as `reconciled` in the checked-release
 transaction. Its current inherited lock must exist and be free, and its box
 must be absent. The stopped decision, raw result and result ineligibility
 remain unchanged. Only the existing operator action requests a successor.
+Ordinary stopped preparations retain their existing ownership operator exits.
 A recorded release on that execution takes precedence over an older
 concurrent failed probe; that probe raises no new ownership item.
 Cleanup's current execution lock survives removal of its attempt directory.
