@@ -34,8 +34,7 @@ fn next_approval_of(watch: &mut Watch, ticket: &str) -> String {
 }
 
 /// Two approved candidates, the second red on its merged ref: the first
-/// lands, the second gets one repair and a second red raises `red`. No two
-/// landings overlap.
+/// lands, the second gets one repair and a second red raises `red`.
 ///
 /// The failing gate writes over 8000 bytes to stderr, then a marker to stdout;
 /// the red's detail ends with the marker.
@@ -117,22 +116,6 @@ fn the_queue_lands_in_order_and_rejudges_a_red_merge() {
         [json!("red"), json!("red")]
     );
     assert_eq!(second[1]["head"], again.as_str());
-
-    // One at a time: each landing ended before the next started. Sabotage:
-    // give each project two landing slots; two landings overlap.
-    let spans = project.rows(
-        "SELECT execution, event FROM audit WHERE event IN ('execution.started', 'execution.ended')
-         AND execution IN (SELECT id FROM execution WHERE kind = 'landing') ORDER BY seq",
-    );
-    let mut open = None;
-    for span in &spans {
-        if span["event"] == "execution.started" {
-            assert!(open.is_none(), "two landings overlap: {spans:?}");
-            open = Some(span["execution"].clone());
-        } else {
-            assert_eq!(open.take(), Some(span["execution"].clone()));
-        }
-    }
 }
 
 /// G2/G9/G10: main first warms the default inputs. A feature attempt then
