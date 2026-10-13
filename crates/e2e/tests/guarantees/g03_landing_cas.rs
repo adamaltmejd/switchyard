@@ -200,6 +200,10 @@ fn hold_update_ref(
 /// The same adjustment succeeds before the intent; another ticket edits
 /// successfully. After canonical moves, the resolved intent still refuses
 /// a selected landing-definition change while the requeue's merge-tree holds.
+/// Before the first intent, a selected gate fails once. Its actual red evidence
+/// binds the committed command before exact acceptance continues preparation.
+/// Sabotage original-landing-decision-evidence: use original_admission in
+/// checks::evidence for parented checks instead of their recorded admission.
 ///
 /// Sabotage: make `queue::land` record the landing when `update_ref`
 /// reports the old value did not match; the first landing is recorded
@@ -230,13 +234,21 @@ fn a_landing_retires_when_canonical_moves_before_update_ref() {
     watch.attention();
     // The admitted candidate accepts source and instructions selection
     // outside the intent boundary. Its agent and grants stay frozen.
-    let adjustment = json!({"implementer": {"profile": "revised"}});
+    let adjustment = json!({"implementer": {"profile": "revised"},
+        "landing-gate-future": {"operator_failure": true}});
     // G3: future requirements are selected before intent and run on the
     // prepared merge, including the target-only file. Host Git is the oracle.
     // Sabotage: freeze landing nodes or read original landing definitions.
     let landing_head = machine.root.join("selected-landing-head");
+    let fail_once = machine.root.join("selected-landing-fail-once");
+    let selected_command = format!(
+        "test -f feature.txt && test -f other.txt && git rev-parse HEAD >> {} && if test -f {}; then rm {}; exit 1; fi",
+        landing_head.display(),
+        fail_once.display(),
+        fail_once.display()
+    );
     let configuration = project.git(&["show", "HEAD:.yard/config.toml"]);
-    let selected_definition = format!("{configuration}\n[gates.future]\nstage = 'landing'\nruns_in = 'host'\ncommand = 'test -f feature.txt && test -f other.txt && git rev-parse HEAD >> {}'\n", landing_head.display())
+    let selected_definition = format!("{configuration}\n[gates.future]\nstage = 'landing'\nruns_in = 'host'\ntimeout_minutes = 1\ncommand = '{selected_command}'\n")
         .replace("test -f feature.txt\"", "test -s feature.txt\"");
     project.write("other.txt", "target-only\n");
     project.write(".yard/config.toml", &selected_definition);
@@ -290,6 +302,7 @@ fn a_landing_retires_when_canonical_moves_before_update_ref() {
     project.json(&["ticket", "new", "--title", "Other", "--parked"]);
 
     std::fs::write(&armed, "").unwrap();
+    std::fs::write(&fail_once, "").unwrap();
     let plan_revision =
         project.json(&["attempt", "show", "Y-1"])["attempt"]["plan_revision"].to_string();
     project.json(&[
@@ -303,6 +316,64 @@ fn a_landing_retires_when_canonical_moves_before_update_ref() {
         "--plan-revision",
         &plan_revision,
     ]);
+    let failure = watch.attention();
+    assert_eq!(failure["data"]["kind"], "red");
+    assert_eq!(failure["data"]["reason"], "landing");
+    let evidence = &failure["data"]["payload"]["evidence"];
+    let identity = &evidence["landing"];
+    let failed_parent = identity["execution"].as_i64().unwrap();
+    let failed_child = evidence["check"]["execution"].as_i64().unwrap();
+    let failed_check = evidence["check"]["check"].as_i64().unwrap();
+    assert_eq!(evidence["node"], "landing-gate-future");
+    assert_eq!(evidence["check"]["name"], "future");
+    assert_eq!(evidence["check"]["plan_revision"], expected + 1);
+    assert_eq!(evidence["check"]["verdict"], "fail");
+    assert_eq!(evidence["result"]["outcome"], "failed");
+    assert_eq!(
+        evidence["consumed_definition"]["gate"],
+        json!({
+            "name": "future", "command": selected_command, "stage": "landing",
+            "runs_in": "host", "timeout_minutes": 1, "env": []
+        })
+    );
+    let prepared = git(
+        &project.canonical(),
+        &["rev-parse", &format!("refs/yard/landings/{failed_parent}")],
+    )
+    .trim()
+    .to_string();
+    assert_eq!(identity["prepared"]["merged"], prepared);
+    assert_eq!(evidence["check"]["head"], prepared);
+    let ended = watch.find("selected failed preparation ended", |event| {
+        event["event"] == "execution.ended"
+            && event["execution"] == failed_parent
+            && event["data"]["outcome"] == "fail"
+            && event["seq"].as_i64().unwrap() > failure["seq"].as_i64().unwrap()
+    });
+    watch.find("selected failed preparation released", |event| {
+        event["event"] == "execution.released"
+            && event["execution"] == failed_parent
+            && event["seq"].as_i64().unwrap() > ended["seq"].as_i64().unwrap()
+    });
+    assert_eq!(project.rows(&format!(
+        "SELECT id, parent, plan_revision, outcome, teardown, reserved FROM execution WHERE id = {failed_child}"
+    )), vec![json!({"id": failed_child, "parent": failed_parent,
+        "plan_revision": expected + 1, "outcome": "fail", "teardown": 1, "reserved": 0})]);
+    assert_eq!(project.rows(&format!(
+        "SELECT status, outcome, reserved, intent_state FROM execution WHERE id = {failed_parent}"
+    )), vec![json!({"status": "ended", "outcome": "fail", "reserved": 0, "intent_state": null})]);
+    let failed_snapshot = project.rows(&format!(
+        "SELECT c.*, e.result, e.inputs FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE c.id = {failed_check}"
+    ));
+    let accepted = operator.call("yard_attempt_accept", json!({
+        "project": project.path, "ticket": "Y-1", "attention": failure["attention"],
+        "check": failed_check, "plan_revision": expected + 1, "target": "main", "head": head,
+        "proof": failure["data"]["payload"]["proof"], "text": "Accept selected committed requirement",
+        "landing": failed_parent, "child": failed_child, "node": evidence["node"],
+        "base": identity["base"], "revision": identity["revision"],
+        "old": identity["prepared"]["old"], "merged": prepared
+    }));
+    assert_eq!(accepted["result"]["accepted"], true, "{accepted}");
     assert_eq!(watch.said(&said), "held\n");
     std::fs::remove_file(&armed).unwrap();
     let intent =
@@ -482,8 +553,17 @@ fn a_landing_retires_when_canonical_moves_before_update_ref() {
     std::fs::write(&requeue_release, "go\n").unwrap();
 
     watch.event("landing.recorded", &[]);
+    assert_eq!(project.rows(&format!(
+        "SELECT c.*, e.result, e.inputs FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE c.id = {failed_check}"
+    )), failed_snapshot);
+    assert_eq!(
+        project
+            .rows("SELECT id FROM execution WHERE kind = 'landing'")
+            .len(),
+        3
+    );
     let landings = project.rows(
-        "SELECT id, outcome, intent_old, intent_merged FROM execution WHERE kind = 'landing' ORDER BY id",
+        "SELECT id, outcome, intent_old, intent_merged FROM execution WHERE kind = 'landing' AND intent_state IS NOT NULL ORDER BY id",
     );
     assert_eq!(landings.len(), 2, "{landings:?}");
     assert_eq!(landings[0]["outcome"], "retired");
