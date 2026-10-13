@@ -49,7 +49,7 @@ fn reasons(project: &Project) -> Vec<Value> {
 /// implementer with the edit's diff.
 ///
 /// In `p`, a real worker holds the sole capacity slot before Y-1 starts.
-/// Y-1's unreserved execution waits while its instruction profile is revised.
+/// Y-1's unreserved execution waits while its instruction profile, consumed definitions, model/effort and staged bytes are revised.
 /// Releasing the owner lets that same execution open with its original
 /// instructions. Its model request is then held for the ticket edit and,
 /// once released, commits; a later prompt carrying `Rename` commits again.
@@ -73,14 +73,19 @@ fn reasons(project: &Project) -> Vec<Value> {
 /// `stopped` for a stopped run; no `stopped` item comes.
 /// Launch every execution with the default worker's settings: q's host model
 /// identity and recorded settings fail. Changed revision settings and
-/// definition-only handoff sabotages need the dependent source adoption API;
-/// this scenario uses only supported instruction revisions.
+/// definition-only changes are adopted independently while p waits. Sabotages:
+/// return the original attempt implementer from implementation_settings;
+/// load the current attempt at held old startup; delete the consumed-definition
+/// map from plan_handoff. Host model/system observations and Git blobs catch
+/// each independently; instruction diffs alone cannot prove these bindings.
 #[test]
 fn an_edit_reaches_the_next_prompt_and_stop_delivers_it_sooner() {
     let (edit_hold, stop_hold) = (Latch::new(), Latch::new());
     let owner_hold = Latch::new();
     let owner_held = owner_hold.clone();
     let holds = (edit_hold.clone(), stop_hold.clone());
+    let successor_hold = Latch::new();
+    let successor_held = successor_hold.clone();
     let machine = Machine::new("g9-edit", move |request| {
         if request.prompt().contains("Hold capacity") {
             return if request.opens() {
@@ -90,10 +95,15 @@ fn an_edit_reaches_the_next_prompt_and_stop_delivers_it_sooner() {
             };
         }
         if request.last_user().contains("Rename") {
-            return act(
+            let reply = act(
                 request,
                 vec![commit_file("renamed.txt", "renamed\n", "Rename")],
             );
+            return if request.opens() && request.last_user().contains("Rename it too") {
+                Reply::Hold(successor_held.clone(), Box::new(reply))
+            } else {
+                reply
+            };
         }
         let hold = if request.prompt().contains("Add widget") {
             &holds.1
@@ -115,20 +125,32 @@ fn an_edit_reaches_the_next_prompt_and_stop_delivers_it_sooner() {
     machine.start();
     let gate = "[gates.check]\ncommand = \"true\"\nstage = \"candidate\"\nruns_in = \"host\"\n";
     let profile = "[profiles.revised]\nrunner = {kind = \"agent\", agent = \"worker\", instructions = \"Revised implementation.\"}\naccess = \"write-allowed\"\noutputs = {result = \"candidate\"}\noutcomes = [\"complete\"]\n";
-    let edited = Project::new(
-        &machine,
-        "p",
-        &unreviewed(&format!("{gate}{profile}"))
-            .replace("max_lanes = 2", "max_lanes = 2\nmax_executions = 1")
-            .replace(
-                "implementer = \"worker\"",
-                "implementer = \"worker\"\ninstructions = \"Original implementation.\"",
-            )
-            .replace(
-                "model = \"fake-model\"",
-                "model = \"fake-model\"\neffort = \"low\"",
-            ),
-    );
+    let configuration = unreviewed(&format!("{gate}{profile}"))
+        .replace("max_lanes = 2", "max_lanes = 2\nmax_executions = 1")
+        .replace(
+            "implementer = \"worker\"",
+            "implementer = \"worker\"\ninstructions = \"Original implementation.\"",
+        )
+        .replace(
+            "model = \"fake-model\"",
+            "model = \"fake-model\"\neffort = \"low\"",
+        );
+    let edited = Project::new(&machine, "p", &configuration);
+    let staged_path = ".pi/extensions/startup/index.ts";
+    let stage = |version: &str| {
+        edited.write(staged_path, &format!(
+            "export default function (pi) {{ pi.on('before_agent_start', async (event) => ({{systemPrompt: event.systemPrompt + '\\nstartup-bytes-{version} effort=' + pi.getThinkingLevel()}})); }}\n"
+        ));
+    };
+    stage("v1");
+    edited.git(&["add", "-A"]);
+    edited.git(&["commit", "-qm", "Original startup input"]);
+    edited.json(&["sync"]);
+    let original_commit = edited.git(&["rev-parse", "HEAD"]).trim().to_string();
+    let original_blob = edited
+        .git(&["rev-parse", &format!("HEAD:{staged_path}")])
+        .trim()
+        .to_string();
     let stopped = Project::new(&machine, "q", &unreviewed(
         "[agents.stopper]\nharness = \"pi\"\nprovider = \"openrouter\"\nmodel = \"stopped-model\"\neffort = \"high\"\n",
     ).replace("implementer = \"worker\"", "implementer = \"stopper\""));
@@ -177,6 +199,39 @@ fn an_edit_reaches_the_next_prompt_and_stop_delivers_it_sooner() {
         "overrides": {"implementer": {"profile": "revised"}}}),
     );
     assert_eq!(revised["result"]["plan_revision"], 2, "{revised}");
+    edited.write(
+        ".yard/config.toml",
+        &configuration
+            .replace("model = \"fake-model\"", "model = \"adopted-model\"")
+            .replace("effort = \"low\"", "effort = \"high\"")
+            .replace("command = \"true\"", "command = \"test -f feature.txt\""),
+    );
+    stage("v2");
+    edited.git(&["add", "-A"]);
+    edited.git(&[
+        "commit",
+        "-qm",
+        "Adopted settings definitions and startup input",
+    ]);
+    edited.json(&["sync"]);
+    let adopted_commit = edited.git(&["rev-parse", "HEAD"]).trim().to_string();
+    let adopted_blob = edited
+        .git(&["rev-parse", &format!("HEAD:{staged_path}")])
+        .trim()
+        .to_string();
+    let adopted = operator.call(
+        "yard_attempt_revise",
+        json!({
+            "project": edited.path, "ticket": "Y-1", "plan_revision": 2,
+            "definition_commit": adopted_commit, "staging_commit": adopted_commit
+        }),
+    );
+    assert_eq!(adopted["result"]["plan_revision"], 3, "{adopted}");
+    // Only consumed definitions/settings/bytes changed, not the plan.
+    assert_eq!(
+        adopted["result"]["plan"]["plan"],
+        revised["result"]["plan"]["plan"]
+    );
     assert_eq!(edited.rows(&frozen_query), frozen);
     owner_hold.release();
     let owner_end = edit_watch.until("capacity owner stops", |event| {
@@ -189,6 +244,12 @@ fn an_edit_reaches_the_next_prompt_and_stop_delivers_it_sooner() {
         .find(|request| request.prompt().contains("Add feature"))
         .unwrap();
     assert_eq!(initial_request.body["model"], "fake-model");
+    assert!(
+        initial_request
+            .system()
+            .contains("startup-bytes-v1 effort=low")
+    );
+    assert!(!initial_request.system().contains("startup-bytes-v2"));
     let initial = initial_request.prompt();
     assert!(initial.contains("Original implementation."), "{initial}");
     assert!(!initial.contains("Revised implementation."), "{initial}");
@@ -196,6 +257,20 @@ fn an_edit_reaches_the_next_prompt_and_stop_delivers_it_sooner() {
     assert_eq!(edited.rows(&original_query), original);
     edit_body(&edited, "Rename it too");
     edit_hold.release();
+    successor_hold.wait_held();
+    // Host route holds the successor before its commit. Checked predecessor
+    // release must already be complete; subsequent work cannot rewrite it.
+    let ended_query = format!("SELECT * FROM execution WHERE id = {execution}");
+    let ended = edited.rows(&ended_query);
+    assert_eq!(ended[0]["teardown"], 1);
+    assert_eq!(ended[0]["reserved"], 0);
+    assert_eq!(ended[0]["outcome"], "candidate");
+    let revisions_query = format!(
+        "SELECT * FROM plan_revision WHERE attempt = {} ORDER BY revision",
+        frozen[0]["attempt"]
+    );
+    let revisions = edited.rows(&revisions_query);
+    successor_hold.release();
     edit_body(&stopped, "Rename it now");
     stopped.json(&["attempt", "stop", "Y-1"]);
 
@@ -207,16 +282,39 @@ fn an_edit_reaches_the_next_prompt_and_stop_delivers_it_sooner() {
     });
     assert_eq!(first["data"]["outcome"], "candidate", "{first}");
     assert_eq!(edited.rows(&original_query), original);
+    assert_eq!(edited.rows(&ended_query), ended);
+    assert_eq!(edited.rows(&revisions_query), revisions);
     assert_eq!(
         edited.rows("SELECT agent, model, effort FROM execution WHERE kind = 'implementation' AND attempt IN (SELECT id FROM attempt WHERE ticket = 1) ORDER BY id"),
-        vec![json!({"agent": "worker", "model": "fake-model", "effort": "low"}); 2]
+        vec![json!({"agent": "worker", "model": "fake-model", "effort": "low"}),
+             json!({"agent": "worker", "model": "adopted-model", "effort": "high"})]
     );
     assert_eq!(
         openings(&machine).last().unwrap().body["model"],
-        "fake-model"
+        "adopted-model"
     );
     // The latest opening is p's second: q opens nothing more until its start.
     let second = openings(&machine).last().unwrap().last_user();
+    assert!(
+        openings(&machine)
+            .last()
+            .unwrap()
+            .system()
+            .contains("startup-bytes-v2 effort=high")
+    );
+    // These identities are absent from the plan-only diff. Git supplies blobs.
+    for identity in [
+        &original_blob,
+        &adopted_blob,
+        "fake-model",
+        "adopted-model",
+        "test -f feature.txt",
+    ] {
+        assert!(
+            second.contains(identity),
+            "missing handoff identity {identity}: {second}"
+        );
+    }
     assert!(second.contains("+Rename it too"), "{second}");
     let mut lines = second.lines().peekable();
     let mut annotation = "";
@@ -262,10 +360,28 @@ fn an_edit_reaches_the_next_prompt_and_stop_delivers_it_sooner() {
     assert_eq!(
         edited
             .rows("SELECT plan_revision FROM execution WHERE kind = 'implementation' AND attempt IN (SELECT id FROM attempt WHERE ticket = 1) ORDER BY id"),
-        vec![json!({"plan_revision": 1}), json!({"plan_revision": 2})]
+        vec![json!({"plan_revision": 1}), json!({"plan_revision": 3})]
     );
     assert_eq!(edited.rows(&frozen_query), frozen);
     let attempt = frozen[0]["attempt"].as_i64().unwrap();
+    let current = &adopted["result"]["plan"]["inputs"];
+    let admission: Value =
+        serde_json::from_str(original[0]["admission"].as_str().unwrap()).unwrap();
+    for (inputs, blob) in [
+        (&admission["inputs"], &original_blob),
+        (current, &adopted_blob),
+    ] {
+        let staged = inputs["trusted_staged_sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|source| source["path"] == staged_path)
+            .unwrap();
+        assert_eq!(staged["blob"], *blob);
+    }
+    assert_eq!(current["image_commit"], original_commit);
+    assert_eq!(current["definition_commit"], adopted_commit);
+    assert_eq!(current["staging_commit"], adopted_commit);
     let clone = edited
         .path
         .join(format!(".yard/local/attempts/{attempt}/clone"));

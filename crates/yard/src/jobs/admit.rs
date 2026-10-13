@@ -1331,11 +1331,13 @@ pub async fn attempt_revise(
         let crate::plan::Runner::Agent { agent, .. } = &old.nodes["implementer"].runner else {
             return Err(Fail::refused("unsupported implementer"));
         };
-        if loaded.config.agents.get(agent) != frozen.config.agents.get(agent)
-            || loaded.config.egress != frozen.config.egress
-        {
+        let mut settings = loaded.config.agents[agent].clone();
+        let previous = &frozen.config.agents[agent];
+        settings.model = previous.model.clone();
+        settings.effort = previous.effort.clone();
+        if settings != *previous || loaded.config.egress != frozen.config.egress {
             return Err(Fail::refused(
-                "source adoption changes frozen implementation settings or grants",
+                "source adoption changes frozen implementation harness, connection or grants",
             )
             .with(json!({"reason": "unsupported_revision"})));
         }
@@ -1401,10 +1403,9 @@ pub async fn attempt_revise(
         attempts::require_plan(tx, current.id, Some(expected))?;
         let executions = executions::for_attempt(tx, current.id)?;
         let open = attempts::open_for_attempt(tx, current.id)?;
-        if adopting && (current.candidate().is_none()
-            || executions.iter().any(|row| row.status == "running" && matches!(row.kind.as_str(), "implementation" | "gate" | "review")))
+        if adopting && executions.iter().any(|row| row.status == "running" && matches!(row.kind.as_str(), "gate" | "review"))
         {
-            return Err(Fail::refused("source adoption requires a quiescent candidate")
+            return Err(Fail::refused("source adoption requires implementation or quiescent candidate work")
                 .with(json!({"reason": "active_plan", "attempt": current.id})));
         }
         let implementing = executions.iter().any(|row| row.kind == "implementation" && row.status == "running");
