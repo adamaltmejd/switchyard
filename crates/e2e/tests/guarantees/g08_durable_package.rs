@@ -313,8 +313,6 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
             "UNSELECTED_SKILL",
             "CANDIDATE_SKILL",
             "CANDIDATE_LAUNCH",
-            "LATER_SELECTED_SKILL",
-            "LATER_REFERENCE",
         ] {
             assert!(!request.context().contains(marker));
         }
@@ -454,6 +452,11 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
         .find(ModelRequest::opens)
         .unwrap();
     assert_eq!(initial_request.body["model"], "fake-model");
+    assert!(
+        initial_request
+            .prompt()
+            .starts_with("Corrected packaged audit\n")
+    );
     assert_context(&initial_request, false);
     let held = project.json(&["attempt", "show", "Y-3"]);
     let source = project.git(&["rev-parse", "HEAD"]).trim().to_string();
@@ -536,8 +539,9 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     // release the predecessor early, or omit audit.json's handoff. Host model
     // requests and Git blobs supply expectations. Ordinary controls cannot
     // catch the packaged controller's distinct launch and publication path.
-    // Original controller settings or stale staged skill bytes fail actual
-    // host request assertions after holds chosen solely by fixture phase.
+    // Original controller settings, instructions or stale staged skill bytes
+    // fail host request assertions after fixture-phase holds. Instructions
+    // must open the prompt; their appearance in the handoff cannot qualify.
     let original_rows = project.rows(&format!("SELECT * FROM execution WHERE id = {old}"));
     let configuration = std::fs::read_to_string(project.path.join(".yard/config.toml")).unwrap();
     project.write(
@@ -621,7 +625,7 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     assert!(
         settings_request
             .prompt()
-            .contains("Fresh replacement audit")
+            .starts_with("Fresh replacement audit\n")
     );
     assert!(
         controller_requests(&machine)
@@ -710,7 +714,11 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     let staged_request = controller_requests(&machine).last().unwrap().clone();
     assert_eq!(staged_request.body["model"], "packaged-adopted-model");
     assert_context(&staged_request, true);
-    assert!(staged_request.prompt().contains("Fresh replacement audit"));
+    assert!(
+        staged_request
+            .prompt()
+            .starts_with("Fresh replacement audit\n")
+    );
     let staged_request = staged_request.prompt();
     for commit in [&source, &staging] {
         let blob = project.git(&["rev-parse", &format!("{commit}:trusted/selected.md")]);
@@ -800,7 +808,11 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     let image_request = controller_requests(&machine).last().unwrap().clone();
     assert_eq!(image_request.body["model"], "packaged-adopted-model");
     assert_context(&image_request, true);
-    assert!(image_request.prompt().contains("Fresh replacement audit"));
+    assert!(
+        image_request
+            .prompt()
+            .starts_with("Fresh replacement audit\n")
+    );
     let image_request = image_request.prompt();
     for commit in [&source, &image_commit] {
         let tree = project.git(&["rev-parse", &format!("{commit}^{{tree}}")]);

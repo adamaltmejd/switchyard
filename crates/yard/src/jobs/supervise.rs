@@ -760,7 +760,8 @@ pub async fn implement(
         Ok(())
     })?;
     let prompt = if packaged.is_some() {
-        Ok(String::new())
+        // Pi requires a prompt; the packaged input hook reads audit.json.
+        Ok("Run the selected packaged audit.".to_string())
     } else {
         implementer_prompt(
             daemon,
