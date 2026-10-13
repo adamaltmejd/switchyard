@@ -59,7 +59,13 @@ fn reasons(project: &Project) -> Vec<Value> {
 /// the latest plan by replacing only the startup `attempts::for_execution`
 /// in `supervise::implement` with `attempts::get`: the initial model prompt
 /// after the capacity wait loses the original instructions. Omit the
-/// successor revision diff; the next model prompt fails. Or make
+/// successor revision diff; the next model prompt fails. Make
+/// `implementer_prompt` change only the plan heading to `Plan revision:`
+/// while retaining the ticket actor heading and complete diff; the local
+/// attribution assertion fails. Remove only the plan diff payload while
+/// retaining its actor heading; the diff-change observer fails. Reword only
+/// that heading to `Operator plan update:`; both observations still pass.
+/// Or make
 /// `supervise::implement` ignore the edit after a candidate; the first head
 /// reaches approval and the edit is never delivered. Make
 /// `admit::attempt_stop` skip notifying the execution; it runs on and no
@@ -180,11 +186,47 @@ fn an_edit_reaches_the_next_prompt_and_stop_delivers_it_sooner() {
     // The latest opening is p's second: q opens nothing more until its start.
     let second = openings(&machine).last().unwrap().last_user();
     assert!(second.contains("+Rename it too"), "{second}");
+    let mut lines = second.lines().peekable();
+    let mut annotation = "";
+    let mut plan_annotation = None;
+    while let Some(line) = lines.next() {
+        if !line.starts_with("diff --git ") {
+            if !line.trim().is_empty() {
+                annotation = line;
+            }
+            continue;
+        }
+        // Consume native Git lines so no previous diff supplies the actor.
+        let diff: Vec<_> = std::iter::from_fn(|| {
+            lines.next_if(|line| {
+                line.starts_with([' ', '+', '-', '\\'])
+                    || line.starts_with("index ")
+                    || line.starts_with("@@ ")
+            })
+        })
+        .collect();
+        if diff.iter().any(|line| {
+            line.starts_with('-')
+                && !line.starts_with("--- ")
+                && line.contains("Original implementation.")
+        }) && diff.iter().any(|line| {
+            line.starts_with('+')
+                && !line.starts_with("+++ ")
+                && line.contains("Revised implementation.")
+        }) {
+            plan_annotation = Some(annotation);
+            break;
+        }
+        annotation = "";
+    }
+    let annotation =
+        plan_annotation.expect("plan Git diff must delete original and add revised instructions");
     assert!(
-        second.contains("The operator revised the plan:"),
-        "{second}"
+        annotation
+            .split(|character: char| !character.is_alphanumeric() && character != '_')
+            .any(|word| word.eq_ignore_ascii_case("operator")),
+        "plan diff annotation must attribute the change to operator: {annotation:?}"
     );
-    assert!(second.contains("Revised implementation."), "{second}");
     assert_eq!(
         edited
             .rows("SELECT plan_revision FROM execution WHERE kind = 'implementation' AND attempt IN (SELECT id FROM attempt WHERE ticket = 1) ORDER BY id"),
