@@ -1531,8 +1531,6 @@ fn selected_skipped_decisions_bind_identity_without_manufacturing_results() {
             "explicit-empty.txt"
         } else if request.context().contains("Ordinary empty") {
             "ordinary-empty.txt"
-        } else if request.context().contains("Ordinary reduced") {
-            "ordinary-reduced.txt"
         } else if request.context().contains("Reduced") {
             "reduced.txt"
         } else {
@@ -1984,7 +1982,8 @@ fn selected_skipped_decisions_bind_identity_without_manufacturing_results() {
     assert_eq!(project.rows(&judgments), original);
     assert_eq!(project.rows(&admission), vec![json!({"unreviewed": 1})]);
     assert!(project.rows(&omissions).is_empty());
-    // Ordinary reduced and empty selections land without any decision.
+    // Ordinary empty selection observes no omission decision; G1 covers reduced landing.
+    // Sabotage: synthesize omission evidence on ordinary approval without a request.
     assert_eq!(project.rows(&accepted_omission), omission_snapshot);
     // Explicit empty selection must expose the host-Git merge before intent.
     let mut empty = graph.clone();
@@ -1995,9 +1994,8 @@ fn selected_skipped_decisions_bind_identity_without_manufacturing_results() {
         .retain(|name, _| name == "implementer");
     empty["nodes"]["implementer"]["routes"] = json!({});
     for (ticket, title, selected, explicit) in [
-        ("Y-3", "Ordinary reduced", graph, false),
-        ("Y-4", "Ordinary empty", empty.clone(), false),
-        ("Y-5", "Explicit empty", empty, true),
+        ("Y-3", "Ordinary empty", empty.clone(), false),
+        ("Y-4", "Explicit empty", empty, true),
     ] {
         project.json(&["ticket", "new", "--title", title, "--workflow", "plan"]);
         let planned = watch.event("attempt.ended", &[("outcome", "planned")]);
