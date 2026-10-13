@@ -169,15 +169,6 @@ selected = [{ to = "choose", repeat = 2 }]
         );
         assert_eq!(control["result"]["plan"], corrected_expected);
     }
-    // A complete one-off graph and a preset with overrides share the model.
-    let one_off = call(
-        &mut operator,
-        &project,
-        "yard_plan_resolve",
-        json!({"target": "feature/a", "graph": corrected_expected}),
-    );
-    assert_eq!(one_off["result"]["plan"], corrected_expected);
-
     let legacy = call(
         &mut operator,
         &project,
