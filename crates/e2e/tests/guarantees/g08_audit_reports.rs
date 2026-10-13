@@ -272,11 +272,54 @@ fn superseded_audit(revise: bool) {
             .rfind(|request| request.opens())
             .unwrap()
             .last_user();
+        // G9: the model's delivered Git diff carries the fixture change and
+        // its attached operator label. Fresh initial instructions also carry
+        // the marker, so they cannot establish this handoff.
+        // Diff-only sabotage: omit the plan diff but keep its operator heading.
+        // Actor-only sabotage: use "Plan revision:" with the full diff intact.
+        let mut lines = prompt.lines().peekable();
+        let mut annotation = "";
+        let mut revision_annotation = None;
+        while let Some(line) = lines.next() {
+            if !line.starts_with("diff --git ") {
+                if !line.trim().is_empty() {
+                    annotation = line.trim();
+                }
+                continue;
+            }
+            let mut in_hunk = false;
+            let mut added_marker = false;
+            while let Some(line) = lines.peek() {
+                if line.starts_with("@@ ") {
+                    in_hunk = true;
+                } else if !(line.starts_with("index ")
+                    || line.starts_with("--- ")
+                    || line.starts_with("+++ ")
+                    || (in_hunk && line.starts_with([' ', '+', '-', '\\'])))
+                {
+                    break;
+                }
+                added_marker |= in_hunk
+                    && line.starts_with('+')
+                    && !line.starts_with("+++")
+                    && line[1..].contains("Revised audit input");
+                lines.next();
+            }
+            if added_marker {
+                revision_annotation = Some(annotation);
+                break;
+            }
+            // Another diff cannot inherit this section's label.
+            annotation = "";
+        }
+        let annotation = revision_annotation
+            .unwrap_or_else(|| panic!("missing revised added content in Git diff: {prompt}"));
         assert!(
-            prompt.contains("The operator revised the plan:"),
-            "{prompt}"
+            annotation
+                .split(|ch: char| !ch.is_alphanumeric() && ch != '_')
+                .any(|word| word.eq_ignore_ascii_case("operator")),
+            "missing operator label attached to revised Git diff: {prompt}"
         );
-        assert!(prompt.contains("Revised audit input"), "{prompt}");
     }
     let rows = project.rows("SELECT id, ticket_revision, report, result FROM execution WHERE kind = 'implementation' ORDER BY id");
     assert_eq!(rows.len(), 2, "{rows:?}");
