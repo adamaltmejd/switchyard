@@ -348,52 +348,117 @@ pub fn start(tx: &Connection, start: Start) -> Result<i64, Fail> {
     Ok(id)
 }
 
-/// The frozen panel digest remains the baseline. A selected reviewer runner
-/// adds its own source-bound settings without changing unrelated seat digests.
+/// The definitions this runner consumes, from recorded source evidence.
+/// Commit labels are provenance; blobs, modes and the whole image tree are inputs.
+pub fn consumed_definition(
+    admission: &Value,
+    runner: &crate::plan::Runner,
+    reviewer: bool,
+) -> Option<Value> {
+    let inputs = &admission["inputs"];
+    let image = inputs.get("build_context_tree")?.as_str()?;
+    let dockerfile = inputs.get("dockerfile_blob")?.as_str()?;
+    let yard = admission.get("yard_runner")?;
+    yard.get("sha256")?.as_str()?;
+    let mut definition = json!({"runner": runner, "yard_runner": yard,
+        "build_context_tree": image, "dockerfile_blob": dockerfile});
+    match runner {
+        crate::plan::Runner::Command { gate } => {
+            definition["gate"] = admission["gates"]
+                .as_array()?
+                .iter()
+                .find(|definition| definition["name"] == *gate)?
+                .clone();
+            if definition["gate"]["runs_in"] == "host" {
+                let definition = definition.as_object_mut()?;
+                definition.remove("build_context_tree");
+                definition.remove("dockerfile_blob");
+            }
+        }
+        crate::plan::Runner::Agent { agent, .. } | crate::plan::Runner::Packaged { agent, .. } => {
+            let settings = admission["agents"].get(agent)?;
+            let harness = settings["settings"]["harness"].as_str()?;
+            settings["runner"]["version"].as_str()?;
+            let staged = inputs.get("trusted_staged_sources")?.as_array()?;
+            let packaged = matches!(runner, crate::plan::Runner::Packaged { .. });
+            let sources: Vec<_> = staged
+                .iter()
+                .filter(|source| {
+                    let path = source["path"].as_str().unwrap_or_default();
+                    packaged || crate::agent_env::consumed_path(harness, path)
+                })
+                .collect();
+            definition["agent"] = settings.clone();
+            definition["trusted_staged_sources"] = json!(sources);
+            if reviewer {
+                definition["review"] = admission.get("review")?.clone();
+            }
+            if packaged {
+                definition["package"] = inputs.get("package")?.clone();
+            }
+        }
+    }
+    Some(definition)
+}
+
+/// Whole gate/panel identities bind decisions. A check binds its own runner.
 pub fn check_digest(
     attempt: &super::attempts::Attempt,
     kind: &str,
     name: &str,
     baseline: &str,
 ) -> Result<String, Fail> {
-    if kind != "review" {
+    if !matches!(kind, "gate" | "review") {
         return Ok(baseline.into());
     }
     let Some(admission) = &attempt.admission else {
         return Ok(baseline.into());
     };
-    let index = admission["workflow"]["review"]
-        .as_array()
-        .and_then(|seats| seats.iter().position(|seat| seat.as_str() == Some(name)))
-        .ok_or_else(|| Fail::refused("seat absent from admitted panel"))?;
     let plan =
         crate::plan::Plan::admitted(admission).map_err(|error| Fail::refused(error.to_string()))?;
-    let Some(node) = plan.nodes.get(&format!("review-{index}")) else {
-        return Ok(baseline.into());
+    let runner = if kind == "gate" {
+        crate::plan::Runner::Command { gate: name.into() }
+    } else {
+        let index = admission["workflow"]["review"]
+            .as_array()
+            .and_then(|seats| seats.iter().position(|seat| seat.as_str() == Some(name)))
+            .ok_or_else(|| Fail::refused("seat absent from admitted panel"))?;
+        let Some(node) = plan.nodes.get(&format!("review-{index}")) else {
+            return Ok(baseline.into());
+        };
+        node.runner.clone()
     };
-    let crate::plan::Runner::Agent {
-        agent,
-        instructions,
-    } = &node.runner
-    else {
-        return Err(Fail::refused("review has no admitted agent runner"));
+    let Some(definition) = consumed_definition(admission, &runner, kind == "review") else {
+        // Unrecorded source proof stays unknown; its historical digest stays intact.
+        if kind != "review" {
+            return Ok(baseline.into());
+        }
+        let crate::plan::Runner::Agent {
+            agent,
+            instructions,
+        } = &runner
+        else {
+            return Err(Fail::refused("review has no admitted agent runner"));
+        };
+        if admission["seats"][name]["agent"] == *agent
+            && admission["seats"][name]["instructions"] == *instructions
+        {
+            return Ok(baseline.into());
+        }
+        let settings = &admission["agents"][agent]["settings"];
+        if settings.is_null() {
+            return Err(Fail::refused("selected reviewer has no admitted settings"));
+        }
+        let policy = serde_json::to_vec(&json!({"runner": runner, "settings": settings}))
+            .expect("review policy serializes");
+        return Ok(crate::config::digest(&[
+            b"selected-review",
+            baseline.as_bytes(),
+            &policy,
+        ]));
     };
-    if admission["seats"][name]["agent"] == *agent
-        && admission["seats"][name]["instructions"] == *instructions
-    {
-        return Ok(baseline.into());
-    }
-    let settings = &admission["agents"][agent]["settings"];
-    if settings.is_null() {
-        return Err(Fail::refused("selected reviewer has no admitted settings"));
-    }
-    let policy = serde_json::to_vec(&json!({"runner": node.runner, "settings": settings}))
-        .expect("review policy serializes");
-    Ok(crate::config::digest(&[
-        b"selected-review",
-        baseline.as_bytes(),
-        &policy,
-    ]))
+    let definition = serde_json::to_vec(&definition).expect("consumer definition serializes");
+    Ok(crate::config::digest(&[b"consumer", &definition]))
 }
 
 /// Bind only the admitted ordinary chain. Merge, cleanup and old history have no node.
@@ -574,6 +639,8 @@ pub fn qualifies(
     let Some(current) = &attempt.admission else {
         return Ok(false);
     };
+    let original_evidence = original.clone();
+    let current_evidence = current;
     let original =
         crate::plan::Plan::admitted(&original).map_err(|error| Fail::refused(error.to_string()))?;
     let current =
@@ -587,6 +654,14 @@ pub fn qualifies(
     old.routes.remove("complete");
     new.routes.remove("complete");
     if old != new {
+        return Ok(false);
+    }
+    let reviewer = execution.kind == "review";
+    let old_definition = consumed_definition(&original_evidence, &old.runner, reviewer);
+    let new_definition = consumed_definition(current_evidence, &new.runner, reviewer);
+    if old_definition != new_definition
+        || (old_definition.is_none() && execution.plan_revision != attempt.plan_revision())
+    {
         return Ok(false);
     }
     let expected = binding(
