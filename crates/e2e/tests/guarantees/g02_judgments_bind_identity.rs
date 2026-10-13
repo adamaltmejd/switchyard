@@ -1155,7 +1155,9 @@ fn an_attempt_abandoned_while_its_landing_rereads_policy_raises_nothing() {
         held_after_policy_change(&machine, candidate_gate, |config| {
             config.replace("approve = \"auto\"", "approve = \"manual\"")
         });
-    let abandoned = project.json(&["attempt", "show", "Y-1"])["attempt"]["attempt"].clone();
+    let first = project.json(&["attempt", "show", "Y-1"]);
+    let first_ticket = first["attempt"]["ticket"].as_str().unwrap();
+    let abandoned = first["attempt"]["attempt"].clone();
     let fifo = |name: &str| {
         let path = machine.root.join(name);
         assert!(
@@ -1182,7 +1184,8 @@ fn an_attempt_abandoned_while_its_landing_rereads_policy_raises_nothing() {
     );
     release.write_all(b"go\n").unwrap();
     assert_eq!(watch.said(&said), "held\n");
-    project.json(&["attempt", "abandon", "Y-1"]);
+    project.json(&["ticket", "park", first_ticket]);
+    project.json(&["attempt", "abandon", first_ticket]);
     std::fs::write(&resume, "go\n").unwrap();
     let ended = watch.event("execution.ended", &[("kind", "landing")]);
     assert_eq!(ended["data"]["outcome"], "withdrawn", "{ended}");
@@ -1208,9 +1211,13 @@ fn an_attempt_abandoned_while_its_landing_rereads_policy_raises_nothing() {
     )));
     project.reconfigure(&base);
     let candidate_base = project.canonical_head();
-    project.json(&["ticket", "new", "--title", "Live notes"]);
-    let approved = watch.event("approval.given", &[("actor", "auto")]);
-    let ticket = approved["ticket"].as_str().unwrap();
+    let created = project.json(&["ticket", "new", "--title", "Live notes"]);
+    let ticket = created["ticket"].as_str().unwrap();
+    let approved = watch.until("live ticket auto approval", |event| {
+        event["event"] == "approval.given"
+            && event["data"]["actor"] == "auto"
+            && event["ticket"] == ticket
+    });
     let attempt = approved["attempt"].as_i64().unwrap();
     let clone = project
         .path
