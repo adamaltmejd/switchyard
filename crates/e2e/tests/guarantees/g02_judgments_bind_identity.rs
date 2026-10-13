@@ -29,6 +29,11 @@ const GATE: &str = "[gates.check]\ncommand = \"test -f feature.txt\"\nstage = \"
 /// follows completed checks. Host Git supplies blobs and the fixed image tree.
 /// Sabotage: resolved overwrites adopted definitions, stale tool/skill digest,
 /// or whole-panel invalidation. Host counters prove actual consumers.
+/// Gate-only adoption must also change the actual gate consumer digest.
+/// Sabotage original-gate-digests: check_digest reads original_admission for
+/// gates instead of the current selected admission. The committed command
+/// and host counter change on the same candidate with fixed image/context;
+/// neither invocation counts nor immutable history alone catch that fault.
 /// All three selected Pi agents consume these paths. Each staging adoption
 /// must rerun the implementer and both reviews; its fresh candidate supplier
 /// also invalidates both host gates. Sabotage: ignore staged inputs for a
@@ -467,6 +472,14 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
     // Hold the sole effect slot before approving. The queued landing has no
     // intent and cannot move canonical before adoption withdraws approval.
     let adoption_executions = project.rows("SELECT * FROM execution WHERE attempt = 1 ORDER BY id");
+    let prior_gate_digest = adoption_executions
+        .iter()
+        .rev()
+        .find(|row| row["node"] == "candidate-gate-check")
+        .unwrap()["digest"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let adoption_ids = adoption_executions
         .iter()
         .map(|row| row["id"].as_i64().unwrap().to_string())
@@ -526,9 +539,13 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
         "original\nadopted\n"
     );
     assert_eq!(std::fs::read_to_string(&keep_counter).unwrap(), "keep\n");
-    assert_eq!(
-        project.rows("SELECT node FROM execution WHERE attempt = 1 AND plan_revision = 5"),
-        vec![json!({"node": "candidate-gate-check"})]
+    let gate_consumers =
+        project.rows("SELECT node, digest FROM execution WHERE attempt = 1 AND plan_revision = 5");
+    assert_eq!(gate_consumers.len(), 1);
+    assert_eq!(gate_consumers[0]["node"], "candidate-gate-check");
+    assert_ne!(
+        gate_consumers[0]["digest"].as_str().unwrap(),
+        prior_gate_digest
     );
     assert!(
         fifth["payload"]["checks"]
