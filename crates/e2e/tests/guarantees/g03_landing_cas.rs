@@ -380,12 +380,10 @@ fn a_landing_retires_when_canonical_moves_before_update_ref() {
     let intent =
         project.rows("SELECT id FROM execution WHERE kind = 'landing' AND intent_state = 'open'");
     assert_eq!(intent.len(), 1);
+    // The accepted continuation reuses the failed parent's pinned input.
     let merged = git(
         &project.canonical(),
-        &[
-            "rev-parse",
-            &format!("refs/yard/landings/{}", intent[0]["id"]),
-        ],
+        &["rev-parse", &format!("refs/yard/landings/{failed_parent}")],
     )
     .trim()
     .to_string();
