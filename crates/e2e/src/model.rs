@@ -768,7 +768,7 @@ fn openai(
     });
     if let Some((read, write)) = cache {
         usage["prompt_tokens_details"] = json!({
-            "cached_tokens": read, "cache_creation_tokens": write,
+            "cached_tokens": read, "cache_write_tokens": write,
         });
     }
     let body = [
