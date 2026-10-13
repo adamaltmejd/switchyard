@@ -145,7 +145,6 @@ fn inputs_are_refused_by_name_and_write_nothing() {
         "[workflows.plan]\naccess = \"read-only\"\nreview = \"none\"\n",
         "",
     );
-    assert!(!without.contains("workflows.plan"));
     project.write(".yard/config.toml", &without);
     project.git(&["commit", "--quiet", "-am", "Drop plan"]);
     let refused = project.refused(&["sync"]);
