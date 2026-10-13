@@ -789,9 +789,8 @@ pub async fn land(
         let crate::plan::Runner::Command { gate: name } = &node.runner else {
             return Err(Fail::refused("unsupported admitted landing runner"));
         };
-        let gate = loaded
-            .config
-            .gates
+        let gates = loaded.landing_gates(&attempt)?;
+        let gate = gates
             .iter()
             .find(|gate| &gate.name == name)
             .ok_or_else(|| Fail::refused("admitted landing gate absent"))?;
