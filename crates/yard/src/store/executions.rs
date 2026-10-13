@@ -488,15 +488,6 @@ fn binding(
             // Old checks can precede node/result binding. Preserve their
             // supported panel continuation without inventing a producer result.
             if value.get("blocked").is_none() {
-                let input = super::checks::Input {
-                    attempt: attempt.id,
-                    base: start.base.unwrap_or_default().into(),
-                    head: start.head.unwrap_or_default().into(),
-                    proof: start.proof.unwrap_or_default().into(),
-                    ticket_revision: start.ticket_revision.unwrap_or_default(),
-                    plan_revision: attempt.plan_revision(),
-                    digest: start.digest.unwrap_or_default().into(),
-                };
                 let mut blocked = Vec::new();
                 let mut previous = Some(source);
                 while let Some(node) = previous {
