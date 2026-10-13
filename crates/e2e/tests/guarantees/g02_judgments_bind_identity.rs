@@ -29,6 +29,10 @@ const GATE: &str = "[gates.check]\ncommand = \"test -f feature.txt\"\nstage = \"
 /// follows completed checks. Host Git supplies blobs and the fixed image tree.
 /// Sabotage: resolved overwrites adopted definitions, stale tool/skill digest,
 /// or whole-panel invalidation. Host counters prove actual consumers.
+/// All three selected Pi agents consume these paths. Each staging adoption
+/// must rerun the implementer and both reviews; its fresh candidate supplier
+/// also invalidates both host gates. Sabotage: ignore staged inputs for a
+/// completed implementer merely because its old candidate tuple still matches.
 #[test]
 fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
     let hold = Latch::new();
@@ -46,6 +50,9 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
             "consumer-source-v1"
         }));
         if request.has_tool("yard_publish_review") {
+            if future {
+                assert_eq!(request.body["model"], "adopted-model");
+            }
             if !future
                 && request.opens()
                 && request
@@ -105,11 +112,18 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
         if request.opens() && request.prompt().contains("Capacity holder") {
             return Reply::Hold(capacity_held.clone(), Box::new(Reply::Text("Held".into())));
         }
+        let feature = if request.system().contains("consumer-skill-v2") {
+            "feature-skill-v2"
+        } else if future {
+            "feature-tool-v2"
+        } else {
+            "feature-v1"
+        };
         act(
             request,
-            vec![bash(
-                "cd /workspace && printf 'feature\\n' > feature.txt && git add -A && git commit -qm Feature && printf 'proof' > /yard/proof/evidence.txt",
-            )],
+            vec![bash(&format!(
+                "cd /workspace && printf '{feature}\\n' > feature.txt && git add -A && git commit -qm Feature && printf 'proof' > /yard/proof/evidence.txt",
+            ))],
         )
     });
     machine.start();
@@ -534,7 +548,24 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
         ]
     );
 
-    for (revision, skill) in [(7, "v1"), (8, "v2")] {
+    let mut current_candidate = candidate.clone();
+    for (revision, skill, feature) in [
+        (7, "v1", "feature-tool-v2\n"),
+        (8, "v2", "feature-skill-v2\n"),
+    ] {
+        let prior_executions =
+            project.rows("SELECT * FROM execution WHERE attempt = 1 ORDER BY id");
+        let prior_ids = prior_executions
+            .iter()
+            .map(|row| row["id"].as_i64().unwrap().to_string())
+            .collect::<Vec<_>>();
+        let prior_checks = project.rows("SELECT * FROM \"check\" WHERE execution IN (SELECT id FROM execution WHERE attempt = 1) ORDER BY id");
+        let prior_check_ids = prior_checks
+            .iter()
+            .map(|row| row["id"].as_i64().unwrap().to_string())
+            .collect::<Vec<_>>();
+        let prior_revisions =
+            project.rows("SELECT * FROM plan_revision WHERE attempt = 1 ORDER BY revision");
         stage(&project, "v2", skill);
         let staging_commit = project.git(&["rev-parse", "HEAD"]).trim().to_string();
         let before = project.rows("SELECT * FROM audit ORDER BY seq");
@@ -561,24 +592,78 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
         assert_eq!(adopt["result"]["plan_revision"], revision, "{adopt}");
         let item = approval(&mut watch);
         assert_eq!(item["payload"]["plan_revision"], revision);
-        let rows = project.rows(&format!("SELECT node, digest, inputs FROM execution WHERE attempt = 1 AND plan_revision = {revision} ORDER BY id"));
+        let rows = project.rows(&format!("SELECT id, node, digest, inputs, result, teardown, reserved FROM execution WHERE attempt = 1 AND plan_revision = {revision} ORDER BY id"));
         assert_eq!(
             rows.iter()
                 .map(|row| row["node"].clone())
                 .collect::<Vec<_>>(),
-            json!(["review-0", "review-2"]).as_array().unwrap().clone()
+            json!([
+                "implementer",
+                "candidate-gate-check",
+                "candidate-gate-keep",
+                "review-0",
+                "review-2"
+            ])
+            .as_array()
+            .unwrap()
+            .clone()
         );
         for row in &rows {
-            let old = project.rows(&format!("SELECT digest FROM execution WHERE attempt = 1 AND node = '{}' AND plan_revision = {}", row["node"].as_str().unwrap(), revision - 1));
-            assert_ne!(row["digest"], old[0]["digest"]);
+            let old = prior_executions
+                .iter()
+                .rev()
+                .find(|old| old["node"] == row["node"])
+                .unwrap();
+            assert_ne!(row["id"], old["id"]);
+            assert_eq!(row["teardown"], 1);
+            assert_eq!(row["reserved"], 0);
+            if row["node"].as_str().unwrap().starts_with("review-") {
+                assert_ne!(row["digest"], old["digest"]);
+            }
         }
-        let inputs: Value = serde_json::from_str(rows[1]["inputs"].as_str().unwrap()).unwrap();
-        let supplier = project.rows(&format!("SELECT id, result FROM execution WHERE attempt = 1 AND node = 'review-0' AND plan_revision = {revision}"));
+        let clone = project.path.join(".yard/local/attempts/1/clone");
+        let produced = git(&clone, &["rev-parse", "HEAD"]).trim().to_string();
+        assert_ne!(produced, current_candidate);
+        git(
+            &clone,
+            &["merge-base", "--is-ancestor", &current_candidate, &produced],
+        );
+        assert_eq!(
+            std::fs::read_to_string(clone.join("feature.txt")).unwrap(),
+            feature
+        );
+        assert_eq!(item["payload"]["head"], produced);
+        assert_eq!(item["payload"]["proof"], first["payload"]["proof"]);
+        let base = git(
+            &project.canonical(),
+            &["merge-base", "refs/heads/main", &produced],
+        )
+        .trim()
+        .to_string();
+        let candidate_value =
+            json!({"base": base, "head": produced, "proof": first["payload"]["proof"]});
+        let producer_result: Value =
+            serde_json::from_str(rows[0]["result"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            producer_result["outputs"]["result"],
+            json!({"kind": "candidate", "value": candidate_value})
+        );
+        for row in &rows[1..] {
+            let inputs: Value = serde_json::from_str(row["inputs"].as_str().unwrap()).unwrap();
+            assert_eq!(
+                inputs["candidate"],
+                json!({"kind": "candidate",
+                "source": {"execution": rows[0]["id"], "node": "implementer", "output": "result"},
+                "value": candidate_value})
+            );
+        }
+        let inputs: Value = serde_json::from_str(rows[4]["inputs"].as_str().unwrap()).unwrap();
+        let supplier = &rows[3];
         assert_eq!(
             inputs["panel"]["source"],
-            json!({"execution": supplier[0]["id"], "node": "review-0", "output": "result"})
+            json!({"execution": supplier["id"], "node": "review-0", "output": "result"})
         );
-        let result: Value = serde_json::from_str(supplier[0]["result"].as_str().unwrap()).unwrap();
+        let result: Value = serde_json::from_str(supplier["result"].as_str().unwrap()).unwrap();
         assert_eq!(inputs["panel"]["kind"], "verdict");
         assert_eq!(
             inputs["panel"]["value"],
@@ -607,12 +692,31 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
                 .unwrap();
             assert_eq!(source["blob"], blob);
         }
+        assert_eq!(
+            project.rows(&format!(
+                "SELECT * FROM execution WHERE id IN ({}) ORDER BY id",
+                prior_ids.join(",")
+            )),
+            prior_executions
+        );
+        assert_eq!(
+            project.rows(&format!(
+                "SELECT * FROM \"check\" WHERE id IN ({}) ORDER BY id",
+                prior_check_ids.join(",")
+            )),
+            prior_checks
+        );
+        assert_eq!(project.rows(&format!("SELECT * FROM plan_revision WHERE attempt = 1 AND revision < {revision} ORDER BY revision")), prior_revisions);
+        current_candidate = produced;
     }
     assert_eq!(
         std::fs::read_to_string(&gate_counter).unwrap(),
-        "original\nadopted\n"
+        "original\nadopted\nadopted\nadopted\n"
     );
-    assert_eq!(std::fs::read_to_string(&keep_counter).unwrap(), "keep\n");
+    assert_eq!(
+        std::fs::read_to_string(&keep_counter).unwrap(),
+        "keep\nkeep\nkeep\n"
+    );
     assert_eq!(
         project.rows(&format!(
             "SELECT * FROM execution WHERE id IN ({}) ORDER BY id",
@@ -717,37 +821,51 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
     );
     let mut decision = decision;
     decision["plan_revision"] = json!(8);
+    decision["head"] = json!(current_candidate);
     let accepted = operator.call("yard_attempt_approve", decision);
     assert!(accepted.get("error").is_none(), "{accepted}");
     watch.event("landing.recorded", &[]);
     git(
         &project.canonical(),
-        &["merge-base", "--is-ancestor", &candidate, "refs/heads/main"],
+        &[
+            "merge-base",
+            "--is-ancestor",
+            &current_candidate,
+            "refs/heads/main",
+        ],
     );
     // Candidate adoption leaves landing commands at their original definitions.
     assert_eq!(
         std::fs::read_to_string(&gate_counter).unwrap(),
-        "original\nadopted\noriginal\n"
+        "original\nadopted\nadopted\nadopted\noriginal\n"
     );
     assert_eq!(
         std::fs::read_to_string(&keep_counter).unwrap(),
-        "keep\nkeep\n"
+        "keep\nkeep\nkeep\nkeep\n"
     );
     let requests = machine.model.requests();
-    let openings = |marker: &str| {
+    let openings = |marker: &str, reviewer: bool| {
         requests
             .iter()
             .filter(|request| {
                 request.opens()
-                    && request.has_tool("yard_publish_review")
+                    && request.has_tool("yard_publish_review") == reviewer
+                    && !request.has_tool("yard_publish_report")
                     && request.system().contains(marker)
             })
             .count()
     };
-    assert_eq!(openings("consumer-source-v1"), 10);
-    assert_eq!(openings("consumer-source-v2"), 4);
-    assert_eq!(openings("consumer-skill-v1"), 12);
-    assert_eq!(openings("consumer-skill-v2"), 2);
+    // Reviews: 3 initial + 1 profile + 3 supplier/profile + 1 routing +
+    // 2 settings, then 2 extension + 2 skill. Implementation: initial,
+    // extension, skill. The read-only capacity holder is not a consumer here.
+    assert_eq!(openings("consumer-source-v1", true), 10);
+    assert_eq!(openings("consumer-source-v2", true), 4);
+    assert_eq!(openings("consumer-skill-v1", true), 12);
+    assert_eq!(openings("consumer-skill-v2", true), 2);
+    assert_eq!(openings("consumer-source-v1", false), 1);
+    assert_eq!(openings("consumer-source-v2", false), 2);
+    assert_eq!(openings("consumer-skill-v1", false), 2);
+    assert_eq!(openings("consumer-skill-v2", false), 1);
 }
 
 /// Seats publish no findings; the implementer commits feature.txt and writes
