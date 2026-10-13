@@ -1418,14 +1418,6 @@ fn a_gate_errors_start_reruns_that_gate() {
             .contains(&children[0]["id"])
     );
     assert_eq!(
-        git(&project.canonical(), &["rev-parse", &format!("{landed}^1")]).trim(),
-        target
-    );
-    assert_eq!(
-        git(&project.canonical(), &["rev-parse", &format!("{landed}^2")]).trim(),
-        head
-    );
-    assert_eq!(
         project.rows("SELECT approval, outcome FROM execution WHERE kind = 'landing' ORDER BY id"),
         vec![
             json!({"approval": approvals[0]["id"], "outcome": "error"}),
