@@ -88,12 +88,21 @@ Then run `yard sync` to bring it into your checkout.
 
 ## Syncing and upgrades
 
-Import your own commits with `yard sync` between landings. An import moves
-the target, so a landing in flight retires and reruns every gate.
+Import your own commits with `yard sync` between landings. A changed target
+or invalid prepared ref or selected evidence retires a pre-intent landing
+continuation. Fresh preparation and verification follow. An unchanged exact
+prepared input can retain eligible completed passing or explicitly accepted
+failed children after checked predecessor ownership and current identity and
+policy revalidation. Infrastructure-error and interrupted children rerun.
 
-A `.yard/` change takes effect for the next execution after `yard sync`. A
-new binary needs `yard daemon restart`. Each running execution comes back as
-`stopped: interrupted`; answer it with `start`.
+Template changes under `.yard/` after `yard sync` apply to future admissions.
+Active attempts keep their admitted inputs through sync, repair and restart.
+Approval and protected-path policy remain live. Revoked containment narrows
+egress at box launch; capacity and credentials also remain live. Historical
+admission and preparation evidence that was not recorded stays unknown.
+
+A new binary needs `yard daemon restart`. Each running execution comes back
+as `stopped: interrupted`; answer it with `start`.
 
 ## When to ask
 
