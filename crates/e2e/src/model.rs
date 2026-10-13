@@ -262,10 +262,12 @@ pub enum Reply {
     AnthropicError,
     /// A non-retryable Responses failure after a reported tool reply.
     ResponsesError,
-    /// Token counts for a real Pi chat-completions reply.
+    /// Token totals and optional cache subsets for a real Pi chat reply.
     ChatUsage {
         input: u64,
         output: u64,
+        /// Cache read and write subsets of input.
+        cache: Option<(u64, u64)>,
         reply: Box<Reply>,
     },
     /// Token totals for a real Codex Responses turn; no monetary cost.
@@ -415,10 +417,15 @@ fn read_request(stream: &TcpStream) -> Option<ModelRequest> {
 }
 
 fn render(reply: Reply, request: &ModelRequest) -> Vec<u8> {
-    render_usage(reply, request, (PROMPT_TOKENS, COMPLETION_TOKENS))
+    render_usage(reply, request, (PROMPT_TOKENS, COMPLETION_TOKENS), None)
 }
 
-fn render_usage(reply: Reply, request: &ModelRequest, usage: (u64, u64)) -> Vec<u8> {
+fn render_usage(
+    reply: Reply,
+    request: &ModelRequest,
+    usage: (u64, u64),
+    cache: Option<(u64, u64)>,
+) -> Vec<u8> {
     match reply {
         Reply::AnthropicUsage { input, output, cache_read, cache_write, reply } => {
             assert!(anthropic(request));
@@ -433,10 +440,11 @@ fn render_usage(reply: Reply, request: &ModelRequest, usage: (u64, u64)) -> Vec<
         Reply::ChatUsage {
             input,
             output,
+            cache,
             reply,
         } => {
             assert!(!responses(request) && !anthropic(request));
-            render_usage(*reply, request, (input, output))
+            render_usage(*reply, request, (input, output), cache)
         }
         Reply::ResponsesUsage {
             input,
@@ -444,16 +452,16 @@ fn render_usage(reply: Reply, request: &ModelRequest, usage: (u64, u64)) -> Vec<
             reply,
         } => {
             assert!(responses(request));
-            render_usage(*reply, request, (input, output))
+            render_usage(*reply, request, (input, output), None)
         }
         Reply::Hold(latch, inner) => {
             latch.hold();
-            render_usage(*inner, request, usage)
+            render_usage(*inner, request, usage, cache)
         }
         reply if anthropic(request) => render_anthropic(reply, request, (usage.0, usage.1, 0, 0)),
         Reply::Text(text) if responses(request) => responses_text(&text, request, usage),
         Reply::Tools(calls) if responses(request) => responses_tools(calls, request, usage),
-        reply => openai(reply, request, usage),
+        reply => openai(reply, request, usage, cache),
     }
 }
 
@@ -704,7 +712,12 @@ fn anthropic_delta(stop_reason: &str, output: u64) -> String {
 }
 
 /// The OpenAI chat-completions API, streamed as SSE.
-fn openai(reply: Reply, request: &ModelRequest, tokens: (u64, u64)) -> Vec<u8> {
+fn openai(
+    reply: Reply,
+    request: &ModelRequest,
+    tokens: (u64, u64),
+    cache: Option<(u64, u64)>,
+) -> Vec<u8> {
     let turn = request.turn();
     let (delta, finish) = match reply {
         Reply::Text(text) => (json!({ "role": "assistant", "content": text }), "stop"),
@@ -748,11 +761,16 @@ fn openai(reply: Reply, request: &ModelRequest, tokens: (u64, u64)) -> Vec<u8> {
         });
         format!("data: {chunk}\n\n")
     };
-    let usage = json!({
+    let mut usage = json!({
         "prompt_tokens": tokens.0,
         "completion_tokens": tokens.1,
         "total_tokens": tokens.0 + tokens.1,
     });
+    if let Some((read, write)) = cache {
+        usage["prompt_tokens_details"] = json!({
+            "cached_tokens": read, "cache_creation_tokens": write,
+        });
+    }
     let body = [
         chunk(
             json!([{ "index": 0, "delta": delta, "finish_reason": null }]),

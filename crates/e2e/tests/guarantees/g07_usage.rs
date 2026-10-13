@@ -4,9 +4,10 @@ use serde_json::{Value, json};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Real Pi: no usage, then a resumed turn interrupted after one reported
-/// message, then an explicit-zero resumed completion. The host wrapper
-/// removes fields from real frames; Pi otherwise always supplies catalog cost.
-/// Sabotage: unwrap_or(0), save only terminal usage, or count resumed history.
+/// cache-inclusive message, then an explicit-zero resumed completion. The host
+/// wrapper removes fields from real frames; Pi otherwise supplies catalog cost.
+/// Sabotage: drop cacheRead or cacheWrite, unwrap_or(0), save only terminal
+/// usage, or count resumed history.
 /// Fresh Codex and the ordinary Pi landing cannot expose these mechanisms.
 #[test]
 fn pi_unknowns_and_interrupted_resume_usage_remain_execution_local() {
@@ -42,6 +43,8 @@ fn pi_unknowns_and_interrupted_resume_usage_remain_execution_local() {
         Reply::ChatUsage {
             input: if round == 2 { 0 } else { PROMPT_TOKENS },
             output: if round == 2 { 0 } else { COMPLETION_TOKENS },
+            // Pi reports input 700, cacheRead 200 and cacheWrite 100.
+            cache: (round == 1).then_some((200, 100)),
             reply: Box::new(reply),
         }
     });
