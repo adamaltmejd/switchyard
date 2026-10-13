@@ -551,6 +551,7 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     // must open the prompt; their appearance in the handoff cannot qualify.
     // Dropping effort or launching predecessor effort with current model and
     // handoff fails the independently held provider-wire effort assertion.
+    // Omitting the SDK's extended-level map clamps max and fails it too.
     let original_rows = project.rows(&format!("SELECT * FROM execution WHERE id = {old}"));
     let configuration = std::fs::read_to_string(project.path.join(".yard/config.toml")).unwrap();
     project.write(
@@ -560,7 +561,7 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
                 "model = \"fake-model\"",
                 "model = \"packaged-adopted-model\"",
             )
-            .replace("effort = \"medium\"", "effort = \"high\"")
+            .replace("effort = \"medium\"", "effort = \"max\"")
             .replace("Corrected packaged audit", "Fresh replacement audit"),
     );
     project.git(&["add", ".yard/config.toml"]);
@@ -631,7 +632,7 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     second.wait_held();
     let settings_request = controller_requests(&machine).last().unwrap().clone();
     assert_eq!(settings_request.body["model"], "packaged-adopted-model");
-    assert_eq!(settings_request.body["reasoning"]["effort"], "high");
+    assert_eq!(settings_request.body["reasoning"]["effort"], "max");
     assert_context(&settings_request, false);
     assert!(
         settings_request
@@ -724,7 +725,7 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     third.wait_held();
     let staged_request = controller_requests(&machine).last().unwrap().clone();
     assert_eq!(staged_request.body["model"], "packaged-adopted-model");
-    assert_eq!(staged_request.body["reasoning"]["effort"], "high");
+    assert_eq!(staged_request.body["reasoning"]["effort"], "max");
     assert_context(&staged_request, true);
     assert!(
         staged_request
@@ -819,7 +820,7 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     fourth.wait_held();
     let image_request = controller_requests(&machine).last().unwrap().clone();
     assert_eq!(image_request.body["model"], "packaged-adopted-model");
-    assert_eq!(image_request.body["reasoning"]["effort"], "high");
+    assert_eq!(image_request.body["reasoning"]["effort"], "max");
     assert_context(&image_request, true);
     assert!(
         image_request

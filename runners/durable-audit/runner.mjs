@@ -237,6 +237,8 @@ async function main() {
     auth: { apiKey: { name: 'Yard injecting route', resolve: async () => ({ auth: { apiKey: 'yard-placeholder' } }) } },
     models: [{ id: cfg.model, name: cfg.model, provider: cfg.provider, api: 'openai-completions', baseUrl,
       input: ['text'], reasoning: cfg.effort !== null, contextWindow: 131072, maxTokens: 4096,
+      // The SDK clamps xhigh/max unless the model explicitly maps them.
+      thinkingLevelMap: { xhigh: 'xhigh', max: 'max' },
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       compat: { supportsDeveloperRole: false, supportsReasoningEffort: true,
         ...(cfg.provider === 'openrouter' ? { thinkingFormat: 'openrouter' } : {}) } }],
