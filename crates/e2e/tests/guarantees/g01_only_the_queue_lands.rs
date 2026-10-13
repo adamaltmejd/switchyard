@@ -2,17 +2,18 @@
 
 use e2e::*;
 use serde_json::json;
+use std::os::unix::fs::FileTypeExt;
 use std::sync::{Arc, Mutex};
 
 /// A worker with its MCP bearer and its clone: `git push` fails, no RPC
 /// lands, canonical is not reachable from the box. In one model turn the
-/// worker commits, pushes to canonical's host path, calls the daemon's
-/// socket and asks the MCP route for a daemon method. Control: the queue
-/// lands the same candidate.
+/// worker commits, pushes to canonical's host path, probes the daemon's
+/// socket visibility and asks the MCP route for a daemon method. Control:
+/// the queue lands the same candidate.
 ///
 /// Sabotage: mount the project's `.yard/local` into the worker box at its
 /// host path; the push to canonical lands the commit. Mount the daemon's
-/// state dir (the socket) into the worker box; the socket call connects.
+/// state dir (the socket) into the worker box; the socket becomes visible.
 /// Accept an MCP request that carries no `Mcp-Session-Id`: in `answer` in
 /// crates/yard/src/mcp.rs change `else if !daemon.grants.in_session(..)` to
 /// `else if false`; the probe gets a JSON-RPC answer,
@@ -42,6 +43,8 @@ fn a_worker_cannot_land_by_push_rpc_or_canonical() {
     );
     let canonical = project.canonical();
     let socket = machine.state.join("yard/yard.sock");
+    // The host has the live socket; the same path must be absent in the box.
+    assert!(std::fs::metadata(&socket).unwrap().file_type().is_socket());
     // A call on the MCP route with the worker's bearer; `pattern` is what
     // its answer is searched for, printed after `name=`. The bearer alone has no
     // MCP session, so the route answers nothing but a 404 status.
@@ -55,8 +58,7 @@ fn a_worker_cannot_land_by_push_rpc_or_canonical() {
         "cd /workspace; \
          git push --quiet '{canonical}' HEAD:refs/heads/main 2>/dev/null; echo \"push-canonical=$?\"; \
          test -e '{canonical}'; echo \"canonical=$?\"; \
-         curl -s --max-time 5 --unix-socket '{socket}' http://yard/rpc \
-           -d '{{\"method\":\"attempt.approve\",\"params\":{{}}}}' >/dev/null 2>&1; echo \"socket=$?\"; \
+         test -e '{socket}'; echo \"socket=$?\"; \
          {method}",
         canonical = canonical.display(),
         socket = socket.display(),
@@ -77,7 +79,7 @@ fn a_worker_cannot_land_by_push_rpc_or_canonical() {
         assert!(probes.contains(line), "{line} missing from:\n{probes}");
     }
     assert!(!probes.contains("push-canonical=0"), "{probes}");
-    assert!(!probes.contains("socket=0"), "{probes}");
+    assert!(probes.lines().any(|line| line == "socket=1"), "{probes}");
     assert_eq!(project.canonical_head(), target);
 
     let head = approval["data"]["payload"]["head"].as_str().unwrap();

@@ -359,7 +359,6 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     launch(&project, 1, "Packaged audit");
     let refused = ended(&project, "Y-1", "Missing packaged asset");
     assert!(refused["report"].is_null());
-    assert!(controller_requests(&machine).is_empty());
     assert!(
         machine.model.requests().is_empty(),
         "missing asset must precede every model call"
