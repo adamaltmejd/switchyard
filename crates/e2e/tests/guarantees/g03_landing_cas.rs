@@ -181,8 +181,9 @@ fn hold_update_ref(
 /// Canonical moved by hand between verify and land: the landing retires and
 /// re-queues. On green, canonical is the verified ref and contains the head.
 /// The landing is held at its `update-ref`, after its gates and intent,
-/// while a ticket edit is refused naming the intent (another ticket edits
-/// successfully), then the operator moves canonical.
+/// while ticket edits and a valid plan adjustment refuse naming the intent.
+/// The same adjustment succeeds before the intent; another ticket edits
+/// successfully. Then the operator moves canonical.
 ///
 /// Sabotage: make `queue::land` record the landing when `update_ref`
 /// reports the old value did not match; the first landing is recorded
@@ -196,12 +197,39 @@ fn a_landing_retires_when_canonical_moves_before_update_ref() {
     let project = Project::new(
         &machine,
         "p",
-        &config("[gates.check]\ncommand = \"test -f feature.txt\"\nruns_in = \"host\"\n")
+        &config(concat!(
+            "[gates.check]\ncommand = \"test -f feature.txt\"\nruns_in = \"host\"\n",
+            "\n[profiles.revised]\n",
+            "runner = {kind = \"agent\", agent = \"worker\", instructions = \"Keep the feature.\"}\n",
+            "access = \"write-allowed\"\noutputs = {result = \"candidate\"}\noutcomes = [\"complete\"]\n",
+        ))
             .replace("review = [\"correctness\"]", "review = \"none\""),
     );
     let mut watch = project.watch(0);
     project.json(&["ticket", "new", "--title", "Add feature"]);
-    let raised = watch.attention();
+    watch.attention();
+    // The same admitted candidate accepts this instructions-only selection
+    // outside the intent boundary. Its agent, grants and landing stay frozen.
+    let adjustment = json!({"implementer": {"profile": "revised"}});
+    let mut operator = machine.operator();
+    operator.initialize();
+    let current = project.json(&["attempt", "show", "Y-1"]);
+    let expected = current["attempt"]["plan_revision"].as_i64().unwrap();
+    let adjusted = operator.call(
+        "yard_attempt_revise",
+        json!({"project": project.path, "ticket": "Y-1",
+            "plan_revision": expected, "overrides": adjustment}),
+    );
+    assert_eq!(
+        adjusted["result"]["plan_revision"],
+        expected + 1,
+        "{adjusted}"
+    );
+    let raised = watch.until("revised approval", |event| {
+        event["event"] == "attention.raised"
+            && event["data"]["kind"] == "approval"
+            && event["data"]["payload"]["plan_revision"] == expected + 1
+    });
     let head = raised["data"]["payload"]["head"]
         .as_str()
         .unwrap()
@@ -210,16 +238,66 @@ fn a_landing_retires_when_canonical_moves_before_update_ref() {
     project.json(&["ticket", "new", "--title", "Other", "--parked"]);
 
     std::fs::write(&armed, "").unwrap();
+    let plan_revision =
+        project.json(&["attempt", "show", "Y-1"])["attempt"]["plan_revision"].to_string();
     project.json(&[
-        "attempt", "approve", "--target", "main", "Y-1", "--head", &head,
+        "attempt",
+        "approve",
+        "--target",
+        "main",
+        "Y-1",
+        "--head",
+        &head,
+        "--plan-revision",
+        &plan_revision,
     ]);
     assert_eq!(watch.said(&said), "held\n");
     std::fs::remove_file(&armed).unwrap();
-    // An edit on the intent is refused; the other ticket can be edited.
-    // Sabotage: drop admit::edit's refuse_during_intent guard.
     let intent =
         project.rows("SELECT id FROM execution WHERE kind = 'landing' AND intent_state = 'open'");
     assert_eq!(intent.len(), 1);
+    // G3 Shown-by: a valid plan adjustment racing the held intent refuses
+    // naming it and changes no plan, approval, attention or audit; the same
+    // adjustment succeeds before the intent. This maps Live adjustment.
+    // attempt_revise guards this independently after ordinary validation.
+    // Sabotage: remove only attempt_revise's refuse_during_intent call.
+    // It must fail first at structured refusal, before identity and no-write
+    // observations. The FIFO holds real Git after the mutation intent;
+    // store snapshots supply the outside oracle.
+    let plan = project.json(&["attempt", "show", "Y-1"]);
+    let revisions = project.rows("SELECT * FROM plan_revision ORDER BY attempt, revision");
+    let approvals = project.rows("SELECT * FROM approval ORDER BY id");
+    let attention = project.rows("SELECT * FROM attention ORDER BY id");
+    let audit = project.rows("SELECT * FROM audit ORDER BY seq");
+    let refused = operator.call(
+        "yard_attempt_revise",
+        json!({"project": project.path, "ticket": "Y-1",
+            "plan_revision": plan["attempt"]["plan_revision"], "overrides": adjustment}),
+    );
+    assert_eq!(refused["error"]["code"], "refused", "{refused}");
+    assert_eq!(refused["error"]["data"]["intent"], intent[0]["id"]);
+    let unchanged = project.json(&["attempt", "show", "Y-1"]);
+    assert_eq!(
+        unchanged["attempt"]["plan_revision"],
+        plan["attempt"]["plan_revision"]
+    );
+    assert_eq!(unchanged["attempt"]["plan"], plan["attempt"]["plan"]);
+    assert_eq!(unchanged["plan_revisions"], plan["plan_revisions"]);
+    assert_eq!(
+        project.rows("SELECT * FROM plan_revision ORDER BY attempt, revision"),
+        revisions
+    );
+    assert_eq!(
+        project.rows("SELECT * FROM approval ORDER BY id"),
+        approvals
+    );
+    assert_eq!(
+        project.rows("SELECT * FROM attention ORDER BY id"),
+        attention
+    );
+    assert_eq!(project.rows("SELECT * FROM audit ORDER BY seq"), audit);
+    // An edit on the intent is refused; the other ticket can be edited.
+    // Sabotage: drop admit::edit's refuse_during_intent guard.
     let revision = project.json(&["ticket", "show", "Y-1"])["revision"].to_string();
     let refused = project.refused(&[
         "ticket",
