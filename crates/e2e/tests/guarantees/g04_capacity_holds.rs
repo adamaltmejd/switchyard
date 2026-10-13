@@ -231,8 +231,12 @@ fn a_returning_repair_takes_a_freed_lane_before_a_new_ticket() {
     );
 
     holder.wait_held();
+    // Landing releases its slot between child gates. Only the release after
+    // its terminal event settles the repair's ownership before snapshots.
     watch.find("landing checked release", |event| {
-        event["event"] == "execution.released" && event["execution"] == landing["execution"]
+        event["event"] == "execution.released"
+            && event["execution"] == landing["execution"]
+            && event["seq"].as_i64().unwrap() > landing["seq"].as_i64().unwrap()
     });
     let pending_sql = "SELECT * FROM attempt WHERE ticket = 1";
     let pending = project.rows(pending_sql);
