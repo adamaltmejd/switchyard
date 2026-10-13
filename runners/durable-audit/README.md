@@ -9,7 +9,7 @@ The operator builds the target image and commits and syncs installed
 `.yard` image/config changes. Workers change none of the installed `.yard`.
 Use Node **26.11.1**, and the unchanged package.json and package-lock.json.
 The lock pins the complete closure, including the three direct
-`@earendil-works` packages and overridden `pi-telemetry` at **1.0.4**.
+`@earendil-works` packages and overridden `pi-telemetry` at **1.2.0**.
 Durable provides the conversation and checkpoints, Pi AI the routed model
 client and schemas, and Chord the context passed to Durable. Telemetry is
 pinned because Pi AI depends on it; no telemetry exporter is configured.

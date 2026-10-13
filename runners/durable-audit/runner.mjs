@@ -13,7 +13,7 @@ class Refusal extends Error {
   constructor(reason, asset) { super(reason); this.reason = reason; this.asset = asset; }
 }
 const refuse = (reason, asset) => { throw new Refusal(reason, asset); };
-const text = value => ({ content: [{ type: 'text', text: value }] });
+const text = value => ({ output: [{ type: 'text', text: value }] });
 const exact = (value, keys) => value !== null && typeof value === 'object' &&
   !Array.isArray(value) && Object.keys(value).sort().join(',') === keys.sort().join(',');
 
@@ -54,14 +54,14 @@ async function identity() {
   if (process.version !== 'v26.11.1' || await realpath(process.execPath) !== `${ROOT}/node/bin/node`)
     refuse('runner_unavailable', 'Node 26.11.1 at node/bin/node');
   const lock = await readFile(`${ROOT}/package-lock.json`);
-  if (createHash('sha256').update(lock).digest('hex') !== '38d2d7a889d74d6e1863ea2a2be86b5ca8ed0ab9e1cef0b288195e6fe12ab33e')
+  if (createHash('sha256').update(lock).digest('hex') !== '2d6bf932cf1746d5b231e8661a8212543b33ab0cc7091d4d249296ec8eef39c2')
     refuse('runner_unavailable', 'package-lock.json');
   for (const name of ['pi-durable', 'pi-ai', 'chord', 'pi-telemetry']) {
     const path = `${ROOT}/node_modules/@earendil-works/${name}/package.json`;
     let pkg;
     try { pkg = JSON.parse(await readFile(path, 'utf8')); }
     catch { refuse('runner_unavailable', path); }
-    if (pkg.name !== `@earendil-works/${name}` || pkg.version !== '1.0.4')
+    if (pkg.name !== `@earendil-works/${name}` || pkg.version !== '1.2.0')
       refuse('runner_unavailable', path);
   }
 }
@@ -203,6 +203,8 @@ async function main() {
   }
   const read = boundedTool({ name: 'read_declared', description: 'Read one declared regular file, at most 32768 bytes.',
     parameters: Type.Object({ file: Type.String({ maxLength: 1032 }) }, { additionalProperties: false }),
+    // JSON escapes can expand each bounded input byte to six output bytes.
+    outputLimits: { maxBytes: MAX_READ * 6 + 64, maxLines: 1, retain: 'head' },
     execute: async args => {
       const path = allowed.get(args.file);
       if (!path) return text('undeclared_file');

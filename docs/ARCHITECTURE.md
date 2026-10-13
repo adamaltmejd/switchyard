@@ -855,8 +855,8 @@ execution slot.
 
 The operator's image supplies Node 26.11.1 and the exact supplied npm lock
 at `/opt/yard/durable-audit`, outside `/workspace`. The three direct
-`@earendil-works` packages `pi-durable`, `pi-ai` and `chord` are 1.0.4;
-transitive `pi-telemetry` is overridden to 1.0.4. Durable supplies the
+`@earendil-works` packages `pi-durable`, `pi-ai` and `chord` are 1.2.0;
+transitive `pi-telemetry` is overridden to 1.2.0. Durable supplies the
 conversation and SQLite checkpoints, Pi AI the model client and schemas,
 Chord its context. Telemetry is a pinned Pi AI dependency, with no configured
 exporter. The image build checks the official Node archive checksum and
