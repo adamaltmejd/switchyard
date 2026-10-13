@@ -89,6 +89,26 @@ fn row(row: &Row) -> rusqlite::Result<Attempt> {
 }
 
 impl Attempt {
+    /// Launch settings belong to the selected revision, not the original row.
+    pub fn implementation_settings(&self) -> Result<Value, Fail> {
+        let Some(admission) = &self.admission else {
+            return Ok(self.implementer.clone());
+        };
+        let plan = crate::plan::Plan::admitted(admission)
+            .map_err(|error| Fail::refused(error.to_string()))?;
+        let agent = match &plan.nodes["implementer"].runner {
+            crate::plan::Runner::Agent { agent, .. }
+            | crate::plan::Runner::Packaged { agent, .. } => agent,
+            _ => return Err(Fail::refused("implementation runner has no agent")),
+        };
+        let mut settings = admission["agents"][agent]["settings"].clone();
+        if !settings.is_object() {
+            return Err(Fail::refused("missing recorded implementation settings"));
+        }
+        settings["name"] = json!(agent);
+        Ok(settings)
+    }
+
     pub fn plan_revision(&self) -> Option<i64> {
         self.admission
             .as_ref()

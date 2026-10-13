@@ -39,9 +39,11 @@ pub fn start_implementation(
     feedback: Option<&Value>,
 ) -> Result<i64, Fail> {
     // The revision and body are read here: the row names what the prompt carries.
+    let attempt = attempts::get(tx, attempt.id)?;
+    let implementer = attempt.implementation_settings()?;
     let ticket = tickets::get(tx, attempt.ticket)?;
-    let name = attempt.implementer["name"].as_str().unwrap_or("default");
-    let harness_version = attempt.implementer["harness"]
+    let name = implementer["name"].as_str().unwrap_or("default");
+    let harness_version = implementer["harness"]
         .as_str()
         .and_then(crate::harness::get)
         .map(|harness| harness.version());
@@ -56,7 +58,7 @@ pub fn start_implementation(
             proof: attempt.proof.as_deref(),
             ticket_revision: Some(ticket.revision),
             ticket: Some(ticket.id),
-            agent: Some((name, &attempt.implementer)),
+            agent: Some((name, &implementer)),
             harness_version,
             feedback,
             ..Default::default()
@@ -544,7 +546,8 @@ pub async fn implement(
         None => loaded.config.workflow_plan(&attempt.workflow)?,
     };
     let packaged = plan.packaged();
-    let provider = attempt.implementer["provider"].as_str();
+    let implementer = attempt.implementation_settings()?;
+    let provider = implementer["provider"].as_str();
     let connection = match provider {
         Some(name) => Some(
             crate::harness::connection(name)
@@ -555,13 +558,9 @@ pub async fn implement(
     let harness: &'static dyn Harness = if packaged.is_some() {
         &crate::pi::PackagedAudit
     } else {
-        crate::harness::get(attempt.implementer["harness"].as_str().unwrap_or_default())
-            .ok_or_else(|| {
-                Fail::invalid(format!(
-                    "harness {:?} is unknown",
-                    attempt.implementer["harness"]
-                ))
-            })?
+        crate::harness::get(implementer["harness"].as_str().unwrap_or_default()).ok_or_else(
+            || Fail::invalid(format!("harness {:?} is unknown", implementer["harness"])),
+        )?
     };
     let dir = project.attempt_dir(attempt.id);
     let audit_dir = dir.join("audits").join(execution.to_string());
@@ -712,11 +711,12 @@ pub async fn implement(
                     path: path.clone(),
                 }
             }));
-            let prompt = format!("{instructions}\n{}\n{}", ticket.title, ticket.body);
+            let mut prompt = format!("{instructions}\n{}\n{}", ticket.title, ticket.body);
+            prompt.push_str(&plan_handoff(daemon, project, &attempt, &row).await?);
             if prompt.len() > 32768 {
                 return Err(Fail::refused("invalid_input: audit prompt bound"));
             }
-            let launch = json!({"provider": provider, "model": attempt.implementer["model"],
+            let launch = json!({"provider": provider, "model": implementer["model"],
             "prompt": prompt, "files": declared, "skill": format!("trusted:{skill}"),
             "identity": admitted["inputs"]["package"]});
             let bytes = launch.to_string();
@@ -775,8 +775,8 @@ pub async fn implement(
     let argv = harness
         .argv(&crate::harness::Launch {
             provider,
-            model: attempt.implementer["model"].as_str().unwrap_or_default(),
-            effort: attempt.implementer["effort"].as_str(),
+            model: implementer["model"].as_str().unwrap_or_default(),
+            effort: implementer["effort"].as_str(),
             resume: resume.as_ref().map(|(_, session)| session.as_str()),
             prompt: &prompt,
             env: &env,
@@ -1400,6 +1400,19 @@ async fn implementer_prompt(
         let diff = body_diff(daemon, project, attempt.id, read, &ticket.body).await?;
         prompt.push_str(&format!("\nThe operator edited the ticket:\n{diff}\n"));
     }
+    prompt.push_str(&plan_handoff(daemon, project, attempt, execution).await?);
+    if prompt.trim().is_empty() {
+        prompt.push_str("Continue the work.\n");
+    }
+    Ok(prompt)
+}
+
+async fn plan_handoff(
+    daemon: &Daemon,
+    project: &Project,
+    attempt: &attempts::Attempt,
+    execution: &executions::Execution,
+) -> Result<String, Fail> {
     let previous = project.read(|conn| {
         Ok(executions::for_attempt(conn, attempt.id)?
             .into_iter()
@@ -1410,19 +1423,37 @@ async fn implementer_prompt(
         && previous.plan_revision != execution.plan_revision
     {
         let before = project.read(|conn| attempts::for_execution(conn, &previous))?;
-        let old =
-            serde_json::to_string_pretty(&before.admission.as_ref().map(|value| &value["plan"]))
-                .expect("plan serializes");
-        let new =
-            serde_json::to_string_pretty(&attempt.admission.as_ref().map(|value| &value["plan"]))
-                .expect("plan serializes");
+        let evidence = |attempt: &attempts::Attempt| -> Result<String, Fail> {
+            let Some(admission) = &attempt.admission else {
+                return Ok("null".into());
+            };
+            let plan = crate::plan::Plan::admitted(admission)
+                .map_err(|error| Fail::refused(error.to_string()))?;
+            let definitions: BTreeMap<_, _> = plan
+                .nodes
+                .iter()
+                .map(|(name, node)| {
+                    (
+                        name,
+                        executions::consumed_definition(
+                            admission,
+                            &node.runner,
+                            name.starts_with("review-"),
+                        ),
+                    )
+                })
+                .collect();
+            Ok(
+                serde_json::to_string_pretty(&json!({"plan": plan, "definitions": definitions}))
+                    .expect("plan evidence serializes"),
+            )
+        };
+        let old = evidence(&before)?;
+        let new = evidence(attempt)?;
         let diff = body_diff(daemon, project, attempt.id, &old, &new).await?;
-        prompt.push_str(&format!("\nThe operator revised the plan:\n{diff}\n"));
+        return Ok(format!("\nThe operator revised the plan:\n{diff}\n"));
     }
-    if prompt.trim().is_empty() {
-        prompt.push_str("Continue the work.\n");
-    }
-    Ok(prompt)
+    Ok(String::new())
 }
 
 /// The unified diff from the body the previous execution read to the current one.

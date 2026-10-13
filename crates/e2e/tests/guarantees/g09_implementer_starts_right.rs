@@ -71,6 +71,10 @@ fn reasons(project: &Project) -> Vec<Value> {
 /// `admit::attempt_stop` skip notifying the execution; it runs on and no
 /// `stopped` is raised. Let `supervise` schedule the edit instead of raising
 /// `stopped` for a stopped run; no `stopped` item comes.
+/// Launch every execution with the default worker's settings: q's host model
+/// identity and recorded settings fail. Changed revision settings and
+/// definition-only handoff sabotages need the dependent source adoption API;
+/// this scenario uses only supported instruction revisions.
 #[test]
 fn an_edit_reaches_the_next_prompt_and_stop_delivers_it_sooner() {
     let (edit_hold, stop_hold) = (Latch::new(), Latch::new());
@@ -119,9 +123,15 @@ fn an_edit_reaches_the_next_prompt_and_stop_delivers_it_sooner() {
             .replace(
                 "implementer = \"worker\"",
                 "implementer = \"worker\"\ninstructions = \"Original implementation.\"",
+            )
+            .replace(
+                "model = \"fake-model\"",
+                "model = \"fake-model\"\neffort = \"low\"",
             ),
     );
-    let stopped = Project::new(&machine, "q", &unreviewed(""));
+    let stopped = Project::new(&machine, "q", &unreviewed(
+        "[agents.stopper]\nharness = \"pi\"\nprovider = \"openrouter\"\nmodel = \"stopped-model\"\neffort = \"high\"\n",
+    ).replace("implementer = \"worker\"", "implementer = \"stopper\""));
     let mut edit_watch = edited.watch(0);
     let mut stop_watch = stopped.watch(0);
     edited.json(&["ticket", "new", "--title", "Add feature", "--parked"]);
@@ -137,10 +147,21 @@ fn an_edit_reaches_the_next_prompt_and_stop_delivers_it_sooner() {
     stop_hold.wait_held();
 
     let execution = waiting["execution"].as_i64().unwrap();
-    let frozen_query =
-        format!("SELECT id, attempt, plan_revision, inputs FROM execution WHERE id = {execution}");
+    let frozen_query = format!(
+        "SELECT id, attempt, plan_revision, inputs, agent, harness, provider, model, effort FROM execution WHERE id = {execution}"
+    );
     let frozen = edited.rows(&frozen_query);
     assert_eq!(frozen[0]["plan_revision"], 1);
+    assert_eq!(frozen[0]["agent"], "worker");
+    assert_eq!(frozen[0]["harness"], "pi");
+    assert_eq!(frozen[0]["provider"], "openrouter");
+    assert_eq!(frozen[0]["model"], "fake-model");
+    assert_eq!(frozen[0]["effort"], "low");
+    let original_query = format!(
+        "SELECT implementer, admission FROM attempt WHERE id = {}",
+        frozen[0]["attempt"]
+    );
+    let original = edited.rows(&original_query);
     assert_eq!(
         edited.rows(&format!(
             "SELECT status, reserved FROM execution WHERE id = {execution}"
@@ -163,14 +184,16 @@ fn an_edit_reaches_the_next_prompt_and_stop_delivers_it_sooner() {
     });
     assert_eq!(owner_end["data"]["kind"], "stopped", "{owner_end}");
     edit_hold.wait_held();
-    let initial = openings(&machine)
+    let initial_request = openings(&machine)
         .into_iter()
         .find(|request| request.prompt().contains("Add feature"))
-        .unwrap()
-        .prompt();
+        .unwrap();
+    assert_eq!(initial_request.body["model"], "fake-model");
+    let initial = initial_request.prompt();
     assert!(initial.contains("Original implementation."), "{initial}");
     assert!(!initial.contains("Revised implementation."), "{initial}");
     assert_eq!(edited.rows(&frozen_query), frozen);
+    assert_eq!(edited.rows(&original_query), original);
     edit_body(&edited, "Rename it too");
     edit_hold.release();
     edit_body(&stopped, "Rename it now");
@@ -183,6 +206,15 @@ fn an_edit_reaches_the_next_prompt_and_stop_delivers_it_sooner() {
         event["event"] == "execution.ended" && event["execution"] == waiting["execution"]
     });
     assert_eq!(first["data"]["outcome"], "candidate", "{first}");
+    assert_eq!(edited.rows(&original_query), original);
+    assert_eq!(
+        edited.rows("SELECT agent, model, effort FROM execution WHERE kind = 'implementation' AND attempt IN (SELECT id FROM attempt WHERE ticket = 1) ORDER BY id"),
+        vec![json!({"agent": "worker", "model": "fake-model", "effort": "low"}); 2]
+    );
+    assert_eq!(
+        openings(&machine).last().unwrap().body["model"],
+        "fake-model"
+    );
     // The latest opening is p's second: q opens nothing more until its start.
     let second = openings(&machine).last().unwrap().last_user();
     assert!(second.contains("+Rename it too"), "{second}");
@@ -258,6 +290,16 @@ fn an_edit_reaches_the_next_prompt_and_stop_delivers_it_sooner() {
     // The latest opening is q's second: p reached approval before it.
     let second = openings(&machine).last().unwrap().last_user();
     assert!(second.contains("+Rename it now"), "{second}");
+    assert_eq!(
+        openings(&machine).last().unwrap().body["model"],
+        "stopped-model"
+    );
+    assert_eq!(
+        stopped.rows(
+            "SELECT agent, model, effort FROM execution WHERE kind = 'implementation' ORDER BY id"
+        ),
+        vec![json!({"agent": "stopper", "model": "stopped-model", "effort": "high"}); 2]
+    );
     stop_hold.release();
 }
 
