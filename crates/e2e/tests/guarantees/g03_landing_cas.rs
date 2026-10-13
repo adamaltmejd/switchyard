@@ -317,7 +317,7 @@ fn a_landing_retires_when_canonical_moves_before_update_ref() {
         &plan_revision,
     ]);
     let failure = watch.attention();
-    assert_eq!(failure["data"]["kind"], "red");
+    assert_eq!(failure["data"]["kind"], "candidate");
     assert_eq!(failure["data"]["reason"], "landing");
     let evidence = &failure["data"]["payload"]["evidence"];
     let identity = &evidence["landing"];
