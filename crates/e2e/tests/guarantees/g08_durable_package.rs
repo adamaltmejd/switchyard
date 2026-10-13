@@ -276,7 +276,7 @@ fn transcript(project: &Project<'_>, attempt: i64) -> String {
 /// exercises a different mechanism: allowlist lookup, not path validation.
 /// G13: a real pinfold exec wrapper holds after Pi and its child have published
 /// and exited, while their box still exists and the daemon awaits exec end.
-/// Edit there; keep the checkpoint while the replacement controller's model
+/// Revise there; keep the checkpoint while the replacement controller's model
 /// request is held. The wrapper, not a binary barrier, holds that exact point.
 /// Reuse
 /// attempt state, enable resume, omit the proof mount or make it writable,
@@ -289,12 +289,18 @@ fn transcript(project: &Project<'_>, attempt: i64) -> String {
 fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     let second = Latch::new();
     let second_held = second.clone();
+    let third = Latch::new();
+    let third_held = third.clone();
+    let fourth = Latch::new();
+    let fourth_held = fourth.clone();
+    let adopted_openings = std::sync::atomic::AtomicUsize::new(0);
     let machine = Machine::new("g8-durable-package", move |request| {
         assert!(
             request.has_tool("read_declared"),
             "outer Pi made a model request"
         );
-        assert!(request.context().contains("TRUSTED_SELECTED_SKILL_Y92"));
+        let staged = request.context().contains("ADOPTED_SELECTED_SKILL_Y141");
+        assert!(staged || request.context().contains("TRUSTED_SELECTED_SKILL_Y92"));
         for marker in [
             "UNSELECTED_GUIDANCE",
             "UNSELECTED_SKILL",
@@ -321,8 +327,25 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
                 tool("read_declared", json!({"file": "source:../operator.env"})),
                 tool("bash", json!({"command": "node /workspace/candidate.cjs"})),
             ]);
-            return if request.prompt().contains("Fresh replacement audit") {
-                Reply::Hold(second_held.clone(), Box::new(reply))
+            return if request.body["model"] == "packaged-adopted-model" {
+                assert!(request.prompt().contains("Fresh replacement audit"));
+                let latch = match adopted_openings.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                {
+                    0 => {
+                        assert!(!staged);
+                        &second_held
+                    }
+                    1 => {
+                        assert!(staged);
+                        &third_held
+                    }
+                    2 => {
+                        assert!(staged);
+                        &fourth_held
+                    }
+                    _ => panic!("unexpected packaged replacement"),
+                };
+                Reply::Hold(latch.clone(), Box::new(reply))
             } else {
                 reply
             };
@@ -341,11 +364,11 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
             .unwrap();
         let read: Value = serde_json::from_str(&read.1).unwrap();
         assert_eq!(read, json!({"value": "x".repeat(32768), "truncated": true}));
-        assert!(
-            results
-                .iter()
-                .any(|(_, s)| s.contains("TRUSTED_REFERENCE_Y92"))
-        );
+        assert!(results.iter().any(|(_, s)| s.contains(if staged {
+            "ADOPTED_REFERENCE_Y141"
+        } else {
+            "TRUSTED_REFERENCE_Y92"
+        })));
         assert!(results.iter().any(|(_, s)| s == "undeclared_file"));
         assert_eq!(
             results
@@ -498,10 +521,76 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
         std::fs::read_to_string(&checkpoint).unwrap(),
         "checkpoint-fixture\n"
     );
-    // Later canonical and candidate instructions differ from the admitted
-    // blobs. The edited execution must still load the original selection.
-    project.write("trusted/selected.md", "LATER_SELECTED_SKILL\n");
-    project.write("trusted/reference.txt", "LATER_REFERENCE\n");
+    // G2/G6/G9: independent source adoption while a published predecessor
+    // still owns its box. Sabotage: ignore a selected commit, adopt omitted
+    // sources, read Attempt.implementer, drop CAS, replace package identity,
+    // release the predecessor early, or omit audit.json's handoff. Host model
+    // requests and Git blobs supply expectations. Ordinary controls cannot
+    // catch the packaged controller's distinct launch and publication path.
+    let original_rows = project.rows(&format!("SELECT * FROM execution WHERE id = {old}"));
+    let configuration = std::fs::read_to_string(project.path.join(".yard/config.toml")).unwrap();
+    project.write(
+        ".yard/config.toml",
+        &configuration
+            .replace(
+                "model = \"fake-model\"",
+                "model = \"packaged-adopted-model\"",
+            )
+            .replace("Corrected packaged audit", "Fresh replacement audit"),
+    );
+    project.git(&["add", ".yard/config.toml"]);
+    project.git(&["commit", "-qm", "Select packaged controller settings"]);
+    project.json(&["sync"]);
+    let definition = project.git(&["rev-parse", "HEAD"]).trim().to_string();
+    assert_eq!(
+        project.json(&["attempt", "show", "Y-3"])["attempt"]["plan_revision"],
+        1
+    );
+    let adopted = operator.call(
+        "yard_attempt_revise",
+        json!({
+            "project": project.path, "ticket": "Y-3", "plan_revision": 1,
+            "definition_commit": definition
+        }),
+    );
+    assert_eq!(adopted["result"]["plan_revision"], 2, "{adopted}");
+    assert_eq!(
+        adopted["result"]["plan"]["inputs"]["staging_commit"],
+        source
+    );
+    assert_eq!(adopted["result"]["plan"]["inputs"]["image_commit"], source);
+    assert_eq!(
+        adopted["result"]["plan"]["inputs"]["package"],
+        inputs["package"]
+    );
+    let revisions = project.rows("SELECT * FROM plan_revision ORDER BY attempt, revision");
+    let audit = project.rows("SELECT * FROM audit WHERE attempt = 3 ORDER BY seq");
+    let stale = operator.call(
+        "yard_attempt_revise",
+        json!({
+            "project": project.path, "ticket": "Y-3", "plan_revision": 1,
+            "definition_commit": definition
+        }),
+    );
+    assert_eq!(stale["error"]["code"], "stale");
+    assert_eq!(
+        stale["error"]["data"],
+        json!({"identity": "plan_revision", "expected": 1, "current": 2})
+    );
+    assert_eq!(
+        project.rows("SELECT * FROM plan_revision ORDER BY attempt, revision"),
+        revisions
+    );
+    assert_eq!(
+        project.rows("SELECT * FROM audit WHERE attempt = 3 ORDER BY seq"),
+        audit
+    );
+    assert_eq!(
+        project.rows(&format!("SELECT * FROM execution WHERE id = {old}")),
+        original_rows
+    );
+    project.write("trusted/selected.md", "ADOPTED_SELECTED_SKILL_Y141\n");
+    project.write("trusted/reference.txt", "ADOPTED_REFERENCE_Y141\n");
     project.write("image-input", "LATER_IMAGE_INPUT\n");
     project.write("candidate/trusted/selected.md", "LATER_CANDIDATE_SKILL\n");
     project.git(&["add", "-A"]);
@@ -511,17 +600,16 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
         "Change canonical and candidate instructions after admission",
     ]);
     project.json(&["sync"]);
-    project.json(&[
-        "ticket",
-        "edit",
-        "Y-3",
-        "--revision",
-        "1",
-        "--body",
-        "Fresh replacement audit",
-    ]);
+    let staging = project.git(&["rev-parse", "HEAD"]).trim().to_string();
     std::fs::write(machine.root.join("release-3"), "go\n").unwrap();
     second.wait_held();
+    assert!(
+        controller_requests(&machine)
+            .last()
+            .unwrap()
+            .prompt()
+            .contains("packaged-adopted-model")
+    );
     assert_eq!(
         std::fs::read_to_string(&checkpoint).unwrap(),
         "checkpoint-fixture\n"
@@ -556,7 +644,153 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
         rows,
         vec![json!({"resumed": null, "node": "implementer"}); 2]
     );
+    let settings_owner = project.rows("SELECT id, handle, model FROM execution WHERE attempt = 3 AND plan_revision = 2 AND kind = 'implementation'")[0].clone();
+    assert_eq!(settings_owner["model"], "packaged-adopted-model");
+    for path in ["trusted/selected.md", "trusted/reference.txt"] {
+        assert_eq!(
+            std::fs::read(project.path.join(format!(
+                ".yard/local/attempts/3/audits/{}/input/trusted/{path}",
+                settings_owner["id"]
+            )))
+            .unwrap(),
+            project
+                .git(&["show", &format!("{source}:{path}")])
+                .as_bytes()
+        );
+    }
+    let settings_image = machine.pinfold(&[
+        "box",
+        "exec",
+        settings_owner["handle"].as_str().unwrap(),
+        "--",
+        "cat",
+        "/admitted-image-input",
+    ]);
+    assert!(settings_image.status.success());
+    assert_eq!(
+        settings_image.stdout,
+        project
+            .git(&["show", &format!("{source}:image-input")])
+            .as_bytes()
+    );
+    std::fs::write(machine.root.join("hold-completed-3"), "hold").unwrap();
     second.release();
+    assert_eq!(watch.said(&machine.root.join("said-3")), "held\n");
+    let staged = operator.call(
+        "yard_attempt_revise",
+        json!({
+            "project": project.path, "ticket": "Y-3", "plan_revision": 2,
+            "staging_commit": staging
+        }),
+    );
+    assert_eq!(staged["result"]["plan_revision"], 3, "{staged}");
+    std::fs::write(machine.root.join("release-3"), "go\n").unwrap();
+    third.wait_held();
+    let staged_request = controller_requests(&machine).last().unwrap().prompt();
+    for commit in [&source, &staging] {
+        let blob = project.git(&["rev-parse", &format!("{commit}:trusted/selected.md")]);
+        assert!(staged_request.contains(blob.trim()), "{staged_request}");
+    }
+    let observe = |revision: i64, staged_commit: &str, image_commit: &str| {
+        let row = project.rows(&format!(
+            "SELECT id, handle FROM execution WHERE attempt = 3 AND plan_revision = {revision} AND kind = 'implementation'"
+        ))[0].clone();
+        let shown = project.json(&["attempt", "show", "Y-3"]);
+        assert_eq!(shown["attempt"]["plan_revision"], revision);
+        let recorded = &shown["attempt"]["plan"]["inputs"];
+        assert_eq!(recorded["definition_commit"], definition);
+        assert_eq!(recorded["staging_commit"], staged_commit);
+        assert_eq!(recorded["image_commit"], image_commit);
+        for path in ["trusted/selected.md", "trusted/reference.txt"] {
+            assert_eq!(
+                std::fs::read(project.path.join(format!(
+                    ".yard/local/attempts/3/audits/{}/input/trusted/{path}",
+                    row["id"]
+                )))
+                .unwrap(),
+                project
+                    .git(&["show", &format!("{staged_commit}:{path}")])
+                    .as_bytes()
+            );
+        }
+        let bytes = machine.pinfold(&[
+            "box",
+            "exec",
+            row["handle"].as_str().unwrap(),
+            "--",
+            "cat",
+            "/admitted-image-input",
+        ]);
+        assert!(bytes.status.success());
+        assert_eq!(
+            bytes.stdout,
+            project
+                .git(&["show", &format!("{image_commit}:image-input")])
+                .as_bytes()
+        );
+        for (key, suffix) in [
+            ("dockerfile_blob", ":.yard/Dockerfile"),
+            ("build_context_tree", "^{tree}"),
+        ] {
+            assert_eq!(
+                recorded[key],
+                project
+                    .git(&["rev-parse", &format!("{image_commit}{suffix}")])
+                    .trim()
+            );
+        }
+    };
+    // Settings-only replacement consumes the original staged/image inputs.
+    // Its startup rows remain immutable after independent staging adoption.
+    let settings_row = project.rows("SELECT plan_revision, inputs, result FROM execution WHERE attempt = 3 AND plan_revision = 2 AND kind = 'implementation'");
+    assert_eq!(settings_row[0]["plan_revision"], 2);
+    observe(3, &staging, &source);
+    let predecessor = project.rows(&format!(
+        "SELECT plan_revision, inputs, report, result FROM execution WHERE id = {old}"
+    ));
+    assert_eq!(predecessor[0]["inputs"], original_rows[0]["inputs"]);
+    assert_eq!(predecessor[0]["report"], original_rows[0]["report"]);
+    project.write("image-input", "ADOPTED_IMAGE_INPUT_Y141\n");
+    project.git(&["add", "image-input"]);
+    project.git(&["commit", "-qm", "Select independent packaged image context"]);
+    project.json(&["sync"]);
+    let image_commit = project.git(&["rev-parse", "HEAD"]).trim().to_string();
+    std::fs::write(machine.root.join("hold-completed-3"), "hold").unwrap();
+    third.release();
+    assert_eq!(watch.said(&machine.root.join("said-3")), "held\n");
+    let image_adopted = operator.call(
+        "yard_attempt_revise",
+        json!({
+            "project": project.path, "ticket": "Y-3", "plan_revision": 3,
+            "image_commit": image_commit
+        }),
+    );
+    assert_eq!(
+        image_adopted["result"]["plan_revision"], 4,
+        "{image_adopted}"
+    );
+    std::fs::write(machine.root.join("release-3"), "go\n").unwrap();
+    fourth.wait_held();
+    let image_request = controller_requests(&machine).last().unwrap().prompt();
+    for commit in [&source, &image_commit] {
+        let tree = project.git(&["rev-parse", &format!("{commit}^{{tree}}")]);
+        assert!(image_request.contains(tree.trim()), "{image_request}");
+    }
+    observe(4, &staging, &image_commit);
+    assert_eq!(project.rows("SELECT plan_revision, inputs, result FROM execution WHERE attempt = 3 AND plan_revision = 2 AND kind = 'implementation'"), settings_row);
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT plan_revision, inputs, report, result FROM execution WHERE id = {old}"
+        )),
+        predecessor
+    );
+    let shown = project.json(&["attempt", "show", "Y-3"]);
+    assert_eq!(shown["executions"][0]["result_eligible"], false);
+    assert_eq!(
+        shown["attempt"]["plan"]["inputs"]["package"],
+        inputs["package"]
+    );
+    fourth.release();
     watch.until("replacement audit ended", |event| {
         event["event"] == "attempt.ended" && event["ticket"] == "Y-3"
     });
@@ -573,7 +807,7 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|row| row["kind"] == "implementation" && row["execution"] != old)
+        .find(|row| row["kind"] == "implementation" && row["plan_revision"] == 4)
         .unwrap()
         .clone();
     assert_eq!(completed["teardown"], true);

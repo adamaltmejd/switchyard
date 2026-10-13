@@ -759,16 +759,20 @@ pub async fn implement(
         )?;
         Ok(())
     })?;
-    let prompt = implementer_prompt(
-        daemon,
-        project,
-        &loaded,
-        &attempt,
-        &ticket,
-        resume.as_ref().map(|(id, _)| *id),
-        &row,
-    )
-    .await;
+    let prompt = if packaged.is_some() {
+        Ok(String::new())
+    } else {
+        implementer_prompt(
+            daemon,
+            project,
+            &loaded,
+            &attempt,
+            &ticket,
+            resume.as_ref().map(|(id, _)| *id),
+            &row,
+        )
+        .await
+    };
     let Some(prompt) = preparation_result(daemon, project, execution, prompt).await? else {
         return Ok(());
     };
