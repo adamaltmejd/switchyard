@@ -1189,8 +1189,9 @@ fn an_attempt_abandoned_while_its_landing_rereads_policy_raises_nothing() {
     std::fs::write(&resume, "go\n").unwrap();
     let ended = watch.event("execution.ended", &[("kind", "landing")]);
     assert_eq!(ended["data"]["outcome"], "withdrawn", "{ended}");
-    // G2: remove queue::lapsed's ended-attempt re-read; an open approval
-    // then survives for the abandoned candidate after the protected-path read.
+    // G2: remove queue::admit's post-protected-path ended-state refusal and
+    // queue::lapsed's live-state eligibility together; an open approval then
+    // survives for the abandoned candidate after the protected-path read.
     assert_eq!(
         project.rows("SELECT kind FROM attention WHERE state = 'open'"),
         Vec::<Value>::new()
@@ -1243,8 +1244,8 @@ fn an_attempt_abandoned_while_its_landing_rereads_policy_raises_nothing() {
     release.write_all(b"go\n").unwrap();
     assert_eq!(watch.said(&said), "held\n");
     std::fs::write(&resume, "go\n").unwrap();
-    // G2: omit the live policy re-read at landing intent; this candidate
-    // lands under its obsolete auto approval instead of withdrawing it.
+    // G2: read approval policy in queue::holds from the prior Loaded instead
+    // of current policy; the landing retires instead of withdrawing.
     let ended = watch.event("execution.ended", &[("kind", "landing")]);
     assert_eq!(ended["data"]["outcome"], "withdrawn", "{ended}");
     let raised = watch.attention();
