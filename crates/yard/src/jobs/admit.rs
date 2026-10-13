@@ -1257,9 +1257,7 @@ pub async fn attempt_revise(
         .ok_or_else(|| Fail::refused("unrecorded plan"))?;
     let old =
         crate::plan::Plan::admitted(&evidence).map_err(|error| Fail::refused(error.to_string()))?;
-    if old.runtime() != "ordinary-linear" {
-        return Err(Fail::refused("adjustment requires an ordinary candidate"));
-    }
+    let packaged = old.packaged().is_some();
     let mut selection = if params.get("definition_commit").is_some() {
         evidence["selection"].clone()
     } else {
@@ -1290,7 +1288,7 @@ pub async fn attempt_revise(
         .config
         .resolve_plan(&request)
         .map_err(|invalid| Fail::invalid("invalid plan").with(json!(invalid)))?;
-    if plan.runtime() != "ordinary-linear"
+    if plan.runtime() != old.runtime()
         || loaded
             .config
             .runnable_workflow(&plan, Some(&attempt.workflow))
@@ -1315,12 +1313,24 @@ pub async fn attempt_revise(
     {
         *instructions = previous.clone();
     }
+    if let (
+        crate::plan::Runner::Packaged { instructions, .. },
+        crate::plan::Runner::Packaged {
+            instructions: previous,
+            ..
+        },
+    ) = (&mut implementer.runner, &old_implementer.runner)
+    {
+        *instructions = previous.clone();
+    }
     if implementer != old_implementer {
         return Err(Fail::refused("adjustment changes frozen grants")
             .with(json!({"reason": "unsupported_revision"})));
     }
     if adopting {
-        let crate::plan::Runner::Agent { agent, .. } = &old.nodes["implementer"].runner else {
+        let (crate::plan::Runner::Agent { agent, .. }
+        | crate::plan::Runner::Packaged { agent, .. }) = &old.nodes["implementer"].runner
+        else {
             return Err(Fail::refused("unsupported implementer"));
         };
         let mut settings = loaded.config.agents[agent].clone();
@@ -1357,6 +1367,10 @@ pub async fn attempt_revise(
         evidence["inputs"] = loaded
             .inputs(&daemon.git, &project.canonical_dir(), &plan)
             .await?;
+        if packaged {
+            evidence["inputs"]["package"] =
+                attempt.admission.as_ref().expect("recorded plan")["inputs"]["package"].clone();
+        }
         evidence["config_head"] = json!(loaded.head);
     }
     let ordinary = loaded.config.workflow_plan(&attempt.workflow)?;
@@ -1372,7 +1386,9 @@ pub async fn attempt_revise(
     );
     evidence["plan"] = json!(plan);
     for node in plan.nodes.values() {
-        if let crate::plan::Runner::Agent { agent, .. } = &node.runner {
+        if let crate::plan::Runner::Agent { agent, .. }
+        | crate::plan::Runner::Packaged { agent, .. } = &node.runner
+        {
             let settings = &loaded.config.agents[agent];
             let harness = crate::harness::get(&settings.harness)
                 .ok_or_else(|| Fail::invalid("selected agent has no harness"))?;
@@ -1401,7 +1417,8 @@ pub async fn attempt_revise(
                 .with(json!({"reason": "active_plan", "attempt": current.id})));
         }
         let implementing = executions.iter().any(|row| row.kind == "implementation" && row.status == "running");
-        if (current.candidate().is_none() && !implementing)
+        if (packaged && !implementing)
+            || (current.candidate().is_none() && !implementing)
             || (current.next.is_some() && !implementing)
             || open.iter().any(|item| !matches!(item.kind.as_str(), "approval" | "candidate" | "red") || (item.kind == "red" && item.reason != "ownership"))
         {

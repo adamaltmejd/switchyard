@@ -716,9 +716,13 @@ pub async fn implement(
             if prompt.len() > 32768 {
                 return Err(Fail::refused("invalid_input: audit prompt bound"));
             }
-            let launch = json!({"provider": provider, "model": implementer["model"],
+            let mut launch = json!({"provider": provider, "model": implementer["model"],
             "prompt": prompt, "files": declared, "skill": format!("trusted:{skill}"),
             "identity": admitted["inputs"]["package"]});
+            // Older sealed controllers accept the envelope without effort.
+            if !implementer["effort"].is_null() {
+                launch["effort"] = implementer["effort"].clone();
+            }
             let bytes = launch.to_string();
             if bytes.len() > 131072 {
                 return Err(Fail::refused("invalid_input: audit launch bound"));
@@ -759,16 +763,21 @@ pub async fn implement(
         )?;
         Ok(())
     })?;
-    let prompt = implementer_prompt(
-        daemon,
-        project,
-        &loaded,
-        &attempt,
-        &ticket,
-        resume.as_ref().map(|(id, _)| *id),
-        &row,
-    )
-    .await;
+    let prompt = if packaged.is_some() {
+        // Pi requires a prompt; the packaged input hook reads audit.json.
+        Ok("Run the selected packaged audit.".to_string())
+    } else {
+        implementer_prompt(
+            daemon,
+            project,
+            &loaded,
+            &attempt,
+            &ticket,
+            resume.as_ref().map(|(id, _)| *id),
+            &row,
+        )
+        .await
+    };
     let Some(prompt) = preparation_result(daemon, project, execution, prompt).await? else {
         return Ok(());
     };
