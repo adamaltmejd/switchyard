@@ -830,6 +830,9 @@ fn a_packaged_audit_bounds_iterations_and_requires_native_publication() {
     // Sabotage: release before controller/box disappearance, admit a successor
     // while reserved, or cancel only the wait. Bounds and outer-Pi holds do
     // not reach this boundary. /proc, pinfold and history are external oracles.
+    // G4/G5/G8: restoring release's completed-only qualification leaves the
+    // stopped owner's exact attention open after checked release. The later
+    // publication is the same-project control; it cannot diagnose this item.
     launch(&project, 3, "Stop selected controller");
     for name in [
         "down-said-3",
@@ -891,15 +894,31 @@ fn a_packaged_audit_bounds_iterations_and_requires_native_publication() {
             ))
             .is_empty()
     );
+    let old_lock_path = project
+        .path
+        .join(format!(".yard/local/attempts/3/effects/{id}/lock"));
+    let old_lock = std::fs::OpenOptions::new()
+        .read(true)
+        .open(&old_lock_path)
+        .unwrap();
+    assert!(matches!(
+        old_lock.try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ));
+    std::fs::write(machine.root.join("hold-listing"), "hold").unwrap();
     std::fs::write(machine.root.join("down-release-3"), "go\n").unwrap();
     let stopped = watch.until("selected controller stopped", |event| {
         event["event"] == "attention.raised" && event["execution"] == id
     });
     assert_eq!(stopped["data"]["kind"], "stopped");
     assert_eq!(stopped["data"]["reason"], "unchanged");
-    let released = watch.until("selected stop checked release", |event| {
-        event["event"] == "execution.released" && event["execution"] == id
-    });
+    assert_eq!(watch.said(&machine.root.join("listing-said")), "0\n");
+    // Real teardown ended and the controller dropped its inherited lock.
+    use std::os::unix::fs::MetadataExt;
+    let inherited = old_lock.metadata().unwrap();
+    let same = std::fs::metadata(&old_lock_path).unwrap();
+    assert_eq!((inherited.dev(), inherited.ino()), (same.dev(), same.ino()));
+    old_lock.try_lock().unwrap();
     assert!(
         !machine
             .boxes("dev.yard.project")
@@ -919,6 +938,36 @@ fn a_packaged_audit_bounds_iterations_and_requires_native_publication() {
         gone.status.code() == Some(3),
         "pinfold must report the selected controller's box absent: {gone:?}"
     );
+    std::fs::write(machine.root.join("listing-release"), "go\n").unwrap();
+    let refused = watch.until("selected stop ownership refused", |event| {
+        event["event"] == "attention.raised"
+            && event["execution"] == id
+            && event["data"]["reason"] == "ownership"
+    });
+    assert_eq!(refused["data"]["kind"], "red");
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT reserved, teardown FROM execution WHERE id = {id}"
+        )),
+        vec![json!({"reserved": 1, "teardown": 0})]
+    );
+    // Hold the next checked probe until the verified same-inode owner leaves.
+    assert_eq!(said(&machine.root.join("listing-said")), "0\n");
+    old_lock.unlock().unwrap();
+    old_lock.try_lock().unwrap();
+    old_lock.unlock().unwrap();
+    std::fs::remove_file(machine.root.join("hold-listing")).unwrap();
+    std::fs::write(machine.root.join("listing-release"), "go\n").unwrap();
+    let released = watch.until("selected stop checked release", |event| {
+        event["event"] == "execution.released" && event["execution"] == id
+    });
+    // Observe this owner directly before a successor FIFO can time out.
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT state, resolution FROM attention WHERE execution = {id} AND reason = 'ownership'"
+        )),
+        vec![json!({"state": "resolved", "resolution": "reconciled"})]
+    );
     let cancelled = project.json(&["attempt", "show", "Y-3"])["executions"][0].clone();
     assert_eq!(cancelled["teardown"], true);
     assert_eq!(cancelled["result_eligible"], false);
@@ -926,16 +975,8 @@ fn a_packaged_audit_bounds_iterations_and_requires_native_publication() {
     assert_eq!(cancelled["result"]["outputs"], json!({}));
     assert!(cancelled["result"]["outcome"].is_null());
     assert_eq!(cancelled["binding"], old["binding"]);
-    let old_lock = std::fs::OpenOptions::new()
-        .read(true)
-        .open(
-            project
-                .path
-                .join(format!(".yard/local/attempts/3/effects/{id}/lock")),
-        )
-        .unwrap();
-    old_lock.try_lock().unwrap();
-    old_lock.unlock().unwrap();
+    assert_eq!(cancelled["reserved"], false);
+    assert_eq!(cancelled["outcome"], "unchanged");
     stop.release();
 
     // G8: the subsequent selected execution publishes, then a real host lock
@@ -991,7 +1032,6 @@ fn a_packaged_audit_bounds_iterations_and_requires_native_publication() {
     std::fs::write(machine.root.join("release-4"), "go\n").unwrap();
     assert_eq!(watch.said(&machine.root.join("listing-said")), "0\n");
     // The work future dropped its lock before issuing this real listing.
-    use std::os::unix::fs::MetadataExt;
     let inherited = lock.metadata().unwrap();
     let same = std::fs::metadata(&lock_path).unwrap();
     assert_eq!((inherited.dev(), inherited.ino()), (same.dev(), same.ino()));

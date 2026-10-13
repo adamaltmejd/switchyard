@@ -176,8 +176,10 @@ pub async fn release(
         .await
         .is_ok_and(|boxes| !boxes.contains(&super::supervise::box_name(project, row.id)));
     let host_gone = if row.lock_contract {
-        (!matches!(row.kind.as_str(), "cleanup" | "review" | "gate")
-            || dir(project, row).join("lock").is_file())
+        (!matches!(
+            row.kind.as_str(),
+            "cleanup" | "implementation" | "review" | "gate"
+        ) || dir(project, row).join("lock").is_file())
             && super::supervise::lock_free(&dir(project, row)).unwrap_or(false)
     } else {
         // The old binary never inherited effects/<id>/lock. Only paths
@@ -206,7 +208,7 @@ pub async fn release(
             }
         }
     };
-    let gone = boxes_gone && host_gone;
+    let mut gone = boxes_gone && host_gone;
     let detail = if !row.lock_contract && !host_gone {
         "legacy execution has no supported host ownership proof; stop the upgrade and resolve outside Yard"
     } else {
@@ -214,6 +216,11 @@ pub async fn release(
     };
     let completed_cleanup = project.tx(|tx| {
         let current = executions::get(tx, row.id)?;
+        // A concurrent checked release is authoritative over this older probe.
+        if !current.reserved {
+            gone = true;
+            return Ok(false);
+        }
         let completed_cleanup = gone
             && current.kind == "cleanup"
             && current.lock_contract
@@ -240,7 +247,16 @@ pub async fn release(
                     .as_ref()
                     .is_some_and(|result| result["infrastructure"]["outcome"] == "completed")
                 && dir(project, &released).join("lock").is_file();
-            if completed_cleanup || completed_candidate || completed_judgment {
+            let stopped_implementation = released.kind == "implementation"
+                && released.lock_contract
+                && released.status == "ended"
+                && released.outcome.as_deref() == Some("unchanged")
+                && dir(project, &released).join("lock").is_file();
+            if completed_cleanup
+                || completed_candidate
+                || completed_judgment
+                || stopped_implementation
+            {
                 for item in attempts::open_for_attempt(tx, current.attempt)? {
                     if item.kind == "red"
                         && item.reason == "ownership"
