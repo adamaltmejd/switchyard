@@ -293,14 +293,21 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     let third_held = third.clone();
     let fourth = Latch::new();
     let fourth_held = fourth.clone();
-    let adopted_openings = std::sync::atomic::AtomicUsize::new(0);
-    let machine = Machine::new("g8-durable-package", move |request| {
+    let phase = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let model_phase = phase.clone();
+    let assert_context = |request: &ModelRequest, staged: bool| {
         assert!(
             request.has_tool("read_declared"),
             "outer Pi made a model request"
         );
-        let staged = request.context().contains("ADOPTED_SELECTED_SKILL_Y141");
-        assert!(staged || request.context().contains("TRUSTED_SELECTED_SKILL_Y92"));
+        assert!(request.context().contains(if staged {
+            "ADOPTED_SELECTED_SKILL_Y141"
+        } else {
+            "TRUSTED_SELECTED_SKILL_Y92"
+        }));
+        if !staged {
+            assert!(!request.context().contains("ADOPTED_SELECTED_SKILL_Y141"));
+        }
         for marker in [
             "UNSELECTED_GUIDANCE",
             "UNSELECTED_SKILL",
@@ -312,6 +319,10 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
             assert!(!request.context().contains(marker));
         }
         assert!(!request.has_tool("bash"));
+    };
+    let machine = Machine::new("g8-durable-package", move |request| {
+        let phase = model_phase.load(std::sync::atomic::Ordering::SeqCst);
+        let staged = matches!(phase, 2 | 3);
         if request.opens() {
             let reply = Reply::Tools(vec![
                 tool("read_declared", json!({"file": "source:large.txt"})),
@@ -327,29 +338,21 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
                 tool("read_declared", json!({"file": "source:../operator.env"})),
                 tool("bash", json!({"command": "node /workspace/candidate.cjs"})),
             ]);
-            return if request.body["model"] == "packaged-adopted-model" {
-                assert!(request.prompt().contains("Fresh replacement audit"));
-                let latch = match adopted_openings.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-                {
-                    0 => {
-                        assert!(!staged);
-                        &second_held
-                    }
-                    1 => {
-                        assert!(staged);
-                        &third_held
-                    }
-                    2 => {
-                        assert!(staged);
-                        &fourth_held
-                    }
-                    _ => panic!("unexpected packaged replacement"),
-                };
-                Reply::Hold(latch.clone(), Box::new(reply))
-            } else {
-                reply
+            // Host phases choose holds before inspecting any tested input.
+            let latch = match phase {
+                1 => Some(&second_held),
+                2 => Some(&third_held),
+                3 => Some(&fourth_held),
+                0 => None,
+                _ => panic!("unexpected packaged fixture phase"),
             };
+            if let Some(latch) = latch {
+                return Reply::Hold(latch.clone(), Box::new(reply));
+            }
+            assert_context(request, staged);
+            return reply;
         }
+        assert_context(request, staged);
         let results = request.tool_results();
         if results
             .iter()
@@ -446,6 +449,12 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     let mut watch = project.watch(project.json(&["status"])["seq"].as_i64().unwrap());
     selected_start(&project, "Corrected packaged asset");
     assert_eq!(watch.said(&machine.root.join("said-3")), "held\n");
+    let initial_request = controller_requests(&machine)
+        .into_iter()
+        .find(ModelRequest::opens)
+        .unwrap();
+    assert_eq!(initial_request.body["model"], "fake-model");
+    assert_context(&initial_request, false);
     let held = project.json(&["attempt", "show", "Y-3"]);
     let source = project.git(&["rev-parse", "HEAD"]).trim().to_string();
     let inputs = &held["attempt"]["admission"]["inputs"];
@@ -527,6 +536,8 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     // release the predecessor early, or omit audit.json's handoff. Host model
     // requests and Git blobs supply expectations. Ordinary controls cannot
     // catch the packaged controller's distinct launch and publication path.
+    // Original controller settings or stale staged skill bytes fail actual
+    // host request assertions after holds chosen solely by fixture phase.
     let original_rows = project.rows(&format!("SELECT * FROM execution WHERE id = {old}"));
     let configuration = std::fs::read_to_string(project.path.join(".yard/config.toml")).unwrap();
     project.write(
@@ -601,8 +612,17 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     ]);
     project.json(&["sync"]);
     let staging = project.git(&["rev-parse", "HEAD"]).trim().to_string();
+    phase.store(1, std::sync::atomic::Ordering::SeqCst);
     std::fs::write(machine.root.join("release-3"), "go\n").unwrap();
     second.wait_held();
+    let settings_request = controller_requests(&machine).last().unwrap().clone();
+    assert_eq!(settings_request.body["model"], "packaged-adopted-model");
+    assert_context(&settings_request, false);
+    assert!(
+        settings_request
+            .prompt()
+            .contains("Fresh replacement audit")
+    );
     assert!(
         controller_requests(&machine)
             .last()
@@ -684,9 +704,14 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
         }),
     );
     assert_eq!(staged["result"]["plan_revision"], 3, "{staged}");
+    phase.store(2, std::sync::atomic::Ordering::SeqCst);
     std::fs::write(machine.root.join("release-3"), "go\n").unwrap();
     third.wait_held();
-    let staged_request = controller_requests(&machine).last().unwrap().prompt();
+    let staged_request = controller_requests(&machine).last().unwrap().clone();
+    assert_eq!(staged_request.body["model"], "packaged-adopted-model");
+    assert_context(&staged_request, true);
+    assert!(staged_request.prompt().contains("Fresh replacement audit"));
+    let staged_request = staged_request.prompt();
     for commit in [&source, &staging] {
         let blob = project.git(&["rev-parse", &format!("{commit}:trusted/selected.md")]);
         assert!(staged_request.contains(blob.trim()), "{staged_request}");
@@ -769,9 +794,14 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
         image_adopted["result"]["plan_revision"], 4,
         "{image_adopted}"
     );
+    phase.store(3, std::sync::atomic::Ordering::SeqCst);
     std::fs::write(machine.root.join("release-3"), "go\n").unwrap();
     fourth.wait_held();
-    let image_request = controller_requests(&machine).last().unwrap().prompt();
+    let image_request = controller_requests(&machine).last().unwrap().clone();
+    assert_eq!(image_request.body["model"], "packaged-adopted-model");
+    assert_context(&image_request, true);
+    assert!(image_request.prompt().contains("Fresh replacement audit"));
+    let image_request = image_request.prompt();
     for commit in [&source, &image_commit] {
         let tree = project.git(&["rev-parse", &format!("{commit}^{{tree}}")]);
         assert!(image_request.contains(tree.trim()), "{image_request}");
@@ -844,6 +874,7 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
         held["attempt"]["admission"]
     );
     assert_eq!(reopened["executions"], evidence["executions"]);
+    phase.store(0, std::sync::atomic::Ordering::SeqCst);
 
     // G8: a selected-input refusal creates no work and cannot block other
     // admissions or cleanup. Sabotage: propagate inputs()'s refusal from
