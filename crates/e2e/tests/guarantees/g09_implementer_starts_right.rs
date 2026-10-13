@@ -2,6 +2,8 @@
 
 use e2e::*;
 use serde_json::{Value, json};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 fn unreviewed(extra: &str) -> String {
     config(extra).replace("review = [\"correctness\"]", "review = \"none\"")
@@ -103,7 +105,8 @@ fn assert_operator_diff(prompt: &str, removed: &[&str], added: &[&str]) {
 /// implementer; the held execution ends unchanged. Load the execution from
 /// the latest plan by replacing only the startup `attempts::for_execution`
 /// in `supervise::implement` with `attempts::get`: the initial model prompt
-/// after the capacity wait loses the original instructions. Omit the
+/// after the capacity wait loses the original model, effort and staged bytes
+/// in the source-only phase. Omit the
 /// successor revision diff; the next model prompt fails. Make
 /// `implementer_prompt` change only the plan heading to `Plan revision:`
 /// while retaining the ticket actor heading and complete diff; the local
@@ -132,6 +135,8 @@ fn an_edit_reaches_the_next_prompt_and_stop_delivers_it_sooner() {
     let holds = (edit_hold.clone(), stop_hold.clone());
     let successor_hold = Latch::new();
     let successor_held = successor_hold.clone();
+    let source_successor = Arc::new(AtomicBool::new(false));
+    let successor_phase = source_successor.clone();
     let machine = Machine::new("g9-edit", move |request| {
         if request.prompt().contains("Hold capacity") {
             return if request.opens() {
@@ -146,7 +151,7 @@ fn an_edit_reaches_the_next_prompt_and_stop_delivers_it_sooner() {
                 vec![commit_file("renamed.txt", "renamed\n", "Rename")],
             );
         }
-        if request.system().contains("startup-bytes-v2") {
+        if request.prompt().contains("Add feature") && successor_phase.load(Ordering::Acquire) {
             let reply = act(
                 request,
                 vec![commit_file("adopted.txt", "adopted\n", "Adopt source")],
@@ -295,6 +300,9 @@ fn an_edit_reaches_the_next_prompt_and_stop_delivers_it_sooner() {
     assert!(!initial.contains("Revised implementation."), "{initial}");
     assert_eq!(edited.rows(&frozen_query), frozen);
     assert_eq!(edited.rows(&original_query), original);
+    // Advance only after judging the actual initial opening. Routing must not
+    // depend on the model, effort or staged bytes those assertions judge.
+    source_successor.store(true, Ordering::Release);
     edit_hold.release();
     successor_hold.wait_held();
     // Host route holds the successor before its commit. Checked predecessor
