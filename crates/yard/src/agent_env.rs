@@ -39,6 +39,21 @@ const ARG_MAX_BYTES: usize = 128 * 1024 - 1;
 const WORKSPACE_SKILL_ROOTS: [&str; 2] = [".agents/skills", ".codex/skills"];
 const WALK_DEPTH: usize = 32;
 
+/// Paths the harness stages or reads as trusted prompt guidance.
+pub(crate) fn consumed_path(harness: &str, path: &str) -> bool {
+    GUIDANCE.contains(&path)
+        || path.starts_with(".agents/skills/")
+        || match harness {
+            "pi" => path.starts_with(".pi/skills/") || path.starts_with(".pi/extensions/"),
+            "claude" => path.starts_with(".claude/skills/") || path == ".claude/settings.json",
+            "codex" => {
+                path.starts_with(".codex/skills/")
+                    || matches!(path, ".codex/config.toml" | ".codex/hooks.json")
+            }
+            _ => false,
+        }
+}
+
 #[derive(Debug)]
 pub struct File {
     pub path: String,

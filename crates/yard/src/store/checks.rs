@@ -139,6 +139,25 @@ pub fn evidence(conn: &Connection, check: &Check, input: &Input) -> Result<Value
         super::executions::check_digest(&attempt, &check.kind, &check.name, &input.digest)?;
     let mut evidence = json!({"check": check.to_json(), "node": execution.node,
         "digest": digest, "result": execution.result});
+    let consumed = match (execution.plan_revision, execution.node.as_deref()) {
+        (Some(revision), Some(node)) => super::attempts::revision(conn, attempt.id, revision)?
+            .map(|admission| {
+                let plan = crate::plan::Plan::admitted(&admission)
+                    .map_err(|error| Fail::refused(error.to_string()))?;
+                Ok::<_, Fail>(plan.nodes.get(node).and_then(|node| {
+                    super::executions::consumed_definition(
+                        &admission,
+                        &node.runner,
+                        check.kind == "review",
+                    )
+                }))
+            })
+            .transpose()?
+            .flatten(),
+        _ => None,
+    };
+    evidence["consumed_definition"] = consumed.unwrap_or_else(|| json!({"status": "unknown"}));
+    evidence["inputs"] = json!(execution.inputs);
     if input.plan_revision != check.plan_revision {
         evidence["plan_revision"] = json!(input.plan_revision);
     }

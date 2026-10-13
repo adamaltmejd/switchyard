@@ -23,6 +23,13 @@ const GATE: &str = "[gates.check]\ncommand = \"test -f feature.txt\"\nstage = \"
 /// into completed evidence, or select an obsolete producer.
 /// Existing G2 edits change ticket/head/proof; none revises a plan on the same
 /// candidate or binds a new consumer to an eligible older-revision producer.
+/// Declared agents have different model settings. Committed extension and
+/// skill markers reach the host model, whose opening requests count consumers.
+/// A second supported admission changes those sources with identical runner
+/// definitions. Host Git supplies the source blobs and whole image trees.
+/// Sabotage: reuse tool/skill digests, qualify by latest admission, or invalidate
+/// the whole panel for one changed gate. The separate-source adoption cases
+/// that isolate those changes belong to the activation child.
 #[test]
 fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
     let hold = Latch::new();
@@ -30,8 +37,20 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
     let final_calls = std::sync::Mutex::new(0);
     let correctness_calls = std::sync::Mutex::new(0);
     let machine = Machine::new("g2-plan-cas", move |request| {
+        let future = request.system().contains("consumer-source-v2");
+        assert!(request.system().contains(if future {
+            "consumer-skill-v2"
+        } else {
+            "consumer-skill-v1"
+        }));
+        assert!(request.system().contains(if future {
+            "consumer-source-v2"
+        } else {
+            "consumer-source-v1"
+        }));
         if request.has_tool("yard_publish_review") {
-            if request.opens()
+            if !future
+                && request.opens()
                 && request
                     .prompt()
                     .contains("You are the correctness reviewer")
@@ -46,8 +65,17 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
                 // G2: selecting the old runner instead of the fixture profile
                 // loses these instructions, regardless of prompt framing.
                 assert!(request.prompt().contains(instructions));
+                assert_eq!(
+                    request.body["model"],
+                    if *calls == 1 {
+                        "fake-model"
+                    } else {
+                        "selected-model"
+                    }
+                );
             }
-            if request.opens() && request.prompt().contains("You are the final reviewer") {
+            if !future && request.opens() && request.prompt().contains("You are the final reviewer")
+            {
                 let mut calls = final_calls.lock().unwrap();
                 *calls += 1;
                 let instructions = if *calls == 1 {
@@ -56,6 +84,14 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
                     "Alternate final review."
                 };
                 assert!(request.prompt().contains(instructions));
+                assert_eq!(
+                    request.body["model"],
+                    if *calls == 1 {
+                        "fake-model"
+                    } else {
+                        "selected-model"
+                    }
+                );
                 if *calls == 2 {
                     return Reply::Hold(
                         held.clone(),
@@ -75,7 +111,24 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
     machine.start();
     let configuration = config(&format!("{GATE}\n[review.seats.middle]\nagent = \"worker\"\ninstructions = \"Middle review.\"\n\n[review.seats.final]\nagent = \"worker\"\ninstructions = \"Final review.\"\n\n[profiles.final]\nrunner = {{kind = \"agent\", agent = \"worker\", instructions = \"Alternate final review.\"}}\naccess = \"read-only\"\noutputs = {{result = \"verdict\"}}\noutcomes = [\"complete\", \"blocked\"]\n"))
         .replace("review = [\"correctness\"]", "review = [\"correctness\", \"middle\", \"final\"]");
+    let configuration = configuration.replace(
+        "agent = \"worker\", instructions = \"Alternate final review.\"",
+        "agent = \"selected\", instructions = \"Alternate final review.\"",
+    ) + "\n[agents.selected]\nharness = \"pi\"\nprovider = \"openrouter\"\nmodel = \"selected-model\"\n";
+    let stage = |project: &Project, version: &str| {
+        project.write(".pi/extensions/consumer/index.ts", &format!(
+            "export default function (pi) {{\n  pi.on(\"before_agent_start\", async (event) => ({{systemPrompt: event.systemPrompt + '\\nconsumer-source-{version}'}}));\n}}\n"
+        ));
+        project.write(
+            ".agents/skills/consumer/SKILL.md",
+            &format!("---\nname: consumer\ndescription: consumer-skill-{version}\n---\nFixture.\n"),
+        );
+        project.git(&["add", "-A"]);
+        project.git(&["commit", "--quiet", "-m", "Consumer inputs"]);
+        project.json(&["sync"]);
+    };
     let project = Project::new(&machine, "p", &configuration);
+    stage(&project, "v1");
     let mut watch = project.watch(0);
     project.json(&["ticket", "new", "--title", "Plan CAS"]);
     let first = approval(&mut watch);
@@ -169,6 +222,12 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
     assert_ne!(revised[0]["id"], old_final["id"]);
     assert_eq!(revised[0]["plan_revision"], 2);
     assert_ne!(revised[0]["digest"], old_final["digest"]);
+    assert_eq!(
+        project.rows(
+            "SELECT agent, model FROM execution WHERE node = 'review-2' AND plan_revision = 2"
+        ),
+        vec![json!({"agent": "selected", "model": "selected-model"})]
+    );
     let inputs: Value = serde_json::from_str(revised[0]["inputs"].as_str().unwrap()).unwrap();
     assert_eq!(inputs["panel"]["source"]["execution"], middle["id"]);
     assert_eq!(
@@ -410,6 +469,34 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
         &project.canonical(),
         &["merge-base", "--is-ancestor", &candidate, "refs/heads/main"],
     );
+    // New admissions may change sources today. Active adoption must later
+    // isolate staging from image context; identical Dockerfiles do not do so.
+    let future = Project::new(&machine, "future", &configuration);
+    stage(&future, "v2");
+    let mut future_watch = future.watch(0);
+    future.json(&["ticket", "new", "--title", "New consumed sources"]);
+    approval(&mut future_watch);
+    let fresh = future.rows("SELECT node, digest FROM execution WHERE kind IN ('gate', 'review') AND parent IS NULL ORDER BY id");
+    for row in &fresh {
+        let old = original_executions
+            .iter()
+            .find(|old| old["node"] == row["node"])
+            .unwrap();
+        assert_ne!(row["digest"], old["digest"], "{row}");
+    }
+    let requests = machine.model.requests();
+    let openings = |marker: &str| {
+        requests
+            .iter()
+            .filter(|request| {
+                request.opens()
+                    && request.has_tool("yard_publish_review")
+                    && request.system().contains(marker)
+            })
+            .count()
+    };
+    assert_eq!(openings("consumer-source-v1"), 8);
+    assert_eq!(openings("consumer-source-v2"), 3);
 }
 
 /// Seats publish no findings; the implementer commits feature.txt and writes
