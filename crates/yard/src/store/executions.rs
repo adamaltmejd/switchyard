@@ -288,7 +288,15 @@ pub fn start(tx: &Connection, start: Start) -> Result<i64, Fail> {
     let attempt = super::attempts::get(tx, start.attempt)?;
     let digest = start
         .digest
-        .map(|digest| check_digest(&attempt, start.kind, start.name.unwrap_or_default(), digest))
+        .map(|digest| {
+            check_digest(
+                &attempt,
+                start.kind,
+                start.name.unwrap_or_default(),
+                digest,
+                start.parent.is_some(),
+            )
+        })
         .transpose()?;
     let settings = start.agent.map(|(_, settings)| settings);
     let field = |key: &str| settings.and_then(|value| value[key].as_str().map(str::to_string));
@@ -407,11 +415,16 @@ pub fn check_digest(
     kind: &str,
     name: &str,
     baseline: &str,
+    landing: bool,
 ) -> Result<String, Fail> {
     if !matches!(kind, "gate" | "review") {
         return Ok(baseline.into());
     }
-    let Some(admission) = &attempt.admission else {
+    let Some(admission) = (if landing {
+        &attempt.original_admission
+    } else {
+        &attempt.admission
+    }) else {
         return Ok(baseline.into());
     };
     let plan =
@@ -657,8 +670,26 @@ pub fn qualifies(
         return Ok(false);
     }
     let reviewer = execution.kind == "review";
-    let old_definition = consumed_definition(&original_evidence, &old.runner, reviewer);
-    let new_definition = consumed_definition(current_evidence, &new.runner, reviewer);
+    let frozen = attempt.original_admission.as_ref();
+    let landing = node.starts_with("landing-gate-");
+    let old_definition = consumed_definition(
+        if landing {
+            frozen.unwrap_or(&original_evidence)
+        } else {
+            &original_evidence
+        },
+        &old.runner,
+        reviewer,
+    );
+    let new_definition = consumed_definition(
+        if landing {
+            frozen.unwrap_or(current_evidence)
+        } else {
+            current_evidence
+        },
+        &new.runner,
+        reviewer,
+    );
     if old_definition != new_definition
         || (old_definition.is_none() && execution.plan_revision != attempt.plan_revision())
     {

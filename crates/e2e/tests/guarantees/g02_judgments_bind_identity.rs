@@ -25,24 +25,21 @@ const GATE: &str = "[gates.check]\ncommand = \"test -f feature.txt\"\nstage = \"
 /// candidate or binds a new consumer to an eligible older-revision producer.
 /// Declared agents have different model settings. Committed extension and
 /// skill markers reach the host model, whose opening requests count consumers.
-/// A second supported admission changes those sources with identical runner
-/// definitions. Host Git supplies the source blobs and whole image trees.
-/// Sabotage: reuse tool/skill digests, qualify by latest admission, or invalidate
-/// the whole panel for one changed gate. The separate-source adoption cases
-/// that isolate those changes belong to the activation child.
+/// Independent committed gate, reviewer setting, extension and skill adoption
+/// follows completed checks. Host Git supplies blobs and the fixed image tree.
+/// Sabotage: resolved overwrites adopted definitions, stale tool/skill digest,
+/// or whole-panel invalidation. Host counters prove actual consumers.
 #[test]
 fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
     let hold = Latch::new();
     let held = hold.clone();
     let final_calls = std::sync::Mutex::new(0);
     let correctness_calls = std::sync::Mutex::new(0);
+    let capacity = Latch::new();
+    let capacity_held = capacity.clone();
     let machine = Machine::new("g2-plan-cas", move |request| {
         let future = request.system().contains("consumer-source-v2");
-        assert!(request.system().contains(if future {
-            "consumer-skill-v2"
-        } else {
-            "consumer-skill-v1"
-        }));
+        assert!(request.system().contains("consumer-skill-v"));
         assert!(request.system().contains(if future {
             "consumer-source-v2"
         } else {
@@ -69,8 +66,10 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
                     request.body["model"],
                     if *calls == 1 {
                         "fake-model"
-                    } else {
+                    } else if *calls == 2 {
                         "selected-model"
+                    } else {
+                        "adopted-model"
                     }
                 );
             }
@@ -88,8 +87,10 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
                     request.body["model"],
                     if *calls == 1 {
                         "fake-model"
-                    } else {
+                    } else if *calls <= 4 {
                         "selected-model"
+                    } else {
+                        "adopted-model"
                     }
                 );
                 if *calls == 2 {
@@ -100,6 +101,9 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
                 }
             }
             return act(request, vec![publish(json!([]))]);
+        }
+        if request.opens() && request.prompt().contains("Capacity holder") {
+            return Reply::Hold(capacity_held.clone(), Box::new(Reply::Text("Held".into())));
         }
         act(
             request,
@@ -115,20 +119,38 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
         "agent = \"worker\", instructions = \"Alternate final review.\"",
         "agent = \"selected\", instructions = \"Alternate final review.\"",
     ) + "\n[agents.selected]\nharness = \"pi\"\nprovider = \"openrouter\"\nmodel = \"selected-model\"\n";
-    let stage = |project: &Project, version: &str| {
+    let gate_counter = machine.root.join("gate-count");
+    let keep_counter = machine.root.join("keep-count");
+    let configuration = configuration.replace(GATE, &format!(
+        "[gates.check]\ncommand = 'test -f feature.txt && echo original >> {}'\nstage = 'candidate'\nruns_in = 'host'\n",
+        gate_counter.display()
+    )) + &format!("\n[gates.keep]\ncommand = 'echo keep >> {}'\nstage = 'candidate'\nruns_in = 'host'\n", keep_counter.display());
+    let configuration = configuration.replace("max_lanes = 2", "max_lanes = 2\nmax_executions = 1");
+    let stage = |project: &Project, tool_version: &str, skill_version: &str| {
         project.write(".pi/extensions/consumer/index.ts", &format!(
-            "export default function (pi) {{\n  pi.on(\"before_agent_start\", async (event) => ({{systemPrompt: event.systemPrompt + '\\nconsumer-source-{version}'}}));\n}}\n"
+            "export default function (pi) {{\n  pi.on(\"before_agent_start\", async (event) => ({{systemPrompt: event.systemPrompt + '\\nconsumer-source-{tool_version}'}}));\n}}\n"
         ));
         project.write(
             ".agents/skills/consumer/SKILL.md",
-            &format!("---\nname: consumer\ndescription: consumer-skill-{version}\n---\nFixture.\n"),
+            &format!(
+                "---\nname: consumer\ndescription: consumer-skill-{skill_version}\n---\nFixture.\n"
+            ),
         );
         project.git(&["add", "-A"]);
         project.git(&["commit", "--quiet", "-m", "Consumer inputs"]);
         project.json(&["sync"]);
     };
     let project = Project::new(&machine, "p", &configuration);
-    stage(&project, "v1");
+    stage(&project, "v1", "v1");
+    let image_commit = project.git(&["rev-parse", "HEAD"]).trim().to_string();
+    let image_tree = project
+        .git(&["rev-parse", "HEAD^{tree}"])
+        .trim()
+        .to_string();
+    let dockerfile_blob = project
+        .git(&["rev-parse", "HEAD:.yard/Dockerfile"])
+        .trim()
+        .to_string();
     let mut watch = project.watch(0);
     project.json(&["ticket", "new", "--title", "Plan CAS"]);
     let first = approval(&mut watch);
@@ -291,7 +313,7 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
     assert!(!selected.contains(&unrelated_check["id"]));
     // Fixture routing removes only the middle seat. The first reviewer keeps
     // its policy and inputs; the final reviewer now consumes it directly.
-    let graph = json!({"inputs": {"feedback": "verdict", "merged": "candidate"}, "nodes": {
+    let mut graph = json!({"inputs": {"feedback": "verdict", "merged": "candidate"}, "nodes": {
         "implementer": {
             "runner": {"kind": "agent", "agent": "worker", "instructions": ""},
             "access": "write-allowed", "inputs": {"feedback": {"output": "feedback", "kind": "verdict"}},
@@ -324,6 +346,14 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
             "outputs": {"result": "verdict"}, "outcomes": ["complete"], "requires": ["merged"]
         }
     }});
+    graph["nodes"]["candidate-gate-keep"] = graph["nodes"]["candidate-gate-check"].clone();
+    graph["nodes"]["candidate-gate-keep"]["runner"]["gate"] = json!("keep");
+    graph["nodes"]["candidate-gate-check"]["routes"]["complete"] =
+        json!([{"to": "candidate-gate-keep"}]);
+    graph["nodes"]["landing-gate-keep"] = graph["nodes"]["landing-gate-check"].clone();
+    graph["nodes"]["landing-gate-keep"]["runner"]["gate"] = json!("keep");
+    graph["nodes"]["landing-gate-check"]["routes"]["complete"] =
+        json!([{"to": "landing-gate-keep"}]);
     let before_routing = project.rows("SELECT * FROM execution WHERE attempt = 1 ORDER BY id");
     let routed = operator.call(
         "yard_attempt_revise",
@@ -399,6 +429,228 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
         )),
         original_checks
     );
+    // Hold the sole effect slot before approving. The queued landing has no
+    // intent and cannot move canonical before adoption withdraws approval.
+    let adoption_executions = project.rows("SELECT * FROM execution WHERE attempt = 1 ORDER BY id");
+    let adoption_ids = adoption_executions
+        .iter()
+        .map(|row| row["id"].as_i64().unwrap().to_string())
+        .collect::<Vec<_>>();
+    let adoption_checks = project.rows("SELECT * FROM \"check\" WHERE execution IN (SELECT id FROM execution WHERE attempt = 1) ORDER BY id");
+    let adoption_check_ids = adoption_checks
+        .iter()
+        .map(|row| row["id"].as_i64().unwrap().to_string())
+        .collect::<Vec<_>>();
+    let original_revisions =
+        project.rows("SELECT * FROM plan_revision WHERE attempt = 1 ORDER BY revision");
+    project.json(&[
+        "ticket",
+        "new",
+        "--title",
+        "Capacity holder",
+        "--workflow",
+        "plan",
+    ]);
+    capacity.wait_held();
+    let accepted = operator.call(
+        "yard_attempt_approve",
+        json!({
+            "project": project.path, "ticket": "Y-1", "target": "main", "head": candidate,
+            "proof": fourth["payload"]["proof"], "plan_revision": 4
+        }),
+    );
+    assert!(accepted.get("error").is_none(), "{accepted}");
+    assert_eq!(
+        project.rows("SELECT state FROM approval"),
+        vec![json!({"state": "active"})]
+    );
+    let gate_definition = configuration.replace("echo original >>", "echo adopted >>");
+    project.write(".yard/config.toml", &gate_definition);
+    project.git(&["add", "-A"]);
+    project.git(&["commit", "--quiet", "-m", "Adopt candidate gate"]);
+    project.json(&["sync"]);
+    let definition_commit = project.git(&["rev-parse", "HEAD"]).trim().to_string();
+    let adopt = operator.call(
+        "yard_attempt_revise",
+        json!({
+            "project": project.path, "ticket": "Y-1", "plan_revision": 4,
+            "definition_commit": definition_commit
+        }),
+    );
+    assert_eq!(adopt["result"]["plan_revision"], 5, "{adopt}");
+    assert_eq!(
+        project.rows("SELECT state FROM approval"),
+        vec![json!({"state": "withdrawn"})]
+    );
+    project.json(&["attempt", "abandon", "Y-2"]);
+    capacity.release();
+    let fifth = approval(&mut watch);
+    assert_eq!(fifth["payload"]["plan_revision"], 5);
+    assert_eq!(
+        std::fs::read_to_string(&gate_counter).unwrap(),
+        "original\nadopted\n"
+    );
+    assert_eq!(std::fs::read_to_string(&keep_counter).unwrap(), "keep\n");
+    assert_eq!(
+        project.rows("SELECT node FROM execution WHERE attempt = 1 AND plan_revision = 5"),
+        vec![json!({"node": "candidate-gate-check"})]
+    );
+    assert!(
+        fifth["payload"]["checks"]
+            .as_array()
+            .unwrap()
+            .contains(&routed_check[0]["id"])
+    );
+
+    let settings_definition =
+        gate_definition.replace("model = \"selected-model\"", "model = \"adopted-model\"");
+    project.write(".yard/config.toml", &settings_definition);
+    project.git(&["add", "-A"]);
+    project.git(&[
+        "commit",
+        "--quiet",
+        "-m",
+        "Adopt declared reviewer settings",
+    ]);
+    project.json(&["sync"]);
+    let settings_commit = project.git(&["rev-parse", "HEAD"]).trim().to_string();
+    let adopt = operator.call(
+        "yard_attempt_revise",
+        json!({
+            "project": project.path, "ticket": "Y-1", "plan_revision": 5,
+            "definition_commit": settings_commit
+        }),
+    );
+    assert_eq!(adopt["result"]["plan_revision"], 6, "{adopt}");
+    let sixth = approval(&mut watch);
+    assert_eq!(sixth["payload"]["plan_revision"], 6);
+    assert_eq!(
+        project.rows(
+            "SELECT node, model FROM execution WHERE attempt = 1 AND plan_revision = 6 ORDER BY id"
+        ),
+        vec![
+            json!({"node": "review-0", "model": "adopted-model"}),
+            json!({"node": "review-2", "model": "adopted-model"})
+        ]
+    );
+
+    for (revision, skill) in [(7, "v1"), (8, "v2")] {
+        stage(&project, "v2", skill);
+        let staging_commit = project.git(&["rev-parse", "HEAD"]).trim().to_string();
+        let before = project.rows("SELECT * FROM audit ORDER BY seq");
+        let stale = operator.call(
+            "yard_attempt_revise",
+            json!({
+                "project": project.path, "ticket": "Y-1", "plan_revision": revision - 2,
+                "staging_commit": staging_commit
+            }),
+        );
+        assert_eq!(stale["error"]["code"], "stale");
+        assert_eq!(
+            stale["error"]["data"],
+            json!({"identity": "plan_revision", "expected": revision - 2, "current": revision - 1})
+        );
+        assert_eq!(project.rows("SELECT * FROM audit ORDER BY seq"), before);
+        let adopt = operator.call(
+            "yard_attempt_revise",
+            json!({
+                "project": project.path, "ticket": "Y-1", "plan_revision": revision - 1,
+                "staging_commit": staging_commit
+            }),
+        );
+        assert_eq!(adopt["result"]["plan_revision"], revision, "{adopt}");
+        let item = approval(&mut watch);
+        assert_eq!(item["payload"]["plan_revision"], revision);
+        let rows = project.rows(&format!("SELECT node, digest, inputs FROM execution WHERE attempt = 1 AND plan_revision = {revision} ORDER BY id"));
+        assert_eq!(
+            rows.iter()
+                .map(|row| row["node"].clone())
+                .collect::<Vec<_>>(),
+            json!(["review-0", "review-2"]).as_array().unwrap().clone()
+        );
+        for row in &rows {
+            let old = project.rows(&format!("SELECT digest FROM execution WHERE attempt = 1 AND node = '{}' AND plan_revision = {}", row["node"].as_str().unwrap(), revision - 1));
+            assert_ne!(row["digest"], old[0]["digest"]);
+        }
+        let inputs: Value = serde_json::from_str(rows[1]["inputs"].as_str().unwrap()).unwrap();
+        let supplier = project.rows(&format!("SELECT id, result FROM execution WHERE attempt = 1 AND node = 'review-0' AND plan_revision = {revision}"));
+        assert_eq!(
+            inputs["panel"]["source"],
+            json!({"execution": supplier[0]["id"], "node": "review-0", "output": "result"})
+        );
+        let result: Value = serde_json::from_str(supplier[0]["result"].as_str().unwrap()).unwrap();
+        assert_eq!(inputs["panel"]["kind"], "verdict");
+        assert_eq!(
+            inputs["panel"]["value"],
+            result["outputs"]["result"]["value"]
+        );
+        let show = project.json(&["attempt", "show", "Y-1"]);
+        let evidence = &show["plan"];
+        assert_eq!(evidence["inputs"]["image_commit"], image_commit);
+        assert_eq!(evidence["inputs"]["build_context_tree"], image_tree);
+        assert_eq!(evidence["inputs"]["dockerfile_blob"], dockerfile_blob);
+        assert_eq!(evidence["inputs"]["definition_commit"], settings_commit);
+        assert_eq!(evidence["inputs"]["staging_commit"], staging_commit);
+        for path in [
+            ".pi/extensions/consumer/index.ts",
+            ".agents/skills/consumer/SKILL.md",
+        ] {
+            let blob = project
+                .git(&["rev-parse", &format!("{staging_commit}:{path}")])
+                .trim()
+                .to_string();
+            let source = evidence["inputs"]["trusted_staged_sources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|source| source["path"] == path)
+                .unwrap();
+            assert_eq!(source["blob"], blob);
+        }
+    }
+    assert_eq!(
+        std::fs::read_to_string(&gate_counter).unwrap(),
+        "original\nadopted\n"
+    );
+    assert_eq!(std::fs::read_to_string(&keep_counter).unwrap(), "keep\n");
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT * FROM execution WHERE id IN ({}) ORDER BY id",
+            old_ids.join(",")
+        )),
+        before_routing
+    );
+    assert_eq!(
+        project.rows("SELECT admission FROM attempt WHERE id = 1"),
+        original_admission
+    );
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT * FROM \"check\" WHERE id IN ({}) ORDER BY id",
+            check_ids.join(",")
+        )),
+        original_checks
+    );
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT * FROM execution WHERE id IN ({}) ORDER BY id",
+            adoption_ids.join(",")
+        )),
+        adoption_executions
+    );
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT * FROM \"check\" WHERE id IN ({}) ORDER BY id",
+            adoption_check_ids.join(",")
+        )),
+        adoption_checks
+    );
+    assert_eq!(
+        project.rows(
+            "SELECT * FROM plan_revision WHERE attempt = 1 AND revision <= 4 ORDER BY revision"
+        ),
+        original_revisions
+    );
     let history = project.json(&["attempt", "show", "Y-1"])["plan_revisions"].clone();
     assert_eq!(
         history
@@ -407,7 +659,7 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
             .iter()
             .map(|revision| revision["revision"].as_i64().unwrap())
             .collect::<Vec<_>>(),
-        vec![1, 2, 3, 4]
+        vec![1, 2, 3, 4, 5, 6, 7, 8]
     );
     assert_eq!(history[0]["ticket_revision"], 1);
     assert_eq!(history[1]["ticket_revision"], 1);
@@ -456,12 +708,15 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
     assert_eq!(stale["error"]["code"], "stale");
     assert_eq!(
         stale["error"]["data"],
-        json!({"identity": "plan_revision", "expected": 1, "current": 4})
+        json!({"identity": "plan_revision", "expected": 1, "current": 8})
     );
     assert_eq!(project.rows("SELECT * FROM audit ORDER BY seq"), before);
-    assert!(project.rows("SELECT * FROM approval").is_empty());
+    assert_eq!(
+        project.rows("SELECT state FROM approval"),
+        vec![json!({"state": "withdrawn"})]
+    );
     let mut decision = decision;
-    decision["plan_revision"] = json!(4);
+    decision["plan_revision"] = json!(8);
     let accepted = operator.call("yard_attempt_approve", decision);
     assert!(accepted.get("error").is_none(), "{accepted}");
     watch.event("landing.recorded", &[]);
@@ -469,21 +724,15 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
         &project.canonical(),
         &["merge-base", "--is-ancestor", &candidate, "refs/heads/main"],
     );
-    // New admissions may change sources today. Active adoption must later
-    // isolate staging from image context; identical Dockerfiles do not do so.
-    let future = Project::new(&machine, "future", &configuration);
-    stage(&future, "v2");
-    let mut future_watch = future.watch(0);
-    future.json(&["ticket", "new", "--title", "New consumed sources"]);
-    approval(&mut future_watch);
-    let fresh = future.rows("SELECT node, digest FROM execution WHERE kind IN ('gate', 'review') AND parent IS NULL ORDER BY id");
-    for row in &fresh {
-        let old = original_executions
-            .iter()
-            .find(|old| old["node"] == row["node"])
-            .unwrap();
-        assert_ne!(row["digest"], old["digest"], "{row}");
-    }
+    // Candidate adoption leaves landing commands at their original definitions.
+    assert_eq!(
+        std::fs::read_to_string(&gate_counter).unwrap(),
+        "original\nadopted\noriginal\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&keep_counter).unwrap(),
+        "keep\nkeep\n"
+    );
     let requests = machine.model.requests();
     let openings = |marker: &str| {
         requests
@@ -495,8 +744,10 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
             })
             .count()
     };
-    assert_eq!(openings("consumer-source-v1"), 8);
-    assert_eq!(openings("consumer-source-v2"), 3);
+    assert_eq!(openings("consumer-source-v1"), 10);
+    assert_eq!(openings("consumer-source-v2"), 4);
+    assert_eq!(openings("consumer-skill-v1"), 12);
+    assert_eq!(openings("consumer-skill-v2"), 2);
 }
 
 /// Seats publish no findings; the implementer commits feature.txt and writes

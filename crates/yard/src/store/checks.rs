@@ -86,7 +86,7 @@ pub fn current(
     if attempt.plan_revision() != input.plan_revision {
         return Ok(None);
     }
-    let digest = super::executions::check_digest(&attempt, kind, name, &input.digest)?;
+    let digest = super::executions::check_digest(&attempt, kind, name, &input.digest, false)?;
     let candidates = super::all(
         conn,
         &format!(
@@ -135,8 +135,13 @@ pub fn for_execution(conn: &Connection, execution: i64) -> Result<Option<Check>,
 pub fn evidence(conn: &Connection, check: &Check, input: &Input) -> Result<Value, Fail> {
     let execution = super::executions::get(conn, check.execution)?;
     let attempt = super::attempts::get(conn, input.attempt)?;
-    let digest =
-        super::executions::check_digest(&attempt, &check.kind, &check.name, &input.digest)?;
+    let digest = super::executions::check_digest(
+        &attempt,
+        &check.kind,
+        &check.name,
+        &input.digest,
+        execution.parent.is_some(),
+    )?;
     let mut evidence = json!({"check": check.to_json(), "node": execution.node,
         "digest": digest, "result": execution.result});
     let consumed = match (execution.plan_revision, execution.node.as_deref()) {
@@ -146,7 +151,11 @@ pub fn evidence(conn: &Connection, check: &Check, input: &Input) -> Result<Value
                     .map_err(|error| Fail::refused(error.to_string()))?;
                 Ok::<_, Fail>(plan.nodes.get(node).and_then(|node| {
                     super::executions::consumed_definition(
-                        &admission,
+                        if execution.parent.is_some() {
+                            attempt.original_admission.as_ref().unwrap_or(&admission)
+                        } else {
+                            &admission
+                        },
                         &node.runner,
                         check.kind == "review",
                     )

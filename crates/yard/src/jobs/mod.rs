@@ -88,6 +88,18 @@ async fn read_default(daemon: &Daemon, project: &Project) -> Result<Arc<Loaded>,
 }
 
 impl Loaded {
+    /// Candidate source adoption never changes the admitted landing commands.
+    pub fn landing_gates(
+        &self,
+        attempt: &attempts::Attempt,
+    ) -> Result<Vec<crate::config::Gate>, Fail> {
+        match &attempt.original_admission {
+            Some(admission) => serde_json::from_value(admission["gates"].clone())
+                .map_err(|error| Fail::refused(error.to_string())),
+            None => Ok(self.config.gates.clone()),
+        }
+    }
+
     pub async fn inputs(
         &self,
         git: &crate::git::Git,

@@ -1204,6 +1204,8 @@ pub async fn attempt_revise(
             "workflow",
             "graph",
             "overrides",
+            "definition_commit",
+            "staging_commit",
         ],
     )?;
     let id = ticket_param(params)?;
@@ -1216,7 +1218,38 @@ pub async fn attempt_revise(
         attempts::require_plan(conn, attempt.id, Some(expected))?;
         Ok(attempt)
     })?;
-    let loaded = super::load_attempt(daemon, project, &attempt).await?;
+    let frozen = super::load_attempt(daemon, project, &attempt).await?;
+    let adopting = ["definition_commit", "staging_commit"]
+        .iter()
+        .any(|key| params.get(*key).is_some());
+    let source = |key: &str, previous: &str| -> Result<String, Fail> {
+        match params.get(key) {
+            None => Ok(previous.to_string()),
+            Some(value) => value
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| Fail::invalid(format!("{key} requires an exact commit"))),
+        }
+    };
+    let loaded = if adopting {
+        let mut loaded = super::read_sources(
+            daemon,
+            &project.canonical_dir(),
+            attempt.target_branch()?,
+            None,
+            &source("definition_commit", &frozen.head)?,
+            &source("staging_commit", &frozen.staging_commit)?,
+            &frozen.image_commit,
+        )
+        .await?;
+        if params.get("definition_commit").is_none() {
+            loaded.config = frozen.config.clone();
+        }
+        Arc::new(loaded)
+    } else {
+        frozen.clone()
+    };
     let mut evidence = attempt
         .admission
         .clone()
@@ -1226,15 +1259,27 @@ pub async fn attempt_revise(
     if old.runtime() != "ordinary-linear" {
         return Err(Fail::refused("adjustment requires an ordinary candidate"));
     }
-    let mut selection = json!({"project": project.root});
+    let mut selection = if params.get("definition_commit").is_some() {
+        evidence["selection"].clone()
+    } else {
+        json!({"project": project.root})
+    };
+    selection["project"] = json!(project.root);
+    if ["preset", "workflow", "graph"]
+        .iter()
+        .any(|key| params.get(*key).is_some())
+    {
+        selection = json!({"project": project.root});
+    }
     for key in ["preset", "workflow", "graph", "overrides"] {
         if let Some(value) = params.get(key) {
             selection[key] = value.clone();
         }
     }
-    if !["preset", "workflow", "graph"]
-        .iter()
-        .any(|key| params.get(*key).is_some())
+    if params.get("definition_commit").is_none()
+        && !["preset", "workflow", "graph"]
+            .iter()
+            .any(|key| params.get(*key).is_some())
     {
         selection["graph"] = serde_json::to_value(&old).expect("plan serializes");
     }
@@ -1282,6 +1327,44 @@ pub async fn attempt_revise(
                 .with(json!({"reason": "unsupported_revision"})),
         );
     }
+    if adopting {
+        let crate::plan::Runner::Agent { agent, .. } = &old.nodes["implementer"].runner else {
+            return Err(Fail::refused("unsupported implementer"));
+        };
+        if loaded.config.agents.get(agent) != frozen.config.agents.get(agent)
+            || loaded.config.egress != frozen.config.egress
+        {
+            return Err(Fail::refused(
+                "source adoption changes frozen implementation settings or grants",
+            )
+            .with(json!({"reason": "unsupported_revision"})));
+        }
+        let workflow = loaded.config.workflow(&attempt.workflow)?;
+        evidence["workflow"] = json!(workflow);
+        evidence["gates"] = json!(if workflow.read_only {
+            &[][..]
+        } else {
+            &loaded.config.gates[..]
+        });
+        evidence["review"] = if workflow.read_only {
+            Value::Null
+        } else {
+            json!(loaded.config.review)
+        };
+        evidence["seats"] = json!(
+            workflow
+                .review
+                .iter()
+                .filter(|_| !workflow.read_only)
+                .map(|name| (name, &loaded.config.seats[name]))
+                .collect::<std::collections::BTreeMap<_, _>>()
+        );
+        evidence["agents"] = json!({});
+        evidence["inputs"] = loaded
+            .inputs(&daemon.git, &project.canonical_dir(), &plan)
+            .await?;
+        evidence["config_head"] = json!(loaded.head);
+    }
     let ordinary = loaded.config.workflow_plan(&attempt.workflow)?;
     let skipped: Vec<_> = ordinary
         .nodes
@@ -1318,6 +1401,12 @@ pub async fn attempt_revise(
         attempts::require_plan(tx, current.id, Some(expected))?;
         let executions = executions::for_attempt(tx, current.id)?;
         let open = attempts::open_for_attempt(tx, current.id)?;
+        if adopting && (current.candidate().is_none()
+            || executions.iter().any(|row| row.status == "running" && matches!(row.kind.as_str(), "implementation" | "gate" | "review")))
+        {
+            return Err(Fail::refused("source adoption requires a quiescent candidate")
+                .with(json!({"reason": "active_plan", "attempt": current.id})));
+        }
         let implementing = executions.iter().any(|row| row.kind == "implementation" && row.status == "running");
         if (current.candidate().is_none() && !implementing)
             || (current.next.is_some() && !implementing)

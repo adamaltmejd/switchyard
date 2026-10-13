@@ -1436,7 +1436,11 @@ async fn plan_handoff(
                     (
                         name,
                         executions::consumed_definition(
-                            admission,
+                            if name.starts_with("landing-gate-") {
+                                attempt.original_admission.as_ref().unwrap_or(admission)
+                            } else {
+                                admission
+                            },
                             &node.runner,
                             name.starts_with("review-"),
                         ),
@@ -1519,7 +1523,12 @@ pub async fn gate(
         .insert((project.key.clone(), execution), stop.clone());
     notify_if_edited(project, execution, &stop);
     let checkout = dir.join("gates").join(execution.to_string());
-    let outcome = match loaded.config.gates.iter().find(|gate| gate.name == name) {
+    let gates = if row.parent.is_some() {
+        loaded.landing_gates(&attempt)?
+    } else {
+        loaded.config.gates.clone()
+    };
+    let outcome = match gates.iter().find(|gate| gate.name == name) {
         None => Err(format!("gate {name} is no longer configured")),
         Some(gate) => {
             let _ = std::fs::remove_dir_all(&checkout);
