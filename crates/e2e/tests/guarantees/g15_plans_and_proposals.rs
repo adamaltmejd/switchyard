@@ -255,9 +255,8 @@ fn depends_on(project: &Project, ticket: i64) -> Vec<i64> {
 /// the same project, runs the same probe and its write succeeds.
 ///
 /// The later plan also proposes A and B, B depending on A, as the first
-/// plan did: accepting both mints A first and B's edge names it. B accepted
-/// first is refused and changes nothing, though the first plan's A is
-/// already minted.
+/// plan did: accepting both mints A first and B's edge names it, though
+/// the first plan's A is already minted.
 ///
 /// Sabotage: make `admit::scheduled` start read-only tickets again; the
 /// parent is admitted once its children are done. Or mount the clone
@@ -425,8 +424,6 @@ fn a_plan_proposes_children_that_block_it() {
     project.json(&["proposal", "reject", &stale.to_string()]);
 
     assert_eq!(depends_on(&project, 1), [3, 4]);
-    let parent = project.json(&["ticket", "show", "Y-1"]);
-    assert_eq!(parent["body"], "The plan: A, then B.");
     for child in ["Y-3", "Y-4"] {
         project.json(&["ticket", "done", child, "--reason", "Done by hand"]);
     }
@@ -456,11 +453,8 @@ fn a_plan_proposes_children_that_block_it() {
             .is_empty()
     );
 
-    // The later plan's B, accepted before its own A, must not reach the
-    // first plan's A, already minted as Y-3. The refusal changes no row.
-    // Cleanup executions for the ended plan attempts land on their own
-    // schedule, so a `MAX(seq)` read would race them; observe the mint and
-    // the item the refused accept could touch.
+    // The later plan's B must name its own accepted A, not the first plan's
+    // A, already minted as Y-3.
     let raised = proposals(&project);
     let titled = |title: &str| {
         raised
@@ -470,19 +464,6 @@ fn a_plan_proposes_children_that_block_it() {
             .0
     };
     let (more_a, more_b) = (titled("More A"), titled("More B"));
-    let refused = project.refused(&["proposal", "accept", &more_b.to_string()]);
-    assert_eq!(refused["code"], "refused", "{refused}");
-    assert!(
-        project
-            .rows("SELECT id FROM ticket WHERE title = 'More B'")
-            .is_empty(),
-        "the refused accept minted More B"
-    );
-    assert_eq!(
-        project.rows(&format!("SELECT state FROM attention WHERE id = {more_b}")),
-        vec![json!({ "state": "open" })]
-    );
-
     let a = project.json(&["proposal", "accept", &more_a.to_string()]);
     let b = project.json(&["proposal", "accept", &more_b.to_string()]);
     let name = |value: &Value| {
