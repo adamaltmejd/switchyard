@@ -50,7 +50,7 @@ const OPERATIONS: &[(&str, &str)] = &[
     ("attempt.stop", "project! ticket!"),
     (
         "attempt.revise",
-        "project! ticket! plan_revision:i! preset workflow graph:o overrides:o definition_commit staging_commit",
+        "project! ticket! plan_revision:i! preset workflow graph:o overrides:o definition_commit staging_commit image_commit",
     ),
     (
         "attempt.accept",

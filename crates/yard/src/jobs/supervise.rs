@@ -1436,11 +1436,7 @@ async fn plan_handoff(
                     (
                         name,
                         executions::consumed_definition(
-                            if name.starts_with("landing-gate-") {
-                                attempt.original_admission.as_ref().unwrap_or(admission)
-                            } else {
-                                admission
-                            },
+                            admission,
                             &node.runner,
                             name.starts_with("review-"),
                         ),
@@ -1523,11 +1519,7 @@ pub async fn gate(
         .insert((project.key.clone(), execution), stop.clone());
     notify_if_edited(project, execution, &stop);
     let checkout = dir.join("gates").join(execution.to_string());
-    let gates = if row.parent.is_some() {
-        loaded.landing_gates(&attempt)?
-    } else {
-        loaded.config.gates.clone()
-    };
+    let gates = &loaded.config.gates;
     let outcome = match gates.iter().find(|gate| gate.name == name) {
         None => Err(format!("gate {name} is no longer configured")),
         Some(gate) => {

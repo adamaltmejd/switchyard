@@ -1206,6 +1206,7 @@ pub async fn attempt_revise(
             "overrides",
             "definition_commit",
             "staging_commit",
+            "image_commit",
         ],
     )?;
     let id = ticket_param(params)?;
@@ -1219,7 +1220,7 @@ pub async fn attempt_revise(
         Ok(attempt)
     })?;
     let frozen = super::load_attempt(daemon, project, &attempt).await?;
-    let adopting = ["definition_commit", "staging_commit"]
+    let adopting = ["definition_commit", "staging_commit", "image_commit"]
         .iter()
         .any(|key| params.get(*key).is_some());
     let source = |key: &str, previous: &str| -> Result<String, Fail> {
@@ -1240,7 +1241,7 @@ pub async fn attempt_revise(
             None,
             &source("definition_commit", &frozen.head)?,
             &source("staging_commit", &frozen.staging_commit)?,
-            &frozen.image_commit,
+            &source("image_commit", &frozen.image_commit)?,
         )
         .await?;
         if params.get("definition_commit").is_none() {
@@ -1303,13 +1304,6 @@ pub async fn attempt_revise(
     let mut old_implementer = old.nodes["implementer"].clone();
     implementer.routes.remove("complete");
     old_implementer.routes.remove("complete");
-    let landing = |plan: &crate::plan::Plan| {
-        plan.nodes
-            .iter()
-            .filter(|(name, _)| name.starts_with("landing-gate-"))
-            .map(|(name, node)| (name.clone(), node.clone()))
-            .collect::<std::collections::BTreeMap<_, _>>()
-    };
     // Instructions may change; access, agent and publication grants remain frozen.
     if let (
         crate::plan::Runner::Agent { instructions, .. },
@@ -1321,11 +1315,9 @@ pub async fn attempt_revise(
     {
         *instructions = previous.clone();
     }
-    if implementer != old_implementer || landing(&plan) != landing(&old) {
-        return Err(
-            Fail::refused("adjustment changes frozen grants or landing policy")
-                .with(json!({"reason": "unsupported_revision"})),
-        );
+    if implementer != old_implementer {
+        return Err(Fail::refused("adjustment changes frozen grants")
+            .with(json!({"reason": "unsupported_revision"})));
     }
     if adopting {
         let crate::plan::Runner::Agent { agent, .. } = &old.nodes["implementer"].runner else {
@@ -1417,6 +1409,20 @@ pub async fn attempt_revise(
                 .with(json!({"reason": "active_plan", "attempt": current.id})));
         }
         refuse_during_intent(tx, id)?;
+        let landing_requirements = |plan: &crate::plan::Plan, evidence: &Value| {
+            plan.nodes.iter().filter(|(name, _)| name.starts_with("landing-gate-"))
+                .map(|(name, node)| {
+                    json!({"name": name, "node": node,
+                        "definition": executions::consumed_definition(evidence, &node.runner, false)})
+                }).collect::<Vec<_>>()
+        };
+        if landing_requirements(&plan, &evidence)
+            != landing_requirements(&old, current.admission.as_ref().expect("recorded plan"))
+            && let Some(intent) = executions.iter().find(|row| row.intent_state.is_some())
+        {
+            return Err(Fail::refused("landing requirements already have an intent")
+                .with(json!({"intent": intent.id})));
+        }
         // A revision during implementation reaches its successor as an operator diff.
         if let Some(row) = executions.iter().rev().find(|row| row.kind == "implementation" && row.status == "running") {
             evidence["handoff_from"] = json!(row.id);

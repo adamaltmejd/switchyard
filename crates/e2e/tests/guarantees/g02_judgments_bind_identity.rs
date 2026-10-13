@@ -43,6 +43,7 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
     let capacity_held = capacity.clone();
     let machine = Machine::new("g2-plan-cas", move |request| {
         let future = request.system().contains("consumer-source-v2");
+        let image = request.system().contains("consumer-image-v2");
         assert!(request.system().contains("consumer-skill-v"));
         assert!(request.system().contains(if future {
             "consumer-source-v2"
@@ -107,12 +108,24 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
                     );
                 }
             }
-            return act(request, vec![publish(json!([]))]);
+            return act(
+                request,
+                if image {
+                    vec![
+                        bash("test \"$(cat /image-input)\" = image-v2"),
+                        publish(json!([])),
+                    ]
+                } else {
+                    vec![publish(json!([]))]
+                },
+            );
         }
         if request.opens() && request.prompt().contains("Capacity holder") {
             return Reply::Hold(capacity_held.clone(), Box::new(Reply::Text("Held".into())));
         }
-        let feature = if request.system().contains("consumer-skill-v2") {
+        let feature = if image {
+            "feature-image-v2"
+        } else if request.system().contains("consumer-skill-v2") {
             "feature-skill-v2"
         } else if future {
             "feature-tool-v2"
@@ -122,7 +135,12 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
         act(
             request,
             vec![bash(&format!(
-                "cd /workspace && printf '{feature}\\n' > feature.txt && git add -A && git commit -qm Feature && printf 'proof' > /yard/proof/evidence.txt",
+                "{}cd /workspace && printf '{feature}\\n' > feature.txt && git add -A && git commit -qm Feature && printf 'proof' > /yard/proof/evidence.txt",
+                if image {
+                    "test \"$(cat /image-input)\" = image-v2 && "
+                } else {
+                    ""
+                },
             ))],
         )
     });
@@ -142,7 +160,7 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
     let configuration = configuration.replace("max_lanes = 2", "max_lanes = 2\nmax_executions = 1");
     let stage = |project: &Project, tool_version: &str, skill_version: &str| {
         project.write(".pi/extensions/consumer/index.ts", &format!(
-            "export default function (pi) {{\n  pi.on(\"before_agent_start\", async (event) => ({{systemPrompt: event.systemPrompt + '\\nconsumer-source-{tool_version}'}}));\n}}\n"
+            "export default function (pi) {{\n  pi.on(\"before_agent_start\", async (event) => ({{systemPrompt: event.systemPrompt + '\\nconsumer-source-{tool_version}\\nconsumer-image-' + (process.env.YARD_IMAGE_SOURCE || 'v1')}}));\n}}\n"
         ));
         project.write(
             ".agents/skills/consumer/SKILL.md",
@@ -156,12 +174,12 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
     };
     let project = Project::new(&machine, "p", &configuration);
     stage(&project, "v1", "v1");
-    let image_commit = project.git(&["rev-parse", "HEAD"]).trim().to_string();
-    let image_tree = project
+    let mut image_commit = project.git(&["rev-parse", "HEAD"]).trim().to_string();
+    let mut image_tree = project
         .git(&["rev-parse", "HEAD^{tree}"])
         .trim()
         .to_string();
-    let dockerfile_blob = project
+    let mut dockerfile_blob = project
         .git(&["rev-parse", "HEAD:.yard/Dockerfile"])
         .trim()
         .to_string();
@@ -548,10 +566,17 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
         ]
     );
 
+    // G2: image-only adoption uses an older exact context while current
+    // definitions and staging differ from both retained sources.
+    // Sabotage: ignore image_commit, build HEAD, or adopt an omitted source.
+    // Real consumers read COPY bytes and ENV; host Git supplies identities.
+    // Host gate definitions stay fixed; their suppliers change independently.
     let mut current_candidate = candidate.clone();
+    let mut staging_commit = image_commit.clone();
     for (revision, skill, feature) in [
         (7, "v1", "feature-tool-v2\n"),
         (8, "v2", "feature-skill-v2\n"),
+        (9, "v2", "feature-image-v2\n"),
     ] {
         let prior_executions =
             project.rows("SELECT * FROM execution WHERE attempt = 1 ORDER BY id");
@@ -566,14 +591,42 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
             .collect::<Vec<_>>();
         let prior_revisions =
             project.rows("SELECT * FROM plan_revision WHERE attempt = 1 ORDER BY revision");
-        stage(&project, "v2", skill);
-        let staging_commit = project.git(&["rev-parse", "HEAD"]).trim().to_string();
+        let (source_key, source_commit) = if revision == 9 {
+            let dockerfile = project.git(&["show", "HEAD:.yard/Dockerfile"]);
+            project.write("image-input", "image-v2\n");
+            project.write(
+                ".yard/Dockerfile",
+                &format!("{dockerfile}\nCOPY image-input /image-input\nENV YARD_IMAGE_SOURCE=v2\n"),
+            );
+            project.write(
+                ".yard/config.toml",
+                &settings_definition.replace("adopted-model", "unselected-model"),
+            );
+            stage(&project, "unselected", "unselected");
+            image_commit = project.git(&["rev-parse", "HEAD"]).trim().to_string();
+            image_tree = project
+                .git(&["rev-parse", "HEAD^{tree}"])
+                .trim()
+                .to_string();
+            dockerfile_blob = project
+                .git(&["rev-parse", "HEAD:.yard/Dockerfile"])
+                .trim()
+                .to_string();
+            project.write("image-input", "unselected-image\n");
+            project.git(&["commit", "--quiet", "-am", "Later unselected context"]);
+            project.json(&["sync"]);
+            ("image_commit", image_commit.clone())
+        } else {
+            stage(&project, "v2", skill);
+            staging_commit = project.git(&["rev-parse", "HEAD"]).trim().to_string();
+            ("staging_commit", staging_commit.clone())
+        };
         let before = project.rows("SELECT * FROM audit ORDER BY seq");
         let stale = operator.call(
             "yard_attempt_revise",
             json!({
                 "project": project.path, "ticket": "Y-1", "plan_revision": revision - 2,
-                "staging_commit": staging_commit
+                (source_key): source_commit
             }),
         );
         assert_eq!(stale["error"]["code"], "stale");
@@ -586,13 +639,13 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
             "yard_attempt_revise",
             json!({
                 "project": project.path, "ticket": "Y-1", "plan_revision": revision - 1,
-                "staging_commit": staging_commit
+                (source_key): source_commit
             }),
         );
         assert_eq!(adopt["result"]["plan_revision"], revision, "{adopt}");
         let item = approval(&mut watch);
         assert_eq!(item["payload"]["plan_revision"], revision);
-        let rows = project.rows(&format!("SELECT id, node, digest, inputs, result, teardown, reserved FROM execution WHERE attempt = 1 AND plan_revision = {revision} ORDER BY id"));
+        let rows = project.rows(&format!("SELECT id, node, digest, image_id, inputs, result, teardown, reserved FROM execution WHERE attempt = 1 AND plan_revision = {revision} ORDER BY id"));
         assert_eq!(
             rows.iter()
                 .map(|row| row["node"].clone())
@@ -617,7 +670,16 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
             assert_ne!(row["id"], old["id"]);
             assert_eq!(row["teardown"], 1);
             assert_eq!(row["reserved"], 0);
-            if row["node"].as_str().unwrap().starts_with("review-") {
+            if revision == 9 {
+                if row["node"].as_str().unwrap().starts_with("candidate-gate-") {
+                    assert_eq!(row["digest"], old["digest"]);
+                } else {
+                    assert_ne!(row["image_id"], old["image_id"]);
+                }
+            }
+            if row["node"].as_str().unwrap().starts_with("review-")
+                || (revision == 9 && row["node"] == "implementer")
+            {
                 assert_ne!(row["digest"], old["digest"]);
             }
         }
@@ -711,11 +773,11 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
     }
     assert_eq!(
         std::fs::read_to_string(&gate_counter).unwrap(),
-        "original\nadopted\nadopted\nadopted\n"
+        "original\nadopted\nadopted\nadopted\nadopted\n"
     );
     assert_eq!(
         std::fs::read_to_string(&keep_counter).unwrap(),
-        "keep\nkeep\nkeep\n"
+        "keep\nkeep\nkeep\nkeep\n"
     );
     assert_eq!(
         project.rows(&format!(
@@ -763,7 +825,7 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
             .iter()
             .map(|revision| revision["revision"].as_i64().unwrap())
             .collect::<Vec<_>>(),
-        vec![1, 2, 3, 4, 5, 6, 7, 8]
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9]
     );
     assert_eq!(history[0]["ticket_revision"], 1);
     assert_eq!(history[1]["ticket_revision"], 1);
@@ -812,7 +874,7 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
     assert_eq!(stale["error"]["code"], "stale");
     assert_eq!(
         stale["error"]["data"],
-        json!({"identity": "plan_revision", "expected": 1, "current": 8})
+        json!({"identity": "plan_revision", "expected": 1, "current": 9})
     );
     assert_eq!(project.rows("SELECT * FROM audit ORDER BY seq"), before);
     assert_eq!(
@@ -820,7 +882,7 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
         vec![json!({"state": "withdrawn"})]
     );
     let mut decision = decision;
-    decision["plan_revision"] = json!(8);
+    decision["plan_revision"] = json!(9);
     decision["head"] = json!(current_candidate);
     let accepted = operator.call("yard_attempt_approve", decision);
     assert!(accepted.get("error").is_none(), "{accepted}");
@@ -834,14 +896,14 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
             "refs/heads/main",
         ],
     );
-    // Candidate adoption leaves landing commands at their original definitions.
+    // Future landing consumes the selected definitions, on the prepared input.
     assert_eq!(
         std::fs::read_to_string(&gate_counter).unwrap(),
-        "original\nadopted\nadopted\nadopted\noriginal\n"
+        "original\nadopted\nadopted\nadopted\nadopted\nadopted\n"
     );
     assert_eq!(
         std::fs::read_to_string(&keep_counter).unwrap(),
-        "keep\nkeep\nkeep\nkeep\n"
+        "keep\nkeep\nkeep\nkeep\nkeep\n"
     );
     let requests = machine.model.requests();
     let openings = |marker: &str, reviewer: bool| {
@@ -856,16 +918,18 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
             .count()
     };
     // Reviews: 3 initial + 1 profile + 3 supplier/profile + 1 routing +
-    // 2 settings, then 2 extension + 2 skill. Implementation: initial,
-    // extension, skill. The read-only capacity holder is not a consumer here.
+    // 2 settings, then 2 extension + 2 skill + 2 image. Implementation:
+    // initial, extension, skill, image. The capacity holder is excluded.
     assert_eq!(openings("consumer-source-v1", true), 10);
-    assert_eq!(openings("consumer-source-v2", true), 4);
+    assert_eq!(openings("consumer-source-v2", true), 6);
     assert_eq!(openings("consumer-skill-v1", true), 12);
-    assert_eq!(openings("consumer-skill-v2", true), 2);
+    assert_eq!(openings("consumer-skill-v2", true), 4);
     assert_eq!(openings("consumer-source-v1", false), 1);
-    assert_eq!(openings("consumer-source-v2", false), 2);
+    assert_eq!(openings("consumer-source-v2", false), 3);
     assert_eq!(openings("consumer-skill-v1", false), 2);
-    assert_eq!(openings("consumer-skill-v2", false), 1);
+    assert_eq!(openings("consumer-skill-v2", false), 2);
+    assert_eq!(openings("consumer-image-v2", true), 2);
+    assert_eq!(openings("consumer-image-v2", false), 1);
 }
 
 /// Seats publish no findings; the implementer commits feature.txt and writes

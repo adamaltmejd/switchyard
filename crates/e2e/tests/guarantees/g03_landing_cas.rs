@@ -208,9 +208,23 @@ fn a_landing_retires_when_canonical_moves_before_update_ref() {
     let mut watch = project.watch(0);
     project.json(&["ticket", "new", "--title", "Add feature"]);
     watch.attention();
-    // The same admitted candidate accepts this instructions-only selection
-    // outside the intent boundary. Its agent, grants and landing stay frozen.
+    // The admitted candidate accepts source and instructions selection
+    // outside the intent boundary. Its agent and grants stay frozen.
     let adjustment = json!({"implementer": {"profile": "revised"}});
+    // G3: future requirements are selected before intent and run on the
+    // prepared merge, including the target-only file. Host Git is the oracle.
+    // Sabotage: freeze landing nodes or read original landing definitions.
+    let landing_head = machine.root.join("selected-landing-head");
+    let configuration = project.git(&["show", "HEAD:.yard/config.toml"]);
+    project.write("other.txt", "target-only\n");
+    project.write(
+        ".yard/config.toml",
+        &format!("{configuration}\n[gates.future]\nstage = 'landing'\nruns_in = 'host'\ncommand = 'test -f feature.txt && test -f other.txt && git rev-parse HEAD >> {}'\n", landing_head.display()),
+    );
+    project.git(&["add", "-A"]);
+    project.git(&["commit", "--quiet", "-m", "Future landing requirement"]);
+    project.json(&["sync"]);
+    let definition_commit = project.git(&["rev-parse", "HEAD"]).trim().to_string();
     let mut operator = machine.operator();
     operator.initialize();
     let current = project.json(&["attempt", "show", "Y-1"]);
@@ -218,7 +232,8 @@ fn a_landing_retires_when_canonical_moves_before_update_ref() {
     let adjusted = operator.call(
         "yard_attempt_revise",
         json!({"project": project.path, "ticket": "Y-1",
-            "plan_revision": expected, "overrides": adjustment}),
+            "plan_revision": expected, "overrides": adjustment,
+            "definition_commit": definition_commit, "image_commit": definition_commit}),
     );
     assert_eq!(
         adjusted["result"]["plan_revision"],
@@ -256,6 +271,26 @@ fn a_landing_retires_when_canonical_moves_before_update_ref() {
     let intent =
         project.rows("SELECT id FROM execution WHERE kind = 'landing' AND intent_state = 'open'");
     assert_eq!(intent.len(), 1);
+    let merged = git(
+        &project.canonical(),
+        &[
+            "rev-parse",
+            &format!("refs/yard/landings/{}", intent[0]["id"]),
+        ],
+    )
+    .trim()
+    .to_string();
+    assert_eq!(
+        std::fs::read_to_string(&landing_head).unwrap(),
+        format!("{merged}\n")
+    );
+    assert_eq!(
+        git(
+            &project.canonical(),
+            &["show", &format!("{merged}:other.txt")]
+        ),
+        "target-only\n"
+    );
     // G3 Shown-by: a valid plan adjustment racing the held intent refuses
     // naming it and changes no plan, approval, attention or audit; the same
     // adjustment succeeds before the intent. This maps Live adjustment.
@@ -272,7 +307,8 @@ fn a_landing_retires_when_canonical_moves_before_update_ref() {
     let refused = operator.call(
         "yard_attempt_revise",
         json!({"project": project.path, "ticket": "Y-1",
-            "plan_revision": plan["attempt"]["plan_revision"], "overrides": adjustment}),
+            "plan_revision": plan["attempt"]["plan_revision"], "overrides": adjustment,
+            "definition_commit": definition_commit, "image_commit": definition_commit}),
     );
     assert_eq!(refused["error"]["code"], "refused", "{refused}");
     assert_eq!(refused["error"]["data"]["intent"], intent[0]["id"]);
@@ -378,7 +414,7 @@ fn a_landing_retires_when_canonical_moves_before_update_ref() {
             "SELECT outcome FROM execution WHERE parent = {} AND head = '{merged}'",
             landings[1]["id"]
         )),
-        vec![json!({ "outcome": "pass" })]
+        vec![json!({ "outcome": "pass" }), json!({ "outcome": "pass" })]
     );
     git(&canonical, &["merge-base", "--is-ancestor", &head, merged]);
     git(&canonical, &["merge-base", "--is-ancestor", moved, merged]);
