@@ -138,7 +138,7 @@ gate still runs. Ordinary omissions record no explicit acceptance.
 
 The e2e suite (`cargo test -p e2e --locked`) runs on a host with the
 container runtime, not inside a box.
-CI pins pinfold 0.2.2.
+CI pins pinfold 0.2.3.
 
 Development binaries use separate state, sockets, projects and runtime names.
 They never open the construction backlog. Release preparation does not
