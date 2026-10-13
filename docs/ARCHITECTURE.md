@@ -365,6 +365,10 @@ are superseded. Ownership questions and reservations remain until existing
 checked teardown proves every owner gone. No replacement overlaps them.
 Stale edits and decisions name expected/current `plan_revision` and write
 no row. Approve and reject on revised candidates name `plan_revision`.
+Selected decision evidence reports the execution's recorded consumed definition.
+Retained candidate checks require that definition to equal the current selection;
+landing decisions require the original approval to remain active on that revision.
+Raw execution and check evidence remains unchanged.
 
 Startup and result recording use each execution's frozen revision and
 settings, including when adjustment races startup or recovery. Each
