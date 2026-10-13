@@ -320,7 +320,8 @@ fn legacy_nullable_usage_survives_migration_and_reopen() {
 /// response with cache/reasoning subsets. The fixture holds the next request
 /// until the real box ends; reopening then completes another resumed execution.
 /// Sabotage: add cached/reasoning subsets, copy cumulative predecessor tokens,
-/// discard nonterminal counters, or label interrupted usage complete.
+/// discard terminal/nonterminal counters, label interrupted usage complete,
+/// or rewrite historical session-local evidence on reopen.
 /// Fresh Y-66 controls do not exercise session baselines or lost terminal frames.
 #[test]
 fn codex_failed_and_interrupted_resume_usage_remain_execution_local() {
@@ -416,7 +417,16 @@ fn codex_failed_and_interrupted_resume_usage_remain_execution_local() {
         (&json!("stopped"), &json!("failed"))
     );
     assert!(hold.is_held());
+    // Terminal attention precedes checked cleanup. Snapshot the historical
+    // row only after this exact execution's reservation and teardown settle.
+    history.until("interrupted Codex checked release", |event| {
+        event["event"] == "execution.released" && event["execution"] == interrupted["execution"]
+    });
     let third = worker_usage(&project, 2);
+    assert_eq!(
+        (&third["execution"], &third["reserved"], &third["teardown"]),
+        (&interrupted["execution"], &json!(false), &json!(true))
+    );
     assert_eq!(third["resumed"], second["execution"]);
     assert_eq!(third["outcome"], "failed");
     assert_codex_local(&third, PROMPT_TOKENS, COMPLETION_TOKENS, "partial");
