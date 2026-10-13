@@ -416,6 +416,12 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     project.json(&["attempt", "abandon", "Y-2"]);
 
     launch(&project, 3, "Corrected packaged audit");
+    let initial_configuration =
+        std::fs::read_to_string(project.path.join(".yard/config.toml")).unwrap();
+    project.reconfigure(&initial_configuration.replace(
+        "model = \"fake-model\"",
+        "model = \"fake-model\"\neffort = \"medium\"",
+    ));
     // A packaged node with topology cannot fall back to ordinary admission.
     // Sabotage: send packaged shapes through the ordinary linear matcher.
     let mut operator = machine.operator();
@@ -452,6 +458,7 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
         .find(ModelRequest::opens)
         .unwrap();
     assert_eq!(initial_request.body["model"], "fake-model");
+    assert_eq!(initial_request.body["reasoning"]["effort"], "medium");
     assert!(
         initial_request
             .prompt()
@@ -542,6 +549,8 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     // Original controller settings, instructions or stale staged skill bytes
     // fail host request assertions after fixture-phase holds. Instructions
     // must open the prompt; their appearance in the handoff cannot qualify.
+    // Dropping effort or launching predecessor effort with current model and
+    // handoff fails the independently held provider-wire effort assertion.
     let original_rows = project.rows(&format!("SELECT * FROM execution WHERE id = {old}"));
     let configuration = std::fs::read_to_string(project.path.join(".yard/config.toml")).unwrap();
     project.write(
@@ -551,6 +560,7 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
                 "model = \"fake-model\"",
                 "model = \"packaged-adopted-model\"",
             )
+            .replace("effort = \"medium\"", "effort = \"high\"")
             .replace("Corrected packaged audit", "Fresh replacement audit"),
     );
     project.git(&["add", ".yard/config.toml"]);
@@ -621,6 +631,7 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     second.wait_held();
     let settings_request = controller_requests(&machine).last().unwrap().clone();
     assert_eq!(settings_request.body["model"], "packaged-adopted-model");
+    assert_eq!(settings_request.body["reasoning"]["effort"], "high");
     assert_context(&settings_request, false);
     assert!(
         settings_request
@@ -713,6 +724,7 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     third.wait_held();
     let staged_request = controller_requests(&machine).last().unwrap().clone();
     assert_eq!(staged_request.body["model"], "packaged-adopted-model");
+    assert_eq!(staged_request.body["reasoning"]["effort"], "high");
     assert_context(&staged_request, true);
     assert!(
         staged_request
@@ -807,6 +819,7 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     fourth.wait_held();
     let image_request = controller_requests(&machine).last().unwrap().clone();
     assert_eq!(image_request.body["model"], "packaged-adopted-model");
+    assert_eq!(image_request.body["reasoning"]["effort"], "high");
     assert_context(&image_request, true);
     assert!(
         image_request

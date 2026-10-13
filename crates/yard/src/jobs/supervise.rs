@@ -716,7 +716,7 @@ pub async fn implement(
             if prompt.len() > 32768 {
                 return Err(Fail::refused("invalid_input: audit prompt bound"));
             }
-            let launch = json!({"provider": provider, "model": implementer["model"],
+            let launch = json!({"provider": provider, "model": implementer["model"], "effort": implementer["effort"],
             "prompt": prompt, "files": declared, "skill": format!("trusted:{skill}"),
             "identity": admitted["inputs"]["package"]});
             let bytes = launch.to_string();
