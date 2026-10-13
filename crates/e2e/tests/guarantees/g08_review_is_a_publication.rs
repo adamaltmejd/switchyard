@@ -2541,6 +2541,17 @@ fn selected_failures_continue_without_rewriting_judgments() {
     assert_eq!(project.rows("SELECT e.result, e.teardown, c.verdict FROM execution e JOIN \"check\" c ON c.execution = e.id WHERE e.attempt = 3 AND e.kind = 'review'"),
         vec![json!({"result": null, "teardown": 0, "verdict": "fail"})]);
     assert!(project.rows("SELECT id FROM attention WHERE attempt = 3 AND kind = 'candidate' AND state = 'open'").is_empty());
+    let before = project.rows("SELECT * FROM audit ORDER BY seq");
+    let refused = operator.call("yard_attempt_accept", json!({
+        "project": project.path, "ticket": "Y-2", "attention": item["attention"], "check": item["payload"]["evidence"]["check"]["check"], "plan_revision": 1,
+        "target": "main", "head": payload["head"], "proof": payload["proof"], "text": "Accept while publication is held"
+    }));
+    assert_eq!(refused["error"]["code"], "stale");
+    assert_eq!(
+        refused["error"]["data"],
+        json!({"identity": "attention", "expected": "open", "current": "resolved"})
+    );
+    assert_eq!(project.rows("SELECT * FROM audit ORDER BY seq"), before);
     hold.release();
     let review = watch.attention();
     assert_eq!(
