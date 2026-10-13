@@ -43,11 +43,9 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
                 } else {
                     "Alternate final review."
                 };
-                assert!(
-                    request
-                        .prompt()
-                        .contains(&format!("\n\n{instructions}\n\n"))
-                );
+                // G2: selecting the old runner instead of the fixture profile
+                // loses these instructions, regardless of prompt framing.
+                assert!(request.prompt().contains(instructions));
             }
             if request.opens() && request.prompt().contains("You are the final reviewer") {
                 let mut calls = final_calls.lock().unwrap();
@@ -57,11 +55,7 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
                 } else {
                     "Alternate final review."
                 };
-                assert!(
-                    request
-                        .prompt()
-                        .contains(&format!("\n\n{instructions}\n\n"))
-                );
+                assert!(request.prompt().contains(instructions));
                 if *calls == 2 {
                     return Reply::Hold(
                         held.clone(),
@@ -128,6 +122,10 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
     hold.wait_held();
     let before = project.rows("SELECT * FROM audit ORDER BY seq");
     let revisions = project.rows("SELECT * FROM plan_revision ORDER BY revision");
+    let before_attempt = project.rows("SELECT * FROM attempt ORDER BY id");
+    let before_executions = project.rows("SELECT * FROM execution ORDER BY id");
+    let before_checks = project.rows("SELECT * FROM \"check\" ORDER BY id");
+    let before_attention = project.rows("SELECT * FROM attention ORDER BY id");
     let refused = operator.call(
         "yard_attempt_revise",
         json!({
@@ -144,6 +142,22 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
     assert_eq!(
         project.rows("SELECT * FROM plan_revision ORDER BY revision"),
         revisions
+    );
+    assert_eq!(
+        project.rows("SELECT * FROM attempt ORDER BY id"),
+        before_attempt
+    );
+    assert_eq!(
+        project.rows("SELECT * FROM execution ORDER BY id"),
+        before_executions
+    );
+    assert_eq!(
+        project.rows("SELECT * FROM \"check\" ORDER BY id"),
+        before_checks
+    );
+    assert_eq!(
+        project.rows("SELECT * FROM attention ORDER BY id"),
+        before_attention
     );
     hold.release();
     let second = approval(&mut watch);
@@ -183,44 +197,6 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
     assert!(!selected.contains(&old_final_check["id"]));
     assert!(selected.contains(&revised_check[0]["id"]));
 
-    let before = project.rows("SELECT * FROM audit ORDER BY seq");
-    let before_attempt = project.rows("SELECT * FROM attempt ORDER BY id");
-    let before_executions = project.rows("SELECT * FROM execution ORDER BY id");
-    let before_checks = project.rows("SELECT * FROM \"check\" ORDER BY id");
-    let before_attention = project.rows("SELECT * FROM attention ORDER BY id");
-    let stale = operator.call(
-        "yard_attempt_revise",
-        json!({
-            "project": project.path, "ticket": "Y-1", "plan_revision": 1,
-            "overrides": {"review-0": {"profile": "final", "operator_failure": true}}
-        }),
-    );
-    assert_eq!(stale["error"]["code"], "stale");
-    assert_eq!(
-        stale["error"]["data"],
-        json!({"identity": "plan_revision", "expected": 1, "current": 2})
-    );
-    assert_eq!(project.rows("SELECT * FROM audit ORDER BY seq"), before);
-    assert_eq!(
-        project.rows("SELECT * FROM attempt ORDER BY id"),
-        before_attempt
-    );
-    assert_eq!(
-        project.rows("SELECT * FROM execution ORDER BY id"),
-        before_executions
-    );
-    assert_eq!(
-        project.rows("SELECT * FROM \"check\" ORDER BY id"),
-        before_checks
-    );
-    assert_eq!(
-        project.rows("SELECT * FROM attention ORDER BY id"),
-        before_attention
-    );
-    assert_eq!(
-        project.rows("SELECT * FROM plan_revision ORDER BY revision"),
-        revisions
-    );
     let changed = operator.call(
         "yard_attempt_revise",
         json!({
@@ -1157,17 +1133,31 @@ fn held_after_policy_change<'m>(
 /// An automatic approval, a sync that sets `approve = "manual"`, and the
 /// attempt abandoned while the landing reads the candidate's protected paths
 /// at its intent: the landing withdraws, and no `approval` is raised for the
-/// ended attempt. Control: `a_sync_that_protects_an_auto_approved_path_withdraws_it`,
-/// whose attempt lives, raises `approval`.
-///
-/// Sabotage: make `queue::lapsed` raise `approval` without re-reading the
-/// attempt; an approval item stays open for an attempt that ended.
+/// ended attempt. After checked cleanup, a live candidate in this same
+/// project loses automatic approval under the same manual policy change.
+/// Its existing checks survive, and operator approval lands it.
 #[test]
 fn an_attempt_abandoned_while_its_landing_rereads_policy_raises_nothing() {
-    let machine = notes_machine("g2-abandon");
-    let (project, mut watch, mut release, _) = held_after_policy_change(&machine, "", |config| {
-        config.replace("approve = \"auto\"", "approve = \"manual\"")
+    let machine = Machine::new("g2-abandon", |request| {
+        let content = if request.context().contains("Live notes") {
+            "live notes\n"
+        } else {
+            "notes\n"
+        };
+        act(
+            request,
+            vec![commit_file("docs/notes.md", content, "Add notes")],
+        )
     });
+    let candidate_gate =
+        "[gates.check]\ncommand = \"test -f docs/notes.md\"\nstage = \"candidate\"\n\n";
+    let (project, mut watch, mut release, _) =
+        held_after_policy_change(&machine, candidate_gate, |config| {
+            config.replace("approve = \"auto\"", "approve = \"manual\"")
+        });
+    let first = project.json(&["attempt", "show", "Y-1"]);
+    let first_ticket = first["attempt"]["ticket"].as_str().unwrap();
+    let abandoned = first["attempt"]["attempt"].clone();
     let fifo = |name: &str| {
         let path = machine.root.join(name);
         assert!(
@@ -1194,13 +1184,118 @@ fn an_attempt_abandoned_while_its_landing_rereads_policy_raises_nothing() {
     );
     release.write_all(b"go\n").unwrap();
     assert_eq!(watch.said(&said), "held\n");
-    project.json(&["attempt", "abandon", "Y-1"]);
+    project.json(&["ticket", "park", first_ticket]);
+    project.json(&["attempt", "abandon", first_ticket]);
     std::fs::write(&resume, "go\n").unwrap();
     let ended = watch.event("execution.ended", &[("kind", "landing")]);
     assert_eq!(ended["data"]["outcome"], "withdrawn", "{ended}");
+    // G2: remove queue::admit's post-protected-path ended-state refusal and
+    // queue::lapsed's live-state eligibility together; an open approval then
+    // survives for the abandoned candidate after the protected-path read.
     assert_eq!(
         project.rows("SELECT kind FROM attention WHERE state = 'open'"),
         Vec::<Value>::new()
+    );
+    let cleanup = watch.find("abandoned candidate cleanup", |event| {
+        event["event"] == "execution.ended"
+            && event["data"]["kind"] == "cleanup"
+            && event["attempt"] == abandoned
+    });
+    assert_eq!(cleanup["data"]["outcome"], "removed");
+    watch.find("abandoned cleanup released", |event| {
+        event["event"] == "execution.released" && event["execution"] == cleanup["execution"]
+    });
+
+    let base = auto(unreviewed(&format!(
+        "{candidate_gate}[gates.held]\ncommand = \"read line < {}\"\nruns_in = \"host\"\n",
+        machine.root.join("hold").display()
+    )));
+    project.reconfigure(&base);
+    let candidate_base = project.canonical_head();
+    let created = project.json(&["ticket", "new", "--title", "Live notes"]);
+    let ticket = created["ticket"].as_str().unwrap();
+    let approved = watch.until("live ticket auto approval", |event| {
+        event["event"] == "approval.given"
+            && event["data"]["actor"] == "auto"
+            && event["ticket"] == ticket
+    });
+    let attempt = approved["attempt"].as_i64().unwrap();
+    let clone = project
+        .path
+        .join(format!(".yard/local/attempts/{attempt}/clone"));
+    let head = git(&clone, &["rev-parse", "HEAD"]).trim().to_string();
+    assert_eq!(approved["data"]["head"], head);
+    watch.event("execution.started", &[("name", "held")]);
+    let judgments = format!(
+        "SELECT e.*, c.id AS check_id, c.execution AS check_execution, c.kind AS check_kind, c.verdict, c.created_at AS check_created_at FROM execution e LEFT JOIN \"check\" c ON c.execution = e.id WHERE e.attempt = {attempt} AND e.kind IN ('gate', 'review') AND e.reason = 'candidate' ORDER BY e.id"
+    );
+    let checks = project.rows(&judgments);
+    assert_eq!(checks.len(), 1);
+    assert_eq!(checks[0]["node"], "candidate-gate-check");
+    assert_eq!(checks[0]["verdict"], "pass");
+    let turns = machine
+        .model
+        .requests()
+        .iter()
+        .filter(|request| request.opens())
+        .count();
+    project.reconfigure(&base.replace("approve = \"auto\"", "approve = \"manual\""));
+    std::fs::write(&armed, "").unwrap();
+    release.write_all(b"go\n").unwrap();
+    assert_eq!(watch.said(&said), "held\n");
+    std::fs::write(&resume, "go\n").unwrap();
+    // G2: read approval policy in queue::holds from the prior Loaded instead
+    // of current policy; the landing retires instead of withdrawing.
+    let ended = watch.event("execution.ended", &[("kind", "landing")]);
+    assert_eq!(ended["data"]["outcome"], "withdrawn", "{ended}");
+    let raised = watch.attention();
+    assert_eq!(raised["attempt"], attempt);
+    assert_eq!(raised["data"]["kind"], "approval");
+    let payload = &raised["data"]["payload"];
+    assert_eq!(payload["head"], head);
+    assert_eq!(payload["base"], candidate_base);
+    assert_eq!(payload["proof"], approved["data"]["proof"]);
+    assert_eq!(payload["target"], "main");
+    assert_eq!(payload["revision"], 1);
+    assert_eq!(payload["plan_revision"], 1);
+    assert_eq!(payload["protected"], json!([]));
+    assert_eq!(payload["checks"], json!([checks[0]["check_id"]]));
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT actor, state FROM approval WHERE attempt = {attempt}"
+        )),
+        vec![json!({"actor": "auto", "state": "withdrawn"})]
+    );
+    assert_eq!(project.rows(&judgments), checks);
+    assert_eq!(
+        machine
+            .model
+            .requests()
+            .iter()
+            .filter(|request| request.opens())
+            .count(),
+        turns
+    );
+    project.json(&[
+        "attempt", "approve", "--target", "main", ticket, "--head", &head,
+    ]);
+    release.write_all(b"go\n").unwrap();
+    let landed = watch.event("landing.recorded", &[]);
+    assert_eq!(landed["attempt"], attempt);
+    git(
+        &project.canonical(),
+        &["merge-base", "--is-ancestor", &head, "refs/heads/main"],
+    );
+    assert_eq!(project.json(&["ticket", "show", ticket])["state"], "done");
+    assert_eq!(project.rows(&judgments), checks);
+    assert_eq!(
+        machine
+            .model
+            .requests()
+            .iter()
+            .filter(|request| request.opens())
+            .count(),
+        turns
     );
 }
 
