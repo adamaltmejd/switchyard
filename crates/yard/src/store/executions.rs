@@ -672,7 +672,7 @@ pub fn qualifies(
     let reviewer = execution.kind == "review";
     let frozen = attempt.original_admission.as_ref();
     let landing = node.starts_with("landing-gate-");
-    let old_definition = consumed_definition(
+    let mut old_definition = consumed_definition(
         if landing {
             frozen.unwrap_or(&original_evidence)
         } else {
@@ -681,7 +681,7 @@ pub fn qualifies(
         &old.runner,
         reviewer,
     );
-    let new_definition = consumed_definition(
+    let mut new_definition = consumed_definition(
         if landing {
             frozen.unwrap_or(current_evidence)
         } else {
@@ -690,6 +690,26 @@ pub fn qualifies(
         &new.runner,
         reviewer,
     );
+    // Staging adoption judges an existing candidate, not a new implementation.
+    // Live handoffs and every other implementation policy still bind normally.
+    if node == "implementer"
+        && execution.result_eligible
+        && attempt.candidate().is_some_and(|(base, head)| {
+            execution.result.as_ref().is_some_and(|result| {
+                result["outputs"]["result"] == json!({"kind": "candidate", "value": {
+                    "base": base, "head": head, "proof": attempt.proof.as_deref().unwrap_or_default()
+                }})
+            })
+        })
+    {
+        for definition in [&mut old_definition, &mut new_definition]
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_object_mut)
+        {
+            definition.remove("trusted_staged_sources");
+        }
+    }
     if old_definition != new_definition
         || (old_definition.is_none() && execution.plan_revision != attempt.plan_revision())
     {

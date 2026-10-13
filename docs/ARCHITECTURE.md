@@ -335,6 +335,10 @@ the image commit and entire build context stay fixed. Definition adoption
 re-resolves the recorded selection unless a replacement selection is supplied.
 Selected workflow, gate, seat, review and agent evidence and staged blob/mode
 identities are rebuilt from those commits. Overrides alone patch the current plan.
+Staging changes alone retain the eligible implementer result that exactly
+supplies the current candidate's base, head and proof. Other implementation
+policy and live handoff checks still apply. Changed judging inputs qualify
+each gate and reviewer independently.
 Selections retain the ordinary
 workflow and supported linear shapes. Reviewer nodes may select a declared
 read-only agent profile with verdict outputs and ordinary complete/blocked
