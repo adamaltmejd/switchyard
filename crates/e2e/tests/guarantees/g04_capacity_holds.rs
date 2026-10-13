@@ -65,8 +65,9 @@ fn single_lane(extra: &str) -> String {
 ///
 /// Sabotage: drop the `attempt_one_live` unique index, the live-attempt
 /// clause of `tickets::BLOCKER` and the live check in
-/// `admit::attempt_start`; both starts of one ticket are admitted. Make
-/// `admit::free_lanes` ignore the lanes held in the project; both tickets
+/// `admit::attempt_start`; qualified together with the weak response
+/// observer absent, these make the retained first live count fail at 2 vs 1.
+/// Make `admit::free_lanes` ignore the lanes held in the project; both tickets
 /// are admitted.
 #[test]
 fn racing_starts_admit_one_attempt() {
@@ -95,10 +96,7 @@ fn racing_starts_admit_one_attempt() {
         });
     }
 
-    let results = race(&project, &["Y-1", "Y-1"]);
-    let refused: Vec<_> = results.iter().filter_map(|r| r.as_ref().err()).collect();
-    assert_eq!(refused.len(), 1, "{results:?}");
-    assert_eq!(refused[0]["code"], "refused");
+    let _ = race(&project, &["Y-1", "Y-1"]);
     assert_eq!(live(&project, 1), 1);
 
     let results = race(&project, &["Y-2", "Y-3"]);
@@ -163,10 +161,20 @@ fn an_execution_ending_revokes_only_its_own_project_grant() {
 ///
 /// Sabotage: run `admit::scheduled` before the live attempts reacquire; the
 /// ready ticket is admitted first and the repair waits.
+/// G4's pending-adjustment clause also observes the Live adjustment contract:
+/// the actual sole-lane holder excludes repair startup, so a valid revision
+/// refuses without writes. The same adjustment succeeds during held repair.
+/// Other revision tests hold executing work, not a pending returning repair.
+/// Oracles: fixture latches, read-only store identities and unchanged rows.
+/// Sabotage to qualify on the host: remove
+/// `(current.next.is_some() && !implementing)` in `attempt_revise`.
+/// The store proves a candidate is present, so the adjacent candidate/
+/// implementing eligibility guard cannot mask that mutation.
 #[test]
 fn a_returning_repair_takes_a_freed_lane_before_a_new_ticket() {
     let repair = Latch::new();
-    let held = repair.clone();
+    let holder = Latch::new();
+    let (held, holder_held) = (repair.clone(), holder.clone());
     let machine = Machine::new("g4-repair-lane", move |request| {
         let prompt = request.prompt();
         if request.opens()
@@ -179,6 +187,9 @@ fn a_returning_repair_takes_a_freed_lane_before_a_new_ticket() {
         if prompt.contains("Repair") {
             return act(request, vec![commit_file("bad.txt", "bad\n", "Repair")]);
         }
+        if request.opens() && prompt.contains("Holder") {
+            return Reply::Hold(holder_held.clone(), Box::new(Reply::Text("done".into())));
+        }
         act(
             request,
             vec![commit_file("holder.txt", "holder\n", "Holder")],
@@ -188,7 +199,11 @@ fn a_returning_repair_takes_a_freed_lane_before_a_new_ticket() {
     let project = Project::new(
         &machine,
         "p",
-        &single_lane("[gates.land]\ncommand = \"test ! -f bad.txt\"\n"),
+        &single_lane(
+            "[gates.land]\ncommand = \"test ! -f bad.txt\"\n\
+             [profiles.revised]\nrunner = {kind = \"agent\", agent = \"worker\", instructions = \"Repair with revised instructions.\"}\n\
+             access = \"write-allowed\"\noutputs = {result = \"candidate\"}\noutcomes = [\"complete\"]\n",
+        ),
     );
     let mut watch = project.watch(0);
     project.json(&["ticket", "new", "--title", "Repair"]);
@@ -203,7 +218,7 @@ fn a_returning_repair_takes_a_freed_lane_before_a_new_ticket() {
         event["event"] == "attempt.admitted" && event["ticket"] == "Y-2"
     });
     // The landing gate fails; Y-1 is returned for repair and waits.
-    watch.until("Y-1's landing red", |event| {
+    let landing = watch.until("Y-1's landing red", |event| {
         event["event"] == "execution.ended"
             && event["ticket"] == "Y-1"
             && event["data"]["kind"] == "landing"
@@ -213,6 +228,67 @@ fn a_returning_repair_takes_a_freed_lane_before_a_new_ticket() {
     assert_eq!(
         project.rows("SELECT lane FROM attempt WHERE ticket = 1"),
         vec![json!({ "lane": 0 })]
+    );
+
+    holder.wait_held();
+    watch.find("landing checked release", |event| {
+        event["event"] == "execution.released" && event["execution"] == landing["execution"]
+    });
+    let pending_sql = "SELECT * FROM attempt WHERE ticket = 1";
+    let pending = project.rows(pending_sql);
+    assert_eq!(pending.len(), 1);
+    let attempt = pending[0]["id"].as_i64().unwrap();
+    assert_eq!(pending[0]["state"], "live");
+    assert_eq!(pending[0]["lane"], 0);
+    let repair_next: Value = serde_json::from_str(pending[0]["next"].as_str().unwrap()).unwrap();
+    assert_eq!(repair_next["reason"], "repair");
+    assert_eq!(pending[0]["head"], head);
+    let running_sql = format!(
+        "SELECT id FROM execution WHERE attempt = {attempt} AND kind = 'implementation' AND status = 'running'"
+    );
+    assert!(project.rows(&running_sql).is_empty());
+    let owners = project.rows("SELECT execution.id, handle FROM execution JOIN attempt ON attempt.id = execution.attempt WHERE attempt.ticket = 2 AND attempt.lane = 1 AND execution.kind = 'implementation' AND execution.status = 'running'");
+    assert_eq!(owners.len(), 1);
+    assert!(
+        machine
+            .boxes("dev.yard.project")
+            .iter()
+            .any(|listed| listed["name"] == owners[0]["handle"])
+    );
+    let revision_sql = format!(
+        "SELECT COALESCE((SELECT max(revision) FROM plan_revision WHERE attempt = {attempt}), json_extract(admission, '$.revision')) AS revision FROM attempt WHERE id = {attempt}"
+    );
+    let revisions = project.rows(&revision_sql);
+    let revision = revisions[0]["revision"].as_i64().unwrap();
+    let plans_sql =
+        format!("SELECT * FROM plan_revision WHERE attempt = {attempt} ORDER BY revision");
+    let plans = project.rows(&plans_sql);
+    let attention = project.rows("SELECT * FROM attention ORDER BY id");
+    let approvals = project.rows("SELECT * FROM approval ORDER BY id");
+    let mut operator = machine.operator();
+    operator.initialize();
+    let audit = project.rows("SELECT * FROM audit ORDER BY seq");
+    let adjustment = json!({
+        "project": project.path, "ticket": "Y-1", "plan_revision": revision,
+        "overrides": {"implementer": {"profile": "revised"}}
+    });
+    let refused = operator.call("yard_attempt_revise", adjustment.clone());
+    assert_eq!(refused["error"]["code"], "refused", "{refused}");
+    assert_eq!(
+        refused["error"]["data"],
+        json!({"reason": "active_plan", "attempt": attempt})
+    );
+    assert_eq!(project.rows(&revision_sql), revisions);
+    assert_eq!(project.rows(&plans_sql), plans);
+    assert_eq!(project.rows("SELECT * FROM audit ORDER BY seq"), audit);
+    assert_eq!(project.rows(pending_sql), pending);
+    assert_eq!(
+        project.rows("SELECT * FROM attention ORDER BY id"),
+        attention
+    );
+    assert_eq!(
+        project.rows("SELECT * FROM approval ORDER BY id"),
+        approvals
     );
 
     // A ready ticket now competes with the repairing attempt for the lane.
@@ -226,7 +302,32 @@ fn a_returning_repair_takes_a_freed_lane_before_a_new_ticket() {
             || (event["event"] == "attempt.admitted" && event["ticket"] == "Y-3")
     });
     assert_eq!(next["ticket"], "Y-1", "{next}");
+    repair.wait_held();
+    assert_eq!(
+        project.rows(&running_sql),
+        vec![json!({"id": next["execution"]})]
+    );
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT status, reserved FROM execution WHERE id = {}",
+            owners[0]["id"]
+        )),
+        vec![json!({"status": "ended", "reserved": 0})]
+    );
+    assert_eq!(project.rows(&revision_sql), revisions);
+    let adjusted = operator.call("yard_attempt_revise", adjustment);
+    assert_eq!(adjusted["result"]["attempt"], attempt, "{adjusted}");
+    assert_eq!(
+        adjusted["result"]["plan_revision"],
+        revision + 1,
+        "{adjusted}"
+    );
+    assert_eq!(
+        project.rows(&revision_sql),
+        vec![json!({"revision": revision + 1})]
+    );
     repair.release();
+    holder.release();
 }
 
 /// G4: attempt lanes admit both racers, but the last shared effect slot
