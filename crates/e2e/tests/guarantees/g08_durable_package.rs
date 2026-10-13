@@ -1067,6 +1067,9 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     project.json(&["attempt", "abandon", "Y-7"]);
 
     image(&project, "");
+    // G8: omitted effort still publishes through the real controller with
+    // reasoning disabled. Sabotage: require effort in the launch schema,
+    // inject null into the envelope, or enable reasoning for absent effort.
     launch(&project, 6, "Unchanged sealed controller control");
     let corrected = ended(&project, "Y-8", "Unchanged sealed controller control");
     assert_eq!(
@@ -1082,6 +1085,13 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     assert!(machine.model.requests().len() > before);
     assert_eq!(corrected["report"]["report"], expected_report());
     assert_eq!(corrected["result_eligible"], true, "{corrected}");
+    let omitted_request = controller_requests(&machine)
+        .into_iter()
+        .rev()
+        .find(ModelRequest::opens)
+        .unwrap();
+    assert!(omitted_request.body.get("reasoning").is_none());
+    assert!(omitted_request.body.get("reasoning_effort").is_none());
     let requests = controller_requests(&machine);
     for request in requests {
         assert_eq!(

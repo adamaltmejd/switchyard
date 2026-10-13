@@ -716,9 +716,13 @@ pub async fn implement(
             if prompt.len() > 32768 {
                 return Err(Fail::refused("invalid_input: audit prompt bound"));
             }
-            let launch = json!({"provider": provider, "model": implementer["model"], "effort": implementer["effort"],
+            let mut launch = json!({"provider": provider, "model": implementer["model"],
             "prompt": prompt, "files": declared, "skill": format!("trusted:{skill}"),
             "identity": admitted["inputs"]["package"]});
+            // Older sealed controllers accept the envelope without effort.
+            if !implementer["effort"].is_null() {
+                launch["effort"] = implementer["effort"].clone();
+            }
             let bytes = launch.to_string();
             if bytes.len() > 131072 {
                 return Err(Fail::refused("invalid_input: audit launch bound"));
