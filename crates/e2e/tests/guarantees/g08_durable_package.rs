@@ -1209,6 +1209,12 @@ fn a_packaged_audit_bounds_iterations_and_requires_native_publication() {
     // G4/G5/G8: restoring release's completed-only qualification leaves the
     // stopped owner's exact attention open after checked release. The later
     // publication is the same-project control; it cannot diagnose this item.
+    // Adoption at this held boundary must preserve the old revision, result
+    // and both questions. Sabotage: resolve ownership during revise or clear
+    // stop during revise/release. Git and fixture instructions supply the
+    // successor's expected definitions; running-adoption tests have no stop.
+    // Latest-admission qualification and invented missing-revision proof
+    // need independent historical controls: both admissions here are packaged.
     launch(&project, 3, "Stop selected controller");
     for name in [
         "down-said-3",
@@ -1341,6 +1347,54 @@ fn a_packaged_audit_bounds_iterations_and_requires_native_publication() {
     );
     // Hold the next checked probe until the verified same-inode owner leaves.
     assert_eq!(said(&machine.root.join("listing-said")), "0\n");
+    let frozen_rows = project.rows(&format!("SELECT * FROM execution WHERE id = {id}"));
+    let ownership = project.rows(&format!(
+        "SELECT * FROM attention WHERE execution = {id} AND reason = 'ownership'"
+    ));
+    let stopped_item = project.rows(&format!(
+        "SELECT * FROM attention WHERE execution = {id} AND kind = 'stopped'"
+    ));
+    assert_eq!(ownership.len(), 1);
+    assert_eq!(ownership[0]["state"], "open");
+    assert_eq!(stopped_item.len(), 1);
+    assert_eq!(stopped_item[0]["state"], "open");
+    let frozen_execution = project.json(&["attempt", "show", "Y-3"])["executions"][0].clone();
+    assert_eq!(frozen_execution["plan_revision"], 1);
+    let configuration = std::fs::read_to_string(project.path.join(".yard/config.toml")).unwrap();
+    project.reconfigure(
+        &configuration.replace("Stop selected controller", "Adopted stopped audit Y138"),
+    );
+    let definition = project.git(&["rev-parse", "HEAD"]).trim().to_owned();
+    let mut operator = machine.operator();
+    operator.initialize();
+    let adopted = operator.call(
+        "yard_attempt_revise",
+        json!({
+            "project": project.path, "ticket": "Y-3", "plan_revision": 1,
+            "definition_commit": definition
+        }),
+    );
+    assert_eq!(adopted["result"]["plan_revision"], 2, "{adopted}");
+    assert_eq!(
+        adopted["result"]["plan"]["inputs"]["definition_commit"],
+        definition
+    );
+    assert_eq!(
+        project.rows(&format!("SELECT * FROM execution WHERE id = {id}")),
+        frozen_rows
+    );
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT * FROM attention WHERE execution = {id} AND reason = 'ownership'"
+        )),
+        ownership
+    );
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT * FROM attention WHERE execution = {id} AND kind = 'stopped'"
+        )),
+        stopped_item
+    );
     old_lock.unlock().unwrap();
     old_lock.try_lock().unwrap();
     old_lock.unlock().unwrap();
@@ -1363,8 +1417,22 @@ fn a_packaged_audit_bounds_iterations_and_requires_native_publication() {
     assert_eq!(cancelled["result"]["outputs"], json!({}));
     assert!(cancelled["result"]["outcome"].is_null());
     assert_eq!(cancelled["binding"], old["binding"]);
+    assert_eq!(cancelled["plan_revision"], 1);
+    assert_eq!(cancelled["result"], frozen_execution["result"]);
     assert_eq!(cancelled["reserved"], false);
     assert_eq!(cancelled["outcome"], "unchanged");
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT * FROM attention WHERE execution = {id} AND kind = 'stopped'"
+        )),
+        stopped_item
+    );
+    assert_eq!(
+        project
+            .rows("SELECT id FROM execution WHERE attempt = 3")
+            .len(),
+        1
+    );
     stop.release();
 
     // G8: the subsequent selected execution publishes, then a real host lock
@@ -1399,6 +1467,13 @@ fn a_packaged_audit_bounds_iterations_and_requires_native_publication() {
         .unwrap()
         .to_owned();
     assert_eq!(published["binding"], old["binding"]);
+    assert_eq!(published["plan_revision"], 2);
+    let request = controller_requests(&machine).last().unwrap().clone();
+    assert!(request.prompt().starts_with("Adopted stopped audit Y138\n"));
+    assert_eq!(
+        shown["attempt"]["plan"]["inputs"]["definition_commit"],
+        definition
+    );
     assert_eq!(
         shown["attempt"]["admission"],
         before["attempt"]["admission"]

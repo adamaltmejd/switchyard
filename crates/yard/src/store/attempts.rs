@@ -166,17 +166,19 @@ pub fn get(conn: &Connection, id: i64) -> Result<Attempt, Fail> {
 }
 
 /// Read the definitions this execution consumed, including after a live revision.
+/// Without a recorded revision, admission evidence stays unknown.
 pub fn for_execution(
     conn: &Connection,
     execution: &super::executions::Execution,
 ) -> Result<Attempt, Fail> {
     let mut attempt = get(conn, execution.attempt)?;
-    if let Some(revision_id) = execution.plan_revision {
-        attempt.admission = Some(
+    attempt.admission = match execution.plan_revision {
+        Some(revision_id) => Some(
             revision(conn, attempt.id, revision_id)?
                 .ok_or_else(|| Fail::refused("missing execution plan revision"))?,
-        );
-    }
+        ),
+        None => None,
+    };
     Ok(attempt)
 }
 

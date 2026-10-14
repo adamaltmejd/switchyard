@@ -252,7 +252,7 @@ pub async fn release(
                 && released.status == "ended"
                 && released.outcome.as_deref() == Some("unchanged")
                 && released.node.as_deref() == Some("implementer")
-                && attempts::get(tx, released.attempt)?
+                && attempts::for_execution(tx, &released)?
                     .admission
                     .as_ref()
                     .is_some_and(|admission| admission["runtime"] == "packaged-audit")

@@ -1417,10 +1417,27 @@ pub async fn attempt_revise(
                 .with(json!({"reason": "active_plan", "attempt": current.id})));
         }
         let implementing = executions.iter().any(|row| row.kind == "implementation" && row.status == "running");
-        if (packaged && !implementing)
-            || (current.candidate().is_none() && !implementing)
+        let mut stopped_owner = None;
+        if adopting && packaged && !implementing {
+            for row in &executions {
+                if row.kind == "implementation" && row.status == "ended"
+                    && row.outcome.as_deref() == Some("unchanged") && row.reserved
+                    && row.lock_contract && row.node.as_deref() == Some("implementer")
+                    && open.iter().any(|item| item.kind == "stopped" && item.reason == "unchanged" && item.execution == Some(row.id))
+                    && open.iter().any(|item| item.kind == "red" && item.reason == "ownership" && item.execution == Some(row.id))
+                    && attempts::for_execution(tx, row)?.admission.as_ref()
+                        .is_some_and(|admission| admission["runtime"] == "packaged-audit")
+                {
+                    stopped_owner = Some(row.id);
+                }
+            }
+        }
+        if (packaged && !implementing && stopped_owner.is_none())
+            || (current.candidate().is_none() && !implementing && stopped_owner.is_none())
             || (current.next.is_some() && !implementing)
-            || open.iter().any(|item| !matches!(item.kind.as_str(), "approval" | "candidate" | "red") || (item.kind == "red" && item.reason != "ownership"))
+            || open.iter().any(|item| !matches!(item.kind.as_str(), "approval" | "candidate" | "red")
+                && !(stopped_owner.is_some() && item.kind == "stopped" && item.reason == "unchanged" && item.execution == stopped_owner)
+                || (item.kind == "red" && item.reason != "ownership"))
         {
             return Err(Fail::refused("plan adjustment requires implementation or candidate work")
                 .with(json!({"reason": "active_plan", "attempt": current.id})));
@@ -1448,7 +1465,7 @@ pub async fn attempt_revise(
         if let Some(approval) = checks::active_for(tx, current.id)? {
             checks::set_approval_state(tx, &approval, "withdrawn", id, None)?;
         }
-        for item in open { if item.reason != "ownership" { attempts::resolve(tx, &item, "superseded", None)?; } }
+        for item in open { if item.reason != "ownership" && item.kind != "stopped" { attempts::resolve(tx, &item, "superseded", None)?; } }
         let revised = attempts::get(tx, current.id)?;
         let stops = executions.iter().filter(|row| row.status == "running" && row.parent.is_none() && matches!(row.kind.as_str(), "gate" | "review"))
             .filter_map(|row| match executions::plan_superseded(tx, &revised, row) { Ok(false) => None, _ => Some(row.id) }).collect::<Vec<_>>();
