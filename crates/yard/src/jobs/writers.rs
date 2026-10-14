@@ -10,6 +10,9 @@ use std::sync::Arc;
 /// A ticket edit takes its stopped exits only after every old owner drains.
 /// Ownership attention belongs to checked release, never to an edit.
 pub fn steer(tx: &rusqlite::Connection, attempt: &attempts::Attempt) -> Result<Vec<i64>, Fail> {
+    if attempt.choice.is_some() && crate::store::selections::current(tx, attempt)?.is_none() {
+        crate::store::selections::invalidate(tx, attempt)?;
+    }
     let rows = executions::attempt_work(tx, attempt.id)?;
     let readers = rows
         .iter()
@@ -53,21 +56,28 @@ pub async fn advance(
     loaded: &Loaded,
     attempt: &attempts::Attempt,
     plan: &Plan,
-) -> Result<(), Fail> {
+) -> Result<bool, Fail> {
     let ticket = project.read(|conn| tickets::get(conn, attempt.ticket))?;
     let rows = project.read(|conn| executions::attempt_work(conn, attempt.id))?;
     project.tx(|tx| steer(tx, attempt))?;
+    if plan.selector().is_some()
+        && project
+            .read(|conn| crate::store::selections::current(conn, attempt))?
+            .is_some()
+    {
+        return Ok(true);
+    }
     if project.read(|conn| {
         Ok(attempts::open_for_attempt(conn, attempt.id)?
             .iter()
             .any(|item| item.kind != "proposal" || item.reason == "edit"))
     })? {
-        return Ok(());
+        return Ok(false);
     }
     if !attempt.lane {
         let default = super::load(daemon, project).await?;
         if !admit::take_lane(daemon, project, &default, attempt.id)? {
-            return Ok(());
+            return Ok(false);
         }
     }
     // Edits and live definition handoffs drain every old writer first. Each
@@ -82,10 +92,13 @@ pub async fn advance(
             .iter()
             .any(|row| row.status == "running" || row.reserved)
     {
-        return Ok(());
+        return Ok(false);
     }
     let mut unfinished = false;
     for (name, node) in &plan.nodes {
+        if name == "selector" || name.contains("-gate-") {
+            continue;
+        }
         let current = rows.iter().rev().find(|row| {
             row.node.as_deref() == Some(name)
                 && row.ticket_revision == Some(ticket.revision)
@@ -120,12 +133,12 @@ pub async fn advance(
                     producer.node.as_deref() == Some(source)
                         && producer.ticket_revision == Some(ticket.revision)
                         && producer.plan_revision == attempt.plan_revision()
-                        && producer.result_eligible
                 });
                 if latest.is_some_and(|producer| {
-                    row.inputs.as_ref().is_some_and(|inputs| {
-                        inputs["candidate"]["source"]["execution"] == producer.id
-                    })
+                    producer.result_eligible
+                        && row.inputs.as_ref().is_some_and(|inputs| {
+                            inputs["candidate"]["source"]["execution"] == producer.id
+                        })
                 }) {
                     continue;
                 }
@@ -150,12 +163,16 @@ pub async fn advance(
             .node
             .as_deref()
             .expect("validated producer");
-        let Some(producer) = rows.iter().rev().find(|row| {
-            row.node.as_deref() == Some(source)
-                && row.ticket_revision == Some(ticket.revision)
-                && row.plan_revision == attempt.plan_revision()
-                && row.result_eligible
-        }) else {
+        let Some(producer) = rows
+            .iter()
+            .rev()
+            .find(|row| {
+                row.node.as_deref() == Some(source)
+                    && row.ticket_revision == Some(ticket.revision)
+                    && row.plan_revision == attempt.plan_revision()
+            })
+            .filter(|row| row.result_eligible)
+        else {
             unfinished = true;
             continue;
         };
@@ -205,6 +222,52 @@ pub async fn advance(
         spawn(daemon, project, "review", execution);
         unfinished = true;
     }
+    if !unfinished && plan.selector().is_some() {
+        if let Some(row) = rows
+            .iter()
+            .rev()
+            .find(|row| row.node.as_deref() == Some("selector"))
+        {
+            if row.status == "running" || row.reserved {
+                return Ok(false);
+            }
+            let mut expected = attempt.clone();
+            expected.choice = Some(row.id);
+            if project
+                .read(|conn| crate::store::selections::current(conn, &expected))?
+                .is_some()
+            {
+                project.tx(|tx| crate::store::selections::activate(tx, attempt, row.id))?;
+                return Ok(false);
+            }
+        }
+        let Runner::Agent { agent, .. } = &plan.nodes["selector"].runner else {
+            return Err(Fail::refused("invalid selector"));
+        };
+        let settings = serde_json::to_value(&loaded.config.agents[agent]).expect("settings");
+        let execution = project.tx(|tx| {
+            executions::start(
+                tx,
+                executions::Start {
+                    attempt: Some(attempt.id),
+                    kind: "review",
+                    node: Some("selector"),
+                    name: Some("selector"),
+                    reason: Some("first"),
+                    base: Some(&attempt.base),
+                    head: Some(&attempt.base),
+                    ticket_revision: Some(ticket.revision),
+                    ticket: Some(ticket.id),
+                    agent: Some((agent, &settings)),
+                    harness_version: crate::harness::get(&loaded.config.agents[agent].harness)
+                        .map(|h| h.version()),
+                    ..Default::default()
+                },
+            )
+        })?;
+        spawn(daemon, project, "review", execution);
+        return Ok(false);
+    }
     if !unfinished
         && !rows
             .iter()
@@ -222,5 +285,5 @@ pub async fn advance(
             Ok(())
         })?;
     }
-    Ok(())
+    Ok(false)
 }

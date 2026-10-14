@@ -323,4 +323,7 @@ CREATE INDEX execution_running ON execution(status) WHERE status = 'running';
      ALTER TABLE execution ADD COLUMN settings TEXT;
      CREATE UNIQUE INDEX execution_workspace_owner ON execution(attempt, workspace)
        WHERE workspace IS NOT NULL AND (status = 'running' OR reserved = 1);",
+    // Earlier stores have no picker provenance. Do not infer a choice from head.
+    "ALTER TABLE attempt ADD COLUMN choice INTEGER REFERENCES execution(id);
+     ALTER TABLE approval ADD COLUMN choice INTEGER REFERENCES execution(id);",
 ];

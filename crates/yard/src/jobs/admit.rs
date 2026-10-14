@@ -293,7 +293,8 @@ fn writer_profiles(
     previous: Option<&Value>,
 ) -> Value {
     json!(plan.nodes.iter()
-        .filter(|(_, node)| node.access == crate::plan::Access::WriteAllowed)
+        .filter(|(_, node)| node.access == crate::plan::Access::WriteAllowed
+            && node.outputs.get("result") == Some(&crate::plan::Output::Candidate))
         .map(|(name, node)| {
             let selected = request.overrides.get(name)
                 .or_else(|| request.graph.as_ref().and_then(|graph| graph.nodes.get(name)))
@@ -393,7 +394,7 @@ pub async fn status(daemon: &Daemon, project: &Project) -> Result<Value, Fail> {
                     json!({ "approval": approval.id, "attempt": approval.attempt,
                            "ticket": ticket_name(ticket), "target": attempt.target_branch,
                            "depends_on": edges,
-                           "head": approval.head, "actor": approval.actor }),
+                           "head": approval.head, "actor": approval.actor, "choice": approval.choice }),
                 )
             })
             .collect::<Result<_, Fail>>()?;
@@ -892,7 +893,7 @@ pub fn ticket_list(project: &Project) -> Result<Value, Fail> {
 }
 
 /// Commands refused while a landing intent names the ticket.
-fn refuse_during_intent(conn: &rusqlite::Connection, ticket: i64) -> Result<(), Fail> {
+pub(super) fn refuse_during_intent(conn: &rusqlite::Connection, ticket: i64) -> Result<(), Fail> {
     for intent in executions::open_intents(conn)? {
         let attempt = attempts::get(conn, intent.required_attempt()?)?;
         if attempt.ticket == ticket {
@@ -1365,7 +1366,7 @@ pub async fn attempt_revise(
         && (plan
             .nodes
             .iter()
-            .filter(|(_, node)| node.access == crate::plan::Access::WriteAllowed)
+            .filter(|(_, node)| node.outputs.get("result") == Some(&crate::plan::Output::Candidate))
             .any(|(name, node)| {
                 old.nodes.get(name).is_none_or(|previous| {
                     let mut node = node.clone();
@@ -1385,7 +1386,8 @@ pub async fn attempt_revise(
                 })
             })
             || old.nodes.iter().any(|(name, node)| {
-                node.access == crate::plan::Access::WriteAllowed && !plan.nodes.contains_key(name)
+                node.outputs.get("result") == Some(&crate::plan::Output::Candidate)
+                    && !plan.nodes.contains_key(name)
             }))
     {
         return Err(Fail::refused("adjustment changes frozen writer grants")
@@ -1398,7 +1400,8 @@ pub async fn attempt_revise(
     if adopting {
         for (name, node) in &old.nodes {
             if name != "implementer"
-                && (!old.writers() || node.access != crate::plan::Access::WriteAllowed)
+                && (!old.writers()
+                    || node.outputs.get("result") != Some(&crate::plan::Output::Candidate))
             {
                 continue;
             }
@@ -1663,10 +1666,10 @@ pub async fn attempt_start(
         )
         .map_err(|error| Fail::refused(error.to_string()))?;
         if !plan.writers()
-            || plan
-                .nodes
-                .get(workspace)
-                .is_none_or(|node| node.access != crate::plan::Access::WriteAllowed)
+            || plan.nodes.get(workspace).is_none_or(|node| {
+                node.access != crate::plan::Access::WriteAllowed
+                    || node.outputs.get("result") != Some(&crate::plan::Output::Candidate)
+            })
         {
             return Err(Fail::refused("undeclared_workspace")
                 .with(json!({"reason": "undeclared_workspace", "workspace": workspace})));
@@ -2132,16 +2135,29 @@ fn limit_checks(
         digest: loaded.review_digest(&attempt.workflow)?,
         ..input
     };
+    let choice = crate::store::selections::current(tx, attempt)?;
+    let producer = choice
+        .as_ref()
+        .and_then(|row| row.result.as_ref())
+        .and_then(|result| {
+            result["outputs"]["result"]["value"]["candidate"]["source"]["node"].as_str()
+        });
     for (_, seat) in loaded
         .config
         .workflow(&attempt.workflow)?
         .review
         .iter()
         .enumerate()
-        .filter(|(index, _)| plan.nodes.contains_key(&format!("review-{index}")))
+        .filter(|(index, _)| {
+            plan.nodes
+                .get(&format!("review-{index}"))
+                .is_some_and(|node| {
+                    producer.is_none() || node.inputs["candidate"].node.as_deref() == producer
+                })
+        })
     {
         if let Some(check) = checks::current(tx, "review", seat, &review)?
-            && check.verdict != "pass"
+            && (producer.is_some() || check.verdict != "pass")
         {
             named.push(check.id);
         }
@@ -2475,6 +2491,20 @@ fn decision_plan(
     attempt: &attempts::Attempt,
     params: &Value,
 ) -> Result<(), Fail> {
+    if params["choice"] != json!(attempt.choice) {
+        return Err(candidate_stale(
+            "choice",
+            params["choice"].clone(),
+            json!(attempt.choice),
+        ));
+    }
+    if attempt.choice.is_some() && crate::store::selections::current(conn, attempt)?.is_none() {
+        return Err(candidate_stale(
+            "choice",
+            json!(attempt.choice),
+            Value::Null,
+        ));
+    }
     if let Some(named) = params.get("plan_revision").filter(|value| !value.is_null()) {
         let named = named
             .as_i64()
@@ -2756,6 +2786,7 @@ pub fn attempt_show(project: &Project, params: &Value) -> Result<Value, Fail> {
             "checks": checks_json,
             "approval": checks::active_for(conn, attempt.id)?.map(|approval| json!({
                 "approval": approval.id, "head": approval.head, "actor": approval.actor,
+                "choice": approval.choice,
                 "accepted_skipped": approval.accepted_skipped,
             })),
             "attention": attention,

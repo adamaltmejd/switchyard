@@ -12,6 +12,7 @@ pub mod reconcile;
 pub mod report;
 pub mod review;
 pub mod scoped;
+pub mod selection;
 pub mod supervise;
 pub mod writers;
 
@@ -733,8 +734,8 @@ async fn advance(
     if let Some(admission) = &attempt.admission {
         let plan = crate::plan::Plan::admitted(admission)
             .map_err(|error| Fail::refused(error.to_string()))?;
-        if plan.writers() {
-            return writers::advance(daemon, project, loaded, attempt, &plan).await;
+        if plan.writers() && !writers::advance(daemon, project, loaded, attempt, &plan).await? {
+            return Ok(());
         }
     }
     let Some(superseded) = project.read(|conn| runnable(conn, loaded, attempt))? else {
@@ -822,12 +823,62 @@ async fn advance(
     let mut selected = Vec::new();
     let mut accepted = Vec::new();
     let mut blocked = Vec::new();
+    let mut chosen_blocked = Vec::new();
     let concurrent = plan.concurrent();
     let active = executions
         .iter()
         .any(|row| row.status == "running" || row.reserved);
     let mut unfinished = false;
     let mut completed = std::collections::BTreeSet::from(["implementer"]);
+    let mut reviewed =
+        plan.selector().is_none() && plan.nodes.keys().any(|name| name.starts_with("review-"));
+    if let Some(choice) = project.read(|conn| crate::store::selections::current(conn, attempt))? {
+        let value =
+            &choice.result.as_ref().expect("choice")["outputs"]["result"]["value"]["candidate"];
+        let producer = value["source"]["node"].as_str().expect("candidate source");
+        for (name, node) in &plan.nodes {
+            if node.outputs.get("result") == Some(&crate::plan::Output::Candidate)
+                || name == "selector"
+                || name.starts_with("review-")
+            {
+                completed.insert(name);
+            }
+            if !name.starts_with("review-")
+                || node.inputs["candidate"].node.as_deref() != Some(producer)
+            {
+                continue;
+            }
+            let row = executions
+                .iter()
+                .rev()
+                .find(|row| row.node.as_deref() == Some(name) && row.result_eligible)
+                .ok_or_else(|| Fail::refused("selected candidate has no review"))?;
+            let check = project
+                .read(|conn| checks::for_execution(conn, row.id))?
+                .ok_or_else(|| Fail::refused("selected review has no publication"))?;
+            let input = checks::Input {
+                digest: review_digest.clone(),
+                ..gate_input.clone()
+            };
+            if project
+                .read(|conn| checks::current(conn, "review", &check.name, &input))?
+                .map(|check| check.id)
+                != Some(check.id)
+            {
+                return Ok(());
+            }
+            let evidence = project.read(|conn| checks::evidence(conn, &check, &input))?;
+            let decision = project.read(|conn| checks::decision(conn, attempt.id, &evidence))?;
+            if check.verdict != "pass" && decision.as_deref() != Some("accept") {
+                chosen_blocked.push(check.clone());
+            }
+            selected.push(check.id);
+            reviewed = true;
+            if decision.as_deref() == Some("accept") {
+                accepted.push(evidence);
+            }
+        }
+    }
     let routed = attempt
         .admission
         .as_ref()
@@ -841,6 +892,13 @@ async fn advance(
         .filter(|node| *node != "implementer")
     {
         let node = &plan.nodes[current];
+        if plan.selector().is_some()
+            && (node.outputs.get("result") == Some(&crate::plan::Output::Candidate)
+                || current == "selector"
+                || current.starts_with("review-"))
+        {
+            continue;
+        }
         if node
             .inputs
             .values()
@@ -971,7 +1029,7 @@ async fn advance(
                 let now = attempts::get(tx, attempt.id)?;
                 let ticket = tickets::get(tx, attempt.ticket)?;
                 let payload = json!({
-                    "actor": "operator", "target": attempt.target_branch,
+                    "actor": "operator", "target": attempt.target_branch, "choice": attempt.choice,
                     "base": base, "head": head, "proof": attempt.proof.clone().unwrap_or_default(),
                     "revision": input.ticket_revision, "plan_revision": attempt.plan_revision(),
                     "gate_digest": loaded.gate_digest, "review_digest": review_digest,
@@ -1062,17 +1120,30 @@ async fn advance(
     if unfinished || active {
         return Ok(());
     }
+    if let Some(trigger) = chosen_blocked.last() {
+        review::blocked(
+            project,
+            loaded,
+            attempt,
+            &ticket,
+            &chosen_blocked,
+            loaded.config.review.max_rounds,
+            trigger,
+        )?
+        .inspect(|id| spawn(daemon, project, "implementation", *id));
+        return Ok(());
+    }
 
     let target_lock = project.target_lock(&crate::git::target_ref(attempt.target_branch()?));
     let _target = target_lock.lock().await;
     let policy = load_target(daemon, project, attempt.target_branch()?).await?;
     let protected = protected_paths(daemon, project, &policy, base, head).await?;
     let payload = json!({
-        "target": attempt.target_branch, "base": base, "head": head, "proof": attempt.proof.clone().unwrap_or_default(),
+        "target": attempt.target_branch, "choice": attempt.choice, "base": base, "head": head, "proof": attempt.proof.clone().unwrap_or_default(),
         "revision": ticket.revision, "plan_revision": attempt.plan_revision(),
         "gate_digest": loaded.gate_digest, "review_digest": review_digest,
         "checks": selected, "accepted": accepted, "protected": protected,
-        "unreviewed": !plan.nodes.keys().any(|name| name.starts_with("review-")),
+        "unreviewed": !reviewed,
         "skipped": attempt.admission.as_ref().map(|admission| &admission["skipped"]),
     });
     project.tx(|tx| {
@@ -1146,6 +1217,7 @@ pub fn stale_part(
     let (base, head) = attempt.candidate().unwrap_or_default();
     for (key, current) in [
         ("target", json!(attempt.target_branch)),
+        ("choice", json!(attempt.choice)),
         ("base", json!(base)),
         ("head", json!(head)),
         ("proof", json!(attempt.proof.clone().unwrap_or_default())),
@@ -1209,6 +1281,9 @@ pub fn selected_checks_current(
     loaded: &Loaded,
     named: &[i64],
 ) -> Result<Option<(Value, Value)>, Fail> {
+    if attempt.choice.is_some() && crate::store::selections::current(conn, attempt)?.is_none() {
+        return Ok(Some((json!(attempt.choice), Value::Null)));
+    }
     let input = checks::Input {
         attempt: attempt.id,
         base: attempt.base.clone(),
@@ -1284,6 +1359,7 @@ pub async fn command(daemon: &Arc<Daemon>, method: &str, params: Value) -> Resul
         "execution.stop" => scoped::stop(daemon, &project, &params),
         "attempt.start" => admit::attempt_start(daemon, &project, &params).await,
         "attempt.revise" => admit::attempt_revise(daemon, &project, &params).await,
+        "attempt.select" => selection::operator(&project, &params),
         "attempt.stop" => admit::attempt_stop(daemon, &project, &params),
         "attempt.approve" => admit::attempt_approve(daemon, &project, &params).await,
         "attempt.accept" => admit::candidate_answer(daemon, &project, &params, true).await,

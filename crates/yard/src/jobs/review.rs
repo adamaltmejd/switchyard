@@ -44,6 +44,12 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
     else {
         return Err(Fail::refused("review has no admitted agent runner"));
     };
+    let selector = plan.selector().is_some() && node == "selector";
+    let kind = if selector {
+        crate::mcp::Kind::Selector
+    } else {
+        crate::mcp::Kind::Review
+    };
     let agent = &loaded.config.agents[selected];
     let connection = match &agent.provider {
         Some(name) => Some(
@@ -54,7 +60,7 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
     };
     let harness = crate::harness::get(&agent.harness)
         .ok_or_else(|| Fail::invalid(format!("harness {:?} is unknown", agent.harness)))?;
-    let head = row.head.clone().unwrap_or_default();
+    let head = row.head.clone().unwrap_or_else(|| attempt.base.clone());
     let base = row.base.clone().unwrap_or_default();
     // The seat reads the snapshot the candidate was judged on, never the
     // implementer's live directory.
@@ -113,6 +119,18 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
         ticket.body,
         instructions
     );
+    let prompt = if selector {
+        format!(
+            "You are the read-only selector for ticket {}: {}\n\n{}\n\n{}\n\nFrozen inputs:\n{}\n\nEach candidate is read-only at /yard/candidates/<hex input name>/source with its proof at /yard/candidates/<hex input name>/proof. Compare only the declared candidate results and bound reviews. Call yard_publish_selection exactly once with candidate naming one candidate input. This selects an existing reference and grants no write, approval or landing authority.\n",
+            ticket_name(ticket.id),
+            ticket.title,
+            ticket.body,
+            instructions,
+            serde_json::to_string_pretty(&row.inputs).expect("inputs serialize")
+        )
+    } else {
+        prompt
+    };
     let argv = harness
         .argv(&crate::harness::Launch {
             provider: agent.provider.as_deref(),
@@ -132,11 +150,11 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
     let bearer = daemon.grants.issue(crate::mcp::Grant {
         project: project.clone(),
         execution,
-        kind: crate::mcp::Kind::Review,
+        kind,
     });
     let mut secrets = vec![(crate::harness::BEARER_VAR.to_string(), bearer)];
     secrets.extend(model.secret.clone());
-    let spec = supervise::worker_spec(
+    let mut spec = supervise::worker_spec(
         daemon,
         project,
         &Worker {
@@ -151,6 +169,49 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
             egress: &[],
         },
     );
+    if selector {
+        for (name, candidate) in row
+            .inputs
+            .as_ref()
+            .and_then(Value::as_object)
+            .into_iter()
+            .flatten()
+            .filter(|(_, input)| input["kind"] == "candidate")
+        {
+            let path = dir
+                .join("candidates")
+                .join(crate::config::hex(name.as_bytes()));
+            let source = path.join("source");
+            let head = candidate["value"]["head"]
+                .as_str()
+                .ok_or_else(|| Fail::refused("invalid_candidate"))?;
+            daemon
+                .git
+                .clone_detached(&project.canonical_dir(), &source, head)
+                .await?;
+            spec.mounts.push(crate::r#box::Mount {
+                host: source,
+                guest: format!(
+                    "/yard/candidates/{}/source",
+                    crate::config::hex(name.as_bytes())
+                ),
+                readonly: true,
+            });
+            if let Some(digest) = candidate["value"]["proof"]
+                .as_str()
+                .filter(|digest| !digest.is_empty())
+            {
+                spec.mounts.push(crate::r#box::Mount {
+                    host: proof::snapshot_path(project, attempt.id, digest),
+                    guest: format!(
+                        "/yard/candidates/{}/proof",
+                        crate::config::hex(name.as_bytes())
+                    ),
+                    readonly: true,
+                });
+            }
+        }
+    }
     let live = supervise::up_worker(daemon, project, execution, &spec, &secrets).await?;
     let timeout = Duration::from_secs(loaded.config.review.timeout_minutes * 60);
     let run = async {
@@ -165,7 +226,7 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
             daemon,
             project,
             execution,
-            crate::mcp::Kind::Review,
+            kind,
             harness,
             &argv,
             &state,
@@ -196,31 +257,28 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
             );
         }
         let published = checks::for_execution(tx, execution)?;
+        let selection = executions::get(tx, execution)?.report.filter(|_| selector);
+        let has_publication = published.is_some() || selection.is_some();
         // An edit that landed while the seat ran superseded it: no error, no round.
         let moved = executions::plan_superseded(tx, &attempts::get(tx, attempt.id)?, &row)?
             || match row.ticket_revision {
                 Some(read) => attempts::superseded_by_edit(tx, attempt.id, ticket.id, read)?,
                 None => false,
             };
-        let failure = match (&published, &run.registered, &run.terminal) {
-            (Some(_), _, _) => None,
+        let failure = match (has_publication, &run.registered, &run.terminal) {
+            (true, _, _) => None,
             // An edit stopped the seat: it judged nothing and is not an error.
-            (None, _, _) if run.stopped || moved => None,
+            (false, _, _) if run.stopped || moved => None,
             // A refused registration ends the run before a terminal frame, so
             // name its reason rather than the generic no-publication error.
-            (None, Some(crate::harness::Registration::Refused(reason)), _) => Some(reason.clone()),
-            (None, _, _) if run.timed_out => {
+            (false, Some(crate::harness::Registration::Refused(reason)), _) => Some(reason.clone()),
+            (false, _, _) if run.timed_out => {
                 Some("the seat ran past its timeout without publishing".to_string())
             }
-            (None, _, Some(crate::harness::Event::Failed { message, .. })) => Some(message.clone()),
-            (None, _, _) => Some("the seat ended without publishing".to_string()),
-        };
-        let outcome = match &failure {
-            Some(_) => "error",
-            None if (run.stopped || moved) && published.is_none() => "stopped",
-            None => published
-                .as_ref()
-                .map_or("error", |check| check.verdict.as_str()),
+            (false, _, Some(crate::harness::Event::Failed { message, .. })) => {
+                Some(message.clone())
+            }
+            (false, _, _) => Some("the seat ended without publishing".to_string()),
         };
         let infrastructure = if run.timed_out {
             "timeout"
@@ -235,12 +293,23 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
         } else {
             "completed"
         };
+        let outcome = match &failure {
+            Some(_) => "error",
+            None if (run.stopped || moved) && (!has_publication || selector) => "stopped",
+            None if selector && selection.is_some() && infrastructure == "completed" => "selected",
+            None => published
+                .as_ref()
+                .map_or("error", |check| check.verdict.as_str()),
+        };
         executions::end(
             tx,
             execution,
             executions::End {
                 outcome,
                 infrastructure: Some(infrastructure),
+                output: selection
+                    .filter(|_| infrastructure == "completed" && !moved)
+                    .map(|value| json!({"kind": "selection", "value": value})),
                 detail: failure.as_deref(),
                 exit_code: run.exit_code,
                 ticket: Some(ticket.id),
@@ -374,6 +443,7 @@ pub fn blocked(
         if attempts::superseded_by_edit(tx, attempt.id, ticket.id, ticket.revision)?
             || current.plan_revision() != attempt.plan_revision()
             || current.rounds != attempt.rounds
+            || current.choice != attempt.choice
         {
             return Ok(None);
         }
@@ -393,7 +463,7 @@ pub fn blocked(
                     execution: blocked.last().map(|check| check.execution),
                     payload: json!({
                         "rounds": rounds, "findings": findings,
-                        "target": attempt.target_branch, "base": base, "head": head,
+                        "target": attempt.target_branch, "choice": attempt.choice, "base": base, "head": head,
                         "proof": current.proof.clone().unwrap_or_default(),
                         "revision": ticket.revision, "plan_revision": attempt.plan_revision(),
                         "gate_digest": loaded.gate_digest,

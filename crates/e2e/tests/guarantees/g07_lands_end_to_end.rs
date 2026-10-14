@@ -496,6 +496,7 @@ fn a_ticket_lands_end_to_end_and_leaves_only_rows() {
         "ticket.abandoned",
         "attempt.admitted",
         "attempt.candidate",
+        "candidate.selected",
         "attempt.stopped",
         "attempt.abandoned",
         "attempt.ended",

@@ -17,6 +17,7 @@ pub struct Attempt {
     pub original_admission: Option<Value>,
     pub base: String,
     pub head: Option<String>,
+    pub choice: Option<i64>,
     /// The digest of the candidate's proof snapshot.
     pub proof: Option<String>,
     /// The latest target handed to the attempt for a repair.
@@ -37,7 +38,7 @@ const COLUMNS: &str =
     "id, ticket, workflow, implementer, base, head, proof, target, state, outcome,
     lane, lane_since, work_ms, next, rounds, extra_rounds, landing_reds, target_branch, admission,
     COALESCE((SELECT evidence FROM plan_revision WHERE plan_revision.attempt = attempt.id
-              ORDER BY revision DESC LIMIT 1), admission)";
+              ORDER BY revision DESC LIMIT 1), admission), choice";
 
 fn row(row: &Row) -> rusqlite::Result<Attempt> {
     let implementer: String = row.get(3)?;
@@ -49,6 +50,7 @@ fn row(row: &Row) -> rusqlite::Result<Attempt> {
         implementer: serde_json::from_str(&implementer).unwrap_or(Value::Null),
         base: row.get(4)?,
         head: row.get(5)?,
+        choice: row.get(20)?,
         proof: row.get(6)?,
         target: row.get(7)?,
         state: row.get(8)?,
@@ -133,6 +135,7 @@ impl Attempt {
             "target": self.target_branch,
             "base": self.base,
             "head": self.head,
+            "choice": self.choice,
             "proof": self.proof,
             "state": self.state,
             "outcome": self.outcome,

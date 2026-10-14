@@ -425,6 +425,13 @@ async fn holds(
         Some("the attempt ended")
     } else if attempt.target_branch.as_deref() != Some(loaded.branch.as_str()) {
         Some("the target changed")
+    } else if approval.choice != attempt.choice
+        || (attempt.choice.is_some()
+            && project
+                .read(|conn| crate::store::selections::current(conn, attempt))?
+                .is_none())
+    {
+        Some("the choice changed")
     } else if attempt.candidate() != Some((approval.base.as_str(), approval.head.as_str()))
         || attempt.proof.clone().unwrap_or_default() != approval.proof
     {
@@ -505,7 +512,7 @@ fn lapsed(
         None => loaded.config.workflow_plan(&attempt.workflow)?,
     };
     let payload = json!({
-        "target": attempt.target_branch, "base": approval.base, "head": approval.head, "proof": approval.proof,
+        "target": attempt.target_branch, "choice": attempt.choice, "base": approval.base, "head": approval.head, "proof": approval.proof,
         "revision": approval.ticket_revision, "plan_revision": attempt.plan_revision(),
         "gate_digest": approval.gate_digest, "review_digest": approval.review_digest,
         "checks": approval.checks, "protected": protected,

@@ -581,6 +581,9 @@ pub fn check_digest(
     let runner = if kind == "gate" {
         crate::plan::Runner::Command { gate: name.into() }
     } else {
+        if name == "selector" {
+            return Ok(baseline.into());
+        }
         let index = admission["workflow"]["review"]
             .as_array()
             .and_then(|seats| seats.iter().position(|seat| seat.as_str() == Some(name)))
@@ -624,7 +627,7 @@ pub fn check_digest(
 }
 
 /// Merge, cleanup and old history have no graph node.
-fn binding(
+pub fn binding(
     conn: &Connection,
     attempt: &super::attempts::Attempt,
     start: &Start,
@@ -668,16 +671,19 @@ fn binding(
             .ok_or_else(|| Fail::refused("undeclared_workspace"))?;
         let mut inputs = serde_json::Map::new();
         for (name, reference) in &declared.inputs {
-            let source = reference
-                .node
-                .as_deref()
-                .ok_or_else(|| Fail::refused("missing_producer"))?;
+            let Some(source) = reference.node.as_deref() else {
+                if reference.output != "merged" || start.parent.is_none() {
+                    return Ok(None);
+                }
+                inputs.insert(name.clone(), json!({"kind": "candidate",
+                    "source": {"external": "merged", "execution": start.parent},
+                    "value": {"base": start.base, "head": start.head, "proof": start.proof.unwrap_or_default()}}));
+                continue;
+            };
             let Some(producer) = query(
                 conn,
-                &format!(
-                    "attempt = ?1 AND node = ?2 AND plan_revision = ?3
-                AND ticket_revision = ?4 AND {RESULT_ELIGIBLE} ORDER BY id DESC LIMIT 1"
-                ),
+                "attempt = ?1 AND node = ?2 AND plan_revision = ?3
+                AND ticket_revision = ?4 ORDER BY id DESC LIMIT 1",
                 params![
                     attempt.id,
                     source,
@@ -688,16 +694,56 @@ fn binding(
             .pop() else {
                 return Ok(None);
             };
+            if !producer.result_eligible {
+                return Ok(None);
+            }
+            if reference.kind == crate::plan::Output::Verdict
+                && binding(
+                    conn,
+                    attempt,
+                    &Start {
+                        kind: "review",
+                        node: Some(source),
+                        base: producer.base.as_deref(),
+                        head: producer.head.as_deref(),
+                        proof: producer.proof.as_deref(),
+                        ticket_revision: producer.ticket_revision,
+                        ..Default::default()
+                    },
+                )?
+                .map(|(_, inputs)| inputs)
+                    != producer.inputs
+            {
+                return Ok(None);
+            }
+            if reference.kind == crate::plan::Output::Selection
+                && attempt.choice != Some(producer.id)
+            {
+                return Ok(None);
+            }
             let output =
                 &producer.result.as_ref().expect("eligible result")["outputs"][&reference.output];
             if output["kind"] != serde_json::to_value(&reference.kind).expect("output kind") {
                 return Ok(None);
             }
+            let mut value = if reference.kind == crate::plan::Output::Selection {
+                output["value"]["candidate"]["value"].clone()
+            } else {
+                output["value"].clone()
+            };
+            if node == "selector" && reference.kind == crate::plan::Output::Verdict {
+                let Some(check) = super::checks::for_execution(conn, producer.id)? else {
+                    return Ok(None);
+                };
+                value["review"] = json!({"check": check.to_json(),
+                    "findings": super::checks::findings(conn, check.id)?,
+                    "node": plan.nodes[source], "settings": producer.settings});
+            }
             inputs.insert(
                 name.clone(),
                 json!({"kind": reference.kind, "source": {
                 "execution": producer.id, "node": source, "output": reference.output,
-                "plan_revision": producer.plan_revision}, "value": output["value"]}),
+                "plan_revision": producer.plan_revision}, "value": value}),
             );
         }
         return Ok(Some((node, Value::Object(inputs))));
@@ -1173,6 +1219,7 @@ pub fn end(tx: &Connection, id: i64, end: End) -> Result<(), Fail> {
             let node = &plan.nodes[execution.node.as_deref().expect("bound node")];
             if execution.kind == "review"
                 && let Some(output) = &mut output
+                && output["kind"] == "verdict"
             {
                 let mut blocked = execution
                     .inputs

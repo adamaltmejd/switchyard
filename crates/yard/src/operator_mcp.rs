@@ -55,6 +55,10 @@ const OPERATIONS: &[(&str, &str)] = &[
     ),
     ("attempt.stop", "project! ticket! execution:i"),
     (
+        "attempt.select",
+        "project! ticket! attempt:i! revision:i! plan_revision:i! target! choice:i! inputs:o! candidate!",
+    ),
+    (
         "attempt.revise",
         "project! ticket! plan_revision:i! preset workflow graph:o overrides:o definition_commit staging_commit image_commit",
     ),
@@ -68,11 +72,11 @@ const OPERATIONS: &[(&str, &str)] = &[
     ),
     (
         "attempt.approve",
-        "project! ticket! head! target! proof text accept_skipped:a observe_landing_skipped:a attention:i base revision:i plan_revision:i",
+        "project! ticket! head! target! proof text accept_skipped:a observe_landing_skipped:a attention:i base revision:i plan_revision:i choice:i",
     ),
     (
         "attempt.reject",
-        "project! ticket! head! target! proof text! plan_revision:i",
+        "project! ticket! head! target! proof text! plan_revision:i choice:i",
     ),
     ("attempt.abandon", "project! ticket! reason"),
     ("attempt.show", "project! ticket!"),

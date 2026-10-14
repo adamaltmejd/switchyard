@@ -231,6 +231,9 @@ enum AttemptCommand {
     },
     Approve {
         ticket: String,
+        /// The exact selector execution this approval binds.
+        #[arg(long)]
+        choice: Option<i64>,
         /// The candidate head this approval binds.
         #[arg(long)]
         head: String,
@@ -259,6 +262,9 @@ enum AttemptCommand {
     },
     Reject {
         ticket: String,
+        /// The exact selector execution this decision answers.
+        #[arg(long)]
+        choice: Option<i64>,
         #[arg(long)]
         head: String,
         /// The frozen target branch.

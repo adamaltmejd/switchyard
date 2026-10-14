@@ -567,6 +567,7 @@ pub struct Approval {
     pub proof: String,
     pub ticket_revision: i64,
     pub plan_revision: Option<i64>,
+    pub choice: Option<i64>,
     pub gate_digest: String,
     pub review_digest: String,
     pub checks: Vec<i64>,
@@ -575,7 +576,7 @@ pub struct Approval {
     pub state: String,
 }
 
-const APPROVAL_COLUMNS: &str = "id, attempt, base, head, ticket_revision, gate_digest, review_digest, checks, actor, state, proof, plan_revision, accepted_skipped";
+const APPROVAL_COLUMNS: &str = "id, attempt, base, head, ticket_revision, gate_digest, review_digest, checks, actor, state, proof, plan_revision, accepted_skipped, choice";
 
 fn approval_row(row: &Row) -> rusqlite::Result<Approval> {
     Ok(Approval {
@@ -591,6 +592,7 @@ fn approval_row(row: &Row) -> rusqlite::Result<Approval> {
         state: row.get(9)?,
         proof: row.get(10)?,
         plan_revision: row.get(11)?,
+        choice: row.get(13)?,
         accepted_skipped: row
             .get::<_, Option<String>>(12)?
             .map(|raw| serde_json::from_str(&raw))
@@ -685,7 +687,7 @@ pub fn approve(tx: &Connection, approve: Approve) -> Result<i64, Fail> {
     let id = tx.last_insert_rowid();
     let revision = super::attempts::get(tx, approve.attempt)?.plan_revision();
     tx.execute(
-        "UPDATE approval SET plan_revision = ?2, accepted_skipped = ?3 WHERE id = ?1",
+        "UPDATE approval SET plan_revision = ?2, accepted_skipped = ?3, choice = (SELECT choice FROM attempt WHERE attempt.id = approval.attempt) WHERE id = ?1",
         params![id, revision, approve.accepted_skipped.map(Value::to_string)],
     )?;
     audit(

@@ -543,7 +543,10 @@ impl Plan {
         let mut reached = if self.writers() {
             self.nodes
                 .iter()
-                .filter(|(_, node)| node.access == Access::WriteAllowed)
+                .filter(|(_, node)| {
+                    node.access == Access::WriteAllowed
+                        && node.outputs.get("result") == Some(&Output::Candidate)
+                })
                 .map(|(name, _)| name.as_str())
                 .collect()
         } else {
@@ -578,7 +581,7 @@ impl Plan {
     }
 
     /// Independent writers are roots. Each reader names exactly one producer.
-    /// Selection and integration of these candidates belong to later graphs.
+    /// A selector may route an existing publication into native verification.
     pub fn writers(&self) -> bool {
         self.nodes
             .values()
@@ -590,7 +593,169 @@ impl Plan {
             > 1
     }
 
+    pub fn selector(&self) -> Option<&Node> {
+        self.nodes
+            .get("selector")
+            .filter(|node| node.outputs.get("result") == Some(&Output::Selection))
+    }
+
     fn writer_selection(&self, config: &Config, workflow: &str) -> bool {
+        if self.selector().is_some() {
+            return self.selected_writer_graph(config, workflow);
+        }
+        self.candidate_writer_graph(config, workflow)
+    }
+
+    fn selected_writer_graph(&self, config: &Config, workflow: &str) -> bool {
+        let Some(selector) = self.selector() else {
+            return false;
+        };
+        let Ok(ordinary) = config.workflow_plan(workflow) else {
+            return false;
+        };
+        if selector.access != Access::ReadOnly
+            || selector.operator_failure
+            || selector.outputs != BTreeMap::from([("result".into(), Output::Selection)])
+            || selector.outcomes != ["complete"]
+            || !config.profiles.values().any(|profile| {
+                profile.runner == selector.runner
+                    && profile.access == selector.access
+                    && profile.outputs == selector.outputs
+                    && profile.outcomes == selector.outcomes
+            })
+            || !matches!(selector.runner, Runner::Agent { .. })
+            || selector.inputs.len() != selector.requires.len()
+            || selector
+                .inputs
+                .keys()
+                .any(|name| !selector.requires.contains(name))
+            || !self
+                .inputs
+                .iter()
+                .all(|(name, kind)| name == "merged" && *kind == Output::Candidate)
+        {
+            return false;
+        }
+        let mut roots = self.clone();
+        roots.inputs.clear();
+        roots
+            .nodes
+            .retain(|name, _| name != "selector" && !name.contains("-gate-"));
+        for node in roots.nodes.values_mut() {
+            node.routes
+                .get_mut("complete")
+                .into_iter()
+                .for_each(|routes| routes.retain(|r| r.to != "selector"));
+            node.routes.retain(|_, routes| !routes.is_empty());
+        }
+        if !roots.candidate_writer_graph(config, workflow) {
+            return false;
+        }
+        for (name, node) in &roots.nodes {
+            let kind = if node.access == Access::WriteAllowed {
+                Output::Candidate
+            } else {
+                Output::Verdict
+            };
+            if selector
+                .inputs
+                .values()
+                .filter(|input| {
+                    input.node.as_deref() == Some(name)
+                        && input.output == "result"
+                        && input.kind == kind
+                })
+                .count()
+                != 1
+                || !self.nodes[name]
+                    .routes
+                    .get("complete")
+                    .is_some_and(|routes| {
+                        routes
+                            .iter()
+                            .any(|r| r.to == "selector" && r.repeat.is_none())
+                    })
+            {
+                return false;
+            }
+        }
+        if selector.inputs.len() != roots.nodes.len() {
+            return false;
+        }
+        for (name, node) in &self.nodes {
+            if name == "selector" || roots.nodes.contains_key(name) {
+                continue;
+            }
+            let Some(defined) = ordinary.nodes.get(name) else {
+                return false;
+            };
+            if !name.contains("-gate-")
+                || node.runner != defined.runner
+                || node.access != defined.access
+                || node.outputs != defined.outputs
+                || node.outcomes != defined.outcomes
+                || node.operator_failure != defined.operator_failure
+            {
+                return false;
+            }
+            let landing = name.starts_with("landing-gate-");
+            let reference = Input {
+                node: (!landing).then(|| "selector".into()),
+                output: if landing { "merged" } else { "result" }.into(),
+                kind: if landing {
+                    Output::Candidate
+                } else {
+                    Output::Selection
+                },
+            };
+            if node.inputs
+                != BTreeMap::from([(
+                    if landing { "merged" } else { "candidate" }.into(),
+                    reference,
+                )])
+                || node.requires != [if landing { "merged" } else { "candidate" }]
+            {
+                return false;
+            }
+        }
+        let mut visited = BTreeSet::new();
+        let mut current = "selector";
+        let mut landing = false;
+        loop {
+            if !visited.insert(current) {
+                return false;
+            }
+            let node = &self.nodes[current];
+            for (outcome, routes) in &node.routes {
+                if outcome != "complete"
+                    && (outcome != "failed"
+                        || routes.len() != 1
+                        || routes[0].to != "implementer"
+                        || routes[0].repeat != Some(config.review.max_rounds))
+                {
+                    return false;
+                }
+            }
+            match node.routes.get("complete").map(Vec::as_slice) {
+                None | Some([]) => break,
+                Some([route]) if route.repeat.is_none() => {
+                    if roots.nodes.contains_key(&route.to) || route.to == "selector" {
+                        return false;
+                    }
+                    if route.to.starts_with("landing-gate-") {
+                        landing = true;
+                    } else if landing {
+                        return false;
+                    }
+                    current = &route.to;
+                }
+                _ => return false,
+            }
+        }
+        visited.len() + roots.nodes.len() == self.nodes.len() && self.complete_order().is_some()
+    }
+
+    fn candidate_writer_graph(&self, config: &Config, workflow: &str) -> bool {
         if config
             .workflow(workflow)
             .map_or(true, |workflow| workflow.read_only)

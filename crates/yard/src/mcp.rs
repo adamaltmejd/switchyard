@@ -25,6 +25,7 @@ pub struct Grant {
 pub enum Kind {
     Implementation,
     Review,
+    Selector,
     Audit,
     StandaloneReport,
 }
@@ -209,9 +210,17 @@ fn tools(kind: Kind) -> Vec<Value> {
             }, "required": ["outcome", "report"]
         }
     });
+    let selection = json!({
+        "name": "yard_publish_selection",
+        "description": "Select exactly one declared candidate input once. This grants no write, approval or landing authority.",
+        "inputSchema": {"type": "object", "additionalProperties": false,
+            "properties": {"candidate": {"type": "string", "minLength": 1, "maxLength": 1024}},
+            "required": ["candidate"]}
+    });
     match kind {
         Kind::Implementation => vec![context, progress, propose],
         Kind::Review => vec![context, progress, publish],
+        Kind::Selector => vec![context, progress, selection],
         Kind::Audit => vec![context, progress, propose, report],
         Kind::StandaloneReport => vec![context, progress, report],
     }
@@ -338,6 +347,7 @@ async fn call(daemon: &Arc<Daemon>, grant: &Grant, params: &Value) -> Value {
             "yard_progress" => progress(grant, &arguments),
             "yard_propose" => crate::jobs::propose(grant, &arguments),
             "yard_publish_review" => crate::jobs::review::publish(grant, &arguments),
+            "yard_publish_selection" => crate::jobs::selection::publish(grant, &arguments),
             "yard_publish_report" => crate::jobs::report::publish(grant, &arguments),
             _ => unreachable!("granted tools are listed above"),
         }

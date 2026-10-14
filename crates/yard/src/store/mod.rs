@@ -10,6 +10,7 @@ use rusqlite::{Connection, Row, Transaction, params};
 pub mod attempts;
 pub mod checks;
 pub mod executions;
+pub mod selections;
 pub mod tickets;
 use serde_json::{Value, json};
 use std::fs::File;

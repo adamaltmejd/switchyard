@@ -46,7 +46,15 @@ pub fn start_implementation(
     reason: &str,
     feedback: Option<&Value>,
 ) -> Result<i64, Fail> {
-    start_writer(tx, attempt, "implementer", reason, feedback)
+    let choice = crate::store::selections::current(tx, attempt)?;
+    let node = choice
+        .as_ref()
+        .and_then(|row| row.result.as_ref())
+        .and_then(|result| {
+            result["outputs"]["result"]["value"]["candidate"]["source"]["node"].as_str()
+        })
+        .unwrap_or("implementer");
+    start_writer(tx, attempt, node, reason, feedback)
 }
 
 pub fn start_writer(
@@ -98,6 +106,10 @@ pub fn start_writer(
             ..Default::default()
         },
     )?;
+    if attempt.choice.is_some() {
+        crate::store::selections::invalidate(tx, &attempt)?;
+        crate::store::attempts::set_next(tx, attempt.id, None)?;
+    }
     tx.execute(
         "UPDATE execution SET body = ?2 WHERE id = ?1",
         rusqlite::params![id, ticket.body],
@@ -409,7 +421,7 @@ pub async fn run_harness(
         .entry((project.key.clone(), execution))
         .or_insert_with(|| Arc::new(tokio::sync::Notify::new()))
         .clone();
-    if kind == crate::mcp::Kind::Review {
+    if matches!(kind, crate::mcp::Kind::Review | crate::mcp::Kind::Selector) {
         notify_if_edited(project, execution, &stop);
     }
     if harness_stopped(daemon, project, execution).await? {
@@ -2344,7 +2356,9 @@ pub async fn context(daemon: &Arc<Daemon>, grant: &crate::mcp::Grant) -> Result<
     let attempt = project.read(|conn| attempts::get(conn, row.required_attempt()?))?;
     let ticket = project.read(|conn| tickets::get(conn, attempt.ticket))?;
     let (base, head) = match grant.kind {
-        crate::mcp::Kind::Review => (row.base.clone().unwrap_or_default(), row.head.clone()),
+        crate::mcp::Kind::Review | crate::mcp::Kind::Selector => {
+            (row.base.clone().unwrap_or_default(), row.head.clone())
+        }
         crate::mcp::Kind::Implementation if row.workspace.is_some() => (
             row.base.clone().unwrap_or_else(|| attempt.base.clone()),
             row.head.clone(),
@@ -2353,6 +2367,13 @@ pub async fn context(daemon: &Arc<Daemon>, grant: &crate::mcp::Grant) -> Result<
         | crate::mcp::Kind::Audit
         | crate::mcp::Kind::StandaloneReport => (attempt.base.clone(), attempt.head.clone()),
     };
+    if grant.kind == crate::mcp::Kind::Selector {
+        return Ok(
+            json!({"ticket": ticket_name(ticket.id), "title": ticket.title, "body": ticket.body,
+            "revision": row.ticket_revision, "plan_revision": row.plan_revision,
+            "target": attempt.target_branch, "inputs": row.inputs}),
+        );
+    }
     let stat = match &head {
         Some(head) => daemon
             .git

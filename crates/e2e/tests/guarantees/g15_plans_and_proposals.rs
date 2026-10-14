@@ -19,6 +19,7 @@ pub(super) fn pre_target_binary() -> PathBuf {
 /// approval, landing and cleanup. Host Git and the fixture supply identities.
 /// Sabotage: omit a column, remap IDs, lose a foreign key or invent scope,
 /// workspace or settings for retained historical rows.
+/// G2 sabotage: infer picker provenance from the old implementation head.
 /// The pre-target upgrade lacks Y-67's bound results and owner records.
 #[test]
 fn nullable_execution_upgrade_preserves_real_results_approvals_and_owners() {
@@ -110,10 +111,16 @@ runs_in = "box"
         "audit",
         "plan_revision",
     ];
-    let preserved =
+    let mut preserved =
         tables.map(|table| project.rows(&format!("SELECT * FROM \"{table}\" ORDER BY rowid")));
     assert!(!preserved[1].is_empty());
     assert!(!preserved[2].is_empty());
+    // These actual source revisions precede pickers. Every old field remains exact.
+    for index in [0, 2] {
+        for row in &mut preserved[index] {
+            row["choice"] = Value::Null;
+        }
+    }
     machine.use_binary(None);
     for _ in 0..2 {
         machine.start();
