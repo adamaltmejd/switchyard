@@ -401,15 +401,24 @@ async fn handle(daemon: &Arc<Daemon>, method: &str, params: Value) -> Result<Val
         "project.list" => Ok(json!(registry()?)),
         "project.forget" => {
             let path = PathBuf::from(params["path"].as_str().unwrap_or_default());
+            let project = daemon
+                .projects
+                .lock()
+                .expect("projects lock")
+                .get(&path)
+                .cloned();
+            let key = project_key(&path);
+            let name = format!("yard-{key}");
+            let _building = daemon.image_build.lock().await;
+            if let Some(project) = project {
+                crate::jobs::supervise::image_preparation_released(&project, None).await?;
+            }
             let roots: Vec<_> = registry()?
                 .into_iter()
                 .filter(|root| *root != path)
                 .collect();
             write_registry(&roots)?;
             daemon.projects.lock().expect("projects lock").remove(&path);
-            let key = project_key(&path);
-            let name = format!("yard-{key}");
-            let _building = daemon.image_build.lock().await;
             daemon.images.lock().expect("images lock").remove(&key);
             let image = daemon
                 .pinfold

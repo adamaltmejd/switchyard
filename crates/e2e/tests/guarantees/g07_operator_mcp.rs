@@ -34,6 +34,197 @@ pub(super) fn scoped_start(
         ["execution"].as_i64().unwrap()
 }
 
+/// G5: cancellation during shared image preparation with spare capacity.
+/// The wrapper delegates real Git, then holds its inherited execution lock
+/// and the actual context until fixture release. Host inode, bytes and flock
+/// are the oracles. Sabotage: release the image mutex on cancellation without
+/// retaining the preparation association through checked execution release.
+/// Existing down/exec holds cannot expose a successor deleting a Git context.
+#[test]
+fn cancelled_image_preparation_retains_its_context_until_checked_owner_release() {
+    use std::os::unix::fs::MetadataExt;
+    let machine = Machine::new("g68-image-owner", |_| Reply::Text("unused".into()));
+    let held = machine.root.join("image-held");
+    let release = machine.root.join("image-release");
+    let armed = machine.root.join("image-armed");
+    let command_done = machine.root.join("boxed-command-done");
+    for path in [&held, &release] {
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(path)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    std::fs::write(&armed, "").unwrap();
+    machine.wrapper(
+        "git",
+        &format!(
+            r#"
+clone=0
+destination=''
+for argument in "$@"; do
+    if [ "$argument" = clone ]; then clone=1; fi
+    destination="$argument"
+done
+case "$destination" in
+    */.yard/local/build/*)
+        if [ "$clone" = 1 ] && [ -e '{armed}' ]; then
+            rm '{armed}'
+            "$REAL" "$@"
+            result=$?
+            printf 'original-context\n' > "$destination/owner-marker"
+            printf '%s\n%s\n%s\n' "$$" "$destination" "$result" > '{held}'
+            read line < '{release}'
+            printf 'last-owner-write\n' >> "$destination/owner-marker"
+            exit "$result"
+        fi
+        ;;
+esac
+"#,
+            armed = armed.display(),
+            held = held.display(),
+            release = release.display()
+        ),
+    );
+    machine.wrapper("pinfold", &format!(
+        "if [ \"$1 $2\" = 'box exec' ]; then \"$REAL\" \"$@\"; result=$?; printf '%s\\n' \"$result\" > '{}'; exit \"$result\"; fi",
+        command_done.display()));
+    machine.start();
+    let project = Project::new(
+        &machine,
+        "p",
+        &config(
+            r#"
+[gates.standalone]
+command = "printf 'successor-command\n'"
+runs_in = "box"
+"#,
+        )
+        .replace("max_lanes = 2", "max_lanes = 2\nmax_executions = 2"),
+    );
+    let input = project.canonical_head();
+    let mut operator = machine.operator();
+    operator.initialize();
+    let mut history = project.watch(0);
+    let original = scoped_start(&mut operator, &project, &input, false);
+    let proof = history.said_before_end(&held, Some(original));
+    let lines: Vec<_> = proof.lines().collect();
+    let pid: u32 = lines[0].parse().unwrap();
+    let context = std::path::PathBuf::from(lines[1]);
+    assert_eq!(
+        lines[2], "0",
+        "the held child must delegate successful real Git"
+    );
+    assert_eq!(context, project.path.join(".yard/local/build").join(&input));
+    let marker = context.join("owner-marker");
+    let inode = std::fs::metadata(&context).unwrap().ino();
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(
+            project
+                .path
+                .join(format!(".yard/local/effects/{original}/lock")),
+        )
+        .unwrap();
+    assert!(matches!(
+        lock.try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ));
+    assert!(
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    call(
+        &mut operator,
+        &project,
+        "yard_execution_stop",
+        json!({"execution": original}),
+    );
+    history.find("cancelled preparation ended", |event| {
+        event["event"] == "execution.ended" && event["execution"] == original
+    });
+    history.find("held preparation ownership", |event| {
+        event["event"] == "attention.raised"
+            && event["execution"] == original
+            && event["data"]["reason"] == "ownership"
+    });
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT outcome, reserved, teardown FROM execution WHERE id = {original}"
+        )),
+        vec![json!({"outcome": "stopped", "reserved": 1, "teardown": 0})]
+    );
+    // Restart discards the in-memory image mutex. External ownership still
+    // protects the context; the successor has its own available capacity.
+    drop(history);
+    drop(operator);
+    machine.kill();
+    assert!(
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(matches!(
+        lock.try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ));
+    machine.start();
+    let mut operator = machine.operator();
+    operator.initialize();
+    let mut history = project.watch(0);
+    let successor = scoped_start(&mut operator, &project, &input, false);
+    history.find("successor waits for image preparation owner", |event| {
+        event["event"] == "execution.waiting"
+            && event["execution"] == successor
+            && event["data"]["reason"] == "image_preparation"
+            && event["data"]["owner"] == original
+    });
+    assert_eq!(project.rows(&format!("SELECT id, reserved, handle FROM execution WHERE id IN ({original}, {successor}) ORDER BY id")),
+        vec![json!({"id": original, "reserved": 1, "handle": null}), json!({"id": successor, "reserved": 1, "handle": null})]);
+    assert_eq!(std::fs::metadata(&context).unwrap().ino(), inode);
+    assert!(!command_done.exists());
+    assert_eq!(
+        std::fs::read_to_string(&marker).unwrap(),
+        "original-context\n"
+    );
+    assert!(matches!(
+        lock.try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ));
+    assert!(
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    std::fs::write(&release, "go\n").unwrap();
+    history.find("original preparation checked release", |event| {
+        event["event"] == "execution.released" && event["execution"] == original
+    });
+    history.find("successor checked completion", |event| {
+        event["event"] == "execution.released" && event["execution"] == successor
+    });
+    let result = call(
+        &mut operator,
+        &project,
+        "yard_execution_show",
+        json!({"execution": successor}),
+    );
+    assert_eq!(result["outcome"], "complete");
+    assert_eq!(result["result"]["infrastructure"]["outcome"], "completed");
+    assert_eq!(std::fs::read_to_string(&command_done).unwrap(), "0\n");
+    assert!(!context.exists());
+}
+
 /// G5/G6/G13: no tickets, real boxed command and report over operator stdio.
 /// Hold the report after publication, before its final host model reply.
 /// Oracles are the empty fixture, host Git, real pinfold exec and model tokens.

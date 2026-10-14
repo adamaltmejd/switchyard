@@ -106,8 +106,62 @@ pub async fn egress(
         .collect())
 }
 
-pub async fn image(daemon: &Daemon, project: &Project, loaded: &Loaded) -> Result<String, Fail> {
+/// A cancelled preparation can leave an inherited-lock child alive. Its
+/// existing reservation, including checked recovery, protects the context.
+pub async fn image_preparation_released(
+    project: &Project,
+    waiting: Option<i64>,
+) -> Result<(), Fail> {
+    let owner = project.local().join("build-owner");
+    let execution: i64 = match std::fs::read_to_string(&owner) {
+        Ok(value) => value
+            .trim()
+            .parse()
+            .map_err(|_| Fail::new("image", "invalid image preparation owner"))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.to_string().into()),
+    };
+    let mut announced = false;
+    loop {
+        let changed = project.events.notified();
+        tokio::pin!(changed);
+        changed.as_mut().enable();
+        if !project
+            .read(|conn| executions::get(conn, execution))?
+            .reserved
+        {
+            return Ok(());
+        }
+        if !announced {
+            if let Some(waiting) = waiting {
+                project.tx(|tx| {
+                    store::audit(
+                        tx,
+                        "execution.waiting",
+                        store::Target {
+                            execution: Some(waiting),
+                            ..Default::default()
+                        },
+                        None,
+                        json!({"reason": "image_preparation", "owner": execution}),
+                    )?;
+                    Ok(())
+                })?;
+            }
+            announced = true;
+        }
+        changed.await;
+    }
+}
+
+pub async fn image(
+    daemon: &Daemon,
+    project: &Project,
+    loaded: &Loaded,
+    execution: i64,
+) -> Result<String, Fail> {
     let _building = daemon.image_build.lock().await;
+    image_preparation_released(project, Some(execution)).await?;
     // `forget` retires the name under this lock; a build that queued behind it must not recreate it.
     if !daemon
         .projects
@@ -125,6 +179,8 @@ pub async fn image(daemon: &Daemon, project: &Project, loaded: &Loaded) -> Resul
         return Ok(reference.clone());
     }
     let context = project.local().join("build").join(&loaded.image_commit);
+    std::fs::write(project.local().join("build-owner"), execution.to_string())
+        .map_err(|error| error.to_string())?;
     let _ = std::fs::remove_dir_all(&context);
     daemon
         .git
@@ -140,9 +196,12 @@ pub async fn image(daemon: &Daemon, project: &Project, loaded: &Loaded) -> Resul
             BUILD_TIMEOUT,
         )
         .await;
-    let _ = std::fs::remove_dir_all(&context);
     let built = built
         .map_err(|error| Fail::new("image", format!("the project image did not build: {error}")))?;
+    let _ = std::fs::remove_dir_all(&context);
+    // Only success proves the awaited preparation finished. Cancellation or
+    // timeout retains the association for the ordinary checked release.
+    std::fs::remove_file(project.local().join("build-owner")).map_err(|error| error.to_string())?;
     daemon.images.lock().expect("images lock").insert(
         project.key.clone(),
         (
@@ -876,7 +935,7 @@ pub async fn implement(
         daemon,
         project,
         execution,
-        image(daemon, project, &loaded).await,
+        image(daemon, project, &loaded, execution).await,
     )
     .await?
     else {
@@ -1828,7 +1887,7 @@ async fn box_gate(
     proof: Option<&Path>,
     stop: &tokio::sync::Notify,
 ) -> Result<GateResult, String> {
-    let image = image(daemon, project, loaded)
+    let image = image(daemon, project, loaded, execution)
         .await
         .map_err(|fail| fail.message)?;
     let mut mounts = vec![Mount {

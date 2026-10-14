@@ -123,7 +123,7 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
             env: &env,
         })
         .map_err(Fail::invalid)?;
-    let image = supervise::image(daemon, project, &loaded).await?;
+    let image = supervise::image(daemon, project, &loaded, execution).await?;
     // Resolve the route, including a login's token, before any bearer is
     // issued, so a missing credential never leaves a live grant.
     let model = harness

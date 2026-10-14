@@ -301,7 +301,7 @@ async fn work(
             row.head.as_deref().expect("scope input"),
         )
         .await?;
-    let image = supervise::image(daemon, project, &loaded).await?;
+    let image = supervise::image(daemon, project, &loaded, row.id).await?;
     let (outcome, infrastructure, code, oom_kills, detail, output) = match &node.runner {
         Runner::Command { .. } => {
             let spec = BoxSpec {
