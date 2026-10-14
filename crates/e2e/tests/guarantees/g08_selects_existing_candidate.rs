@@ -43,6 +43,10 @@ fn approval(watch: &mut Watch) -> Value {
 /// clear choice before recording the repair execution's bound failure inputs.
 /// Selected landing omissions require exact operator acceptance before CAS.
 /// Sabotage: omit choice from landing attention, making valid acceptance stale.
+/// G10: an external target conflicts with B after candidate-gate repair. Its
+/// actual producer fetches the target bundle through its own input mount,
+/// resolves the conflict and earns fresh review, choice, checks and approval.
+/// Sabotage: stage target.bundle in the shared attempt input instead of B's.
 #[test]
 fn only_the_declared_choice_is_checked_and_landed() {
     let holds: Vec<_> = (0..5).map(|_| Latch::new()).collect();
@@ -51,6 +55,8 @@ fn only_the_declared_choice_is_checked_and_landed() {
     let replacement_hold = replacement.clone();
     let repair = Latch::new();
     let repair_hold = repair.clone();
+    let landing_repair = Latch::new();
+    let landing_repair_hold = landing_repair.clone();
     let turns: Vec<_> = (0..5).map(|_| AtomicUsize::new(0)).collect();
     let picker_finishes = AtomicUsize::new(0);
     let machine = Machine::new("g8-select", move |request| {
@@ -136,7 +142,15 @@ fn only_the_declared_choice_is_checked_and_landed() {
             .unwrap();
         if request.opens() {
             let version = turns[n].fetch_add(1, Ordering::SeqCst);
-            let fix = if n == 1 && version == 2 {
+            let fix = if n == 1 && version == 3 {
+                assert!(
+                    request
+                        .last_user()
+                        .contains("git fetch /yard/input/target.bundle refs/heads/feature/a")
+                );
+                assert!(request.last_user().contains("same.txt"));
+                "git fetch /yard/input/target.bundle refs/heads/feature/a && test \"$(git show FETCH_HEAD:same.txt)\" = operator-target-marker && (git merge --no-commit FETCH_HEAD || test -f .git/MERGE_HEAD) && "
+            } else if n == 1 && version == 2 {
                 assert!(
                     request
                         .last_user()
@@ -157,6 +171,8 @@ fn only_the_declared_choice_is_checked_and_landed() {
         {
             let hold = if turns[n].load(Ordering::SeqCst) == 1 {
                 writer_holds[n].clone()
+            } else if n == 1 && turns[n].load(Ordering::SeqCst) == 4 {
+                landing_repair_hold.clone()
             } else if n == 1 && turns[n].load(Ordering::SeqCst) == 3 {
                 repair_hold.clone()
             } else {
@@ -536,6 +552,88 @@ fn only_the_declared_choice_is_checked_and_landed() {
         );
     }
     assert_eq!(project.canonical_head(), target);
+    let before_conflict = rows(
+        &project,
+        "SELECT * FROM execution WHERE status = 'ended' ORDER BY id",
+    );
+    project.write("same.txt", "operator-target-marker\n");
+    project.git(&["add", "same.txt"]);
+    project.git(&["commit", "-qm", "Advance the actual target against B"]);
+    project.json(&["sync", "feature/a"]);
+    let target = git(&project.canonical(), &["rev-parse", "refs/heads/feature/a"])
+        .trim()
+        .to_owned();
+    let approved = operator.call(
+        "yard_attempt_approve",
+        json!({
+            "project": project.path, "ticket": "Y-1", "target": "feature/a",
+            "head": repaired_head, "proof": third["proof"], "choice": third["choice"]
+        }),
+    );
+    assert!(approved.get("error").is_none(), "{approved}");
+    landing_repair.wait_held();
+    let repairs = rows(
+        &project,
+        "SELECT * FROM execution WHERE kind = 'implementation' AND reason = 'repair' ORDER BY id",
+    );
+    assert_eq!(repairs.len(), 2);
+    let returned = &repairs[1];
+    assert_eq!(returned["workspace"], "writer-1");
+    assert_eq!(returned["settings"]["model"], "producer-1");
+    assert_eq!(returned["head"], repaired_head);
+    assert_eq!(returned["inputs"]["feedback"]["value"]["target"], target);
+    assert_eq!(
+        returned["inputs"]["feedback"]["value"]["branch"],
+        "feature/a"
+    );
+    let conflict = rows(
+        &project,
+        "SELECT * FROM execution WHERE kind = 'landing' AND outcome = 'conflict'",
+    );
+    assert_eq!(conflict.len(), 1);
+    assert_eq!(conflict[0]["head"], repaired_head);
+    assert_eq!(git(&clone, &["rev-parse", "FETCH_HEAD"]).trim(), target);
+    let landed_head = git(&clone, &["rev-parse", "HEAD"]).trim().to_owned();
+    assert_ne!(landed_head, repaired_head);
+    assert_eq!(git(&clone, &["rev-parse", "HEAD^2"]).trim(), target);
+    assert_eq!(git(&clone, &["show", "HEAD:same.txt"]).trim(), "writer-1-3");
+    assert_eq!(
+        git(&project.canonical(), &["rev-parse", "refs/heads/feature/a"]).trim(),
+        target
+    );
+    landing_repair.release();
+    let fourth = approval(&mut watch);
+    assert_eq!(fourth["head"], landed_head);
+    assert_ne!(fourth["choice"], third["choice"]);
+    let after_conflict = rows(
+        &project,
+        "SELECT * FROM execution WHERE status = 'ended' ORDER BY id",
+    );
+    for old in before_conflict.iter().chain(&conflict) {
+        assert_eq!(
+            after_conflict.iter().find(|row| row["id"] == old["id"]),
+            Some(old)
+        );
+    }
+    let picker = after_conflict
+        .iter()
+        .find(|row| row["id"] == fourth["choice"])
+        .unwrap();
+    assert_eq!(
+        picker["inputs"]["c1"]["source"]["execution"],
+        returned["id"]
+    );
+    let review = after_conflict
+        .iter()
+        .find(|row| row["id"] == picker["inputs"]["r1"]["source"]["execution"])
+        .unwrap();
+    assert_eq!(review["inputs"]["candidate"], picker["inputs"]["c1"]);
+    assert!(
+        fourth["checks"]
+            .as_array()
+            .unwrap()
+            .contains(&picker["inputs"]["r1"]["value"]["publication"])
+    );
     // Reopening revalidates current suppliers without rewriting the immutable choice.
     machine.kill();
     machine.start();
@@ -546,7 +644,7 @@ fn only_the_declared_choice_is_checked_and_landed() {
     let mut watch = project.watch(since);
     std::fs::write(&armed, "").unwrap();
     let approved = operator.call("yard_attempt_approve", json!({"project": project.path, "ticket": "Y-1",
-        "target": "feature/a", "head": repaired_head, "proof": third["proof"], "choice": third["choice"],
+        "target": "feature/a", "head": landed_head, "proof": fourth["proof"], "choice": fourth["choice"],
         "observe_landing_skipped": ["landing-gate-other"], "text": "Observe the omitted landing gate"}));
     assert!(approved.get("error").is_none(), "{approved}");
     let omission = watch.find("selected landing omission", |event| {
@@ -555,14 +653,14 @@ fn only_the_declared_choice_is_checked_and_landed() {
             && event["data"]["reason"] == "landing"
     });
     let payload = &omission["data"]["payload"];
-    assert_eq!(payload["choice"], third["choice"]);
+    assert_eq!(payload["choice"], fourth["choice"]);
     let identity = &payload["evidence"]["landing"];
     watch.find("selected omission released", |event| {
         event["event"] == "execution.released" && event["execution"] == identity["execution"]
     });
     let accepted = operator.call("yard_attempt_accept", json!({
         "project": project.path, "ticket": "Y-1", "attention": omission["attention"],
-        "plan_revision": 1, "target": "feature/a", "head": repaired_head, "proof": third["proof"],
+        "plan_revision": 1, "target": "feature/a", "head": landed_head, "proof": fourth["proof"],
         "base": identity["base"], "revision": identity["revision"], "landing": identity["execution"],
         "old": identity["prepared"]["old"], "merged": identity["prepared"]["merged"],
         "accept_skipped": ["landing-gate-other"], "text": "Accept this exact selected landing omission"
@@ -607,7 +705,7 @@ fn only_the_declared_choice_is_checked_and_landed() {
     });
     assert_eq!(
         git(&project.canonical(), &["show", "feature/a:same.txt"]).trim(),
-        "writer-1-2"
+        "writer-1-3"
     );
     assert_eq!(project.canonical_head(), main);
     let gates = rows(
@@ -632,13 +730,21 @@ fn only_the_declared_choice_is_checked_and_landed() {
     assert!(
         gates
             .iter()
+            .any(|row| row["parent"].is_null() && row["head"] == landed_head)
+    );
+    assert!(
+        gates
+            .iter()
             .filter(|row| row["parent"].is_null())
             .all(|row| row["head"] == heads[1]
                 || row["head"] == replacement_head
-                || row["head"] == repaired_head)
+                || row["head"] == repaired_head
+                || row["head"] == landed_head)
     );
     let approved = project.rows("SELECT * FROM approval ORDER BY id");
-    assert_eq!(approved.len(), 1);
+    assert_eq!(approved.len(), 2);
     assert_eq!(approved[0]["choice"], third["choice"]);
-    assert_eq!(approved[0]["state"], "landed");
+    assert_eq!(approved[0]["state"], "retired");
+    assert_eq!(approved[1]["choice"], fourth["choice"]);
+    assert_eq!(approved[1]["state"], "landed");
 }

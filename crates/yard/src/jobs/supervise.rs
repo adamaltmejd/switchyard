@@ -39,6 +39,21 @@ pub fn transcript(project: &Project, attempt: i64, execution: i64) -> PathBuf {
         .join(format!("{execution}.jsonl"))
 }
 
+pub fn implementation_node(
+    tx: &rusqlite::Connection,
+    attempt: &attempts::Attempt,
+) -> Result<String, Fail> {
+    let choice = crate::store::selections::current(tx, attempt)?;
+    Ok(choice
+        .as_ref()
+        .and_then(|row| row.result.as_ref())
+        .and_then(|result| {
+            result["outputs"]["result"]["value"]["candidate"]["source"]["node"].as_str()
+        })
+        .unwrap_or("implementer")
+        .to_owned())
+}
+
 /// Record the next implementer execution. Its reason says why it runs.
 pub fn start_implementation(
     tx: &rusqlite::Connection,
@@ -46,15 +61,8 @@ pub fn start_implementation(
     reason: &str,
     feedback: Option<&Value>,
 ) -> Result<i64, Fail> {
-    let choice = crate::store::selections::current(tx, attempt)?;
-    let node = choice
-        .as_ref()
-        .and_then(|row| row.result.as_ref())
-        .and_then(|result| {
-            result["outputs"]["result"]["value"]["candidate"]["source"]["node"].as_str()
-        })
-        .unwrap_or("implementer");
-    start_writer(tx, attempt, node, reason, feedback)
+    let node = implementation_node(tx, attempt)?;
+    start_writer(tx, attempt, &node, reason, feedback)
 }
 
 pub fn start_writer(

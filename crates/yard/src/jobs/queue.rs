@@ -1399,7 +1399,18 @@ async fn returned(
         Ok((attempts::get(conn, row.required_attempt()?)?, approval))
     })?;
     let ticket = attempt.ticket;
-    let input = project.attempt_dir(attempt.id).join("input");
+    let mut storage = project.attempt_dir(attempt.id);
+    if attempt
+        .admission
+        .as_ref()
+        .is_some_and(|admission| admission["runtime"] == "writer-graph")
+    {
+        let node = project.read(|conn| super::supervise::implementation_node(conn, &attempt))?;
+        storage = storage
+            .join("writers")
+            .join(crate::config::hex(node.as_bytes()));
+    }
+    let input = storage.join("input");
     std::fs::create_dir_all(&input).map_err(|error| error.to_string())?;
     let bundle = input.join("target.bundle");
     let _ = std::fs::remove_file(&bundle);
