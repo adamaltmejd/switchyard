@@ -518,7 +518,10 @@ fn lapsed(
         "checks": approval.checks, "protected": protected,
         "accepted": approval.checks.iter().map(|check| checks::accepted_evidence(tx, attempt.id, *check))
             .collect::<Result<Vec<_>, _>>()?.into_iter().flatten().collect::<Vec<_>>(),
-        "unreviewed": !plan.nodes.keys().any(|name| name.starts_with("review-")),
+        "unreviewed": !plan.nodes.values().any(|node| {
+            matches!(node.runner, crate::plan::Runner::Agent { .. })
+                && node.outputs.get("result") == Some(&crate::plan::Output::Verdict)
+        }),
         "skipped": attempt.admission.as_ref().map(|admission| &admission["skipped"]),
     });
     // Only for the candidate as it is now: the lapse was read before this

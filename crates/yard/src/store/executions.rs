@@ -581,9 +581,6 @@ pub fn check_digest(
     let runner = if kind == "gate" {
         crate::plan::Runner::Command { gate: name.into() }
     } else {
-        if name == "selector" {
-            return Ok(baseline.into());
-        }
         let index = admission["workflow"]["review"]
             .as_array()
             .and_then(|seats| seats.iter().position(|seat| seat.as_str() == Some(name)))
@@ -731,7 +728,9 @@ pub fn binding(
             } else {
                 output["value"].clone()
             };
-            if node == "selector" && reference.kind == crate::plan::Output::Verdict {
+            if declared.outputs.get("result") == Some(&crate::plan::Output::Selection)
+                && reference.kind == crate::plan::Output::Verdict
+            {
                 let Some(check) = super::checks::for_execution(conn, producer.id)? else {
                     return Ok(None);
                 };

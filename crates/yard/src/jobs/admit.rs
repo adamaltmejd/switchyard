@@ -236,7 +236,10 @@ fn admit(
         .keys()
         .filter(|name| !plan.nodes.contains_key(*name))
         .collect();
-    let unreviewed = !plan.nodes.keys().any(|name| name.starts_with("review-"));
+    let unreviewed = !plan.nodes.values().any(|node| {
+        matches!(node.runner, crate::plan::Runner::Agent { .. })
+            && node.outputs.get("result") == Some(&crate::plan::Output::Verdict)
+    });
     if plan.packaged().is_some() {
         inputs["package"] = crate::pi::package_identity();
     }
@@ -1496,7 +1499,10 @@ pub async fn attempt_revise(
     );
     evidence["selection"] = selection;
     evidence["skipped"] = json!(skipped);
-    evidence["unreviewed"] = json!(!plan.nodes.keys().any(|name| name.starts_with("review-")));
+    evidence["unreviewed"] = json!(!plan.nodes.values().any(|node| {
+        matches!(node.runner, crate::plan::Runner::Agent { .. })
+            && node.outputs.get("result") == Some(&crate::plan::Output::Verdict)
+    }));
     let (result, stops) = project.tx(|tx| {
         let current = attempts::live_for(tx, id)?
             .ok_or_else(|| Fail::refused("no live attempt"))?;
@@ -1539,7 +1545,8 @@ pub async fn attempt_revise(
         }
         refuse_during_intent(tx, id)?;
         let landing_requirements = |plan: &crate::plan::Plan, evidence: &Value| {
-            plan.nodes.iter().filter(|(name, _)| name.starts_with("landing-gate-"))
+            plan.nodes.iter().filter(|(_, node)| matches!(node.runner, crate::plan::Runner::Command { .. })
+                && node.inputs.values().any(|input| input.node.is_none() && input.output == "merged"))
                 .map(|(name, node)| {
                     json!({"name": name, "node": node,
                         "definition": executions::consumed_definition(evidence, &node.runner, false)})

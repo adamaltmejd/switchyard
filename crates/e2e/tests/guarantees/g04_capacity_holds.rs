@@ -887,6 +887,9 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
 /// another writer, or delete only the ordinary clone. Git, inode identities and fixture bytes
 /// supply expectations. The host model holds each real harness after its edits;
 /// the fifth writer's real box and inherited lock hold the external crash point.
+/// Roots named selector and build-gate-model remain candidate producers through
+/// publication, bound review, explicit continuation and recovery in this project.
+/// Sabotage: skip roots by selector/gate spelling instead of admitted output.
 fn five_writer_candidates_survive_continuation_and_restart() {
     use std::os::unix::fs::MetadataExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1076,10 +1079,11 @@ fn five_writer_candidates_survive_continuation_and_restart() {
              access = \"write-allowed\"\noutputs = {{result = \"candidate\"}}\noutcomes = [\"complete\"]\n\
              [review.seats.trial{n}]\nagent = \"worker\"\ninstructions = \"Frozen reader {n}.\"\n"
         ));
-        let writer = if n == 0 {
-            "implementer".to_string()
-        } else {
-            format!("writer-{n}")
+        let writer = match n {
+            0 => "implementer".to_string(),
+            2 => "selector".to_string(),
+            3 => "build-gate-model".to_string(),
+            _ => format!("writer-{n}"),
         };
         nodes.insert(
             writer.clone(),
@@ -1154,10 +1158,11 @@ fn five_writer_candidates_survive_continuation_and_restart() {
     let mut sessions = std::collections::BTreeSet::new();
     let mut expected_heads = Vec::new();
     for n in 0..5 {
-        let name = if n == 0 {
-            "implementer".to_string()
-        } else {
-            format!("writer-{n}")
+        let name = match n {
+            0 => "implementer".to_string(),
+            2 => "selector".to_string(),
+            3 => "build-gate-model".to_string(),
+            _ => format!("writer-{n}"),
         };
         let row = writers.iter().find(|row| row["workspace"] == name).unwrap();
         assert!(boxes.iter().any(|listed| listed["name"] == row["handle"]));
@@ -1266,10 +1271,11 @@ fn five_writer_candidates_survive_continuation_and_restart() {
     assert_eq!(published.len(), 4);
     let mut proofs = std::collections::BTreeSet::new();
     for (n, expected_head) in expected_heads.iter().enumerate().take(4) {
-        let name = if n == 0 {
-            "implementer".to_string()
-        } else {
-            format!("writer-{n}")
+        let name = match n {
+            0 => "implementer".to_string(),
+            2 => "selector".to_string(),
+            3 => "build-gate-model".to_string(),
+            _ => format!("writer-{n}"),
         };
         let producer = published
             .iter()
@@ -1358,17 +1364,17 @@ fn five_writer_candidates_survive_continuation_and_restart() {
     let other = operator.call(
         "yard_attempt_start",
         json!({
-            "project": project.path, "ticket": "Y-1", "workspace": "writer-3"
+            "project": project.path, "ticket": "Y-1", "workspace": "build-gate-model"
         }),
     );
     assert!(other.get("error").is_none(), "{other}");
     other_continued.wait_held();
     let other_writer = writer_rows(
         &project,
-        "SELECT * FROM execution WHERE workspace = 'writer-3' ORDER BY id DESC LIMIT 1",
+        "SELECT * FROM execution WHERE workspace = 'build-gate-model' ORDER BY id DESC LIMIT 1",
     )[0]
     .clone();
-    let other_workspace = writer_workspace(&root, "writer-3");
+    let other_workspace = writer_workspace(&root, "build-gate-model");
     let other_inode = std::fs::metadata(other_workspace.join("clone"))
         .unwrap()
         .ino();
@@ -1553,7 +1559,7 @@ fn five_writer_candidates_survive_continuation_and_restart() {
     other_recovered.wait_held();
     let other_successor = writer_rows(
         &project,
-        "SELECT * FROM execution WHERE workspace = 'writer-3' ORDER BY id DESC LIMIT 1",
+        "SELECT * FROM execution WHERE workspace = 'build-gate-model' ORDER BY id DESC LIMIT 1",
     )[0]
     .clone();
     assert_eq!(other_successor["resumed"], other_writer["id"]);
@@ -1645,7 +1651,7 @@ fn five_writer_candidates_survive_continuation_and_restart() {
     assert_eq!(project.canonical_head(), frozen_target);
     let recovered = writer_rows(
         &project,
-        "SELECT * FROM execution WHERE workspace = 'writer-3' ORDER BY id DESC LIMIT 1",
+        "SELECT * FROM execution WHERE workspace = 'build-gate-model' ORDER BY id DESC LIMIT 1",
     )[0]
     .clone();
     assert_eq!(recovered["outcome"], "candidate");
@@ -1668,11 +1674,11 @@ fn five_writer_candidates_survive_continuation_and_restart() {
     assert_eq!(
         writer_rows(
             &project,
-            "SELECT * FROM execution WHERE workspace = 'writer-3' AND outcome = 'candidate' ORDER BY id"
+            "SELECT * FROM execution WHERE workspace = 'build-gate-model' AND outcome = 'candidate' ORDER BY id"
         )[0],
         published
             .iter()
-            .find(|row| row["workspace"] == "writer-3")
+            .find(|row| row["workspace"] == "build-gate-model")
             .unwrap()
             .clone()
     );

@@ -96,7 +96,9 @@ pub async fn advance(
     }
     let mut unfinished = false;
     for (name, node) in &plan.nodes {
-        if name == "selector" || name.contains("-gate-") {
+        if node.outputs.get("result") == Some(&crate::plan::Output::Selection)
+            || matches!(node.runner, Runner::Command { .. })
+        {
             continue;
         }
         let current = rows.iter().rev().find(|row| {

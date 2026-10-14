@@ -36,6 +36,8 @@ fn approval(watch: &mut Watch) -> Value {
 /// explicit start may retry it. Sabotage: let publication mask picker failure.
 /// At the final nondefault-target CAS, real Git holds the open intent while a
 /// replacement is refused. Sabotage: omit the intent fence in start_writer.
+/// Gate- and review-shaped candidate names exercise selected admission and
+/// current consumers. Sabotage: filter roots or reviewers by lexical name.
 #[test]
 fn only_the_declared_choice_is_checked_and_landed() {
     let holds: Vec<_> = (0..5).map(|_| Latch::new()).collect();
@@ -178,10 +180,11 @@ fn only_the_declared_choice_is_checked_and_landed() {
              [review.seats.r{n}]\nagent = 'worker'\ninstructions = 'Same frozen reviewer.'\n"
         ));
         seats.push(format!("r{n}"));
-        let writer = if n == 0 {
-            "implementer".into()
-        } else {
-            format!("writer-{n}")
+        let writer = match n {
+            0 => "implementer".into(),
+            2 => "build-gate-model".into(),
+            3 => "review-model".into(),
+            _ => format!("writer-{n}"),
         };
         nodes.insert(
             writer.clone(),
@@ -268,10 +271,11 @@ fn only_the_declared_choice_is_checked_and_landed() {
     let attempt = writers[0]["attempt"].as_i64().unwrap();
     let mut heads = Vec::new();
     for n in 0..5 {
-        let node = if n == 0 {
-            "implementer".into()
-        } else {
-            format!("writer-{n}")
+        let node = match n {
+            0 => "implementer".into(),
+            2 => "build-gate-model".into(),
+            3 => "review-model".into(),
+            _ => format!("writer-{n}"),
         };
         let row = writers.iter().find(|row| row["workspace"] == node).unwrap();
         assert_eq!(row["settings"]["model"], format!("producer-{n}"));

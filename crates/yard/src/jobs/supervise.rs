@@ -1760,7 +1760,9 @@ async fn plan_handoff(
                         executions::consumed_definition(
                             admission,
                             &node.runner,
-                            name.starts_with("review-"),
+                            matches!(node.runner, crate::plan::Runner::Agent { .. })
+                                && node.outputs.get("result")
+                                    == Some(&crate::plan::Output::Verdict),
                         ),
                     )
                 })

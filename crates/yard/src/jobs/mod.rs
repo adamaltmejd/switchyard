@@ -830,20 +830,21 @@ async fn advance(
         .any(|row| row.status == "running" || row.reserved);
     let mut unfinished = false;
     let mut completed = std::collections::BTreeSet::from(["implementer"]);
-    let mut reviewed =
-        plan.selector().is_none() && plan.nodes.keys().any(|name| name.starts_with("review-"));
+    let mut reviewed = plan.selector().is_none()
+        && plan.nodes.values().any(|node| {
+            matches!(node.runner, crate::plan::Runner::Agent { .. })
+                && node.outputs.get("result") == Some(&crate::plan::Output::Verdict)
+        });
     if let Some(choice) = project.read(|conn| crate::store::selections::current(conn, attempt))? {
         let value =
             &choice.result.as_ref().expect("choice")["outputs"]["result"]["value"]["candidate"];
         let producer = value["source"]["node"].as_str().expect("candidate source");
         for (name, node) in &plan.nodes {
-            if node.outputs.get("result") == Some(&crate::plan::Output::Candidate)
-                || name == "selector"
-                || name.starts_with("review-")
-            {
+            if matches!(node.runner, crate::plan::Runner::Agent { .. }) {
                 completed.insert(name);
             }
-            if !name.starts_with("review-")
+            if !matches!(node.runner, crate::plan::Runner::Agent { .. })
+                || node.outputs.get("result") != Some(&crate::plan::Output::Verdict)
                 || node.inputs["candidate"].node.as_deref() != Some(producer)
             {
                 continue;
@@ -892,11 +893,7 @@ async fn advance(
         .filter(|node| *node != "implementer")
     {
         let node = &plan.nodes[current];
-        if plan.selector().is_some()
-            && (node.outputs.get("result") == Some(&crate::plan::Output::Candidate)
-                || current == "selector"
-                || current.starts_with("review-"))
-        {
+        if plan.selector().is_some() && matches!(node.runner, crate::plan::Runner::Agent { .. }) {
             continue;
         }
         if node

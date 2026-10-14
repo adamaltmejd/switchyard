@@ -638,9 +638,13 @@ impl Plan {
         }
         let mut roots = self.clone();
         roots.inputs.clear();
-        roots
-            .nodes
-            .retain(|name, _| name != "selector" && !name.contains("-gate-"));
+        roots.nodes.retain(|_, node| {
+            matches!(node.runner, Runner::Agent { .. })
+                && matches!(
+                    node.outputs.get("result"),
+                    Some(Output::Candidate | Output::Verdict)
+                )
+        });
         for node in roots.nodes.values_mut() {
             node.routes
                 .get_mut("complete")
@@ -689,7 +693,7 @@ impl Plan {
             let Some(defined) = ordinary.nodes.get(name) else {
                 return false;
             };
-            if !name.contains("-gate-")
+            if !matches!(node.runner, Runner::Command { .. })
                 || node.runner != defined.runner
                 || node.access != defined.access
                 || node.outputs != defined.outputs
@@ -698,7 +702,7 @@ impl Plan {
             {
                 return false;
             }
-            let landing = name.starts_with("landing-gate-");
+            let landing = defined.inputs.contains_key("merged");
             let reference = Input {
                 node: (!landing).then(|| "selector".into()),
                 output: if landing { "merged" } else { "result" }.into(),
@@ -742,7 +746,7 @@ impl Plan {
                     if roots.nodes.contains_key(&route.to) || route.to == "selector" {
                         return false;
                     }
-                    if route.to.starts_with("landing-gate-") {
+                    if self.nodes[&route.to].inputs.contains_key("merged") {
                         landing = true;
                     } else if landing {
                         return false;
