@@ -830,11 +830,7 @@ async fn advance(
         .any(|row| row.status == "running" || row.reserved);
     let mut unfinished = false;
     let mut completed = std::collections::BTreeSet::from(["implementer"]);
-    let mut reviewed = plan.selector().is_none()
-        && plan.nodes.values().any(|node| {
-            matches!(node.runner, crate::plan::Runner::Agent { .. })
-                && node.outputs.get("result") == Some(&crate::plan::Output::Verdict)
-        });
+    let reviewed = project.read(|conn| candidate_reviewed(conn, attempt, &plan))?;
     if let Some(choice) = project.read(|conn| crate::store::selections::current(conn, attempt))? {
         let value =
             &choice.result.as_ref().expect("choice")["outputs"]["result"]["value"]["candidate"];
@@ -877,7 +873,6 @@ async fn advance(
                 chosen_blocked.push(check.clone());
             }
             selected.push(check.id);
-            reviewed = true;
             if decision.as_deref() == Some("accept") {
                 accepted.push(evidence);
             }
@@ -1271,6 +1266,30 @@ pub fn skipped_identity(attempt: &attempts::Attempt, ticket: &tickets::Ticket) -
         "revision": ticket.revision, "plan_revision": attempt.plan_revision(),
         "skipped": skipped
     })
+}
+
+fn candidate_reviewed(
+    conn: &rusqlite::Connection,
+    attempt: &attempts::Attempt,
+    plan: &crate::plan::Plan,
+) -> Result<bool, Fail> {
+    let choice = crate::store::selections::current(conn, attempt)?;
+    let producer = choice
+        .as_ref()
+        .and_then(|row| row.result.as_ref())
+        .and_then(|result| {
+            result["outputs"]["result"]["value"]["candidate"]["source"]["node"].as_str()
+        });
+    Ok(plan.nodes.values().any(|node| {
+        matches!(node.runner, crate::plan::Runner::Agent { .. })
+            && node.outputs.get("result") == Some(&crate::plan::Output::Verdict)
+            && (plan.selector().is_none()
+                || producer.is_some_and(|producer| {
+                    node.inputs
+                        .get("candidate")
+                        .is_some_and(|input| input.node.as_deref() == Some(producer))
+                }))
+    }))
 }
 
 /// Re-read each selected identity at approval and every queue boundary.

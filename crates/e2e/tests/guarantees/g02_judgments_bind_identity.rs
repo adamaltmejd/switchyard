@@ -2711,6 +2711,198 @@ fn a_sync_that_protects_an_auto_approved_path_withdraws_it() {
     assert_eq!(project.json(&["ticket", "show", "Y-1"])["state"], "done");
 }
 
+/// G2/G8: a live manual-policy lapse retains the chosen empty panel despite
+/// a passing review of a losing source. Real Git supplies both candidate heads;
+/// the graph supplies required checks. Existing ordinary policy lapses have
+/// no unrelated reviewer and cannot expose this mistake.
+/// Sabotage: queue::lapsed counts every agent verdict as selected review.
+#[test]
+fn policy_reapproval_keeps_the_selected_empty_panel() {
+    let machine = Machine::new("g2-selected-policy", |request| {
+        if request.has_tool("yard_publish_report") {
+            return planned(request);
+        }
+        if request.has_tool("yard_publish_selection") {
+            return act(
+                request,
+                vec![tool(
+                    "yard_publish_selection",
+                    json!({"candidate": "chosen"}),
+                )],
+            );
+        }
+        if request.has_tool("yard_publish_review") {
+            return act(request, vec![publish(json!([]))]);
+        }
+        let content = if request.prompt().contains("Losing implementation.") {
+            "loser\n"
+        } else {
+            "chosen\n"
+        };
+        act(
+            request,
+            vec![commit_file("notes.txt", content, "Add notes")],
+        )
+    });
+    let hold = machine.root.join("hold");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&hold)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let mut release = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&hold)
+        .unwrap();
+    machine.start();
+    let base = auto(config(&format!(
+        "\n[profiles.chosen]\nrunner = {{kind = 'agent', agent = 'worker', instructions = 'Chosen implementation.'}}\naccess = 'write-allowed'\noutputs = {{result = 'candidate'}}\noutcomes = ['complete']\n\
+         [profiles.loser]\nrunner = {{kind = 'agent', agent = 'worker', instructions = 'Losing implementation.'}}\naccess = 'write-allowed'\noutputs = {{result = 'candidate'}}\noutcomes = ['complete']\n\
+         [profiles.reader]\nrunner = {{kind = 'agent', agent = 'worker', instructions = 'Review for correctness.'}}\naccess = 'read-only'\noutputs = {{result = 'verdict'}}\noutcomes = ['complete', 'blocked']\n\
+         [profiles.picker]\nrunner = {{kind = 'agent', agent = 'worker', instructions = 'Choose the declared chosen input.'}}\naccess = 'read-only'\noutputs = {{result = 'selection'}}\noutcomes = ['complete']\n\
+         [gates.check]\ncommand = 'test \"$(cat notes.txt)\" = chosen'\nstage = 'candidate'\n\
+         [gates.held]\ncommand = 'read line < {}'\nruns_in = 'host'\n",
+        hold.display()
+    )));
+    let project = Project::new(&machine, "p", &base);
+    let mut watch = project.watch(0);
+    project.json(&[
+        "ticket",
+        "new",
+        "--title",
+        "Select empty panel",
+        "--workflow",
+        "plan",
+    ]);
+    let planner = watch.event("attempt.ended", &[]);
+    let cleanup = watch.find("planner cleanup", |event| {
+        event["event"] == "execution.ended"
+            && event["data"]["kind"] == "cleanup"
+            && event["attempt"] == planner["attempt"]
+    });
+    watch.find("planner released", |event| {
+        event["event"] == "execution.released" && event["execution"] == cleanup["execution"]
+    });
+    let mut nodes = json!({
+        "implementer": {"profile": "chosen", "routes": {"complete": [{"to": "selector"}]}},
+        "loser": {"profile": "loser", "routes": {"complete": [{"to": "review-0"}, {"to": "selector"}]}},
+        "review-0": {"profile": "reader", "inputs": {"candidate": {"node": "loser", "output": "result", "kind": "candidate"}}, "requires": ["candidate"], "routes": {"complete": [{"to": "selector"}]}},
+        "selector": {"profile": "picker", "inputs": {
+            "chosen": {"node": "implementer", "output": "result", "kind": "candidate"},
+            "loser": {"node": "loser", "output": "result", "kind": "candidate"},
+            "review": {"node": "review-0", "output": "result", "kind": "verdict"}
+        }, "requires": ["chosen", "loser", "review"], "routes": {"complete": [{"to": "candidate-gate-check"}]}}
+    });
+    for (name, gate, next, landing) in [
+        (
+            "candidate-gate-check",
+            "check",
+            Some("landing-gate-check"),
+            false,
+        ),
+        (
+            "landing-gate-check",
+            "check",
+            Some("landing-gate-held"),
+            true,
+        ),
+        ("landing-gate-held", "held", None, true),
+    ] {
+        let mut node = json!({
+            "runner": {"kind": "command", "gate": gate}, "access": "write-allowed",
+            "inputs": {}, "requires": [if landing {"merged"} else {"candidate"}],
+            "outputs": {"result": "verdict"}, "outcomes": if landing {json!(["complete"])} else {json!(["complete", "failed"])}, "routes": {}
+        });
+        node["inputs"][if landing { "merged" } else { "candidate" }] = if landing {
+            json!({"node": null, "output": "merged", "kind": "candidate"})
+        } else {
+            json!({"node": "selector", "output": "result", "kind": "selection"})
+        };
+        if let Some(next) = next {
+            node["routes"]["complete"] = json!([{"to": next}]);
+        }
+        if !landing {
+            node["routes"]["failed"] = json!([{"to": "implementer", "repeat": 3}]);
+        }
+        nodes[name] = node;
+    }
+    let mut operator = machine.operator();
+    operator.initialize();
+    let started = operator.call("yard_attempt_start", json!({"project": project.path, "ticket": "Y-1", "graph": {"inputs": {"merged": "candidate"}, "nodes": nodes}}));
+    assert!(started.get("error").is_none(), "{started}");
+    let approved = watch.event("approval.given", &[("actor", "auto")]);
+    watch.event("execution.started", &[("name", "held")]);
+    let attempt = approved["attempt"].as_i64().unwrap();
+    let initial = project.rows(&format!(
+        "SELECT choice FROM approval WHERE attempt = {attempt} AND actor = 'auto'"
+    ));
+    assert_eq!(initial.len(), 1);
+    assert!(initial[0]["choice"].is_i64());
+    let clone = |workspace: &str| {
+        project.path.join(format!(
+            ".yard/local/attempts/{attempt}/writers/{}/clone",
+            workspace
+                .bytes()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        ))
+    };
+    let head = git(&clone("implementer"), &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    let loser = git(&clone("loser"), &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    assert_ne!(head, loser);
+    assert_eq!(approved["data"]["head"], head);
+    let judgments = format!(
+        "SELECT c.*, e.reason FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE e.attempt = {attempt} AND (e.reason = 'candidate' OR e.node = 'review-0') ORDER BY c.id"
+    );
+    let checks = project.rows(&judgments);
+    assert_eq!(checks.len(), 2);
+    let candidate = checks.iter().find(|row| row["kind"] == "gate").unwrap();
+    let review = checks.iter().find(|row| row["kind"] == "review").unwrap();
+    assert_eq!(review["head"], loser);
+    assert_eq!(review["verdict"], "pass");
+    assert_eq!(candidate["head"], head);
+    assert_eq!(candidate["verdict"], "pass");
+    assert_eq!(approved["data"]["checks"], json!([candidate["id"]]));
+    let turns = machine.model.requests().len();
+    project.reconfigure(&base.replace("approve = \"auto\"", "approve = \"manual\""));
+    release.write_all(b"go\n").unwrap();
+    let ended = watch.event("execution.ended", &[("kind", "landing")]);
+    assert_eq!(ended["data"]["outcome"], "withdrawn");
+    let raised = approval(&mut watch);
+    let payload = &raised["payload"];
+    assert_eq!(payload["unreviewed"], true);
+    assert_eq!(payload["head"], head);
+    assert_eq!(payload["choice"], initial[0]["choice"]);
+    assert_eq!(payload["checks"], json!([candidate["id"]]));
+    assert_eq!(project.rows(&judgments), checks);
+    assert_eq!(machine.model.requests().len(), turns);
+    let answer = operator.call("yard_attempt_approve", json!({"project": project.path, "ticket": "Y-1", "target": "main", "head": head, "proof": payload["proof"], "choice": payload["choice"], "plan_revision": payload["plan_revision"]}));
+    assert!(answer.get("error").is_none(), "{answer}");
+    release.write_all(b"go\n").unwrap();
+    watch.event("landing.recorded", &[]);
+    let approval = project.rows(&format!(
+        "SELECT checks, choice FROM approval WHERE attempt = {attempt} AND actor = 'operator'"
+    ));
+    assert_eq!(approval.len(), 1);
+    assert_eq!(
+        serde_json::from_str::<Value>(approval[0]["checks"].as_str().unwrap()).unwrap(),
+        json!([candidate["id"]])
+    );
+    assert_eq!(approval[0]["choice"], payload["choice"]);
+    assert_eq!(project.rows(&judgments), checks);
+    assert_eq!(
+        git(&project.canonical(), &["show", "main:notes.txt"]).trim(),
+        "chosen"
+    );
+}
+
 fn notes_machine(test: &str) -> Machine {
     Machine::new(test, |request| {
         act(
