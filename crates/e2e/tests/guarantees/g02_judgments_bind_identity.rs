@@ -40,16 +40,33 @@ fn candidate_reuses_original_pass_after_bookkeeping_with_unknown_rerun() {
         )
     });
     let commands = machine.root.join("gate-commands");
+    // Revision prompts contain gate definitions. Count only literal lines from
+    // real command stdout, never argv or marker mentions inside SDK frames.
     machine.wrapper(
         "pinfold",
         &format!(
-            "if [ \"$1 $2\" = 'box exec' ]; then
-  case \"$*\" in
-    *reuse-closed*) printf 'closed\\n' >> '{}' ;;
-    *reuse-other*) printf 'other\\n' >> '{}' ;;
-    *reuse-unknown*) printf 'unknown\\n' >> '{}' ;;
-  esac
-fi",
+            r#"if [ "$1 $2" = 'box exec' ]; then
+  fifo='{}.'$$
+  mkfifo "$fifo" || exit $?
+  trap 'rm -f "$fifo"' 0
+  {{
+    while IFS= read -r line; do
+      case "$line" in
+        reuse-closed) printf 'closed\n' >> '{}' ;;
+        reuse-other) printf 'other\n' >> '{}' ;;
+        reuse-unknown) printf 'unknown\n' >> '{}' ;;
+      esac
+      printf '%s\n' "$line"
+    done
+    printf '%s' "$line"
+  }} < "$fifo" &
+  reader=$!
+  "$REAL" "$@" > "$fifo"
+  result=$?
+  wait "$reader"
+  exit "$result"
+fi"#,
+            machine.root.join("gate-commands.fifo").display(),
             commands.display(),
             commands.display(),
             commands.display()
@@ -57,9 +74,9 @@ fi",
     );
     machine.start();
     let configuration = unreviewed(
-        "[gates.closed]\ncommand = 'test -f feature.txt # reuse-closed'\nstage = 'candidate'\nclosed_inputs = 'runtime-v1'\n\
-         [gates.other]\ncommand = 'test -f feature.txt # reuse-other'\nstage = 'candidate'\nclosed_inputs = 'runtime-v1'\n\
-         [gates.unknown]\ncommand = 'test -f feature.txt # reuse-unknown'\nstage = 'candidate'\n",
+        "[gates.closed]\ncommand = 'echo reuse-closed; test -f feature.txt'\nstage = 'candidate'\nclosed_inputs = 'runtime-v1'\n\
+         [gates.other]\ncommand = 'echo reuse-other; test -f feature.txt'\nstage = 'candidate'\nclosed_inputs = 'runtime-v1'\n\
+         [gates.unknown]\ncommand = 'echo reuse-unknown; test -f feature.txt'\nstage = 'candidate'\n",
     );
     let project = Project::new(&machine, "p", &configuration);
     let mut watch = project.watch(0);
@@ -168,8 +185,8 @@ fi",
     // Sabotage: omit command, declaration or image from matching, or rerun
     // unrelated consumers despite identical consumed definitions.
     let changed_command = configuration.replace(
-        "test -f feature.txt # reuse-closed",
-        "test -f feature.txt && test -s feature.txt # reuse-closed",
+        "echo reuse-closed; test -f feature.txt",
+        "echo reuse-closed; test -f feature.txt && test -s feature.txt",
     );
     let changed_runtime = changed_command.replacen("runtime-v1", "runtime-v2", 1);
     let mut plan_revision = 1;
@@ -362,8 +379,8 @@ fi",
     // Sabotage: reference failed results, carry acceptance to a new identity,
     // or manufacture a check for the omitted node.
     let failed_definition = changed_runtime.replace(
-        "test -f feature.txt && test -s feature.txt # reuse-closed",
-        "exit 7 # reuse-closed",
+        "echo reuse-closed; test -f feature.txt && test -s feature.txt",
+        "echo reuse-closed; exit 7",
     );
     project.reconfigure(&failed_definition);
     let source = project.git(&["rev-parse", "HEAD"]).trim().to_string();
