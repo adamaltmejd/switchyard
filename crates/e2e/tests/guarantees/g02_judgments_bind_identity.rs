@@ -29,6 +29,13 @@ const GATE: &str = "[gates.check]\ncommand = \"test -f feature.txt\"\nstage = \"
 /// follows completed checks. Host Git supplies blobs and the fixed image tree.
 /// Sabotage: resolved overwrites adopted definitions, stale tool/skill digest,
 /// or whole-panel invalidation. Host counters prove actual consumers.
+/// Gate-only and agent-only adoption each retain the fixture's exact image,
+/// whole context and staging source. Sabotage: adopt an omitted source in
+/// either revision, then restore it on the later staging revision; checking
+/// only the later revision misses that fault. Agent-only adoption must change
+/// both affected reviewer digests, not merely their launched model settings.
+/// Sabotage: omit agent settings from review consumer digests while still
+/// launching the selected model.
 /// Gate-only adoption must also change the actual gate consumer digest.
 /// Sabotage original-gate-digests: check_digest reads original_admission for
 /// gates instead of the current selected admission. The committed command
@@ -518,6 +525,15 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
     project.git(&["commit", "--quiet", "-m", "Adopt candidate gate"]);
     project.json(&["sync"]);
     let definition_commit = project.git(&["rev-parse", "HEAD"]).trim().to_string();
+    let frozen_sources = |definition: &str| {
+        let shown = project.json(&["attempt", "show", "Y-1"]);
+        let inputs = &shown["attempt"]["plan"]["inputs"];
+        assert_eq!(inputs["definition_commit"], definition);
+        assert_eq!(inputs["staging_commit"], image_commit);
+        assert_eq!(inputs["image_commit"], image_commit);
+        assert_eq!(inputs["build_context_tree"], image_tree);
+        assert_eq!(inputs["dockerfile_blob"], dockerfile_blob);
+    };
     let adopt = operator.call(
         "yard_attempt_revise",
         json!({
@@ -534,6 +550,7 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
     capacity.release();
     let fifth = approval(&mut watch);
     assert_eq!(fifth["payload"]["plan_revision"], 5);
+    frozen_sources(&definition_commit);
     assert_eq!(
         std::fs::read_to_string(&gate_counter).unwrap(),
         "original\nadopted\n"
@@ -576,6 +593,7 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
     assert_eq!(adopt["result"]["plan_revision"], 6, "{adopt}");
     let sixth = approval(&mut watch);
     assert_eq!(sixth["payload"]["plan_revision"], 6);
+    frozen_sources(&settings_commit);
     assert_eq!(
         project.rows(
             "SELECT node, model FROM execution WHERE attempt = 1 AND plan_revision = 6 ORDER BY id"
@@ -585,6 +603,19 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
             json!({"node": "review-2", "model": "adopted-model"})
         ]
     );
+    for row in project.rows(
+        "SELECT node, digest FROM execution WHERE attempt = 1 AND plan_revision = 6 ORDER BY id",
+    ) {
+        let previous = adoption_executions
+            .iter()
+            .rev()
+            .find(|previous| previous["node"] == row["node"])
+            .unwrap();
+        assert_ne!(
+            row["digest"].as_str().unwrap(),
+            previous["digest"].as_str().unwrap()
+        );
+    }
 
     // G2: image-only adoption uses an older exact context while current
     // definitions and staging differ from both retained sources.
