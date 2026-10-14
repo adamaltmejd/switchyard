@@ -954,8 +954,8 @@ export default async function () {
 /// repair instead of retaining approval for the successful requeue.
 /// Regenerate an unchanged prepared merge or rerun its passing child: host
 /// Git's pinned head or the retained execution/result identity changes.
-/// Publish a check for any landing child, including the passing host child:
-/// merged verdicts are results, not candidate check publications.
+/// Publish a check for the infrastructure-error child; only the preceding
+/// real passing host judgment may supply a landing check at this point.
 /// After the original controls, hold a real listing reply at landing-child
 /// admission and acquire the parent's external lock before checked release.
 /// Sabotage: return on release refusal without ending the unstarted child;
@@ -1345,10 +1345,9 @@ fn a_gate_errors_start_reruns_that_gate() {
     assert_eq!(child["route"], Value::Null);
     assert_eq!(child["judgment"], Value::Null);
     assert_eq!(child["outputs"], "{}");
-    assert!(
-        project
-            .rows("SELECT c.id FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE e.parent IS NOT NULL")
-            .is_empty()
+    assert_eq!(
+        project.rows("SELECT c.execution, c.verdict FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE e.parent IS NOT NULL ORDER BY c.id"),
+        vec![json!({"execution": children[0]["id"], "verdict": "pass"})]
     );
     assert_eq!(project.canonical_head(), target);
     assert_eq!(kinds(&project, "implementation").len(), 2);
