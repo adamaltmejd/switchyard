@@ -379,7 +379,17 @@ pub async fn run_harness(
                                 run.registered = Some(registration);
                             }
                             crate::harness::Event::Usage { usage: spent } => {
-                                project.read(|conn| executions::set_worker(conn, execution, None, Some(spent)))?;
+                                project.tx(|tx| {
+                                    let current = executions::get(tx, execution)?;
+                                    executions::set_worker(tx, execution, None, Some(spent))?;
+                                    if kind == crate::mcp::Kind::Audit && current.usage != *spent {
+                                        store::audit(tx, "execution.usage", store::Target {
+                                            execution: Some(execution), attempt: Some(current.attempt),
+                                            ..Default::default()
+                                        }, None, json!(spent))?;
+                                    }
+                                    Ok(())
+                                })?;
                                 usage = Some(spent.clone());
                             }
                             crate::harness::Event::Finished { usage: spent, .. } | crate::harness::Event::Failed { usage: spent, .. } => {
@@ -445,6 +455,39 @@ pub async fn run_harness(
         .lock()
         .expect("activity lock")
         .remove(&activity_key);
+    if kind == crate::mcp::Kind::Audit
+        && (run.stopped || run.timed_out)
+        && project.read(|conn| {
+            Ok(executions::get(conn, execution)?
+                .prepared
+                .is_some_and(|prepared| !prepared["durable"].is_null()))
+        })?
+    {
+        daemon.grants.revoke(project, execution);
+        // Cancel work, not its waiter. This signals the existing boxed
+        // controller and joins its abort before the caller checks teardown.
+        let aborted = daemon
+            .pinfold
+            .exec(
+                &box_name(project, execution),
+                None,
+                &["/opt/yard/durable-audit/launch".into(), "--abort".into()],
+                Duration::from_secs(15),
+            )
+            .await;
+        if aborted.is_ok_and(|out| out.code == 0) {
+            let drain = async {
+                while let Ok(Some(line)) = stdout.next_line().await {
+                    for event in reader.stdout(&line) {
+                        if let crate::harness::Event::Usage { usage: spent } = event {
+                            usage = Some(spent);
+                        }
+                    }
+                }
+            };
+            let _ = tokio::time::timeout(Duration::from_secs(5), drain).await;
+        }
+    }
     if !run.stopped && !run.timed_out && !refused(&run.registered) {
         run.exit_code = child.wait().await.ok().map(crate::git::exit_code);
     }
@@ -610,6 +653,25 @@ pub async fn implement(
     let storage = if workflow.read_only { &audit_dir } else { &dir };
     let state = storage.join("state");
     let input = storage.join("input");
+    let checkpoint = if let Some(packaged) = packaged
+        && attempt
+            .admission
+            .as_ref()
+            .is_some_and(|admission| admission["package_checkpoint"] == "exclusive-v1")
+    {
+        let admission = attempt.admission.as_ref().expect("packaged admission");
+        let current_egress = egress(daemon, project, &loaded).await?;
+        let identity = json!({"node": row.node, "inputs": row.inputs,
+            "base": row.base, "head": row.head, "proof": row.proof,
+            "ticket_revision": row.ticket_revision, "plan_revision": row.plan_revision,
+            "definition": executions::consumed_definition(admission, packaged, false),
+            "policy": {"plan": admission["plan"], "egress": current_egress,
+                "inactivity": workflow.inactivity_timeout_minutes,
+                "total": workflow.total_work_timeout_minutes}});
+        Some(project.tx(|tx| executions::durable_checkpoint(tx, execution, identity))?)
+    } else {
+        None
+    };
     let proof_dir = (|| {
         if workflow.read_only {
             let snapshots = audit_dir.join("proof-snapshots");
@@ -722,6 +784,12 @@ pub async fn implement(
             if crate::pi::package_effort_capable(admitted) && !implementer["effort"].is_null() {
                 launch["effort"] = implementer["effort"].clone();
             }
+            if let Some(checkpoint) = &checkpoint {
+                use sha2::{Digest, Sha256};
+                launch["checkpoint"] = json!({"execution": checkpoint["checkpoint"],
+                    "predecessor": checkpoint["predecessor"],
+                    "identity": crate::config::hex(&Sha256::digest(checkpoint["identity"].to_string().as_bytes()))});
+            }
             let bytes = launch.to_string();
             if bytes.len() > 131072 {
                 return Err(Fail::refused("invalid_input: audit launch bound"));
@@ -756,10 +824,12 @@ pub async fn implement(
     };
     project.read(|conn| {
         conn.execute("UPDATE attempt SET next = NULL WHERE id = ?1", [attempt.id])?;
-        conn.execute(
-            "UPDATE execution SET resumed = ?2 WHERE id = ?1",
-            rusqlite::params![execution, resume.as_ref().map(|(id, _)| *id)],
-        )?;
+        if checkpoint.is_none() {
+            conn.execute(
+                "UPDATE execution SET resumed = ?2 WHERE id = ?1",
+                rusqlite::params![execution, resume.as_ref().map(|(id, _)| *id)],
+            )?;
+        }
         Ok(())
     })?;
     let prompt = if packaged.is_some() {
@@ -824,6 +894,14 @@ pub async fn implement(
     else {
         return Ok(());
     };
+    if checkpoint
+        .as_ref()
+        .is_some_and(|checkpoint| checkpoint["identity"]["policy"]["egress"] != json!(egress))
+    {
+        return Err(Fail::refused(
+            "checkpoint_incompatible: containment policy changed before launch",
+        ));
+    }
     let kind = if workflow.read_only {
         crate::mcp::Kind::Audit
     } else {
@@ -836,7 +914,7 @@ pub async fn implement(
     });
     let mut secrets = vec![(crate::harness::BEARER_VAR.to_string(), bearer)];
     secrets.extend(model.secret.clone());
-    let spec = worker_spec(
+    let mut spec = worker_spec(
         daemon,
         project,
         &Worker {
@@ -851,6 +929,36 @@ pub async fn implement(
             egress: &egress,
         },
     );
+    if let Some(checkpoint) = &checkpoint {
+        // Staging never enters retained guest bytes. The only reused mount is
+        // the checkpoint root, after the store's exclusive ownership claim.
+        let origin = checkpoint["checkpoint"]
+            .as_i64()
+            .expect("checkpoint identity");
+        let host = dir
+            .join("audits")
+            .join(origin.to_string())
+            .join("state")
+            .join("audit-checkpoints");
+        if origin == execution {
+            std::fs::create_dir(&host).map_err(|error| error.to_string())?;
+        } else {
+            for path in [host.parent().expect("state"), host.as_path()] {
+                if !std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir()) {
+                    return Err(Fail::refused(format!(
+                        "checkpoint_invalid: execution {origin}"
+                    )));
+                }
+            }
+            std::fs::create_dir(state.join("audit-checkpoints"))
+                .map_err(|error| error.to_string())?;
+            spec.mounts.push(Mount {
+                host,
+                guest: "/yard/state/audit-checkpoints".into(),
+                readonly: false,
+            });
+        }
+    }
     let live = match up_worker(daemon, project, execution, &spec, &secrets).await {
         Ok(live) => live,
         Err(fail) => {

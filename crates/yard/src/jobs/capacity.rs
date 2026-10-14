@@ -153,7 +153,30 @@ pub async fn reap(daemon: &Daemon, project: &Project) -> Result<(), Fail> {
                         detail: Some("external owner is now proved gone"),
                         ..Default::default()
                     },
-                )
+                )?;
+                if row.kind == "implementation"
+                    && row
+                        .prepared
+                        .as_ref()
+                        .is_some_and(|prepared| !prepared["durable"].is_null())
+                {
+                    let attempt = attempts::get(tx, row.attempt)?;
+                    if attempt.state == "live" {
+                        attempts::raise(
+                            tx,
+                            attempts::Raise {
+                                kind: "stopped",
+                                reason: "interrupted",
+                                ticket: Some(attempt.ticket),
+                                attempt: Some(row.attempt),
+                                execution: Some(row.id),
+                                payload: json!({"detail": "external owner is now proved gone"}),
+                                text: None,
+                            },
+                        )?;
+                    }
+                }
+                Ok(())
             })?;
         }
     }
@@ -261,6 +284,13 @@ pub async fn release(
                 || completed_candidate
                 || completed_judgment
                 || stopped_implementation
+                || (released.kind == "implementation"
+                    && released.lock_contract
+                    && released
+                        .prepared
+                        .as_ref()
+                        .is_some_and(|prepared| !prepared["durable"].is_null())
+                    && dir(project, &released).join("lock").is_file())
             {
                 for item in attempts::open_for_attempt(tx, current.attempt)? {
                     if item.kind == "red"

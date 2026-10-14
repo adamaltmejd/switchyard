@@ -235,6 +235,62 @@ pub fn session(
     Ok(Some((owner, count)))
 }
 
+/// Bind the checkpoint while this execution holds the existing reservation.
+/// Only checked interrupted ownership can supply a continuation. Guest bytes
+/// never determine either the identity or the owner.
+pub fn durable_checkpoint(conn: &Connection, current: i64, identity: Value) -> Result<Value, Fail> {
+    let row = get(conn, current)?;
+    if !row.reserved || row.status != "running" || row.prepared.is_some() {
+        return Err(Fail::refused(format!(
+            "checkpoint_owned: execution {current}"
+        )));
+    }
+    let previous = query(
+        conn,
+        "attempt = ?1 AND kind = 'implementation' AND id < ?2 ORDER BY id DESC LIMIT 1",
+        params![row.attempt, current],
+    )?
+    .pop();
+    let previous = previous.filter(|previous| {
+        previous.status == "ended"
+            && previous.outcome.as_deref() == Some("interrupted")
+            && !previous.reserved
+            && previous.teardown == Some(true)
+            && previous.report.is_none()
+            && previous
+                .prepared
+                .as_ref()
+                .is_some_and(|prepared| prepared["durable"]["identity"] == identity)
+    });
+    let checkpoint = previous
+        .as_ref()
+        .and_then(|previous| previous.prepared.as_ref()?["durable"]["checkpoint"].as_i64())
+        .unwrap_or(current);
+    if let Some(owner) = query(
+        conn,
+        "reserved = 1 AND id != ?1 AND json_extract(prepared, '$.durable.checkpoint') = ?2 LIMIT 1",
+        params![current, checkpoint],
+    )?
+    .pop()
+    {
+        return Err(Fail::refused(format!(
+            "checkpoint_owned: checkpoint execution {checkpoint} owned by execution {}",
+            owner.id
+        )));
+    }
+    let prepared = json!({"durable": {"checkpoint": checkpoint,
+        "predecessor": previous.as_ref().map(|previous| previous.id), "identity": identity}});
+    conn.execute(
+        "UPDATE execution SET prepared = ?2, resumed = ?3 WHERE id = ?1",
+        params![
+            current,
+            prepared.to_string(),
+            previous.map(|previous| previous.id)
+        ],
+    )?;
+    Ok(prepared["durable"].clone())
+}
+
 /// Landings whose intent is still open.
 pub fn open_intents(conn: &Connection) -> Result<Vec<Execution>, Fail> {
     query(
@@ -397,6 +453,9 @@ pub fn consumed_definition(
                 definition["package"] = inputs.get("package")?.clone();
                 if let Some(contract) = admission.get("package_launch") {
                     definition["package_launch"] = contract.clone();
+                }
+                if let Some(contract) = admission.get("package_checkpoint") {
+                    definition["package_checkpoint"] = contract.clone();
                 }
             }
         }

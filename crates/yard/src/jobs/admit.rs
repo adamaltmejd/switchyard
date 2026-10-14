@@ -262,6 +262,7 @@ fn admit(
     });
     if plan.packaged().is_some() {
         admission["package_launch"] = json!("effort");
+        admission["package_checkpoint"] = json!("exclusive-v1");
     }
     let attempt = attempts::insert(
         tx,
@@ -1567,6 +1568,23 @@ pub async fn attempt_start(
     let default = super::refresh_default(daemon, project, &canonical).await?;
     let live = project.read(|conn| attempts::live_for(conn, id))?;
     let ticket = project.read(|conn| tickets::get(conn, id))?;
+    if let Some(attempt) = &live
+        && let Some(owner) = project.read(|conn| {
+            Ok(executions::for_attempt(conn, attempt.id)?
+                .into_iter()
+                .find(|row| {
+                    row.reserved
+                        && row
+                            .prepared
+                            .as_ref()
+                            .is_some_and(|prepared| !prepared["durable"].is_null())
+                }))
+        })?
+    {
+        return Err(Fail::refused("checkpoint_owned: previous execution still owns its checkpoint")
+            .with(json!({"reason": "checkpoint_owned", "execution": owner.id,
+                "checkpoint": owner.prepared.as_ref().expect("durable claim")["durable"]["checkpoint"]})));
+    }
     let branch = live
         .as_ref()
         .map(attempts::Attempt::target_branch)

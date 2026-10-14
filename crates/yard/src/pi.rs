@@ -118,11 +118,14 @@ impl Harness for PackagedAudit {
         Pi.argv(launch)
     }
     fn reader(&self, _resumed: bool) -> Box<dyn Reader> {
-        Box::new(AuditReader)
+        Box::new(AuditReader::default())
     }
 }
 
-struct AuditReader;
+#[derive(Default)]
+struct AuditReader {
+    usage: Usage,
+}
 
 impl Reader for AuditReader {
     fn stdout(&mut self, line: &str) -> Vec<Event> {
@@ -130,6 +133,36 @@ impl Reader for AuditReader {
             return Vec::new();
         };
         match frame["type"].as_str() {
+            Some("yard_audit_usage") => {
+                let (Some(input), Some(output), Some(complete)) = (
+                    frame["input"].as_u64(),
+                    frame["output"].as_u64(),
+                    frame["complete"].as_bool(),
+                ) else {
+                    return Vec::new();
+                };
+                let field = UsageField {
+                    completeness: if complete {
+                        Completeness::Complete
+                    } else {
+                        Completeness::Partial
+                    },
+                    provenance: Provenance::Harness,
+                };
+                self.usage = Usage {
+                    input: Some(input),
+                    output: Some(output),
+                    fields: crate::harness::UsageFields {
+                        input: field.clone(),
+                        output: field,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                vec![Event::Usage {
+                    usage: self.usage.clone(),
+                }]
+            }
             Some("yard_audit_started") => frame["session_id"]
                 .as_str()
                 .filter(|id| !id.is_empty())
@@ -140,11 +173,11 @@ impl Reader for AuditReader {
                 })
                 .unwrap_or_default(),
             Some("yard_audit_terminal") if frame["exit_code"] == 0 => vec![Event::Finished {
-                usage: Usage::default(),
+                usage: self.usage.clone(),
             }],
             Some("yard_audit_terminal") => vec![Event::Failed {
                 message: frame["detail"].as_str().unwrap_or("audit_failed").into(),
-                usage: Usage::default(),
+                usage: self.usage.clone(),
             }],
             _ => Vec::new(),
         }

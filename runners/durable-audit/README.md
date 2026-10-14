@@ -101,12 +101,17 @@ launcher, controller and lock hashes before package code executes; the image
 launcher then verifies its sealed runtime closure before model calls.
 This package identity is separate from pinfold's native Pi artifact pin.
 
-Supply a writable state parent at `/yard/state`. The runner creates
-separate `audit-scratch` and `audit-checkpoints` directories. Existing
-directories are refused; this is a fresh execution only. The boxed controller writes Durable's SQLite state
-only in checkpoints and uses scratch as cwd and HOME. Checkpoints are
-untrusted data, never host-evaluated or accepted as workflow evidence.
-No automatic resume is provided.
+Yard supplies fresh Pi and scratch state at `/yard/state`. Admissions with
+`package_checkpoint = "exclusive-v1"` can continue an interrupted submission
+after supported `start`, in a new execution. Checked predecessor teardown and
+exclusive reservation precede mounting matching checkpoint state at
+`/yard/state/audit-checkpoints`. Changed inputs start fresh; invalid checkpoint
+identity or storage names `checkpoint_invalid`. Older admissions stay fresh-only.
+The boxed controller writes SQLite only in checkpoints and uses scratch as cwd
+and HOME. The host never opens or evaluates checkpoint bytes. Interrupted
+tools are unsafe and never replay automatically. Stop aborts the controller's
+work before checked teardown. Usage subtracts the boxed invocation baseline.
+Native MCP publication remains necessary for report eligibility.
 
 At most 12 model HTTP requests and 64 executed tool calls are admitted.
 Each response is limited to 1 MiB and 60 seconds. Each file read returns at
@@ -117,7 +122,7 @@ Launch input is at most 128 KiB, with at most 512 declared files and a
 Report fields and byte bounds match Yard's validated publication contract;
 the daemon remains authoritative. Successful publication asks Durable to
 terminate. A bare answer raises `missing_report`. Logs contain only named
-completion/refusal frames, never SDK exceptions or model text.
+completion/refusal and numeric usage frames, never SDK exceptions or model text.
 
 Host acceptance is `cargo test -p e2e --locked`. Set
 `YARD_E2E_DURABLE_INPUTS` to a public input directory with the official

@@ -20,6 +20,16 @@ fn copy_tree(from: &Path, to: &Path) {
 }
 
 fn packaged_daemon_source(name: &str, revision: &str, runner_suffix: &str) -> std::path::PathBuf {
+    packaged_daemon_source_assets(name, revision, runner_suffix, false, None)
+}
+
+fn packaged_daemon_source_assets(
+    name: &str,
+    revision: &str,
+    runner_suffix: &str,
+    debugger: bool,
+    runner: Option<&str>,
+) -> std::path::PathBuf {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let target = yard().parent().unwrap().join(name);
     let source = target.join("source");
@@ -60,6 +70,20 @@ fn packaged_daemon_source(name: &str, revision: &str, runner_suffix: &str) -> st
         let runner = source.join("runners/durable-audit/runner.mjs");
         let bytes = std::fs::read_to_string(&runner).unwrap();
         std::fs::write(runner, format!("{bytes}{runner_suffix}")).unwrap();
+    }
+    if let Some(runner) = runner {
+        std::fs::write(source.join("runners/durable-audit/runner.mjs"), runner).unwrap();
+    }
+    if debugger {
+        // Node's public debugger holds the real tool after its committed
+        // intent. No harness replacement or binary barrier participates.
+        let launch = source.join("runners/durable-audit/launch");
+        let bytes = std::fs::read_to_string(&launch).unwrap();
+        std::fs::write(
+            launch,
+            bytes.replace("--no-addons", "--no-addons --inspect=127.0.0.1:9229"),
+        )
+        .unwrap();
     }
     assert!(
         std::process::Command::new(env!("CARGO"))
@@ -1429,17 +1453,22 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     ] {
         let source_runner =
             std::fs::read_to_string(source.join("runners/durable-audit/runner.mjs")).unwrap();
-        assert_eq!(
-            source_runner,
-            format!(
-                "{original}{}",
-                if contract.is_some() {
-                    CAPABILITY_VARIANT
-                } else {
-                    ""
-                }
+        if contract.is_some() {
+            assert_eq!(source_runner, format!("{original}{CAPABILITY_VARIANT}"));
+        }
+        // Keep the exact-package fallback under the receiving code under
+        // test, with the real archived runtime compiled into its identity.
+        // The new checkpoint controller has different bytes; comparing it
+        // to b9e374 would no longer exercise that fallback's premise.
+        let receiving = contract.is_none().then(|| {
+            packaged_daemon_source_assets(
+                "effort-fallback-receiver",
+                "HEAD",
+                "",
+                false,
+                Some(&source_runner),
             )
-        );
+        });
         for asset in ["launch", "package-lock.json"] {
             assert_eq!(
                 std::fs::read(source.join("runners/durable-audit").join(asset)).unwrap(),
@@ -1500,7 +1529,11 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
             "SELECT * FROM execution WHERE id = {admitting_execution}"
         ));
         machine.kill();
-        machine.use_binary(None);
+        machine.use_binary(
+            receiving
+                .as_ref()
+                .map(|source| source.parent().unwrap().join("debug/yard")),
+        );
         machine.start();
         let mut operator = machine.operator();
         operator.initialize();
@@ -2082,4 +2115,356 @@ fn a_packaged_audit_bounds_iterations_and_requires_native_publication() {
         machine.model.requests().len(),
         controller_requests(&machine).len()
     );
+}
+
+fn debugger_holds_read(machine: &Machine, handle: &str) -> std::process::Child {
+    use std::io::{BufRead, BufReader};
+    let script = r#"
+import { writeSync } from 'node:fs';
+const targets = await (await fetch('http://127.0.0.1:9229/json/list')).json();
+const socket = new WebSocket(targets[0].webSocketDebuggerUrl);
+await new Promise((resolve, reject) => {
+  socket.addEventListener('open', resolve, {once:true});
+  socket.addEventListener('error', reject, {once:true});
+});
+let id = 0;
+const pending = new Map();
+socket.addEventListener('message', event => {
+  const message = JSON.parse(event.data);
+  if (message.id) {
+    const waiter = pending.get(message.id);
+    pending.delete(message.id);
+    message.error ? waiter.reject(message.error) : waiter.resolve(message.result);
+  }
+  if (message.method === 'Debugger.paused') writeSync(1, 'held\n');
+});
+const call = (method, params = {}) => new Promise((resolve, reject) => {
+  pending.set(++id, {resolve,reject}); socket.send(JSON.stringify({id,method,params}));
+});
+await call('Debugger.enable');
+const source = await (await import('node:fs/promises')).readFile('/opt/yard/durable-audit/runner.mjs', 'utf8');
+const lineNumber = source.split('\n').findIndex(line => line.includes('const path = allowed.get(args.file);'));
+if (lineNumber < 0) throw new Error('read tool source missing');
+await call('Debugger.setBreakpointByUrl', {url:'file:///opt/yard/durable-audit/runner.mjs',lineNumber});
+writeSync(1, 'armed\n');
+// The debugger stays attached and paused until the real box is destroyed.
+"#;
+    let mut child = std::process::Command::new("pinfold")
+        .env("XDG_STATE_HOME", "/tmp/yard-e2e-state")
+        .env("XDG_CONFIG_HOME", &machine.config)
+        .env("XDG_CACHE_HOME", &machine.cache)
+        .args([
+            "box",
+            "exec",
+            handle,
+            "--",
+            "/opt/yard/durable-audit/node/bin/node",
+            "--no-addons",
+            "--input-type=module",
+            "-e",
+            script,
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let root = machine.root.clone();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let line = line.unwrap();
+            match line.as_str() {
+                "armed" | "held" => {
+                    std::fs::write(root.join(format!("debug-{line}")), format!("{line}\n")).unwrap()
+                }
+                _ => panic!("unexpected debugger observation: {line}"),
+            }
+        }
+    });
+    child
+}
+
+/// G2/G5: pause a real read_declared invocation after Durable commits its
+/// unsafe intent. The debugger holds it through daemon death; a real box
+/// listing and refused exec prove it cannot act before replacement starts.
+/// Sabotage: resume before checked release, drop checkpoint exclusion, reuse
+/// changed inputs, copy session usage totals, or mark the read replay-safe.
+/// Existing model-reply/finished-publication holds contain no pending tool.
+/// Oracles: Node debugger, boxed read-only SQLite query, pinfold, fixture tool
+/// results and token constants, external marker, and execution rows/history.
+fn durable_checkpoint_scenario(name: &str, changed: bool, corrupt: bool) {
+    let initial = std::sync::Arc::new(std::sync::Mutex::new(None::<Latch>));
+    let held_initial = initial.clone();
+    let resumed_marker = std::sync::Arc::new(std::sync::Mutex::new(None::<std::path::PathBuf>));
+    let model_marker = resumed_marker.clone();
+    let continuation = std::sync::Arc::new(std::sync::Mutex::new(None::<Latch>));
+    let held_continuation = continuation.clone();
+    let machine = Machine::new(name, move |request| {
+        let read = || {
+            Reply::Tools(vec![tool(
+                "read_declared",
+                json!({"file":"source:large.txt"}),
+            )])
+        };
+        if request.opens() {
+            if let Some(latch) = held_initial.lock().unwrap().take() {
+                return Reply::Hold(latch, Box::new(read()));
+            }
+            return read();
+        }
+        if request
+            .last_tool_result()
+            .unwrap()
+            .1
+            .contains("interrupted")
+        {
+            if let Some(path) = model_marker.lock().unwrap().take() {
+                std::fs::write(path, "unsafe read was interrupted, not replayed\n").unwrap();
+            }
+            if let Some(latch) = held_continuation.lock().unwrap().take() {
+                return Reply::Hold(latch, Box::new(read()));
+            }
+            return read();
+        }
+        assert!(request.last_tool_result().unwrap().1.contains("truncated"));
+        Reply::Tools(vec![audit_report()])
+    });
+    machine.kill();
+    static SOURCE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    let source = SOURCE.get_or_init(|| {
+        packaged_daemon_source_assets("checkpoint-debugger", "HEAD", "", true, None)
+    });
+    machine.use_binary(Some(source.parent().unwrap().join("debug/yard")));
+    machine.start();
+    let project = fixture(&machine);
+    let launcher = std::fs::read_to_string(source.join("runners/durable-audit/launch")).unwrap();
+    project.write("runners/durable-audit/launch", &launcher);
+    project.git(&["add", "runners/durable-audit/launch"]);
+    project.git(&[
+        "commit",
+        "-qm",
+        "Enable the real Node debugger in the fixture image",
+    ]);
+    project.json(&["sync"]);
+    image(&project, "");
+    for path in ["debug-armed", "debug-held"] {
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(machine.root.join(path))
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    {
+        let number = 1;
+        let ticket = format!("Y-{number}");
+        launch(&project, number, "Checkpoint continuation");
+        let latch = Latch::new();
+        *initial.lock().unwrap() = Some(latch.clone());
+        let marker = machine.root.join(format!("resumed-{number}"));
+        *resumed_marker.lock().unwrap() = Some(marker.clone());
+        let mut watch = project.watch(project.json(&["status"])["seq"].as_i64().unwrap());
+        selected_start(&project, "Checkpoint continuation");
+        latch.wait_held();
+        let old = project.rows(&format!(
+            "SELECT id, handle FROM execution WHERE attempt = {number} AND kind = 'implementation'"
+        ))[0]
+            .clone();
+        let id = old["id"].as_i64().unwrap();
+        let handle = old["handle"].as_str().unwrap();
+        let mut debugger = debugger_holds_read(&machine, handle);
+        assert_eq!(
+            watch.said_before_end(&machine.root.join("debug-armed"), Some(id)),
+            "armed\n"
+        );
+        latch.release();
+        assert_eq!(
+            watch.said_before_end(&machine.root.join("debug-held"), Some(id)),
+            "held\n"
+        );
+        watch.until("committed execution usage", |event| {
+            event["event"] == "execution.usage"
+                && event["execution"] == id
+                && event["data"]["input"] == PROMPT_TOKENS
+        });
+        // Reading a database as data inside the box is the supported worker
+        // boundary. No host process opens or evaluates these checkpoint bytes.
+        let intent = machine.pinfold(&["box", "exec", handle, "--",
+            "/opt/yard/durable-audit/node/bin/node", "--no-addons", "--input-type=module", "-e",
+            r#"import {DatabaseSync} from 'node:sqlite'; const db = new DatabaseSync('/yard/state/audit-checkpoints/session.sqlite',{readOnly:true}); console.log(JSON.stringify(db.prepare('SELECT record FROM tasks').all().map(r=>JSON.parse(r.record)).filter(r=>r.state.checkpoint?.phase === 'execute'))); db.close();"#]);
+        assert!(intent.status.success());
+        let tasks: Value = serde_json::from_slice(&intent.stdout).unwrap();
+        assert_eq!(tasks.as_array().unwrap().len(), 1);
+        assert_eq!(tasks[0]["state"]["checkpoint"]["replay"], "unsafe");
+        let inode = machine.pinfold(&[
+            "box",
+            "exec",
+            handle,
+            "--",
+            "stat",
+            "-c",
+            "%i",
+            "/yard/state/audit-checkpoints/session.sqlite",
+        ]);
+        assert!(inode.status.success());
+        let refused = project.refused(&["attempt", "start", &ticket]);
+        assert_eq!(refused["data"]["reason"], "checkpoint_owned");
+        assert_eq!(refused["data"]["execution"], id);
+        assert_eq!(refused["data"]["checkpoint"], id);
+        let key = handle
+            .strip_prefix("yard-")
+            .unwrap()
+            .rsplit_once('-')
+            .unwrap()
+            .0;
+        let label = format!("dev.yard.project={key}");
+        let boxes = machine.boxes(&label);
+        assert_eq!(boxes.len(), 1);
+        assert_eq!(boxes[0]["name"], handle);
+        let before = project.rows(&format!(
+            "SELECT id FROM execution WHERE attempt = {number}"
+        ));
+        assert_eq!(before.len(), 1);
+        let boxed_marker = machine.pinfold(&["box", "exec", handle, "--", "sh", "-c",
+            if corrupt { "printf '%s' 'untrusted checkpoint bytes' > /yard/state/audit-checkpoints/identity.json" }
+            else { "printf '%s' 'fixture checkpoint marker' > /yard/state/audit-checkpoints/fixture-marker" }]);
+        assert!(boxed_marker.status.success());
+        machine.kill();
+        // The tool is still debugger-held at death, not a fleeting row/ref.
+        let held = project.rows(&format!(
+            "SELECT status, reserved, report, tokens_in FROM execution WHERE id = {id}"
+        ));
+        assert_eq!(held[0]["status"], "running");
+        assert_eq!(held[0]["reserved"], 1);
+        assert!(held[0]["report"].is_null());
+        assert_eq!(held[0]["tokens_in"], PROMPT_TOKENS);
+        machine.start();
+        let _ = debugger.wait().unwrap();
+        let dead = machine.pinfold(&[
+            "box",
+            "exec",
+            handle,
+            "--",
+            "sh",
+            "-c",
+            "echo old-owner-acted",
+        ]);
+        assert!(!dead.status.success());
+        assert!(machine.boxes(&label).is_empty());
+        let old = project.rows(&format!("SELECT * FROM execution WHERE id = {id}"))[0].clone();
+        assert_eq!(old["outcome"], "interrupted");
+        assert_eq!(old["reserved"], 0);
+        assert_eq!(old["teardown"], 1);
+        assert_eq!(old["tokens_in"], PROMPT_TOKENS);
+        assert_eq!(old["tokens_out"], COMPLETION_TOKENS);
+        let mut watch = project.watch(project.json(&["status"])["seq"].as_i64().unwrap());
+        let resumed = Latch::new();
+        if !changed && !corrupt {
+            *continuation.lock().unwrap() = Some(resumed.clone());
+        }
+        if changed {
+            let revision = project.json(&["ticket", "show", &ticket])["revision"].to_string();
+            project.json(&[
+                "ticket",
+                "edit",
+                &ticket,
+                "--revision",
+                &revision,
+                "--body",
+                "Changed pending work",
+            ]);
+        } else {
+            project.json(&["attempt", "start", &ticket]);
+        }
+        if !changed && !corrupt {
+            resumed.wait_held();
+            let replacement = project.rows(&format!("SELECT handle FROM execution WHERE attempt = {number} AND status = 'running' AND kind = 'implementation'"));
+            let new_handle = replacement[0]["handle"].as_str().unwrap();
+            let checkpoint = machine.pinfold(&[
+                "box",
+                "exec",
+                new_handle,
+                "--",
+                "cat",
+                "/yard/state/audit-checkpoints/fixture-marker",
+            ]);
+            assert!(checkpoint.status.success());
+            assert_eq!(checkpoint.stdout, b"fixture checkpoint marker");
+            let retained_inode = machine.pinfold(&[
+                "box",
+                "exec",
+                new_handle,
+                "--",
+                "stat",
+                "-c",
+                "%i",
+                "/yard/state/audit-checkpoints/session.sqlite",
+            ]);
+            assert!(retained_inode.status.success());
+            assert_eq!(retained_inode.stdout, inode.stdout);
+            assert_eq!(machine.boxes(&label).len(), 1);
+            resumed.release();
+        }
+        if corrupt {
+            let refused = watch.until("corrupt checkpoint refused", |event| {
+                event["event"] == "attention.raised" && event["ticket"] == ticket
+            });
+            assert!(transcript(&project, number).contains("checkpoint_invalid"));
+            assert!(!marker.exists());
+            watch.until("corrupt checkpoint owner released", |event| {
+                event["event"] == "execution.released" && event["execution"] == refused["execution"]
+            });
+            // A failed checkpoint is an explicit error, and supported retry
+            // starts fresh instead of falling back to a second live writer.
+            project.json(&["attempt", "start", &ticket]);
+        }
+        watch.until("continued audit completed", |event| {
+            event["event"] == "attempt.ended" && event["ticket"] == ticket
+        });
+        let rows = project.rows(&format!("SELECT id, resumed, prepared, tokens_in, tokens_out FROM execution WHERE attempt = {number} AND kind = 'implementation' ORDER BY id"));
+        let last = rows.last().unwrap();
+        assert_ne!(last["id"], id);
+        if !changed && !corrupt {
+            assert_eq!(last["resumed"], id);
+            let prepared: Value = serde_json::from_str(last["prepared"].as_str().unwrap()).unwrap();
+            assert_eq!(prepared["durable"]["checkpoint"], id);
+            assert_eq!(prepared["durable"]["predecessor"], id);
+            assert_eq!(
+                std::fs::read_to_string(marker).unwrap(),
+                "unsafe read was interrupted, not replayed\n"
+            );
+        } else {
+            assert!(last["resumed"].is_null());
+            let prepared: Value = serde_json::from_str(last["prepared"].as_str().unwrap()).unwrap();
+            assert_eq!(prepared["durable"]["checkpoint"], last["id"]);
+            assert!(!marker.exists());
+        }
+        assert_eq!(last["tokens_in"], 2 * PROMPT_TOKENS);
+        assert_eq!(last["tokens_out"], 2 * COMPLETION_TOKENS);
+        assert_eq!(
+            project.rows(&format!("SELECT * FROM execution WHERE id = {id}"))[0],
+            old
+        );
+        watch.until("checkpoint attempt cleaned", |event| {
+            event["event"] == "execution.ended"
+                && event["attempt"] == number
+                && event["data"]["kind"] == "cleanup"
+        });
+    }
+}
+
+#[test]
+fn durable_continuations_exclusively_resume_matching_interrupted_inputs() {
+    durable_checkpoint_scenario("g5-durable-resume", false, false);
+}
+
+#[test]
+fn durable_input_edits_start_fresh_after_interrupted_tool() {
+    durable_checkpoint_scenario("g2-durable-fresh", true, false);
+}
+
+#[test]
+fn durable_checkpoint_corruption_refuses_before_fresh_retry() {
+    durable_checkpoint_scenario("g2-durable-corrupt", false, true);
 }

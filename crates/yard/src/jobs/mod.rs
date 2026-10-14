@@ -352,6 +352,11 @@ pub async fn load_attempt(
         };
     let mut recorded_inputs = admission["inputs"].clone();
     if admitted.packaged().is_some() {
+        if admission.get("package_checkpoint").is_some()
+            && admission["package_checkpoint"] != "exclusive-v1"
+        {
+            return Err(Fail::refused("invalid admitted checkpoint contract"));
+        }
         if admission.get("package_launch").is_some() && admission["package_launch"] != "effort" {
             return Err(Fail::refused("invalid admitted package launch contract"));
         }

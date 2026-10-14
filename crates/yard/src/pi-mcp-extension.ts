@@ -225,10 +225,32 @@ async function runAudit(client: McpClient): Promise<{ exit_code: number; detail:
     const stop = (reason: string) => { failure = reason; child.kill("SIGKILL"); };
     for (const stream of [child.stdout, child.stderr]) {
       const decoder = new StringDecoder("utf8");
+      let pending = "";
       stream!.on("data", chunk => {
         bytes += chunk.length;
         if (bytes > 1024 * 1024) stop("audit_limit");
-        else output += decoder.write(chunk);
+        else {
+          const decoded = decoder.write(chunk);
+          output += decoded;
+          if (stream === child.stdout) {
+            pending += decoded;
+            for (;;) {
+              const end = pending.indexOf("\n");
+              if (end < 0) break;
+              const line = pending.slice(0, end);
+              pending = pending.slice(end + 1);
+              try {
+                const frame = JSON.parse(line);
+                if (frame.type === "audit_usage" &&
+                    [frame.input, frame.output].every(value => Number.isSafeInteger(value) && value >= 0) &&
+                    typeof frame.complete === "boolean") {
+                  auditFrame({ type: "yard_audit_usage", input: frame.input,
+                    output: frame.output, complete: frame.complete });
+                }
+              } catch { /* Package diagnostics remain bounded terminal output. */ }
+            }
+          }
+        }
       });
       stream!.on("end", () => { output += decoder.end(); });
     }
