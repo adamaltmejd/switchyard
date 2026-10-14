@@ -22,6 +22,7 @@ fn copy_tree(from: &Path, to: &Path) {
 fn packaged_daemon_source(name: &str, revision: &str, runner_suffix: &str) -> std::path::PathBuf {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let target = yard().parent().unwrap().join(name);
+    let build_target = yard().parent().unwrap().join("packaged-daemon-build");
     let source = target.join("source");
     std::fs::create_dir_all(&source).unwrap();
     // Build real runtime assets; the optional comment changes sealed bytes,
@@ -61,15 +62,28 @@ fn packaged_daemon_source(name: &str, revision: &str, runner_suffix: &str) -> st
         let bytes = std::fs::read_to_string(&runner).unwrap();
         std::fs::write(runner, format!("{bytes}{runner_suffix}")).unwrap();
     }
+    // These builds are serial. Share dependencies, but discard Yard artifacts:
+    // archived timestamps can otherwise reuse a different compiled asset seal.
     assert!(
         std::process::Command::new(env!("CARGO"))
             .current_dir(&source)
-            .args(["build", "-p", "yard", "--locked", "--target-dir"])
-            .arg(&target)
+            .args(["clean", "-p", "yard", "--target-dir"])
+            .arg(&build_target)
             .status()
             .unwrap()
             .success()
     );
+    assert!(
+        std::process::Command::new(env!("CARGO"))
+            .current_dir(&source)
+            .args(["build", "-p", "yard", "--locked", "--target-dir"])
+            .arg(&build_target)
+            .status()
+            .unwrap()
+            .success()
+    );
+    std::fs::create_dir_all(target.join("debug")).unwrap();
+    std::fs::copy(build_target.join("debug/yard"), target.join("debug/yard")).unwrap();
     source
 }
 
