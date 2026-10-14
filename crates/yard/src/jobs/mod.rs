@@ -74,7 +74,7 @@ pub async fn verification(
             |row| row.get(0),
         )?)
     })?;
-    let evidence = json!({
+    let mut evidence = json!({
         "status": "recorded", "reuse": "disabled",
         "candidate": {"tree": tree, "base_tree": base_tree,
             "provenance": {"base": row.base, "head": row.head}, "proof": row.proof},
@@ -87,6 +87,51 @@ pub async fn verification(
             "executed": {"status": "unknown"}},
         "external_services": {"status": "unknown"},
     });
+    let definition = &evidence["policy"]["definition"];
+    let declaration = definition["gate"]["closed_inputs"].as_str();
+    if row.kind == "gate"
+        && row.parent.is_none()
+        && declaration.is_some_and(|identity| !identity.trim().is_empty())
+        && definition["gate"]["stage"] == "candidate"
+        && definition["gate"]["runs_in"] == "box"
+        && evidence["runtime"]["environment"]["status"] == "declared"
+        && evidence["runtime"]["supported"]["version"].is_string()
+        && evidence["image"]["status"] == "observed"
+        && row
+            .inputs
+            .as_ref()
+            .and_then(Value::as_object)
+            .is_some_and(|inputs| {
+                !inputs.is_empty()
+                    && inputs.values().all(|input| {
+                        input["source"]["execution"].is_i64()
+                            && input["source"]["status"] != "unknown"
+                    })
+            })
+    {
+        let mut definition = definition.clone();
+        definition
+            .as_object_mut()
+            .expect("recorded definition")
+            .remove("runner");
+        definition["gate"]
+            .as_object_mut()
+            .expect("recorded gate")
+            .remove("name");
+        // Provenance commits and per-launch handles do not describe consumed
+        // bytes. The original evidence still retains them for inspection.
+        evidence["identity"] = json!({
+            "declaration": declaration,
+            "candidate": {"tree": evidence["candidate"]["tree"],
+                "base_tree": evidence["candidate"]["base_tree"], "proof": row.proof},
+            "inputs": row.inputs, "definition": definition,
+            "launch": evidence["launch"], "image": evidence["image"],
+            "runtime": evidence["runtime"], "yard": evidence["tools"]["yard"]});
+        evidence["reuse"] = json!("eligible");
+        evidence["tools"]["executed"] = json!({"status": "declared",
+            "source": "observed-image", "contract": "pinfold-box-v1"});
+        evidence["external_services"] = json!({"status": "none"});
+    }
     project.read(|conn| executions::verification(conn, execution, &evidence))
 }
 

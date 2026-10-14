@@ -96,6 +96,8 @@ pub struct Gate {
     pub stage: Stage,
     pub runs_in: RunsIn,
     pub env: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_inputs: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, Deserialize)]
@@ -169,6 +171,7 @@ struct RawGate {
     runs_in: RunsIn,
     #[serde(default)]
     env: Vec<String>,
+    closed_inputs: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -319,6 +322,15 @@ impl Config {
                     return Err(format!("gates.{name}.env names {variable:?}"));
                 }
             }
+            if gate
+                .closed_inputs
+                .as_ref()
+                .is_some_and(|identity| identity.trim().is_empty())
+            {
+                return Err(format!(
+                    "gates.{name}.closed_inputs must name declared runtime configuration"
+                ));
+            }
             gates.push(Gate {
                 name,
                 command: gate.command,
@@ -326,6 +338,7 @@ impl Config {
                 stage: gate.stage,
                 runs_in: gate.runs_in,
                 env: gate.env,
+                closed_inputs: gate.closed_inputs,
             });
         }
         let config = Config {

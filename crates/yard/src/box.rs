@@ -331,6 +331,63 @@ impl Pinfold {
         checked(self.control(&["--version"]).await?).map(|out| out.trim().to_string())
     }
 
+    /// Only supported public runtime identity fields survive this observation.
+    /// The doctor report is never evidence and its diagnostics are not logged.
+    pub async fn runtime_identity(&self) -> Option<Value> {
+        let pinfold = self.version().await.ok()?;
+        if pinfold
+            .strip_prefix("pinfold ")
+            .is_none_or(|version| version.trim().is_empty())
+        {
+            return None;
+        }
+        let mut child = self
+            .command(&["doctor"])
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .ok()?;
+        let mut stdout = BufReader::new(child.stdout.take()?);
+        let work = async {
+            let mut backend = None;
+            let mut version = None;
+            let mut next_version = false;
+            while let Some(bytes) = read_line(&mut stdout).await {
+                let line = String::from_utf8_lossy(&bytes);
+                if next_version {
+                    version = line
+                        .trim_end()
+                        .strip_prefix("  version: ")
+                        .filter(|version| {
+                            !version.is_empty() && !version.starts_with("unavailable:")
+                        })
+                        .map(str::to_owned);
+                }
+                next_version = false;
+                if let Some(runtime) = line.trim_end().strip_prefix("runtime: ") {
+                    backend = match runtime {
+                        "podman (the host kernel, shared with every box)" => Some("podman"),
+                        "Apple container (one VM per box)" => Some("Apple container"),
+                        _ => None,
+                    };
+                    next_version = true;
+                }
+            }
+            if !child.wait().await.ok()?.success() {
+                return None;
+            }
+            Some(serde_json::json!({"pinfold": pinfold, "backend": backend?, "version": version?}))
+        };
+        match tokio::time::timeout(CONTROL_TIMEOUT, work).await {
+            Ok(identity) => identity,
+            Err(_) => {
+                kill_group(&child);
+                let _ = child.wait().await;
+                None
+            }
+        }
+    }
+
     /// Each artifact pinfold carries, by name.
     pub async fn artifacts(&self) -> Result<BTreeMap<String, String>, String> {
         let text = checked(self.control(&["artifacts"]).await?)?;

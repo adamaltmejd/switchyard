@@ -6,6 +6,204 @@ use std::io::Write;
 
 const GATE: &str = "[gates.check]\ncommand = \"test -f feature.txt\"\nstage = \"candidate\"\n";
 
+/// G2: equivalent consumers on one candidate, then changed declared
+/// configuration. Existing adoption cases cannot show stable runtime
+/// identity across distinct launches. Expected inputs come from fixture
+/// literals, Git and real Pinfold/runtime. Observe store and operator MCP.
+/// Sabotage: accept stdout claims, omit the declaration, include box names,
+/// or overwrite launch/result/check history.
+#[test]
+fn closed_box_gate_inputs_are_declared_stable_and_immutable() {
+    let machine = Machine::new("g2-closed-inputs", worker(vec![]));
+    let observed = machine.root.join("ready.jsonl");
+    machine.wrapper(
+        "pinfold",
+        &format!(
+            "if [ \"$1 $2\" = 'box up' ]; then \"$REAL\" \"$@\" | tee -a '{}'; exit $?; fi",
+            observed.display()
+        ),
+    );
+    machine.start();
+    let command = "test -f feature.txt && echo '{\"reuse\":\"eligible\",\"runtime\":\"forged\"}'";
+    let configuration = unreviewed(&format!(
+        "[gates.closed]\ncommand = {}\nstage = 'candidate'\nclosed_inputs = 'operator-runtime-v1'\n\n[gates.again]\ncommand = {}\nstage = 'candidate'\nclosed_inputs = 'operator-runtime-v1'\n\n[gates.unknown]\ncommand = {}\nstage = 'candidate'\n",
+        serde_json::to_string(command).unwrap(),
+        serde_json::to_string(command).unwrap(),
+        serde_json::to_string(command).unwrap()
+    ));
+    let project = Project::new(&machine, "p", &configuration);
+    let admitted_source = project.git(&["rev-parse", "HEAD"]).trim().to_string();
+    let mut watch = project.watch(0);
+    project.json(&["ticket", "new", "--title", "Feature"]);
+    approval(&mut watch);
+    let original = project.rows("SELECT * FROM execution WHERE kind = 'gate' ORDER BY id");
+    let checks = project.rows("SELECT * FROM \"check\" ORDER BY id");
+    let closed = original
+        .iter()
+        .find(|r| r["node"] == "candidate-gate-closed")
+        .unwrap();
+    let evidence: Value = serde_json::from_str(closed["verification"].as_str().unwrap()).unwrap();
+    let unknown = original
+        .iter()
+        .find(|r| r["node"] == "candidate-gate-unknown")
+        .unwrap();
+    let unknown_evidence: Value =
+        serde_json::from_str(unknown["verification"].as_str().unwrap()).unwrap();
+    assert_eq!(unknown_evidence["reuse"], "disabled");
+    assert_eq!(unknown["outcome"], "pass");
+    assert_eq!(closed["outcome"], "pass");
+    assert_eq!(evidence["reuse"], "eligible");
+    let again = original
+        .iter()
+        .find(|r| r["node"] == "candidate-gate-again")
+        .unwrap();
+    let again_evidence: Value =
+        serde_json::from_str(again["verification"].as_str().unwrap()).unwrap();
+    assert_ne!(again["handle"], closed["handle"]);
+    assert_eq!(again_evidence["reuse"], "eligible");
+    assert_eq!(again_evidence["identity"], evidence["identity"]);
+    assert_eq!(evidence["identity"]["declaration"], "operator-runtime-v1");
+    assert_eq!(evidence["launch"]["command"], command);
+    let tree = git(
+        &project.canonical(),
+        &["rev-parse", "refs/yard/candidates/1^{tree}"],
+    )
+    .trim()
+    .to_string();
+    assert_eq!(evidence["identity"]["candidate"]["tree"], tree);
+    let supplier = project.rows(
+        "SELECT id, proof FROM execution WHERE kind = 'implementation' AND outcome = 'candidate'",
+    )[0]
+    .clone();
+    assert_eq!(
+        evidence["identity"]["inputs"]["candidate"]["source"]["execution"],
+        supplier["id"]
+    );
+    assert_eq!(
+        evidence["identity"]["candidate"]["proof"],
+        supplier["proof"]
+    );
+    assert_eq!(
+        std::fs::read_to_string(project.path.join(format!(
+            ".yard/local/attempts/1/proof-snapshots/{}/evidence.txt",
+            supplier["proof"].as_str().unwrap()
+        )))
+        .unwrap(),
+        "first"
+    );
+    assert_eq!(
+        evidence["identity"]["definition"]["build_context_tree"],
+        project
+            .git(&["rev-parse", &format!("{admitted_source}^{{tree}}")])
+            .trim()
+    );
+    assert_eq!(
+        evidence["identity"]["definition"]["dockerfile_blob"],
+        project
+            .git(&["rev-parse", &format!("{admitted_source}:.yard/Dockerfile")])
+            .trim()
+    );
+    assert_eq!(
+        evidence["runtime"]["environment"]["definition"],
+        "yard-box-gate-v1"
+    );
+    assert_eq!(evidence["external_services"]["status"], "none");
+    let ready: Vec<Value> = std::fs::read_to_string(&observed)
+        .unwrap()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|line| line["event"] == "ready")
+        .collect();
+    assert!(
+        ready
+            .iter()
+            .any(|line| line["image"]["id"] == evidence["image"]["id"])
+    );
+    let program = if cfg!(target_os = "macos") {
+        "container"
+    } else {
+        "podman"
+    };
+    let runtime = std::process::Command::new(program)
+        .arg("--version")
+        .output()
+        .unwrap();
+    assert!(runtime.status.success());
+    assert_eq!(
+        evidence["runtime"]["supported"]["version"],
+        String::from_utf8(runtime.stdout).unwrap().trim()
+    );
+    let pinfold = machine.pinfold(&["--version"]);
+    assert!(pinfold.status.success());
+    assert_eq!(
+        evidence["runtime"]["supported"]["pinfold"],
+        String::from_utf8(pinfold.stdout).unwrap().trim()
+    );
+    let result: Value = serde_json::from_str(closed["result"].as_str().unwrap()).unwrap();
+    assert_eq!(result["verification"], evidence);
+    let mut operator = machine.operator();
+    operator.initialize();
+    {
+        let (revision, declaration) = (1, "operator-runtime-v2");
+        project.reconfigure(&configuration.replace("operator-runtime-v1", declaration));
+        let source = project.git(&["rev-parse", "HEAD"]).trim().to_string();
+        let revised = operator.call(
+            "yard_attempt_revise",
+            json!({"project": project.path,
+            "ticket": "Y-1", "plan_revision": revision, "definition_commit": source}),
+        );
+        assert_eq!(
+            revised["result"]["plan_revision"],
+            revision + 1,
+            "{revised}"
+        );
+        approval(&mut watch);
+        let rows = project
+            .rows("SELECT * FROM execution WHERE node = 'candidate-gate-closed' ORDER BY id");
+        let next = rows.last().unwrap();
+        assert_ne!(next["handle"], closed["handle"]);
+        let next: Value = serde_json::from_str(next["verification"].as_str().unwrap()).unwrap();
+        assert_eq!(next["identity"]["declaration"], declaration);
+        assert_ne!(next["identity"], evidence["identity"]);
+        assert_eq!(
+            project.rows(&format!(
+                "SELECT * FROM execution WHERE id IN ({}, {}, {}) ORDER BY id",
+                original[0]["id"], original[1]["id"], original[2]["id"]
+            )),
+            original
+        );
+        assert_eq!(
+            project.rows(&format!(
+                "SELECT * FROM \"check\" WHERE id <= {} ORDER BY id",
+                checks.last().unwrap()["id"]
+            )),
+            checks
+        );
+        let shown = operator.call(
+            "yard_attempt_show",
+            json!({"project": project.path, "ticket": "Y-1"}),
+        );
+        assert!(shown.get("error").is_none(), "{shown}");
+        let old = shown["result"]["executions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["execution"] == closed["id"])
+            .unwrap();
+        assert_eq!(old["verification"], evidence);
+        assert_eq!(old["result"], result);
+    }
+    machine.kill();
+    machine.start();
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT * FROM execution WHERE id IN ({}, {}, {}) ORDER BY id",
+            original[0]["id"], original[1]["id"], original[2]["id"]
+        )),
+        original
+    );
+}
+
 /// G2/G5/G9: revise the final policy at manual approval, then change its
 /// producer policy. The first edit retains the completed unrelated seat;
 /// the second selects that profile for the non-final producer and invalidates

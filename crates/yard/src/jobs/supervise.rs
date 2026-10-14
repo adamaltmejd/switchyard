@@ -1879,13 +1879,29 @@ async fn box_gate(
     drop(target);
     let recorded = match recorded {
         Ok(()) => {
+            let mut runtime = runtime_evidence(&spec);
+            if gate.stage == crate::config::Stage::Candidate
+                && gate.closed_inputs.is_some()
+                && gate.env.is_empty()
+                && spec.egress.is_none()
+            {
+                runtime["supported"] = daemon
+                    .pinfold
+                    .runtime_identity()
+                    .await
+                    .unwrap_or_else(|| json!({"status": "unknown"}));
+                runtime["environment"] = json!({"status": "declared",
+                    "definition": "yard-box-gate-v1", "source": "tools.yard",
+                    "base_source": "candidate.provenance.base", "image_defaults": "observed-image",
+                    "names": spec.env.keys().collect::<Vec<_>>()});
+            }
             super::verification(
                 daemon,
                 project,
                 execution,
                 checkout,
                 json!({"command": gate.command}),
-                runtime_evidence(&spec),
+                runtime,
             )
             .await
         }
