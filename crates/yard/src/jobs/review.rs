@@ -242,8 +242,8 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
     let _ = std::fs::remove_dir_all(&dir);
     let run = run?;
 
-    // Publication survives a failed runner. Eligibility also needs the
-    // registration and ownership proofs checked by checks::current.
+    // Review verdicts survive a failed runner; selector results require success.
+    // Eligibility also needs checked registration and ownership proofs.
     project.tx(|tx| {
         if attempts::get(tx, attempt.id)?.state != "live" {
             return executions::end(
@@ -265,7 +265,26 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
                 Some(read) => attempts::superseded_by_edit(tx, attempt.id, ticket.id, read)?,
                 None => false,
             };
+        let infrastructure = if run.timed_out {
+            "timeout"
+        } else if run.stopped {
+            "stopped"
+        } else if matches!(run.terminal, Some(crate::harness::Event::Failed { .. }))
+            || run.exit_code.is_some_and(|code| code != 0)
+        {
+            "failed"
+        } else if run.terminal.is_none() {
+            "unknown"
+        } else {
+            "completed"
+        };
         let failure = match (has_publication, &run.registered, &run.terminal) {
+            (true, _, _) if selector && !run.stopped && !moved && infrastructure != "completed" => {
+                Some(match &run.terminal {
+                    Some(crate::harness::Event::Failed { message, .. }) => message.clone(),
+                    _ => format!("the selector ended with infrastructure outcome {infrastructure}"),
+                })
+            }
             (true, _, _) => None,
             // An edit stopped the seat: it judged nothing and is not an error.
             (false, _, _) if run.stopped || moved => None,
@@ -279,19 +298,6 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
                 Some(message.clone())
             }
             (false, _, _) => Some("the seat ended without publishing".to_string()),
-        };
-        let infrastructure = if run.timed_out {
-            "timeout"
-        } else if run.stopped {
-            "stopped"
-        } else if matches!(run.terminal, Some(crate::harness::Event::Failed { .. }))
-            || run.exit_code.is_some_and(|code| code != 0)
-        {
-            "failed"
-        } else if run.terminal.is_none() {
-            "unknown"
-        } else {
-            "completed"
         };
         let outcome = match &failure {
             Some(_) => "error",

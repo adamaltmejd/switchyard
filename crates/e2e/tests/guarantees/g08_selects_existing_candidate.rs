@@ -8,7 +8,7 @@ fn rows(project: &Project<'_>, sql: &str) -> Vec<Value> {
         .rows(sql)
         .into_iter()
         .map(|mut row| {
-            for key in ["inputs", "result", "settings"] {
+            for key in ["inputs", "result", "settings", "report"] {
                 if let Some(text) = row[key].as_str() {
                     row[key] = serde_json::from_str(text).unwrap();
                 }
@@ -32,6 +32,10 @@ fn approval(watch: &mut Watch) -> Value {
 /// Sabotage: use the newest attempt head, grant picker review/write authority,
 /// copy a losing review, reuse a choice after replacement, overwrite old evidence,
 /// or approve the same head without binding the exact choice.
+/// A published picker then receives a nonretryable host-model error: only an
+/// explicit start may retry it. Sabotage: let publication mask picker failure.
+/// At the final nondefault-target CAS, real Git holds the open intent while a
+/// replacement is refused. Sabotage: omit the intent fence in start_writer.
 #[test]
 fn only_the_declared_choice_is_checked_and_landed() {
     let holds: Vec<_> = (0..5).map(|_| Latch::new()).collect();
@@ -39,6 +43,7 @@ fn only_the_declared_choice_is_checked_and_landed() {
     let replacement = Latch::new();
     let replacement_hold = replacement.clone();
     let turns: Vec<_> = (0..5).map(|_| AtomicUsize::new(0)).collect();
+    let picker_finishes = AtomicUsize::new(0);
     let machine = Machine::new("g8-select", move |request| {
         if request.has_tool("yard_publish_report") {
             return planned(request);
@@ -72,6 +77,17 @@ fn only_the_declared_choice_is_checked_and_landed() {
                     "yard_publish_selection",
                     json!({"candidate": "c1"}),
                 )]);
+            }
+            assert!(
+                request
+                    .tool_results()
+                    .last()
+                    .unwrap()
+                    .1
+                    .contains("published")
+            );
+            if picker_finishes.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Reply::ResponsesError;
             }
             return Reply::Text("selected".into());
         }
@@ -129,6 +145,23 @@ fn only_the_declared_choice_is_checked_and_landed() {
         }
         Reply::Text("done".into())
     });
+    let armed = machine.root.join("landing-armed");
+    let said = machine.root.join("landing-said");
+    let release = machine.root.join("landing-release");
+    for fifo in [&said, &release] {
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    machine.wrapper("git", &format!(
+        "if [ -e '{}' ]; then case \" $* \" in *' update-ref --no-deref refs/heads/feature/a '*)\n\
+         echo held > '{}'; read line < '{}';; esac; fi",
+        armed.display(), said.display(), release.display()
+    ));
     machine.start();
     let mut extra = String::from(
         "\n[profiles.picker]\nrunner = {kind = 'agent', agent = 'worker', instructions = 'Compare frozen inputs.'}\naccess = 'read-only'\noutputs = {result = 'selection'}\noutcomes = ['complete']\n\
@@ -190,12 +223,17 @@ fn only_the_declared_choice_is_checked_and_landed() {
             &format!("review = {}", json!(seats)),
         );
     let project = Project::new(&machine, "p", &configuration);
+    let main = project.canonical_head();
+    project.git(&["checkout", "--quiet", "-b", "feature/a"]);
+    project.json(&["sync", "feature/a"]);
     let mut watch = project.watch(0);
     project.json(&[
         "ticket",
         "new",
         "--title",
         "Five candidate choice",
+        "--target",
+        "feature/a",
         "--workflow",
         "plan",
     ]);
@@ -259,6 +297,35 @@ fn only_the_declared_choice_is_checked_and_landed() {
             event["event"] == "execution.released" && &event["execution"] == id
         });
     }
+    let failure = watch.find("published picker failed", |event| {
+        event["event"] == "attention.raised"
+            && event["data"]["kind"] == "red"
+            && event["data"]["reason"] == "review"
+    });
+    assert_eq!(failure["data"]["payload"]["seat"], "selector");
+    watch.find("failed picker released", |event| {
+        event["event"] == "execution.released" && event["execution"] == failure["execution"]
+    });
+    let failed = rows(&project, "SELECT * FROM execution WHERE node = 'selector'");
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0]["id"], failure["execution"]);
+    assert_eq!(failed[0]["outcome"], "error");
+    assert_eq!(failed[0]["result"]["infrastructure"]["outcome"], "failed");
+    assert!(failed[0]["result"]["outputs"]["result"].is_null());
+    assert_eq!(failed[0]["report"]["candidate"], failed[0]["inputs"]["c1"]);
+    assert!(project.rows("SELECT * FROM approval").is_empty());
+    assert!(
+        project
+            .rows("SELECT * FROM execution WHERE kind = 'gate'")
+            .is_empty()
+    );
+    let retry = operator.call(
+        "yard_attempt_start",
+        json!({
+            "project": project.path, "ticket": "Y-1", "attention": failure["attention"]
+        }),
+    );
+    assert!(retry.get("error").is_none(), "{retry}");
     let first = approval(&mut watch);
     assert_eq!(first["head"], heads[1]);
     let history = rows(
@@ -267,7 +334,7 @@ fn only_the_declared_choice_is_checked_and_landed() {
     );
     let picker = history
         .iter()
-        .find(|row| row["node"] == "selector")
+        .find(|row| row["node"] == "selector" && row["outcome"] == "selected")
         .unwrap();
     assert_eq!(picker["inputs"].as_object().unwrap().len(), 10);
     for n in 0..5 {
@@ -309,7 +376,7 @@ fn only_the_declared_choice_is_checked_and_landed() {
             .contains(&picker["inputs"]["r1"]["value"]["publication"])
     );
     let mut direct = json!({"project": project.path, "ticket": "Y-1", "attempt": attempt, "revision": 1,
-        "plan_revision": 1, "target": "main", "choice": first["choice"], "inputs": picker["inputs"], "candidate": "foreign"});
+        "plan_revision": 1, "target": "feature/a", "choice": first["choice"], "inputs": picker["inputs"], "candidate": "foreign"});
     let before = project.rows("SELECT * FROM audit ORDER BY seq");
     let refused = operator.call("yard_attempt_select", direct.clone());
     assert_eq!(refused["error"]["code"], "refused");
@@ -328,7 +395,7 @@ fn only_the_declared_choice_is_checked_and_landed() {
     let old_approve = operator.call(
         "yard_attempt_approve",
         json!({"project": project.path, "ticket": "Y-1",
-        "target": "main", "head": heads[1], "proof": first["proof"], "choice": first["choice"]}),
+        "target": "feature/a", "head": heads[1], "proof": first["proof"], "choice": first["choice"]}),
     );
     assert_eq!(
         old_approve["error"]["data"]["identity"], "choice",
@@ -381,6 +448,10 @@ fn only_the_declared_choice_is_checked_and_landed() {
     for old in &retained {
         assert_eq!(now.iter().find(|row| row["id"] == old["id"]), Some(old));
     }
+    assert_eq!(
+        now.iter().find(|row| row["id"] == failed[0]["id"]),
+        Some(&failed[0])
+    );
     let checks_now = project.rows("SELECT * FROM \"check\" ORDER BY id");
     for old in &raw_checks {
         assert_eq!(
@@ -400,17 +471,56 @@ fn only_the_declared_choice_is_checked_and_landed() {
     machine.kill();
     machine.start();
     drop(watch);
-    let mut watch = project.watch(0);
+    let since = project.rows("SELECT MAX(seq) AS seq FROM audit")[0]["seq"]
+        .as_i64()
+        .unwrap();
+    let mut watch = project.watch(since);
+    std::fs::write(&armed, "").unwrap();
     let approved = operator.call("yard_attempt_approve", json!({"project": project.path, "ticket": "Y-1",
-        "target": "main", "head": replacement_head, "proof": third["proof"], "choice": third["choice"]}));
+        "target": "feature/a", "head": replacement_head, "proof": third["proof"], "choice": third["choice"]}));
     assert!(approved.get("error").is_none(), "{approved}");
+    assert_eq!(watch.said(&said), "held\n");
+    let intents = project.rows("SELECT * FROM execution WHERE intent_state = 'open'");
+    assert_eq!(intents.len(), 1);
+    assert_eq!(intents[0]["intent_ref"], "refs/heads/feature/a");
+    assert_eq!(
+        git(&project.canonical(), &["rev-parse", "refs/heads/feature/a"]).trim(),
+        target
+    );
+    let before_attempt = project.rows("SELECT * FROM attempt ORDER BY id");
+    let before_approval = project.rows("SELECT * FROM approval ORDER BY id");
+    let before_writers =
+        project.rows("SELECT * FROM execution WHERE kind = 'implementation' ORDER BY id");
+    let refused = operator.call(
+        "yard_attempt_start",
+        json!({
+            "project": project.path, "ticket": "Y-1", "workspace": "writer-1"
+        }),
+    );
+    assert_eq!(refused["error"]["code"], "refused", "{refused}");
+    assert_eq!(refused["error"]["data"]["intent"], intents[0]["id"]);
+    assert_eq!(
+        project.rows("SELECT * FROM attempt ORDER BY id"),
+        before_attempt
+    );
+    assert_eq!(
+        project.rows("SELECT * FROM approval ORDER BY id"),
+        before_approval
+    );
+    assert_eq!(
+        project.rows("SELECT * FROM execution WHERE kind = 'implementation' ORDER BY id"),
+        before_writers
+    );
+    std::fs::remove_file(&armed).unwrap();
+    std::fs::write(&release, "go\n").unwrap();
     watch.find("selected candidate landed", |event| {
         event["event"] == "attempt.ended" && event["data"]["outcome"] == "landed"
     });
     assert_eq!(
-        git(&project.canonical(), &["show", "main:same.txt"]).trim(),
+        git(&project.canonical(), &["show", "feature/a:same.txt"]).trim(),
         "writer-1-1"
     );
+    assert_eq!(project.canonical_head(), main);
     let gates = rows(
         &project,
         "SELECT * FROM execution WHERE kind = 'gate' ORDER BY id",

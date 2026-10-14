@@ -66,6 +66,7 @@ pub fn start_writer(
 ) -> Result<i64, Fail> {
     // The revision and body are read here: the row names what the prompt carries.
     let attempt = attempts::get(tx, attempt.id)?;
+    super::admit::refuse_during_intent(tx, attempt.ticket)?;
     let implementer = attempt.writer_settings(node)?;
     let ticket = tickets::get(tx, attempt.ticket)?;
     let previous = executions::query(
