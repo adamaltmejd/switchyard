@@ -2138,7 +2138,11 @@ fn debugger_holds_read(machine: &Machine, handle: &str) -> std::process::Child {
     use std::io::{BufRead, BufReader};
     let script = r#"
 import { writeSync } from 'node:fs';
-const targets = await (await fetch('http://127.0.0.1:9229/json/list')).json();
+const response = await fetch('http://127.0.0.1:9229/json/list');
+const discovery = await response.text();
+if (!response.ok || !discovery.length)
+  throw new Error(`inspector_discovery: HTTP ${response.status}, ${Buffer.byteLength(discovery)} bytes`);
+const targets = JSON.parse(discovery);
 const socket = new WebSocket(targets[0].webSocketDebuggerUrl);
 await new Promise((resolve, reject) => {
   socket.addEventListener('open', resolve, {once:true});
@@ -2166,15 +2170,30 @@ await call('Debugger.setBreakpointByUrl', {url:'file:///opt/yard/durable-audit/r
 writeSync(1, 'armed\n');
 // The debugger stays attached and paused until the real box is destroyed.
 "#;
-    let mut child = std::process::Command::new("pinfold")
+    let mut command = std::process::Command::new("pinfold");
+    command
         .env("XDG_STATE_HOME", "/tmp/yard-e2e-state")
         .env("XDG_CONFIG_HOME", &machine.config)
         .env("XDG_CACHE_HOME", &machine.cache)
+        .args(["box", "exec", handle, "--", "env"]);
+    // Only this observer uses guest loopback. The controller keeps its model
+    // proxy; inherited proxy routing must not intercept inspector discovery
+    // or its WebSocket connection.
+    for key in [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "no_proxy",
+        "NODE_USE_ENV_PROXY",
+    ] {
+        command.args(["-u", key]);
+    }
+    let mut child = command
         .args([
-            "box",
-            "exec",
-            handle,
-            "--",
             "/opt/yard/durable-audit/node/bin/node",
             "--no-addons",
             "--input-type=module",
