@@ -17,10 +17,10 @@ model = "gpt-6.1-sol"
 effort = "medium"
 
 [agents.reviewer]
-harness = "pi"
-provider = "opencode-go"
-model = "deepseek-v4.1-flash"
-effort = "high"
+harness = "codex"
+login = true
+model = "gpt-6-astra"
+effort = "medium"
 
 [workflows.default]
 implementer = "implementer"
