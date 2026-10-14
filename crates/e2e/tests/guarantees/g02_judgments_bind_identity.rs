@@ -385,11 +385,18 @@ fi"#,
     project.reconfigure(&failed_definition);
     let source = project.git(&["rev-parse", "HEAD"]).trim().to_string();
     let mut graph = project.json(&["attempt", "show", "Y-1"])["attempt"]["plan"]["plan"].clone();
-    graph["nodes"]
-        .as_object_mut()
-        .unwrap()
-        .remove("candidate-gate-unknown");
-    graph["nodes"]["candidate-gate-other"]["routes"]
+    for omitted in [
+        "candidate-gate-unknown",
+        "landing-gate-closed",
+        "landing-gate-unknown",
+    ] {
+        graph["nodes"].as_object_mut().unwrap().remove(omitted);
+    }
+    // Ordinary reduced selections are one reachable linear chain. Candidate
+    // failure acceptance cannot authorize the failing command on merged input.
+    graph["nodes"]["candidate-gate-other"]["routes"]["complete"] =
+        json!([{"to": "landing-gate-other"}]);
+    graph["nodes"]["landing-gate-other"]["routes"]
         .as_object_mut()
         .unwrap()
         .remove("complete");
@@ -513,7 +520,9 @@ fi"#,
         vec![json!({"n": 2})]
     );
     // G3: the queue rechecks the original selected reference under the exact
-    // current approval. Sabotage: drop references from queue qualification.
+    // current approval. Selected merged verification still runs. Sabotage:
+    // drop references from queue qualification, carry candidate acceptance to
+    // landing, or manufacture results for explicitly omitted landing nodes.
     let current = project.json(&["attempt", "show", "Y-1"]);
     let approved = operator.call(
         "yard_attempt_approve",
@@ -522,10 +531,77 @@ fi"#,
         "head": final_item["payload"]["head"], "proof": final_item["payload"]["proof"],
         "revision": final_item["payload"]["revision"], "plan_revision": plan_revision,
         "attention": current["attention"][0]["attention"],
-        "accept_skipped": ["candidate-gate-unknown"], "text": "Accept this exact omitted gate"}),
+        "accept_skipped": ["candidate-gate-unknown"],
+        "observe_landing_skipped": ["landing-gate-closed", "landing-gate-unknown"],
+        "text": "Accept this exact omitted gate"}),
     );
     assert!(approved.get("error").is_none(), "{approved}");
-    watch.event("landing.recorded", &[]);
+    let attempt = current["attempt"]["attempt"].clone();
+    // find searches retained events too: preparation and checked release may
+    // already have arrived by the time the omission attention is observed.
+    let preparation = watch.find("reuse selection preparation", |event| {
+        event["event"] == "landing.prepared" && event["attempt"] == attempt
+    });
+    let omission = watch.find("reuse selection landing omissions", |event| {
+        event["event"] == "attention.raised"
+            && event["attempt"] == attempt
+            && event["data"]["reason"] == "landing"
+            && event["data"]["payload"]["evidence"]["landing"]["execution"]
+                == preparation["execution"]
+            && event["seq"].as_i64().unwrap() > preparation["seq"].as_i64().unwrap()
+    });
+    let evidence = &omission["data"]["payload"]["evidence"];
+    let landing = &evidence["landing"];
+    watch.find("reuse omission parent released", |event| {
+        event["event"] == "execution.released"
+            && event["execution"] == landing["execution"]
+            && event["seq"].as_i64().unwrap() > omission["seq"].as_i64().unwrap()
+    });
+    let merged = git(
+        &project.canonical(),
+        &[
+            "rev-parse",
+            &format!("refs/yard/landings/{}", landing["execution"]),
+        ],
+    )
+    .trim()
+    .to_string();
+    assert_eq!(landing["prepared"]["merged"], merged);
+    assert_eq!(
+        evidence["identity"],
+        json!({"attempt": attempt, "target": "main",
+        "base": final_item["payload"]["base"], "head": final_item["payload"]["head"],
+        "proof": final_item["payload"]["proof"], "revision": final_item["payload"]["revision"],
+        "plan_revision": plan_revision, "skipped": ["landing-gate-closed", "landing-gate-unknown"]})
+    );
+    let answer = operator.call(
+        "yard_attempt_accept",
+        json!({"project": project.path,
+        "ticket": "Y-1", "attention": omission["attention"], "target": "main",
+        "base": final_item["payload"]["base"], "head": final_item["payload"]["head"],
+        "proof": final_item["payload"]["proof"], "revision": final_item["payload"]["revision"],
+        "plan_revision": plan_revision, "landing": landing["execution"],
+        "old": landing["prepared"]["old"], "merged": merged,
+        "accept_skipped": ["landing-gate-closed", "landing-gate-unknown"],
+        "text": "Accept these exact merged omissions"}),
+    );
+    assert!(answer.get("error").is_none(), "{answer}");
+    decisions.push(
+        project.rows(&format!(
+            "SELECT * FROM attention WHERE id = {}",
+            omission["attention"]
+        ))[0]
+            .clone(),
+    );
+    let recorded = watch.event("landing.recorded", &[]);
+    assert_eq!(project.canonical_head(), merged);
+    assert_eq!(project.rows(&format!(
+        "SELECT node, head, outcome FROM execution WHERE attempt = {attempt} AND reason = 'landing' AND kind = 'gate' ORDER BY id"
+    )), vec![json!({"node": "landing-gate-other", "head": merged, "outcome": "pass"})]);
+    let log = std::fs::read_to_string(&commands).unwrap();
+    for (name, count) in [("closed", 9), ("other", 5), ("unknown", 5)] {
+        assert_eq!(log.lines().filter(|line| *line == name).count(), count);
+    }
     git(
         &project.canonical(),
         &[
@@ -539,6 +615,7 @@ fi"#,
         project.rows("SELECT checks FROM approval ORDER BY id DESC LIMIT 1"),
         vec![json!({"checks": final_item["payload"]["checks"].to_string()})]
     );
+    let approval_rows = project.rows("SELECT * FROM approval ORDER BY id");
     assert_eq!(
         project.rows(&format!(
             "SELECT * FROM execution WHERE kind = 'gate' AND id <= {} ORDER BY id",
@@ -553,8 +630,21 @@ fi"#,
         )),
         original_checks
     );
+    let cleanup = watch.find("reuse selection cleanup", |event| {
+        event["event"] == "execution.ended"
+            && event["data"]["kind"] == "cleanup"
+            && event["attempt"] == attempt
+            && event["seq"].as_i64().unwrap() > recorded["seq"].as_i64().unwrap()
+    });
+    watch.find("reuse selection cleanup released", |event| {
+        event["event"] == "execution.released" && event["execution"] == cleanup["execution"]
+    });
     machine.kill();
     machine.start();
+    assert_eq!(
+        project.rows("SELECT * FROM approval ORDER BY id"),
+        approval_rows
+    );
     for failed in &accepted {
         assert_eq!(
             project.rows(&format!(
