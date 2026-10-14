@@ -90,9 +90,7 @@ pub async fn verification(
     let definition = &evidence["policy"]["definition"];
     let declaration = definition["gate"]["closed_inputs"].as_str();
     if row.kind == "gate"
-        && row.parent.is_none()
         && declaration.is_some_and(|identity| !identity.trim().is_empty())
-        && definition["gate"]["stage"] == "candidate"
         && definition["gate"]["runs_in"] == "box"
         && evidence["runtime"]["environment"]["status"] == "declared"
         && evidence["runtime"]["supported"]["version"].is_string()
@@ -118,6 +116,10 @@ pub async fn verification(
             .as_object_mut()
             .expect("recorded gate")
             .remove("name");
+        definition["gate"]
+            .as_object_mut()
+            .expect("recorded gate")
+            .remove("stage");
         // The base commit is also the declared YARD_BASE source. Tree equality
         // cannot replace it. Per-launch handles remain outside semantic inputs.
         evidence["identity"] = json!({

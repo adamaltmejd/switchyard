@@ -333,6 +333,23 @@ fn accepted_child(
     if passing_child(child, row, target, merged) {
         return Ok(true);
     }
+    if child.outcome.as_deref() == Some("reused")
+        && child.kind == "gate"
+        && child.attempt == row.attempt
+        && child.lock_contract
+        && child.base.as_deref() == Some(target)
+        && child.head.as_deref() == Some(merged)
+        && child.proof == row.proof
+        && child.ticket_revision == row.ticket_revision
+        && child.plan_revision == row.plan_revision
+        && child
+            .name
+            .as_ref()
+            .is_some_and(|name| child.node.as_deref() == Some(&format!("landing-gate-{name}")))
+        && checks::referenced_pass(conn, child)?
+    {
+        return Ok(true);
+    }
     let Some(evidence) = failed_evidence(conn, child, original)? else {
         return Ok(false);
     };
@@ -349,6 +366,28 @@ fn retire_preparation(tx: &rusqlite::Connection, execution: i64, reason: &str) -
             ..Default::default()
         },
     )
+}
+
+/// Git is the authority at continuation and again before mutation intent.
+async fn reference_input(
+    daemon: &Daemon,
+    project: &Project,
+    child: &executions::Execution,
+    target: &str,
+    merged: &str,
+) -> Result<bool, Fail> {
+    if child.outcome.as_deref() != Some("reused") {
+        return Ok(true);
+    }
+    let canonical = project.canonical_dir();
+    let tree = daemon.git.root_tree(&canonical, merged).await?;
+    let base_tree = daemon.git.root_tree(&canonical, target).await?;
+    Ok(child.verification.as_ref().is_some_and(|evidence| {
+        evidence["candidate"]["tree"] == tree
+            && evidence["candidate"]["base_tree"] == base_tree
+            && evidence["candidate"]["provenance"]["base"] == target
+            && evidence["candidate"]["provenance"]["head"] == merged
+    }))
 }
 
 /// Why an approval no longer holds. A superseded one's checks count for
@@ -796,7 +835,7 @@ pub async fn land(
             .ok_or_else(|| Fail::refused("admitted landing gate absent"))?;
         if let Some(child) = retained.iter().rev().find(|child| {
             child.name.as_deref() == Some(&gate.name)
-                && matches!(child.outcome.as_deref(), Some("pass" | "fail"))
+                && matches!(child.outcome.as_deref(), Some("pass" | "fail" | "reused"))
         }) {
             let admitted = super::capacity::effect(daemon, project, execution, async {
                 let held = target_lock.lock().await;
@@ -815,6 +854,12 @@ pub async fn land(
                 {
                     return project.tx(|tx| {
                         retire_preparation(tx, execution, "prepared_input_changed")?;
+                        Ok(Ok(false))
+                    });
+                }
+                if !reference_input(daemon, project, child, &target, &merged).await? {
+                    return project.tx(|tx| {
+                        retire_preparation(tx, execution, "prepared_child_evidence_changed")?;
                         Ok(Ok(false))
                     });
                 }
@@ -985,7 +1030,26 @@ pub async fn land(
         }
         let result = project.read(|conn| executions::get(conn, child))?;
         match result.outcome.as_deref() {
+            Some("reused")
+                if project.read(|conn| {
+                    accepted_child(conn, &result, &row, &original, &target, &merged)
+                })? =>
+            {
+                selected.push(child);
+            }
             Some("pass") if result.node.is_none() || result.result_eligible => {
+                project.tx(|tx| {
+                    checks::record(
+                        tx,
+                        checks::Record {
+                            execution: child,
+                            kind: "gate",
+                            verdict: "pass",
+                            ticket: ticket.id,
+                        },
+                    )?;
+                    Ok(())
+                })?;
                 selected.push(child);
             }
             Some("abandoned") => {
@@ -1097,6 +1161,15 @@ pub async fn land(
             != Some(&merged)
         {
             return project.tx(|tx| retire_preparation(tx, execution, "prepared_ref_changed"));
+        }
+        // Read Git again at intent. A reference must describe this preparation,
+        // even after a continuation retained its already completed child.
+        for child in &selected {
+            let child = project.read(|conn| executions::get(conn, *child))?;
+            if !reference_input(daemon, project, &child, &target, &merged).await? {
+                return project
+                    .tx(|tx| retire_preparation(tx, execution, "prepared_child_evidence_changed"));
+            }
         }
         let admitted = admit(daemon, project, held, approval.id, execution, |tx, now| {
             if let Some(evidence) = &omission

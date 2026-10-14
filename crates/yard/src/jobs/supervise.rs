@@ -1883,11 +1883,7 @@ async fn box_gate(
     let recorded = match recorded {
         Ok(()) => {
             let mut runtime = runtime_evidence(&spec);
-            if gate.stage == crate::config::Stage::Candidate
-                && gate.closed_inputs.is_some()
-                && gate.env.is_empty()
-                && spec.egress.is_none()
-            {
+            if gate.closed_inputs.is_some() && gate.env.is_empty() && spec.egress.is_none() {
                 runtime["supported"] = daemon
                     .pinfold
                     .runtime_identity()

@@ -139,7 +139,7 @@ fn matching_identity(
     execution: &super::executions::Execution,
     evidence: &Value,
 ) -> Result<Option<Value>, Fail> {
-    if execution.kind != "gate" || execution.parent.is_some() || evidence["reuse"] != "eligible" {
+    if execution.kind != "gate" || evidence["reuse"] != "eligible" {
         return Ok(None);
     }
     let Some(mut identity) = evidence.get("identity").filter(|v| v.is_object()).cloned() else {
@@ -150,45 +150,109 @@ fn matching_identity(
     else {
         return Ok(None);
     };
-    // Qualification permits only successor routing to differ. A replacement
-    // execution cannot authorize reuse of an original with different policy.
+    // Routing selects the consumer; it cannot prove the consumed publication.
     policy.routes.remove("complete");
+    let landing = execution.parent.is_some();
+    let label = if landing { "merged" } else { "candidate" };
+    // The ordinary candidate repair edge is a controller action after a failed
+    // command. It is not consumed by a passing verification. Other policy,
+    // including operator_failure, still has to match.
+    if !landing
+        && policy.routes.get("failed")
+            == Some(&vec![crate::plan::Route {
+                to: "implementer".into(),
+                repeat: Some(1),
+            }])
+    {
+        policy.routes.remove("failed");
+        policy.outcomes.retain(|outcome| outcome != "failed");
+    }
+    let expected_input = crate::plan::Input {
+        node: (!landing).then(|| "implementer".into()),
+        output: if landing { "merged" } else { "result" }.into(),
+        kind: crate::plan::Output::Candidate,
+    };
+    if policy.inputs != std::collections::BTreeMap::from([(label.into(), expected_input)])
+        || policy.requires != [label]
+        || !matches!(policy.runner, crate::plan::Runner::Command { .. })
+    {
+        return Ok(None);
+    }
+    // Supplier routing is proved below. Preserve the remaining node policy.
+    policy.runner = crate::plan::Runner::Command {
+        gate: "verification".into(),
+    };
+    policy.inputs.clear();
+    policy.requires.clear();
     identity["node_policy"] = json!(policy);
-    let Some(inputs) = identity["inputs"].as_object_mut() else {
+    let Some(inputs) = identity["inputs"].as_object() else {
         return Ok(None);
     };
     if inputs.len() != 1 {
         return Ok(None);
     }
-    let Some(candidate) = inputs.get_mut("candidate") else {
+    let Some(candidate) = inputs.get(label) else {
         return Ok(None);
     };
-    let Some(producer) = candidate["source"]["execution"].as_i64() else {
-        return Ok(None);
-    };
-    let producer = super::executions::get(conn, producer)?;
-    let published = producer
-        .result
-        .as_ref()
-        .map(|r| &r["outputs"]["result"]["value"]);
-    if producer.attempt != execution.attempt
-        || producer.node.as_deref() != Some("implementer")
-        || !producer.result_eligible
-        || published != Some(&candidate["value"])
+    if candidate["kind"] != "candidate"
         || candidate["value"]["base"] != json!(execution.base)
         || candidate["value"]["head"] != json!(execution.head)
         || candidate["value"]["proof"] != json!(execution.proof.clone().unwrap_or_default())
     {
         return Ok(None);
     }
-    candidate["source"]
-        .as_object_mut()
-        .expect("supplier")
-        .remove("execution");
-    candidate["value"]
-        .as_object_mut()
-        .expect("publication")
-        .remove("head");
+    if let Some(parent) = execution.parent {
+        let parent = super::executions::get(conn, parent)?;
+        let mut original = parent.clone();
+        while original.prepared.is_none() {
+            let Some(previous) = original.resumed else {
+                return Ok(None);
+            };
+            let previous = super::executions::get(conn, previous)?;
+            if previous.id >= original.id
+                || previous.kind != "landing"
+                || previous.attempt != parent.attempt
+                || previous.approval != parent.approval
+            {
+                return Ok(None);
+            }
+            original = previous;
+        }
+        let prepared = original.prepared.as_ref().expect("prepared provenance");
+        if parent.kind != "landing"
+            || parent.attempt != execution.attempt
+            || parent.proof != execution.proof
+            || parent.ticket_revision != execution.ticket_revision
+            || parent.plan_revision != execution.plan_revision
+            || prepared["old"] != json!(execution.base)
+            || prepared["merged"] != json!(execution.head)
+            || candidate["source"] != json!({"external": "merged", "execution": parent.id})
+        {
+            return Ok(None);
+        }
+    } else {
+        let Some(producer) = candidate["source"]["execution"].as_i64() else {
+            return Ok(None);
+        };
+        let producer = super::executions::get(conn, producer)?;
+        if producer.attempt != execution.attempt
+            || producer.node.as_deref() != Some("implementer")
+            || !producer.result_eligible
+            || producer
+                .result
+                .as_ref()
+                .map(|r| &r["outputs"]["result"]["value"])
+                != Some(&candidate["value"])
+            || candidate["source"]
+                != json!({"execution": producer.id, "node": "implementer", "output": "result"})
+        {
+            return Ok(None);
+        }
+    }
+    identity["inputs"] = json!({"publication": {
+        "kind": "candidate", "base": execution.base,
+        "proof": execution.proof.clone().unwrap_or_default(),
+        "tree": identity["candidate"]["tree"]}});
     Ok(Some(identity))
 }
 
@@ -206,10 +270,15 @@ pub fn reusable(
         conn,
         &format!(
             "{SELECT}
-        WHERE e.attempt = ?1 AND e.name = ?2 AND c.kind = 'gate' AND c.verdict = 'pass'
-        AND e.parent IS NULL AND e.id < ?3 ORDER BY c.id DESC"
+        WHERE e.attempt = ?1 AND c.kind = 'gate' AND c.verdict = 'pass'
+        AND e.id < ?2 AND (?3 OR (e.name = ?4 AND e.parent IS NULL)) ORDER BY c.id DESC"
         ),
-        params![execution.attempt, execution.name, execution.id],
+        params![
+            execution.attempt,
+            execution.id,
+            execution.parent.is_some(),
+            execution.name
+        ],
         row,
     )?;
     for check in candidates {
@@ -281,6 +350,27 @@ fn referenced(
         }
     }
     Ok(None)
+}
+
+/// Re-read a passing reference only after the borrower released ownership.
+pub fn referenced_pass(
+    conn: &Connection,
+    execution: &super::executions::Execution,
+) -> Result<bool, Fail> {
+    let Some(evidence) = execution.verification.as_ref() else {
+        return Ok(false);
+    };
+    Ok(execution.status == "ended"
+        && !execution.reserved
+        && execution.teardown == Some(true)
+        && execution.outcome.as_deref() == Some("reused")
+        && execution.result.as_ref().is_some_and(|result| {
+            result["reference"] == evidence["reference"]
+                && result["judgment"].is_null()
+                && result["outputs"] == json!({})
+        })
+        && !evidence["reference"].is_null()
+        && reusable(conn, execution, evidence)?.as_ref() == evidence.get("reference"))
 }
 
 pub fn for_execution(conn: &Connection, execution: i64) -> Result<Option<Check>, Fail> {

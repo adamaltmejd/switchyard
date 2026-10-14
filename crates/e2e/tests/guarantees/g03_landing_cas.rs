@@ -47,6 +47,220 @@ fn unreviewed() -> String {
     config("").replace("review = [\"correctness\"]", "review = \"none\"")
 }
 
+fn landing_command_observer(machine: &Machine) -> String {
+    let commands = machine.root.join("commands");
+    format!(
+        r#"if [ "$1 $2" = 'box exec' ]; then
+  fifo='{}.'$$
+  mkfifo "$fifo" || exit $?
+  trap 'rm -f "$fifo"' 0
+  {{
+    while IFS= read -r line; do
+      case "$line" in
+        landing-known|landing-unknown) printf '%s\n' "$line" >> '{}' ;;
+      esac
+      printf '%s\n' "$line"
+    done
+    printf '%s' "$line"
+  }} < "$fifo" &
+  reader=$!
+  "$REAL" "$@" > "$fifo"
+  result=$?
+  wait "$reader"
+  exit "$result"
+fi"#,
+        machine.root.join("commands.fifo").display(),
+        commands.display()
+    )
+}
+
+/// G3: selected landing verification borrows an immutable passing candidate
+/// result only on the actual prepared inputs. Host Git supplies trees/base;
+/// literal command stdout supplies counts. Existing continuation cases hold
+/// the remaining host child; this case proves the cross-stage matcher itself.
+/// Sabotage: rerun every audit event, match candidate head alone, reuse unknown
+/// inputs, copy a verdict, or omit prepared input qualification before intent.
+#[test]
+fn identical_prepared_inputs_reference_candidate_pass_and_changed_tree_reruns() {
+    let machine = Machine::new("g3-landing-reference", |request| {
+        act(
+            request,
+            vec![bash(
+                "cd /workspace && printf 'feature\\n' > feature.txt && git add feature.txt && git commit --allow-empty -qm Feature",
+            )],
+        )
+    });
+    let commands = machine.root.join("commands");
+    machine.wrapper("pinfold", &landing_command_observer(&machine));
+    machine.start();
+    let known = "echo landing-known; test -f feature.txt && git cat-file -e \"$YARD_BASE^{tree}\"";
+    let unknown = "echo landing-unknown; test -f feature.txt";
+    let gates = format!(
+        "[gates.candidate]\ncommand = {}\nstage = 'candidate'\nclosed_inputs = 'runtime-v1'\n\
+         [gates.candidate_unknown]\ncommand = {}\nstage = 'candidate'\n\
+         [gates.landing]\ncommand = {}\nstage = 'landing'\nclosed_inputs = 'runtime-v1'\n\
+         [gates.landing_unknown]\ncommand = {}\nstage = 'landing'\n",
+        serde_json::to_string(known).unwrap(),
+        serde_json::to_string(unknown).unwrap(),
+        serde_json::to_string(known).unwrap(),
+        serde_json::to_string(unknown).unwrap(),
+    );
+    let configuration = config(&gates).replace("review = [\"correctness\"]", "review = \"none\"");
+    let mut operator = machine.operator();
+    operator.initialize();
+    let project = Project::new(&machine, "p", &configuration);
+    let mut watch = project.watch(0);
+    for (ticket, advance, known_count, unknown_count) in [("Y-1", false, 1, 2), ("Y-2", true, 3, 4)]
+    {
+        project.json(&["sync"]);
+        let base = project.git(&["rev-parse", "HEAD"]).trim().to_string();
+        project.json(&["ticket", "new", "--title", "Feature"]);
+        let approval = watch.attention();
+        assert_eq!(approval["data"]["kind"], "approval");
+        let head = approval["data"]["payload"]["head"].as_str().unwrap();
+        let proof = approval["data"]["payload"]["proof"].as_str().unwrap();
+        let original = project.rows("SELECT * FROM execution WHERE name = 'candidate' AND attempt = (SELECT max(id) FROM attempt)");
+        let original_checks = project.rows("SELECT * FROM \"check\" ORDER BY id");
+        let check = original_checks
+            .iter()
+            .find(|row| row["execution"] == original[0]["id"])
+            .unwrap();
+        if advance {
+            project.write("operator.txt", "different merged tree\n");
+            project.git(&["add", "operator.txt"]);
+            project.git(&["commit", "-qm", "Advance target tree"]);
+            project.json(&["sync"]);
+        }
+        let target = git(&project.canonical(), &["rev-parse", "refs/heads/main"])
+            .trim()
+            .to_string();
+        project.json(&[
+            "attempt", "approve", ticket, "--target", "main", "--head", head, "--proof", proof,
+        ]);
+        let recorded = watch.event("landing.recorded", &[]);
+        let landed = git(&project.canonical(), &["rev-parse", "refs/heads/main"])
+            .trim()
+            .to_string();
+        let candidate_tree = git(
+            &project.canonical(),
+            &["rev-parse", &format!("{head}^{{tree}}")],
+        )
+        .trim()
+        .to_string();
+        let merged_tree = git(
+            &project.canonical(),
+            &["rev-parse", &format!("{landed}^{{tree}}")],
+        )
+        .trim()
+        .to_string();
+        let rows = project
+            .rows("SELECT * FROM execution WHERE parent IS NOT NULL AND kind = 'gate' AND attempt = (SELECT max(id) FROM attempt) ORDER BY id");
+        assert_eq!(rows.len(), 2);
+        let selected = rows.iter().find(|row| row["name"] == "landing").unwrap();
+        let evidence: serde_json::Value =
+            serde_json::from_str(selected["verification"].as_str().unwrap()).unwrap();
+        assert_eq!(evidence["candidate"]["tree"], merged_tree);
+        assert_eq!(evidence["candidate"]["provenance"]["base"], target);
+        assert_eq!(
+            evidence["candidate"]["base_tree"],
+            git(
+                &project.canonical(),
+                &["rev-parse", &format!("{target}^{{tree}}")]
+            )
+            .trim()
+        );
+        assert_eq!(selected["head"], landed);
+        let result: serde_json::Value =
+            serde_json::from_str(selected["result"].as_str().unwrap()).unwrap();
+        if advance {
+            assert_ne!(candidate_tree, merged_tree);
+            assert_ne!(base, target);
+            assert_eq!(selected["outcome"], "pass");
+            assert_eq!(result["reference"], serde_json::Value::Null);
+        } else {
+            assert_eq!(candidate_tree, merged_tree);
+            assert_eq!(base, target);
+            assert_eq!(selected["outcome"], "reused");
+            assert_eq!(
+                result["reference"],
+                json!({"execution": original[0]["id"], "check": check["id"],
+                "result": {"execution": original[0]["id"]}})
+            );
+            assert_eq!(result["judgment"], serde_json::Value::Null);
+            assert_eq!(result["outputs"], json!({}));
+            assert!(project.rows("SELECT * FROM \"check\" WHERE execution IN (SELECT id FROM execution WHERE outcome = 'reused')").is_empty());
+        }
+        let unknown = rows
+            .iter()
+            .find(|row| row["name"] == "landing_unknown")
+            .unwrap();
+        assert_eq!(unknown["outcome"], "pass");
+        let unknown_evidence: serde_json::Value =
+            serde_json::from_str(unknown["verification"].as_str().unwrap()).unwrap();
+        assert_eq!(unknown_evidence["reuse"], "disabled");
+        let final_row = project
+            .rows("SELECT inputs, approval, intent_old FROM execution WHERE outcome = 'landed' ORDER BY id DESC LIMIT 1")[0]
+            .clone();
+        assert_eq!(final_row["intent_old"], target);
+        let inputs: serde_json::Value =
+            serde_json::from_str(final_row["inputs"].as_str().unwrap()).unwrap();
+        assert_eq!(inputs["children"], json!([rows[0]["id"], rows[1]["id"]]));
+        let approved = project.rows("SELECT * FROM approval ORDER BY id DESC LIMIT 1")[0].clone();
+        assert_eq!(final_row["approval"], approved["id"]);
+        assert_eq!(approved["base"], base);
+        assert_eq!(approved["head"], head);
+        assert_eq!(approved["proof"], proof);
+        assert_eq!(approved["ticket_revision"], 1);
+        assert_eq!(approved["plan_revision"], 1);
+        assert_eq!(approved["accepted_skipped"], serde_json::Value::Null);
+        let approved_checks: serde_json::Value =
+            serde_json::from_str(approved["checks"].as_str().unwrap()).unwrap();
+        assert!(approved_checks.as_array().unwrap().contains(&check["id"]));
+        assert_eq!(
+            project.rows("SELECT * FROM execution WHERE name = 'candidate' AND attempt = (SELECT max(id) FROM attempt)"),
+            original
+        );
+        assert_eq!(
+            project.rows(&format!(
+                "SELECT * FROM \"check\" WHERE id <= {} ORDER BY id",
+                original_checks.last().unwrap()["id"]
+            )),
+            original_checks
+        );
+        let shown = operator.call(
+            "yard_attempt_show",
+            json!({"project": project.path, "ticket": ticket}),
+        );
+        assert!(shown.get("error").is_none(), "{shown}");
+        let shown_child = shown["result"]["executions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["execution"] == selected["id"])
+            .unwrap();
+        assert_eq!(shown_child["result"], result);
+        let log = std::fs::read_to_string(&commands).unwrap();
+        for (marker, count) in [
+            ("landing-known", known_count),
+            ("landing-unknown", unknown_count),
+        ] {
+            assert_eq!(
+                log.lines().filter(|line| *line == marker).count(),
+                count,
+                "{log}"
+            );
+        }
+        let cleanup = watch.find("landing cleanup", |event| {
+            event["event"] == "execution.ended"
+                && event["data"]["kind"] == "cleanup"
+                && event["seq"].as_i64().unwrap() > recorded["seq"].as_i64().unwrap()
+        });
+        watch.find("cleanup release", |event| {
+            event["event"] == "execution.released" && event["execution"] == cleanup["execution"]
+        });
+    }
+}
+
 /// The daemon killed while its `update-ref` is held: restart keeps the
 /// intent and raises `red`; once the command is released,
 /// `start` records the landing once.
@@ -592,6 +806,8 @@ fn a_landing_retires_when_canonical_moves_before_update_ref() {
 /// permit acceptance. Require the final release after the failed end.
 /// Delete admit's predecessor proof or accept while ownership is retained.
 /// Retire an unrelated landing instead of the changed-input continuation.
+/// Discard a retained verification reference, mutate its original passing
+/// rows, or select that reference after its exact prepared base changes.
 fn prepared_host_child_restart(advance: bool) {
     let machine = Machine::new(
         if advance {
@@ -607,6 +823,8 @@ fn prepared_host_child_restart(advance: bool) {
     let release = machine.root.join("release");
     let observed = machine.root.join("observed-heads");
     let failed_marker = machine.root.join("failed-middle");
+    let commands = machine.root.join("commands");
+    machine.wrapper("pinfold", &landing_command_observer(&machine));
     let final_probe = machine.root.join("final-probe");
     let probe_said = machine.root.join("probe-said");
     let probe_release = machine.root.join("probe-release");
@@ -639,7 +857,7 @@ fn prepared_host_child_restart(advance: bool) {
         machine.wrapper(
             "pinfold",
             &format!(
-                "if [ \"$1 $2\" = 'box list' ]; then\n\
+                "{}\nif [ \"$1 $2\" = 'box list' ]; then\n\
                if [ -f '{}' ]; then\n\
                  mv '{}' '{}';\n\
                elif [ -f '{}' ]; then\n\
@@ -650,6 +868,7 @@ fn prepared_host_child_restart(advance: bool) {
                  exit \"$result\"\n\
                fi\n\
              fi",
+                landing_command_observer(&machine),
                 failed_marker.display(),
                 failed_marker.display(),
                 final_probe.display(),
@@ -666,7 +885,9 @@ fn prepared_host_child_restart(advance: bool) {
         format!("touch '{}'; false", failed_marker.display())
     };
     let gates = format!(
-        "[gates.first]\ncommand = \"git rev-parse HEAD >> {}\"\nstage = \"landing\"\nruns_in = \"host\"\n\
+        "[gates.closed]\ncommand = 'echo landing-known; test -f feature.txt'\nclosed_inputs = 'runtime-v1'\n\
+         [gates.closed_again]\ncommand = 'echo landing-known; test -f feature.txt'\nclosed_inputs = 'runtime-v1'\n\
+         [gates.first]\ncommand = \"git rev-parse HEAD >> {}\"\nstage = \"landing\"\nruns_in = \"host\"\n\
          [gates.middle]\ncommand = \"{middle}\"\nstage = \"landing\"\nruns_in = \"host\"\n\
          [gates.second]\ncommand = \"if [ -e '{}' ]; then echo $$ > {}; read line < {}; fi\"\nstage = \"landing\"\nruns_in = \"host\"\n",
         observed.display(),
@@ -853,6 +1074,34 @@ fn prepared_host_child_restart(advance: bool) {
     ));
     assert_eq!(completed[0]["outcome"], "pass");
     assert_eq!(completed[0]["teardown"], 1);
+    let verification_rows = project
+        .rows("SELECT * FROM execution WHERE name IN ('closed', 'closed_again') ORDER BY id");
+    assert_eq!(verification_rows.len(), 2);
+    assert_eq!(verification_rows[0]["outcome"], "pass");
+    assert_eq!(verification_rows[1]["outcome"], "reused");
+    let verification_checks = project.rows(
+        "SELECT * FROM \"check\" WHERE execution IN (SELECT id FROM execution WHERE name IN ('closed', 'closed_again')) ORDER BY id");
+    assert_eq!(verification_checks.len(), 1);
+    let reference: serde_json::Value =
+        serde_json::from_str(verification_rows[1]["verification"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        reference["reference"],
+        json!({"execution": verification_rows[0]["id"],
+        "check": verification_checks[0]["id"], "result": {"execution": verification_rows[0]["id"]}})
+    );
+    assert_eq!(
+        reference["candidate"]["tree"],
+        git(
+            &project.canonical(),
+            &["rev-parse", &format!("{merged}^{{tree}}")]
+        )
+        .trim()
+    );
+    assert_eq!(reference["candidate"]["provenance"]["base"], target);
+    assert_eq!(
+        std::fs::read_to_string(&commands).unwrap(),
+        "landing-known\n"
+    );
     let held_child = project
         .rows("SELECT id, parent FROM execution WHERE name = 'second' AND status = 'running'")[0]
         .clone();
@@ -1011,6 +1260,35 @@ fn prepared_host_child_restart(advance: bool) {
     assert_eq!(final_row["intent_old"], expected_target);
     let inputs: serde_json::Value =
         serde_json::from_str(final_row["inputs"].as_str().unwrap()).unwrap();
+    assert_eq!(inputs["children"].as_array().unwrap().len(), 5);
+    for old in &verification_rows {
+        assert_eq!(
+            inputs["children"].as_array().unwrap().contains(&old["id"]),
+            !advance
+        );
+    }
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT * FROM execution WHERE id IN ({}, {}) ORDER BY id",
+            verification_rows[0]["id"], verification_rows[1]["id"]
+        )),
+        verification_rows
+    );
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT * FROM \"check\" WHERE id = {}",
+            verification_checks[0]["id"]
+        )),
+        verification_checks
+    );
+    assert_eq!(
+        std::fs::read_to_string(&commands).unwrap(),
+        if advance {
+            "landing-known\nlanding-known\n"
+        } else {
+            "landing-known\n"
+        }
+    );
     if advance {
         assert_ne!(landed, merged);
         let fresh_parent = project.rows("SELECT id FROM execution WHERE kind = 'landing' AND prepared IS NOT NULL ORDER BY id DESC LIMIT 1")[0]["id"].clone();
