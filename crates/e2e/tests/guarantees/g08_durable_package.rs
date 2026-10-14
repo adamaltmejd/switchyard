@@ -1292,12 +1292,17 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
             ("execution", "attempt"),
             ("attention", "attempt"),
             ("approval", "attempt"),
-            ("check", "attempt"),
+            ("check", "execution"),
             ("audit", "attempt"),
         ]
         .map(|(table, key)| {
+            let predicate = if table == "check" {
+                format!("{key} IN (SELECT id FROM execution WHERE attempt = {attempt})")
+            } else {
+                format!("{key} = {attempt}")
+            };
             project.rows(&format!(
-                "SELECT * FROM \"{table}\" WHERE {key} = {attempt} ORDER BY rowid"
+                "SELECT * FROM \"{table}\" WHERE {predicate} ORDER BY rowid"
             ))
         })
     };
