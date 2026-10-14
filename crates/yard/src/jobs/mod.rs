@@ -40,6 +40,56 @@ pub struct Configurations {
     pub sources: HashMap<(String, String, String), Arc<Loaded>>,
 }
 
+/// Record at the launch boundary, from the execution's revision and prepared bytes.
+/// Launch data must contain no credentials or fingerprints of credentials.
+pub async fn verification(
+    daemon: &Daemon,
+    project: &Project,
+    execution: i64,
+    checkout: &std::path::Path,
+    launch: Value,
+    runtime: Value,
+) -> Result<(), Fail> {
+    let row = project.read(|conn| executions::get(conn, execution))?;
+    let attempt = project.read(|conn| attempts::for_execution(conn, &row))?;
+    let tree = daemon.git.root_tree(checkout, "HEAD").await?;
+    let base_tree = match &row.base {
+        Some(base) => Some(daemon.git.root_tree(&project.canonical_dir(), base).await?),
+        None => None,
+    };
+    let policy = attempt.admission.as_ref().and_then(|admission| {
+        let plan = crate::plan::Plan::admitted(admission).ok()?;
+        let node = plan.nodes.get(row.node.as_deref()?)?;
+        Some(
+            json!({"node": node, "config_blob": admission["inputs"]["config_blob"],
+            "definition": executions::consumed_definition(
+            admission, &node.runner, row.kind == "review")
+            .unwrap_or_else(|| json!({"status": "unknown"}))}),
+        )
+    });
+    let image: Option<String> = project.read(|conn| {
+        Ok(conn.query_row(
+            "SELECT image_id FROM execution WHERE id = ?1",
+            [execution],
+            |row| row.get(0),
+        )?)
+    })?;
+    let evidence = json!({
+        "status": "recorded", "reuse": "disabled",
+        "candidate": {"tree": tree, "base_tree": base_tree,
+            "provenance": {"base": row.base, "head": row.head}, "proof": row.proof},
+        "inputs": row.inputs.clone().unwrap_or_else(|| json!({"status": "unknown"})),
+        "policy": policy.unwrap_or_else(|| json!({"status": "unknown"})),
+        "launch": launch, "runtime": runtime,
+        "image": image.map_or_else(|| json!({"status": "unknown"}),
+            |id| json!({"status": "observed", "id": id})),
+        "tools": {"yard": {"status": "observed", "sha256": admit::runner_identity()?},
+            "executed": {"status": "unknown"}},
+        "external_services": {"status": "unknown"},
+    });
+    project.read(|conn| executions::verification(conn, execution, &evidence))
+}
+
 /// Automatic readers cannot restore an input an uncertain mutation invalidated.
 pub async fn refresh_default(
     daemon: &Daemon,

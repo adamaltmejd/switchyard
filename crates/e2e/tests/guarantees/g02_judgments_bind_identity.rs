@@ -48,6 +48,13 @@ const GATE: &str = "[gates.check]\ncommand = \"test -f feature.txt\"\nstage = \"
 /// Image adoption is observed through the image ENV marker and COPY bytes in
 /// real consumers, not optional runtime image IDs. Sabotage: build current HEAD
 /// instead of the selected image context, or reuse the prior consumer image.
+/// G2 real launch evidence: source/image adoption leaves newer templates
+/// unselected. Compare verification trees and source blobs with host Git,
+/// source bytes and the daemon executable with host SHA-256, and runtime
+/// images with the real pinfold ready stream. Host identities stay unknown.
+/// Sabotage: record head as tree, read current templates at launch, substitute
+/// admitted image labels for observed IDs, or fingerprint host environment.
+/// Earlier blocks observe admission and behavior, not launch/result evidence.
 #[test]
 fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
     let hold = Latch::new();
@@ -159,6 +166,32 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
             ))],
         )
     });
+    let observed_images = machine.root.join("observed-images.jsonl");
+    machine.wrapper(
+        "pinfold",
+        &format!(
+        "if [ \"$1 $2\" = 'box up' ]; then \"$REAL\" \"$@\" | while IFS= read -r line; do printf '%s\\n' \"$line\" >> '{}'; printf '%s\\n' \"$line\"; done; exit $?; fi",
+            observed_images.display()
+        ),
+    );
+    let sha256 = |bytes: &[u8]| {
+        let mut child = std::process::Command::new("shasum")
+            .args(["-a", "256"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(bytes).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .to_string()
+    };
+    let yard_sha256 = sha256(&std::fs::read(yard()).unwrap());
     machine.start();
     let configuration = config(&format!("{GATE}\n[review.seats.middle]\nagent = \"worker\"\ninstructions = \"Middle review.\"\n\n[review.seats.final]\nagent = \"worker\"\ninstructions = \"Final review.\"\n\n[profiles.final]\nrunner = {{kind = \"agent\", agent = \"worker\", instructions = \"Alternate final review.\"}}\naccess = \"read-only\"\noutputs = {{result = \"verdict\"}}\noutcomes = [\"complete\", \"blocked\"]\n"))
         .replace("review = [\"correctness\"]", "review = [\"correctness\", \"middle\", \"final\"]");
@@ -242,6 +275,20 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
     );
     assert_eq!(changed["result"]["plan_revision"], 2, "{changed}");
     hold.wait_held();
+    let held_verification = project
+        .rows("SELECT verification FROM execution WHERE node = 'review-2' AND status = 'running'");
+    let held_verification: Value =
+        serde_json::from_str(held_verification[0]["verification"].as_str().unwrap()).unwrap();
+    let ready: Value = std::fs::read_to_string(&observed_images)
+        .unwrap()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .rfind(|line| line["event"] == "ready")
+        .unwrap();
+    assert_eq!(
+        held_verification["image"],
+        json!({"status": "observed", "id": ready["image"]["id"]})
+    );
     let before = project.rows("SELECT * FROM audit ORDER BY seq");
     let revisions = project.rows("SELECT * FROM plan_revision ORDER BY revision");
     let before_attempt = project.rows("SELECT * FROM attempt ORDER BY id");
@@ -707,7 +754,7 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
         assert_eq!(adopt["result"]["plan_revision"], revision, "{adopt}");
         let item = approval(&mut watch);
         assert_eq!(item["payload"]["plan_revision"], revision);
-        let rows = project.rows(&format!("SELECT id, node, digest, inputs, result, teardown, reserved FROM execution WHERE attempt = 1 AND plan_revision = {revision} ORDER BY id"));
+        let rows = project.rows(&format!("SELECT id, node, digest, inputs, result, teardown, reserved, verification FROM execution WHERE attempt = 1 AND plan_revision = {revision} ORDER BY id"));
         assert_eq!(
             rows.iter()
                 .map(|row| row["node"].clone())
@@ -809,6 +856,85 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
                 .find(|source| source["path"] == path)
                 .unwrap();
             assert_eq!(source["blob"], blob);
+        }
+        // G2: the immutable launch and its result describe the actual frozen
+        // consumer, not the newer canonical template or a provenance commit.
+        let tree = git(
+            &project.canonical(),
+            &["rev-parse", &format!("{produced}^{{tree}}")],
+        )
+        .trim()
+        .to_string();
+        let base_tree = git(
+            &project.canonical(),
+            &["rev-parse", &format!("{base}^{{tree}}")],
+        )
+        .trim()
+        .to_string();
+        for row in &rows[1..] {
+            let verification: Value =
+                serde_json::from_str(row["verification"].as_str().unwrap()).unwrap();
+            assert_eq!(verification["candidate"]["tree"], tree);
+            assert_eq!(verification["candidate"]["base_tree"], base_tree);
+            assert_eq!(
+                verification["candidate"]["proof"],
+                first["payload"]["proof"]
+            );
+            assert_eq!(verification["tools"]["yard"]["sha256"], yard_sha256);
+            assert_eq!(verification["tools"]["executed"]["status"], "unknown");
+            assert_eq!(verification["runtime"]["environment"]["status"], "unknown");
+            assert_eq!(verification["reuse"], "disabled");
+            let result: Value = serde_json::from_str(row["result"].as_str().unwrap()).unwrap();
+            assert_eq!(result["verification"], verification);
+            if row["node"].as_str().unwrap().starts_with("candidate-gate-") {
+                assert_eq!(verification["image"]["status"], "unknown");
+                let command = if row["node"] == "candidate-gate-check" {
+                    format!(
+                        "test -f feature.txt && echo adopted >> {}",
+                        gate_counter.display()
+                    )
+                } else {
+                    format!("echo keep >> {}", keep_counter.display())
+                };
+                assert_eq!(verification["launch"]["command"], command);
+            } else {
+                assert_eq!(
+                    verification["policy"]["definition"]["build_context_tree"],
+                    image_tree
+                );
+                assert_eq!(
+                    verification["policy"]["definition"]["dockerfile_blob"],
+                    dockerfile_blob
+                );
+                for path in [
+                    ".pi/extensions/consumer/index.ts",
+                    ".agents/skills/consumer/SKILL.md",
+                ] {
+                    let blob = project
+                        .git(&["rev-parse", &format!("{staging_commit}:{path}")])
+                        .trim()
+                        .to_string();
+                    let bytes = project.git(&["show", &format!("{staging_commit}:{path}")]);
+                    let sources = verification["policy"]["definition"]["trusted_staged_sources"]
+                        .as_array()
+                        .unwrap();
+                    assert_eq!(
+                        sources
+                            .iter()
+                            .find(|source| source["path"] == path)
+                            .unwrap()["blob"],
+                        blob
+                    );
+                    let sources = verification["launch"]["trusted_bytes"].as_array().unwrap();
+                    assert_eq!(
+                        sources
+                            .iter()
+                            .find(|source| source["path"] == path)
+                            .unwrap()["sha256"],
+                        sha256(bytes.as_bytes())
+                    );
+                }
+            }
         }
         assert_eq!(
             project.rows(&format!(

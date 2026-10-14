@@ -31,6 +31,7 @@ pub struct Execution {
     pub session_id: Option<String>,
     pub approval: Option<i64>,
     pub prepared: Option<Value>,
+    pub verification: Option<Value>,
     pub intent_old: Option<String>,
     pub intent_ref: Option<String>,
     pub intent_merged: Option<String>,
@@ -48,7 +49,7 @@ pub struct Execution {
 const COLUMNS: &str = "id, attempt, parent, kind, reason, status, outcome, detail, base, head,
     proof, ticket_revision, name, round, handle, session_id, approval, intent_old, intent_merged,
     intent_state, progress, harness_version, resumed, reserved, lock_contract, intent_ref, plan_revision,
-    tokens_in, tokens_out, cost, usage_fields, harness, model, node, inputs, result, teardown, report, prepared";
+    tokens_in, tokens_out, cost, usage_fields, harness, model, node, inputs, result, teardown, report, prepared, verification";
 
 pub const RESULT_ELIGIBLE: &str = "status = 'ended' AND reserved = 0 AND teardown = 1
     AND json_extract(result, '$.outputs.result') IS NOT NULL";
@@ -121,7 +122,8 @@ fn row(row: &Row) -> rusqlite::Result<Execution> {
         teardown: row.get(36)?,
         report: json_column(row, 37)?,
         prepared: json_column(row, 38)?,
-        result_eligible: row.get(39)?,
+        verification: json_column(row, 39)?,
+        result_eligible: row.get(40)?,
     })
 }
 
@@ -170,6 +172,7 @@ impl Execution {
             "model": self.model,
             "resumed": self.resumed,
             "prepared": self.prepared,
+            "verification": self.verification.clone().unwrap_or_else(|| json!({"status": "unknown"})),
             "intent": self.intent_state.as_ref().map(|state| json!({
                 "state": state, "target_ref": self.intent_ref, "old": self.intent_old, "merged": self.intent_merged,
             })),
@@ -729,6 +732,17 @@ pub fn set_handle(
     Ok(())
 }
 
+/// Append the real launch inputs once. Qualification does not read this evidence.
+pub fn verification(conn: &Connection, id: i64, evidence: &Value) -> Result<(), Fail> {
+    if conn.execute(
+        "UPDATE execution SET verification = ?2 WHERE id = ?1 AND status = 'running' AND verification IS NULL",
+        params![id, evidence.to_string()],
+    )? != 1 {
+        return Err(Fail::refused("execution already has verification evidence"));
+    }
+    Ok(())
+}
+
 /// Observational: a worker's session and usage.
 pub fn set_worker(
     conn: &Connection,
@@ -889,6 +903,7 @@ pub fn end(tx: &Connection, id: i64, end: End) -> Result<(), Fail> {
             "outcome": output.as_ref().map(|_| outcome),
             "infrastructure": {"outcome": infrastructure, "exit_cause": end.exit_cause, "exit_code": end.exit_code},
             "judgment": judgment,
+            "verification": execution.verification.clone().unwrap_or_else(|| json!({"status": "unknown"})),
             "outputs": output.map_or_else(|| json!({}), |output| json!({"result": output})),
         });
         tx.execute(

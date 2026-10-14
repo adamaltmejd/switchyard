@@ -145,6 +145,21 @@ impl AgentEnv {
         })
     }
 
+    /// Bytes loaded from trusted Git, after harness configuration filtering.
+    pub fn evidence(&self, harness: &str) -> serde_json::Value {
+        use sha2::{Digest, Sha256};
+        serde_json::json!(
+            self.files
+                .iter()
+                .filter(|file| consumed_path(harness, &file.path))
+                .map(
+                    |file| serde_json::json!({"path": file.path, "executable": file.exec,
+                        "sha256": crate::config::hex(&Sha256::digest(&file.bytes))})
+                )
+                .collect::<Vec<_>>()
+        )
+    }
+
     pub fn get(&self, path: &str) -> Option<&[u8]> {
         self.files
             .iter()

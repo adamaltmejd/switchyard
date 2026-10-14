@@ -253,4 +253,5 @@ CREATE INDEX attention_open ON attention(state) WHERE state = 'open';
         created_at TEXT NOT NULL,
         PRIMARY KEY (attempt, revision)
      );",
+    "ALTER TABLE execution ADD COLUMN verification TEXT;",
 ];
