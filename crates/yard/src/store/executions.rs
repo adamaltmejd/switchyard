@@ -7,7 +7,8 @@ use serde_json::{Value, json};
 #[derive(Debug, Clone)]
 pub struct Execution {
     pub id: i64,
-    pub attempt: i64,
+    pub attempt: Option<i64>,
+    pub scope: Option<Value>,
     pub parent: Option<i64>,
     pub kind: String,
     pub reason: Option<String>,
@@ -49,7 +50,7 @@ pub struct Execution {
 const COLUMNS: &str = "id, attempt, parent, kind, reason, status, outcome, detail, base, head,
     proof, ticket_revision, name, round, handle, session_id, approval, intent_old, intent_merged,
     intent_state, progress, harness_version, resumed, reserved, lock_contract, intent_ref, plan_revision,
-    tokens_in, tokens_out, cost, usage_fields, harness, model, node, inputs, result, teardown, report, prepared, verification";
+    tokens_in, tokens_out, cost, usage_fields, harness, model, node, inputs, result, teardown, report, prepared, verification, scope";
 
 pub const RESULT_ELIGIBLE: &str = "status = 'ended' AND reserved = 0 AND teardown = 1
     AND json_extract(result, '$.outputs.result') IS NOT NULL";
@@ -123,7 +124,8 @@ fn row(row: &Row) -> rusqlite::Result<Execution> {
         report: json_column(row, 37)?,
         prepared: json_column(row, 38)?,
         verification: json_column(row, 39)?,
-        result_eligible: row.get(40)?,
+        scope: json_column(row, 40)?,
+        result_eligible: row.get(41)?,
     })
 }
 
@@ -141,10 +143,25 @@ fn token_count(row: &Row, index: usize) -> rusqlite::Result<Option<u64>> {
 }
 
 impl Execution {
+    pub fn required_attempt(&self) -> Result<i64, Fail> {
+        if self.scope.is_some() {
+            return Err(Fail::refused("standalone_authority"));
+        }
+        self.attempt.ok_or_else(|| Fail::refused("missing_attempt"))
+    }
+
+    pub fn eligible_to_act(&self, conn: &Connection) -> Result<bool, Fail> {
+        Ok(self.status == "running"
+            && (self.scope.is_some()
+                || self.kind == "cleanup"
+                || super::attempts::get(conn, self.required_attempt()?)?.state == "live"))
+    }
+
     pub fn to_json(&self) -> Value {
         json!({
             "execution": self.id,
             "attempt": self.attempt,
+            "scope": self.scope.clone().unwrap_or_else(|| json!({"status": "unknown"})),
             "parent": self.parent,
             "kind": self.kind,
             "reason": self.reason,
@@ -196,6 +213,15 @@ pub fn running(conn: &Connection) -> Result<Vec<Execution>, Fail> {
 
 pub fn for_attempt(conn: &Connection, attempt: i64) -> Result<Vec<Execution>, Fail> {
     query(conn, "attempt = ?1 ORDER BY id", [attempt])
+}
+
+/// Optional standalone attachment carries no attempt lifecycle authority.
+pub fn attempt_work(conn: &Connection, attempt: i64) -> Result<Vec<Execution>, Fail> {
+    query(
+        conn,
+        "attempt = ?1 AND scope IS NULL ORDER BY id",
+        [attempt],
+    )
 }
 
 /// The attempt's session to resume: the most recent implementation before
@@ -321,7 +347,8 @@ pub fn query<P: rusqlite::Params>(
 /// What an execution is started on.
 #[derive(Default)]
 pub struct Start<'a> {
-    pub attempt: i64,
+    pub attempt: Option<i64>,
+    pub scope: Option<&'a Value>,
     pub parent: Option<i64>,
     pub kind: &'a str,
     pub reason: Option<&'a str>,
@@ -344,10 +371,36 @@ pub struct Start<'a> {
 
 /// The intent: the row exists before any effect.
 pub fn start(tx: &Connection, start: Start) -> Result<i64, Fail> {
-    let attempt = super::attempts::get(tx, start.attempt)?;
+    let attempt = start
+        .attempt
+        .map(|id| super::attempts::get(tx, id))
+        .transpose()?;
+    if start.scope.is_some() {
+        if !matches!(start.kind, "command" | "report")
+            || start.approval.is_some()
+            || start.parent.is_some()
+            || start.proof.is_some()
+            || start.ticket_revision.is_some()
+            || start.digest.is_some()
+            || start.ticket.is_some()
+        {
+            return Err(Fail::refused("standalone_authority"));
+        }
+    } else if attempt.is_none() || matches!(start.kind, "command" | "report") {
+        return Err(Fail::refused("missing_attempt"));
+    }
     let digest = start
         .digest
-        .map(|digest| check_digest(&attempt, start.kind, start.name.unwrap_or_default(), digest))
+        .map(|digest| {
+            check_digest(
+                attempt
+                    .as_ref()
+                    .ok_or_else(|| Fail::refused("missing_attempt"))?,
+                start.kind,
+                start.name.unwrap_or_default(),
+                digest,
+            )
+        })
         .transpose()?;
     let settings = start.agent.map(|(_, settings)| settings);
     let field = |key: &str| settings.and_then(|value| value[key].as_str().map(str::to_string));
@@ -378,9 +431,19 @@ pub fn start(tx: &Connection, start: Start) -> Result<i64, Fail> {
         ],
     )?;
     let id = tx.last_insert_rowid();
-    let revision = attempt.plan_revision();
-    let binding = binding(tx, &attempt, &start)?;
-    if attempt.admission.is_some()
+    let revision = attempt.as_ref().and_then(|attempt| attempt.plan_revision());
+    let binding = if start.scope.is_some() {
+        None
+    } else {
+        attempt
+            .as_ref()
+            .map(|attempt| binding(tx, attempt, &start))
+            .transpose()?
+            .flatten()
+    };
+    if attempt
+        .as_ref()
+        .is_some_and(|attempt| attempt.admission.is_some())
         && matches!(start.kind, "implementation" | "gate" | "review")
         && binding.is_none()
     {
@@ -391,12 +454,16 @@ pub fn start(tx: &Connection, start: Start) -> Result<i64, Fail> {
         params![id, revision, binding.as_ref().map(|(node, _)| node),
             binding.as_ref().map(|(_, inputs)| inputs.to_string()).or_else(|| start.feedback.map(|feedback| json!({"feedback": feedback}).to_string())), binding.as_ref().map(|_| false)],
     )?;
+    if let Some(scope) = start.scope {
+        tx.execute("UPDATE execution SET scope = ?2, node = 'standalone', inputs = ?3, teardown = 0, plan_revision = NULL WHERE id = ?1",
+            params![id, scope.to_string(), scope["input"].to_string()])?;
+    }
     audit(
         tx,
         "execution.started",
         Target {
             ticket: start.ticket,
-            attempt: Some(start.attempt),
+            attempt: start.attempt,
             execution: Some(id),
             attention: None,
         },
@@ -800,7 +867,7 @@ pub fn qualifies(
         conn,
         attempt,
         &Start {
-            attempt: attempt.id,
+            attempt: Some(attempt.id),
             kind: &execution.kind,
             name: execution.name.as_deref(),
             parent: execution.parent,
@@ -877,13 +944,13 @@ pub fn set_worker(
     usage: Option<&Usage>,
 ) -> Result<(), Fail> {
     conn.execute(
-        "UPDATE execution SET session_id = COALESCE(?2, session_id) WHERE id = ?1",
+        "UPDATE execution SET session_id = COALESCE(?2, session_id) WHERE id = ?1 AND status = 'running'",
         params![id, session_id],
     )?;
     if let Some(usage) = usage {
         conn.execute(
             "UPDATE execution SET tokens_in = ?2, tokens_out = ?3, cost = ?4,
-                usage_fields = ?5 WHERE id = ?1",
+                usage_fields = ?5 WHERE id = ?1 AND status = 'running'",
             params![
                 id,
                 usage
@@ -907,7 +974,7 @@ pub fn set_worker(
 
 pub fn set_progress(conn: &Connection, id: i64, note: &str) -> Result<(), Fail> {
     conn.execute(
-        "UPDATE execution SET progress = ?2 WHERE id = ?1",
+        "UPDATE execution SET progress = ?2 WHERE id = ?1 AND status = 'running'",
         params![id, note],
     )?;
     Ok(())
@@ -917,7 +984,7 @@ pub fn set_progress(conn: &Connection, id: i64, note: &str) -> Result<(), Fail> 
 /// yields a complete one. `mcp` is `registered` or `refused`.
 pub fn set_mcp(conn: &Connection, id: i64, mcp: &str) -> Result<(), Fail> {
     conn.execute(
-        "UPDATE execution SET mcp = ?2 WHERE id = ?1",
+        "UPDATE execution SET mcp = ?2 WHERE id = ?1 AND status = 'running'",
         params![id, mcp],
     )?;
     Ok(())
@@ -945,6 +1012,19 @@ pub fn end(tx: &Connection, id: i64, end: End) -> Result<(), Fail> {
             format!("execution {id} has already ended"),
         ));
     }
+    if execution.scope.is_some() && end.infrastructure != Some("completed") {
+        let mut usage = execution.usage.clone();
+        for field in [
+            &mut usage.fields.input,
+            &mut usage.fields.output,
+            &mut usage.fields.cost,
+        ] {
+            if field.completeness == crate::harness::Completeness::Complete {
+                field.completeness = crate::harness::Completeness::Partial;
+            }
+        }
+        set_worker(tx, id, None, Some(&usage))?;
+    }
     tx.execute(
         "UPDATE execution SET status = 'ended', outcome = ?2, detail = ?3, exit_cause = ?4,
             exit_code = ?5, oom_kills = ?6, ended_at = ?7
@@ -959,7 +1039,22 @@ pub fn end(tx: &Connection, id: i64, end: End) -> Result<(), Fail> {
             now()
         ],
     )?;
-    if execution.node.is_some() {
+    if execution.scope.is_some() {
+        let output = if end.infrastructure == Some("completed") {
+            end.output.clone()
+        } else {
+            None
+        };
+        let result = json!({"outcome": output.as_ref().map(|_| end.outcome),
+            "infrastructure": {"outcome": end.infrastructure.unwrap_or(end.outcome),
+                "exit_cause": end.exit_cause, "exit_code": end.exit_code},
+            "judgment": null, "outputs": output.map_or_else(|| json!({}), |output| json!({"result": output})),
+            "scope": execution.scope});
+        tx.execute(
+            "UPDATE execution SET result = ?2 WHERE id = ?1",
+            params![id, result.to_string()],
+        )?;
+    } else if execution.node.is_some() {
         let publication = super::checks::for_execution(tx, id)?;
         let registered: Option<String> =
             tx.query_row("SELECT mcp FROM execution WHERE id = ?1", [id], |row| {
@@ -1053,7 +1148,7 @@ pub fn end(tx: &Connection, id: i64, end: End) -> Result<(), Fail> {
             && publication.is_some()
             && get(tx, id)?.result_eligible
         {
-            for item in super::attempts::open_for_attempt(tx, execution.attempt)? {
+            for item in super::attempts::open_for_attempt(tx, execution.required_attempt()?)? {
                 if item.kind == "red" && item.reason == "ownership" && item.execution == Some(id) {
                     super::attempts::resolve(tx, &item, "reconciled", None)?;
                 }
@@ -1065,7 +1160,7 @@ pub fn end(tx: &Connection, id: i64, end: End) -> Result<(), Fail> {
         "execution.ended",
         Target {
             ticket: end.ticket,
-            attempt: Some(execution.attempt),
+            attempt: execution.attempt,
             execution: Some(id),
             attention: None,
         },
@@ -1090,7 +1185,7 @@ pub fn prepare(tx: &Connection, id: i64, prepared: &Value) -> Result<(), Fail> {
         tx,
         "landing.prepared",
         Target {
-            attempt: Some(row.attempt),
+            attempt: row.attempt,
             execution: Some(id),
             ..Default::default()
         },
@@ -1153,7 +1248,7 @@ pub fn reserve(tx: &Connection, id: i64, reserved: bool) -> Result<(), Fail> {
             "execution.released"
         },
         Target {
-            attempt: Some(row.attempt),
+            attempt: row.attempt,
             execution: Some(id),
             ..Default::default()
         },

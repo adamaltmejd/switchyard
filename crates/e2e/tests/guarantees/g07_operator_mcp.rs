@@ -14,6 +14,385 @@ fn call(operator: &mut Operator, project: &Project, tool: &str, extra: Value) ->
     answer["result"].clone()
 }
 
+pub(super) fn scoped_node(report: bool) -> Value {
+    json!({"runner": if report {
+        json!({"kind": "agent", "agent": "worker", "instructions": "Audit the exact input."})
+    } else { json!({"kind": "command", "gate": "standalone"}) },
+        "access": if report { "read-only" } else { "write-allowed" },
+        "outputs": {"result": if report { "report" } else { "verdict" }},
+        "outcomes": ["complete"]})
+}
+
+pub(super) fn scoped_start(
+    operator: &mut Operator,
+    project: &Project,
+    input: &str,
+    report: bool,
+) -> i64 {
+    call(operator, project, "yard_execution_start",
+        json!({"target": "main", "input": input, "node": scoped_node(report), "timeout_seconds": 300}))
+        ["execution"].as_i64().unwrap()
+}
+
+/// G5/G6/G13: no tickets, real boxed command and report over operator stdio.
+/// Hold the report after publication, before its final host model reply.
+/// Oracles are the empty fixture, host Git, real pinfold exec and model tokens.
+/// Sabotage: manufacture an attempt; discard scope; forward worker creation;
+/// mount report source writable; publish a check/approval or release early.
+/// Attempt-backed reports cannot expose the absent association or authority.
+#[test]
+fn standalone_command_and_report_need_no_ticket_and_grant_no_landing_authority() {
+    let hold = Latch::new();
+    let held = hold.clone();
+    let attached_hold = Latch::new();
+    let attached_held = attached_hold.clone();
+    let attached_phase = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let phase = attached_phase.clone();
+    let machine = Machine::new("g68-scoped", move |request| {
+        if request.has_tool("yard_publish_review") {
+            return act(request, vec![publish(json!([]))]);
+        }
+        if !request.prompt().contains("Frozen scope:") {
+            return act(
+                request,
+                vec![commit_file("feature.txt", "feature\n", "Feature")],
+            );
+        }
+        match request.turn() {
+            0 => Reply::Tools(vec![tool("yard_context", json!({}))]),
+            1 => Reply::Tools(vec![bash("git rev-parse HEAD")]),
+            2 => Reply::Tools(vec![publish_report()]),
+            _ => Reply::Hold(
+                if phase.load(std::sync::atomic::Ordering::SeqCst) {
+                    attached_held.clone()
+                } else {
+                    held.clone()
+                },
+                Box::new(Reply::Text("done".into())),
+            ),
+        }
+    });
+    let command_held = machine.root.join("command-held");
+    let command_release = machine.root.join("command-release");
+    let armed = machine.root.join("command-armed");
+    for path in [&command_held, &command_release] {
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(path)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    std::fs::write(&armed, "").unwrap();
+    // Delegate the real command unchanged, retaining its child and box until
+    // the host has observed the actual effect. Preserve its exit status.
+    machine.wrapper("pinfold", &format!(
+        "if [ -e '{}' ] && [ \"$1 $2\" = 'box exec' ]; then \"$REAL\" \"$@\"; result=$?; echo held > '{}'; read line < '{}'; exit \"$result\"; fi",
+        armed.display(), command_held.display(), command_release.display()));
+    machine.start();
+    let project = Project::new(
+        &machine,
+        "p",
+        &config(
+            r#"
+[gates.standalone]
+command = "printf 'command-effect\n' > command-only.txt; git rev-parse HEAD"
+runs_in = "box"
+"#,
+        ),
+    );
+    // Trusted fixture extension probes the same worker session, not a new bearer.
+    let extension = r#"import { writeFileSync } from 'node:fs';
+export default function () {
+  const original = globalThis.fetch;
+  globalThis.fetch = async function (url, options) {
+    const message = JSON.parse(options?.body || '{}');
+    if (message.method === 'tools/call' && message.params?.name === 'yard_context') {
+      const results = [];
+      for (const name of ['yard_execution_start', 'yard_publish_review']) {
+        const response = await original(url, { ...options, body: JSON.stringify({
+          jsonrpc: '2.0', id: 9876, method: 'tools/call',
+          params: { name, arguments: REQUEST }
+        }) });
+        results.push(await response.json());
+      }
+      writeFileSync('/tmp/standalone-probe.json', JSON.stringify(results));
+    }
+    return original(url, options);
+  };
+}
+"#
+    .replace(
+        "REQUEST",
+        &args(
+            &project,
+            json!({"target": "main", "input": project.canonical_head(),
+        "node": scoped_node(false), "timeout_seconds": 300}),
+        )
+        .to_string(),
+    );
+    project.write(".pi/extensions/probe/index.ts", &extension);
+    project.git(&["add", "-A"]);
+    project.git(&["commit", "-qm", "Trusted standalone probe"]);
+    project.json(&["sync"]);
+    let input = project.canonical_head();
+    let tree = git(
+        &project.canonical(),
+        &["rev-parse", &format!("{input}^{{tree}}")],
+    )
+    .trim()
+    .to_string();
+    let config_blob = git(
+        &project.canonical(),
+        &["rev-parse", &format!("{input}:.yard/config.toml")],
+    )
+    .trim()
+    .to_string();
+    let mut operator = machine.operator();
+    operator.initialize();
+    let mut history = project.watch(0);
+    let mut candidate = scoped_node(false);
+    candidate["outputs"]["result"] = json!("candidate");
+    let refused = operator.call(
+        "yard_execution_start",
+        args(
+            &project,
+            json!({"target": "main", "input": input, "node": candidate, "timeout_seconds": 300}),
+        ),
+    );
+    assert_eq!(refused["error"]["code"], "refused");
+    assert_eq!(refused["error"]["message"], "standalone_authority");
+    let command = scoped_start(&mut operator, &project, &input, false);
+    assert_eq!(
+        history.said_before_end(&command_held, Some(command)),
+        "held\n"
+    );
+    let command_box = project.rows(&format!(
+        "SELECT handle FROM execution WHERE id = {command}"
+    ))[0]["handle"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let actual = machine.pinfold(&[
+        "box",
+        "exec",
+        &command_box,
+        "--",
+        "cat",
+        "/workspace/command-only.txt",
+    ]);
+    assert!(actual.status.success(), "{actual:?}");
+    assert_eq!(actual.stdout, b"command-effect\n");
+    std::fs::remove_file(&armed).unwrap();
+    std::fs::write(&command_release, "go\n").unwrap();
+    history.find("command checked release", |e| {
+        e["event"] == "execution.released" && e["execution"] == command
+    });
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT outcome, exit_code, detail FROM execution WHERE id = {command}"
+        )),
+        vec![json!({"outcome": "complete", "exit_code": 0, "detail": format!("{input}\n")})]
+    );
+    let report = scoped_start(&mut operator, &project, &input, true);
+    hold.wait_held();
+    let held_row = project.rows(&format!(
+        "SELECT handle, status, reserved, result, report FROM execution WHERE id = {report}"
+    ))[0]
+        .clone();
+    assert_eq!(held_row["status"], "running");
+    assert_eq!(held_row["reserved"], 1);
+    assert_eq!(held_row["result"], Value::Null);
+    assert!(!held_row["report"].is_null());
+    let name = held_row["handle"].as_str().unwrap();
+    let actual_input = machine.pinfold(&[
+        "box",
+        "exec",
+        name,
+        "--",
+        "git",
+        "-C",
+        "/workspace",
+        "rev-parse",
+        "HEAD",
+    ]);
+    assert!(actual_input.status.success(), "{actual_input:?}");
+    assert_eq!(
+        String::from_utf8(actual_input.stdout).unwrap(),
+        format!("{input}\n")
+    );
+    let probe = machine.pinfold(&[
+        "box",
+        "exec",
+        name,
+        "--",
+        "cat",
+        "/tmp/standalone-probe.json",
+    ]);
+    assert!(probe.status.success(), "{probe:?}");
+    let probes: Value = serde_json::from_slice(&probe.stdout).unwrap();
+    assert_eq!(probes[0]["result"]["isError"], true);
+    assert!(
+        probes[0]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("operator_only")
+    );
+    assert_eq!(probes[1]["result"]["isError"], true);
+    let write = machine.pinfold(&[
+        "box",
+        "exec",
+        name,
+        "--",
+        "sh",
+        "-c",
+        "printf forbidden > /workspace/report-write.txt",
+    ]);
+    assert!(!write.status.success(), "{write:?}");
+    assert!(
+        !project
+            .path
+            .join(format!(
+                ".yard/local/effects/{report}/checkout/report-write.txt"
+            ))
+            .exists()
+    );
+    hold.release();
+    history.find("report checked release", |e| {
+        e["event"] == "execution.released" && e["execution"] == report
+    });
+    for (id, kind) in [(command, "command"), (report, "report")] {
+        let row = call(
+            &mut operator,
+            &project,
+            "yard_execution_show",
+            json!({"execution": id}),
+        );
+        assert_eq!(row["attempt"], Value::Null);
+        assert_eq!(row["scope"]["project"], json!(project.path));
+        assert_eq!(row["scope"]["target"], "main");
+        assert_eq!(
+            row["scope"]["input"],
+            json!({"commit": input, "tree": tree})
+        );
+        assert_eq!(
+            row["scope"]["policy"]["definitions"]["config_blob"],
+            config_blob
+        );
+        let mut node = scoped_node(kind == "report");
+        node["inputs"] = json!({});
+        node["requires"] = json!([]);
+        node["routes"] = json!({});
+        assert_eq!(row["scope"]["policy"]["node"], node);
+        assert_eq!(row["scope"]["timeout_seconds"], 300);
+        assert_eq!(row["result"]["scope"], row["scope"]);
+        assert_eq!(row["result"]["judgment"], Value::Null);
+        assert_eq!(
+            row["result"]["outputs"]["result"]["kind"],
+            if kind == "report" {
+                "report"
+            } else {
+                "verdict"
+            }
+        );
+        assert_eq!(row["outcome"], "complete");
+        if kind == "report" {
+            assert_eq!(row["usage"]["input"], 4 * PROMPT_TOKENS);
+            assert_eq!(row["usage"]["output"], 4 * COMPLETION_TOKENS);
+            assert_eq!(
+                row["result"]["outputs"]["result"]["value"]["report"],
+                json!({"summary": "Fixture audit", "findings": []})
+            );
+        } else {
+            assert_eq!(row["usage"]["input"], Value::Null);
+        }
+    }
+    assert_eq!(project.rows("SELECT (SELECT count(*) FROM ticket) AS tickets, (SELECT count(*) FROM attempt) AS attempts, (SELECT count(*) FROM execution) AS executions, (SELECT count(*) FROM \"check\") AS checks, (SELECT count(*) FROM approval) AS approvals"),
+        vec![json!({"tickets": 0, "attempts": 0, "executions": 2, "checks": 0, "approvals": 0})]);
+    assert_eq!(project.canonical_head(), input);
+    // Optional attachment is association only. A real candidate provides the
+    // allowed landing control; the attached report supplies no approval/check.
+    call(
+        &mut operator,
+        &project,
+        "yard_ticket_new",
+        json!({"title": "Feature"}),
+    );
+    let candidate = history.attention();
+    assert_eq!(candidate["data"]["kind"], "approval");
+    let checks = project.rows("SELECT * FROM \"check\" ORDER BY id");
+    let attempt = project.rows("SELECT * FROM attempt");
+    let attention = project.rows("SELECT * FROM attention");
+    attached_phase.store(true, std::sync::atomic::Ordering::SeqCst);
+    let attached = call(&mut operator, &project, "yard_execution_start",
+        json!({"target": "main", "input": input, "node": scoped_node(true), "attempt": 1, "timeout_seconds": 300}))["execution"].as_i64().unwrap();
+    attached_hold.wait_held();
+    let attached_scope = project.rows(&format!(
+        "SELECT scope FROM execution WHERE id = {attached}"
+    ));
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT attempt, approval, plan_revision, proof FROM execution WHERE id = {attached}"
+        )),
+        vec![json!({"attempt": 1, "approval": null, "plan_revision": null, "proof": null})]
+    );
+    assert_eq!(project.rows("SELECT * FROM attempt"), attempt);
+    assert_eq!(project.rows("SELECT * FROM attention"), attention);
+    assert_eq!(project.rows("SELECT * FROM \"check\" ORDER BY id"), checks);
+    assert!(project.rows("SELECT * FROM approval").is_empty());
+    let candidate_head = git(
+        &project.path.join(".yard/local/attempts/1/clone"),
+        &["rev-parse", "HEAD"],
+    )
+    .trim()
+    .to_string();
+    call(
+        &mut operator,
+        &project,
+        "yard_attempt_approve",
+        json!({"ticket": "Y-1", "target": "main", "head": candidate_head}),
+    );
+    history.event("landing.recorded", &[]);
+    let cleanup = history.until("cleanup ended", |e| {
+        e["event"] == "execution.ended" && e["data"]["kind"] == "cleanup"
+    });
+    history.find("cleanup checked release", |e| {
+        e["event"] == "execution.released" && e["execution"] == cleanup["execution"]
+    });
+    assert_eq!(project.canonical_head(), candidate_head);
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT status, reserved FROM execution WHERE id = {attached}"
+        )),
+        vec![json!({"status": "running", "reserved": 1})]
+    );
+    attached_hold.release();
+    history.find("attached checked release", |e| {
+        e["event"] == "execution.released" && e["execution"] == attached
+    });
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT scope FROM execution WHERE id = {attached}"
+        )),
+        attached_scope
+    );
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT outcome FROM execution WHERE id = {attached}"
+        )),
+        vec![json!({"outcome": "complete"})]
+    );
+    let preserved = project.rows("SELECT * FROM execution ORDER BY id");
+    drop(history);
+    machine.kill();
+    machine.start();
+    assert_eq!(
+        project.rows("SELECT * FROM execution ORDER BY id"),
+        preserved
+    );
+}
+
 /// Cancel while a real implementer is held, then let it commit and land.
 /// The base extension probes an operator tool with the harness's actual
 /// worker session. Stale mutations cross stdio after a successful edit.

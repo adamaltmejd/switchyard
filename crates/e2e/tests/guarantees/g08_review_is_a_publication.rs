@@ -358,26 +358,51 @@ fn a_seat_that_exits_without_publishing_is_a_review_error() {
 /// publication settles.
 #[test]
 fn a_seat_killed_after_publishing_has_published() {
+    published_owner_scenario(false);
+}
+
+/// G5/G6/G13: the same real delegated owner with no attempt association.
+/// Sabotage: resolve scope from an attempt, release on box absence alone,
+/// replay the report, reset its deadline, or turn raw publication into approval.
+#[test]
+fn a_standalone_report_retains_its_owner_across_restart_and_checked_stop() {
+    published_owner_scenario(true);
+}
+
+fn published_owner_scenario(standalone: bool) {
     let hold = Latch::new();
     let held = hold.clone();
-    let machine = Machine::new("g8-killed", move |request| {
-        if request
-            .prompt()
-            .contains("Your workspace is read-only. Plan the work")
-        {
-            return planned(request);
-        }
-        if !seat(&request) {
-            return implementer(request);
-        }
-        match request.tool_results().len() {
-            0 => Reply::Tools(vec![publish(json!([]))]),
-            1 => Reply::Tools(vec![publish(json!([
-                { "priority": "P0", "body": "second thoughts" }
-            ]))]),
-            _ => Reply::Hold(held.clone(), Box::new(Reply::Text("never".into()))),
-        }
-    });
+    let machine = Machine::new(
+        if standalone {
+            "g68-held-owner"
+        } else {
+            "g8-killed"
+        },
+        move |request| {
+            if standalone {
+                if request.turn() == 0 {
+                    return Reply::Tools(vec![publish_report()]);
+                }
+                return Reply::Hold(held.clone(), Box::new(Reply::Text("done".into())));
+            }
+            if request
+                .prompt()
+                .contains("Your workspace is read-only. Plan the work")
+            {
+                return planned(request);
+            }
+            if !seat(&request) {
+                return implementer(request);
+            }
+            match request.tool_results().len() {
+                0 => Reply::Tools(vec![publish(json!([]))]),
+                1 => Reply::Tools(vec![publish(json!([
+                    { "priority": "P0", "body": "second thoughts" }
+                ]))]),
+                _ => Reply::Hold(held.clone(), Box::new(Reply::Text("never".into()))),
+            }
+        },
+    );
     let owners = machine.root.join("owners");
     std::fs::create_dir(&owners).unwrap();
     let selected_owner = machine.root.join("selected-owner");
@@ -416,35 +441,75 @@ fn a_seat_killed_after_publishing_has_published() {
         "p",
         &config(&format!(
             "{SELECTED_LANDING}[workflows.quick]\nreview = \"none\"\n"
-        )),
+        ))
+        .replace(
+            "max_lanes = 2",
+            if standalone {
+                "max_lanes = 2\nmax_executions = 1"
+            } else {
+                "max_lanes = 2"
+            },
+        ),
     );
-    start_selected(&machine, &project, "Add feature", "review-0");
+    let mut operator = machine.operator();
+    operator.initialize();
+    let scope_id = if standalone {
+        Some(super::g07_operator_mcp::scoped_start(
+            &mut operator,
+            &project,
+            &project.canonical_head(),
+            true,
+        ))
+    } else {
+        start_selected(&machine, &project, "Add feature", "review-0");
+        None
+    };
+    let kind = if standalone { "report" } else { "review" };
     hold.wait_held();
     assert!(project.rows("SELECT id FROM finding").is_empty());
-    assert_eq!(
-        project
-            .rows("SELECT seq FROM audit WHERE event = 'tool.refused'")
-            .len(),
-        1
-    );
+    if !standalone {
+        assert_eq!(
+            project
+                .rows("SELECT seq FROM audit WHERE event = 'tool.refused'")
+                .len(),
+            1
+        );
+    }
     // The fixture holds the seat's request after both tool replies, so the
     // publication is committed and its registered box is still acting.
-    let before = project.json(&["attempt", "show", "Y-1"]);
+    let shown = |operator: &mut Operator| {
+        if let Some(id) = scope_id {
+            let row = operator.call(
+                "yard_execution_show",
+                json!({"project": project.path, "execution": id}),
+            );
+            assert!(row.get("error").is_none(), "{row}");
+            json!({"executions": [row["result"]], "checks": []})
+        } else {
+            project.json(&["attempt", "show", "Y-1"])
+        }
+    };
+    let before = shown(&mut operator);
     let review = before["executions"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|row| row["kind"] == "review")
+        .find(|row| row["kind"] == kind)
         .unwrap()
         .clone();
-    assert_eq!(review["binding"]["node"], "review-0");
+    assert_eq!(
+        review["binding"]["node"],
+        if standalone { "standalone" } else { "review-0" }
+    );
     assert_eq!(review["result"], serde_json::Value::Null);
     assert_eq!(review["result_eligible"], false);
     assert_eq!(review["teardown"], false);
     // Select the actual daemon-owned box from the read-only store, after
     // the real reviewer has registered and published. Prompt prose is not
     // an execution identity. Every wrapper delegates the real command.
-    let owner_box = project.rows("SELECT handle FROM execution WHERE kind = 'review'")[0]["handle"]
+    let owner_box = project.rows(&format!(
+        "SELECT handle FROM execution WHERE kind = '{kind}'"
+    ))[0]["handle"]
         .as_str()
         .unwrap()
         .to_string();
@@ -452,44 +517,58 @@ fn a_seat_killed_after_publishing_has_published() {
     let owner = std::fs::read_to_string(owners.join(&owner_box)).unwrap();
     let (pid, recorded_box) = owner.trim().split_once(' ').unwrap();
     assert_eq!(recorded_box, owner_box);
-    let mut live = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Quick", "--workflow", "quick"]);
-    live.until("second ticket approval while review held", |event| {
-        event["event"] == "attention.raised"
-            && event["ticket"] == "Y-2"
-            && event["data"]["kind"] == "approval"
-    });
-    assert!(
-        project
-            .rows("SELECT id FROM attention WHERE ticket = 1 AND kind = 'approval'")
-            .is_empty()
-    );
-    assert!(project.rows("SELECT id FROM approval").is_empty());
-    assert!(
-        project
-            .rows("SELECT id FROM execution WHERE kind IN ('gate', 'landing')")
-            .is_empty()
-    );
-    let publication = before["checks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|row| row["kind"] == "review")
-        .unwrap()
-        .clone();
-    assert_eq!(publication["execution"], review["execution"]);
+    if !standalone {
+        let mut live = project.watch(0);
+        project.json(&["ticket", "new", "--title", "Quick", "--workflow", "quick"]);
+        live.until("second ticket approval while review held", |event| {
+            event["event"] == "attention.raised"
+                && event["ticket"] == "Y-2"
+                && event["data"]["kind"] == "approval"
+        });
+        assert!(
+            project
+                .rows("SELECT id FROM attention WHERE ticket = 1 AND kind = 'approval'")
+                .is_empty()
+        );
+        assert!(project.rows("SELECT id FROM approval").is_empty());
+        assert!(
+            project
+                .rows("SELECT id FROM execution WHERE kind IN ('gate', 'landing')")
+                .is_empty()
+        );
+    }
+    let publication = if standalone {
+        serde_json::Value::Null
+    } else {
+        before["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["kind"] == "review")
+            .unwrap()
+            .clone()
+    };
+    if !standalone {
+        assert_eq!(publication["execution"], review["execution"]);
+    }
     assert_eq!(
-        project.rows("SELECT handle FROM execution WHERE kind = 'review'")[0]["handle"],
+        project.rows(&format!(
+            "SELECT handle FROM execution WHERE kind = '{kind}'"
+        ))[0]["handle"],
         owner_box
     );
     machine.kill();
 
+    if !standalone {
+        assert_eq!(
+            project.rows("SELECT verdict FROM \"check\" WHERE kind = 'review'"),
+            vec![json!({ "verdict": "pass" })]
+        );
+    }
     assert_eq!(
-        project.rows("SELECT verdict FROM \"check\" WHERE kind = 'review'"),
-        vec![json!({ "verdict": "pass" })]
-    );
-    assert_eq!(
-        project.rows("SELECT status, result, teardown FROM execution WHERE kind = 'review'"),
+        project.rows(&format!(
+            "SELECT status, result, teardown FROM execution WHERE kind = '{kind}'"
+        )),
         vec![json!({ "status": "running", "result": null, "teardown": 0 })]
     );
     assert!(
@@ -503,10 +582,14 @@ fn a_seat_killed_after_publishing_has_published() {
     // Read the real effect lock; never write the daemon's private inputs.
     let lock = std::fs::OpenOptions::new()
         .read(true)
-        .open(project.path.join(format!(
-            ".yard/local/attempts/{}/effects/{}/lock",
-            review["attempt"], review["execution"]
-        )))
+        .open(project.path.join(if standalone {
+            format!(".yard/local/effects/{}/lock", review["execution"])
+        } else {
+            format!(
+                ".yard/local/attempts/{}/effects/{}/lock",
+                review["attempt"], review["execution"]
+            )
+        }))
         .unwrap();
     assert!(matches!(
         lock.try_lock(),
@@ -522,7 +605,9 @@ fn a_seat_killed_after_publishing_has_published() {
     });
     assert_eq!(ownership["data"]["kind"], "red");
     assert_eq!(ownership["data"]["reason"], "ownership");
-    let retained = project.json(&["attempt", "show", "Y-1"]);
+    operator = machine.operator();
+    operator.initialize();
+    let retained = shown(&mut operator);
     let retained_review = retained["executions"]
         .as_array()
         .unwrap()
@@ -533,6 +618,49 @@ fn a_seat_killed_after_publishing_has_published() {
     assert_eq!(retained_review["result_eligible"], false);
     assert_eq!(retained_review["teardown"], false);
     assert_eq!(retained_review["result"], Value::Null);
+    if standalone {
+        assert_eq!(retained_review["scope"], review["scope"]);
+        assert_eq!(retained_review["usage"]["input"], PROMPT_TOKENS);
+        assert_eq!(retained_review["usage"]["output"], COMPLETION_TOKENS);
+        assert_eq!(
+            project.rows("SELECT count(*) AS n FROM execution"),
+            vec![json!({"n": 1})]
+        );
+        let rows = project.rows("SELECT * FROM execution");
+        let stop = operator.call(
+            "yard_execution_stop",
+            json!({"project": project.path, "execution": scope_id}),
+        );
+        assert_eq!(stop["error"]["code"], "refused");
+        assert_eq!(stop["error"]["message"], "ownership");
+        assert_eq!(stop["error"]["data"]["execution"], scope_id.unwrap());
+        assert_eq!(project.rows("SELECT * FROM execution"), rows);
+        // The retained owner still consumes the ordinary project capacity.
+        // A real admitted waiter owns no box; stop is its allowed control.
+        let waiter = super::g07_operator_mcp::scoped_start(
+            &mut operator,
+            &project,
+            &project.canonical_head(),
+            true,
+        );
+        watch.find("standalone capacity wait", |e| {
+            e["event"] == "execution.waiting" && e["execution"] == waiter
+        });
+        assert_eq!(
+            project.rows(&format!(
+                "SELECT handle, reserved, result FROM execution WHERE id = {waiter}"
+            )),
+            vec![json!({"handle": null, "reserved": 0, "result": null})]
+        );
+        let stopped = operator.call(
+            "yard_execution_stop",
+            json!({"project": project.path, "execution": waiter}),
+        );
+        assert!(stopped.get("error").is_none(), "{stopped}");
+        watch.find("standalone waiter stopped", |e| {
+            e["event"] == "execution.ended" && e["execution"] == waiter
+        });
+    }
     assert!(matches!(
         lock.try_lock(),
         Err(std::fs::TryLockError::WouldBlock)
@@ -559,37 +687,56 @@ fn a_seat_killed_after_publishing_has_published() {
             && event["execution"] == review["execution"]
             && event["attempt"] == review["attempt"]
     });
-    let approval = watch.find("approval raised", |event| {
-        event["event"] == "attention.raised"
-            && event["ticket"] == "Y-1"
-            && event["data"]["kind"] == "approval"
-    });
-    assert_eq!(approval["ticket"], "Y-1");
+    if !standalone {
+        let approval = watch.find("approval raised", |event| {
+            event["event"] == "attention.raised"
+                && event["ticket"] == "Y-1"
+                && event["data"]["kind"] == "approval"
+        });
+        assert_eq!(approval["ticket"], "Y-1");
+    }
+    if standalone {
+        watch.find("standalone interrupted after checked release", |e| {
+            e["event"] == "execution.ended" && e["execution"] == review["execution"]
+        });
+    }
     assert_eq!(
-        project.rows("SELECT outcome FROM execution WHERE kind = 'review'"),
+        project.rows(&format!(
+            "SELECT outcome FROM execution WHERE id = {}",
+            review["execution"]
+        )),
         vec![json!({ "outcome": "interrupted" })]
     );
-    let after = project.json(&["attempt", "show", "Y-1"]);
+    let after = shown(&mut operator);
     let reviews: Vec<_> = after["executions"]
         .as_array()
         .unwrap()
         .iter()
-        .filter(|row| row["kind"] == "review")
+        .filter(|row| row["kind"] == kind)
         .collect();
     assert_eq!(reviews.len(), 1);
     let ended = reviews[0];
     assert_eq!(ended["execution"], review["execution"]);
     assert_eq!(ended["binding"], review["binding"]);
-    assert_eq!(ended["result_eligible"], true);
+    assert_eq!(ended["result_eligible"], !standalone);
     assert_eq!(ended["teardown"], true);
-    assert_eq!(ended["result"]["outcome"], "complete");
-    assert_eq!(ended["result"]["infrastructure"]["outcome"], "interrupted");
     assert_eq!(
-        ended["result"]["outputs"]["result"],
-        json!({"kind": "verdict", "value": {
-            "publication": publication["check"], "verdict": "pass", "blocked": [],
-        }})
+        ended["result"]["outcome"],
+        if standalone {
+            Value::Null
+        } else {
+            json!("complete")
+        }
     );
+    assert_eq!(ended["result"]["infrastructure"]["outcome"], "interrupted");
+    if !standalone {
+        assert_eq!(
+            ended["result"]["outputs"]["result"],
+            json!({"kind": "verdict", "value": {
+                "publication": publication["check"], "verdict": "pass", "blocked": [],
+            }})
+        );
+    }
     assert_eq!(after["checks"], before["checks"]);
     assert_eq!(
         project.rows(&format!(
@@ -600,7 +747,71 @@ fn a_seat_killed_after_publishing_has_published() {
     );
     lock.try_lock().unwrap();
     lock.unlock().unwrap();
-    hold.release();
+    if standalone {
+        assert_eq!(ended["report"], review["report"]);
+        assert_eq!(ended["scope"], review["scope"]);
+        assert_eq!(ended["result"]["outputs"], json!({}));
+        assert_eq!(
+            project.rows("SELECT count(*) AS n FROM execution"),
+            vec![json!({"n": 2})]
+        );
+        assert!(project.rows("SELECT id FROM \"check\"").is_empty());
+        assert!(project.rows("SELECT id FROM ticket UNION ALL SELECT id FROM attempt UNION ALL SELECT id FROM approval").is_empty());
+        let original = project.rows(&format!(
+            "SELECT * FROM execution WHERE id = {}",
+            review["execution"]
+        ));
+        let next = super::g07_operator_mcp::scoped_start(
+            &mut operator,
+            &project,
+            &project.canonical_head(),
+            true,
+        );
+        // The next real report publishes and holds at its host model request.
+        watch.find("successor publication", |e| {
+            e["event"] == "report.published" && e["execution"] == next
+        });
+        let stop = operator.call(
+            "yard_execution_stop",
+            json!({"project": project.path, "execution": next}),
+        );
+        assert!(stop.get("error").is_none(), "{stop}");
+        watch.find("successor stopped", |e| {
+            e["event"] == "execution.ended" && e["execution"] == next
+        });
+        watch.find("successor checked release", |e| {
+            e["event"] == "execution.released" && e["execution"] == next
+        });
+        assert_eq!(
+            project.rows(&format!(
+                "SELECT outcome, reserved FROM execution WHERE id = {next}"
+            )),
+            vec![json!({"outcome": "stopped", "reserved": 0})]
+        );
+        assert_eq!(
+            project.rows(&format!(
+                "SELECT * FROM execution WHERE id = {}",
+                review["execution"]
+            )),
+            original
+        );
+        hold.release();
+        let fresh = super::g07_operator_mcp::scoped_start(
+            &mut operator,
+            &project,
+            &project.canonical_head(),
+            true,
+        );
+        watch.find("fresh report checked release", |e| {
+            e["event"] == "execution.released" && e["execution"] == fresh
+        });
+        assert_eq!(
+            project.rows(&format!("SELECT outcome FROM execution WHERE id = {fresh}")),
+            vec![json!({"outcome": "complete"})]
+        );
+    } else {
+        hold.release();
+    }
 }
 
 /// A seat that publishes a block and is then held by the fixture: no

@@ -10,53 +10,169 @@ use std::sync::{Arc, Mutex};
 pub(super) fn pre_target_binary() -> PathBuf {
     static BINARY: OnceLock<PathBuf> = OnceLock::new();
     BINARY
+        .get_or_init(|| archived_binary("c85369dfaec8f8554da49ddf02a4dbec03bcad02", "pre-target"))
+        .clone()
+}
+
+fn pre_standalone_binary() -> PathBuf {
+    static BINARY: OnceLock<PathBuf> = OnceLock::new();
+    BINARY
         .get_or_init(|| {
-            let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-            let target = yard().parent().unwrap().join("pre-target");
-            let source = target.join("source");
-            std::fs::create_dir_all(&source).unwrap();
-            // The landed Y-82 tree, before the target columns existed.
-            let archive = Command::new("git")
-                .current_dir(&root)
-                .args([
-                    "archive",
-                    "c85369dfaec8f8554da49ddf02a4dbec03bcad02",
-                    "Cargo.toml",
-                    "Cargo.lock",
-                    "crates",
-                    ".agents/skills",
-                ])
-                .output()
-                .unwrap();
-            assert!(
-                archive.status.success(),
-                "{}",
-                String::from_utf8_lossy(&archive.stderr)
-            );
-            let path = target.join("source.tar");
-            std::fs::write(&path, archive.stdout).unwrap();
-            assert!(
-                Command::new("tar")
-                    .args(["-xf"])
-                    .arg(&path)
-                    .arg("-C")
-                    .arg(&source)
-                    .status()
-                    .unwrap()
-                    .success()
-            );
-            assert!(
-                Command::new(env!("CARGO"))
-                    .current_dir(&source)
-                    .args(["build", "-p", "yard", "--locked", "--target-dir"])
-                    .arg(&target)
-                    .status()
-                    .unwrap()
-                    .success()
-            );
-            target.join("debug/yard")
+            archived_binary("fb3f727f793524534965480f86e71af06b0ad646", "pre-standalone")
         })
         .clone()
+}
+
+/// G5/G6: actual Y-67 rows survive the nullable execution rebuild unchanged.
+/// The historical daemon creates a fresh store, completes verification,
+/// approval, landing and cleanup. Host Git and the fixture supply identities.
+/// Sabotage: omit a column, remap IDs, lose a foreign key or backfill scope.
+/// The pre-target upgrade lacks Y-67's bound results and owner records.
+#[test]
+fn nullable_execution_upgrade_preserves_real_results_approvals_and_owners() {
+    let machine = Machine::new("g68-migration", |request| {
+        if request.has_tool("yard_publish_review") {
+            return act(request, vec![publish(json!([]))]);
+        }
+        act(
+            request,
+            vec![
+                bash("printf proof > /yard/proof/evidence.txt"),
+                commit_file("feature.txt", "feature\n", "Feature"),
+            ],
+        )
+    });
+    machine.use_binary(Some(pre_standalone_binary()));
+    machine.start();
+    let project = Project::new(
+        &machine,
+        "p",
+        &config(
+            r#"
+[gates.checked]
+command = "test -f feature.txt"
+runs_in = "box"
+"#,
+        ),
+    );
+    let mut history = project.watch(0);
+    project.json(&["ticket", "new", "--title", "Historical candidate"]);
+    let candidate = history.attention();
+    assert_eq!(candidate["data"]["kind"], "approval");
+    let head = git(
+        &project.path.join(".yard/local/attempts/1/clone"),
+        &["rev-parse", "HEAD"],
+    )
+    .trim()
+    .to_string();
+    let snapshots = project.path.join(".yard/local/attempts/1/proof-snapshots");
+    let proof = std::fs::read_dir(&snapshots)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .file_name()
+        .into_string()
+        .unwrap();
+    assert_eq!(
+        std::fs::read(snapshots.join(&proof).join("evidence.txt")).unwrap(),
+        b"proof"
+    );
+    assert_eq!(candidate["data"]["payload"]["proof"], proof);
+    project.json(&[
+        "attempt", "approve", "Y-1", "--target", "main", "--head", &head, "--proof", &proof,
+    ]);
+    history.event("landing.recorded", &[]);
+    let cleanup = history.until("historical cleanup ended", |e| {
+        e["event"] == "execution.ended" && e["data"]["kind"] == "cleanup"
+    });
+    history.find("historical cleanup release", |e| {
+        e["event"] == "execution.released" && e["execution"] == cleanup["execution"]
+    });
+    assert_eq!(project.canonical_head(), head);
+    drop(history);
+    machine.kill();
+    let mut executions = project.rows("SELECT * FROM execution ORDER BY id");
+    for row in &mut executions {
+        row["scope"] = Value::Null;
+    }
+    let tables = [
+        "attempt",
+        "check",
+        "approval",
+        "attention",
+        "audit",
+        "plan_revision",
+    ];
+    let preserved =
+        tables.map(|table| project.rows(&format!("SELECT * FROM \"{table}\" ORDER BY rowid")));
+    assert!(!preserved[1].is_empty());
+    assert!(!preserved[2].is_empty());
+    machine.use_binary(None);
+    for _ in 0..2 {
+        machine.start();
+        assert_eq!(
+            project.rows("SELECT * FROM execution ORDER BY id"),
+            executions
+        );
+        for (table, before) in tables.iter().zip(&preserved) {
+            assert_eq!(
+                &project.rows(&format!("SELECT * FROM \"{table}\" ORDER BY rowid")),
+                before,
+                "{table}"
+            );
+        }
+        assert!(project.rows("PRAGMA foreign_key_check").is_empty());
+        assert_eq!(project.canonical_head(), head);
+        machine.kill();
+    }
+}
+
+fn archived_binary(revision: &str, name: &str) -> PathBuf {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let target = yard().parent().unwrap().join(name);
+    let source = target.join("source");
+    std::fs::create_dir_all(&source).unwrap();
+    // Compile real archived source; each old daemon creates its own fresh store.
+    let archive = Command::new("git")
+        .current_dir(&root)
+        .args([
+            "archive",
+            revision,
+            "Cargo.toml",
+            "Cargo.lock",
+            "crates",
+            ".agents/skills",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        archive.status.success(),
+        "{}",
+        String::from_utf8_lossy(&archive.stderr)
+    );
+    let path = target.join("source.tar");
+    std::fs::write(&path, archive.stdout).unwrap();
+    assert!(
+        Command::new("tar")
+            .args(["-xf"])
+            .arg(&path)
+            .arg("-C")
+            .arg(&source)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new(env!("CARGO"))
+            .current_dir(&source)
+            .args(["build", "-p", "yard", "--locked", "--target-dir"])
+            .arg(&target)
+            .status()
+            .unwrap()
+            .success()
+    );
+    target.join("debug/yard")
 }
 
 /// G15/G8: the old real daemon leaves a planned parent with open proposals
@@ -150,6 +266,25 @@ fn an_upgrade_preserves_ended_planner_proposals_and_limit_overrides() {
         "SELECT id, kind, reason, ticket, attempt, execution, state, resolution, created_at, resolved_at FROM attention WHERE id = {limit_id}"
     ));
     let audit_before = project.rows("SELECT * FROM audit ORDER BY seq");
+    // G5/G6: preserve every column actually recorded by the historical binary,
+    // including old proofs and handles. New scope stays unknown, never inferred.
+    // Sabotage: drop or relabel an old execution/check during nullable rebuild.
+    let execution_columns = project
+        .rows("PRAGMA table_info(execution)")
+        .iter()
+        .map(|column| format!("\"{}\"", column["name"].as_str().unwrap()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let execution_query = format!("SELECT {execution_columns} FROM execution ORDER BY id");
+    let executions_before = project.rows(&execution_query);
+    let check_columns = project
+        .rows("PRAGMA table_info(\"check\")")
+        .iter()
+        .map(|column| format!("\"{}\"", column["name"].as_str().unwrap()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let check_query = format!("SELECT {check_columns} FROM \"check\" ORDER BY id");
+    let checks_before = project.rows(&check_query);
     machine.use_binary(None);
     machine.start();
     machine.kill();
@@ -180,6 +315,13 @@ fn an_upgrade_preserves_ended_planner_proposals_and_limit_overrides() {
     let audit_after = project.rows("SELECT * FROM audit ORDER BY seq");
     assert_eq!(&audit_after[..audit_before.len()], audit_before.as_slice());
     assert!(project.rows("PRAGMA foreign_key_check").is_empty());
+    assert_eq!(project.rows(&execution_query), executions_before);
+    assert_eq!(project.rows(&check_query), checks_before);
+    assert!(
+        project
+            .rows("SELECT id FROM execution WHERE scope IS NOT NULL")
+            .is_empty()
+    );
     for ticket in ["Y-1", "Y-2"] {
         assert_eq!(
             project.json(&["attempt", "show", ticket])["attempt"]["admission"],

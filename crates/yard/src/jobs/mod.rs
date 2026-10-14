@@ -11,6 +11,7 @@ pub mod queue;
 pub mod reconcile;
 pub mod report;
 pub mod review;
+pub mod scoped;
 pub mod supervise;
 
 use crate::api::Fail;
@@ -556,14 +557,16 @@ pub fn spawn(daemon: &Arc<Daemon>, project: &Arc<Project>, kind: &str, execution
     let daemon = daemon.clone();
     let project = project.clone();
     let kind = kind.to_string();
-    if kind == "implementation" {
+    if matches!(kind.as_str(), "implementation" | "command" | "report") {
         daemon.stops.lock().expect("stops lock").insert(
             (project.key.clone(), execution),
             Arc::new(tokio::sync::Notify::new()),
         );
     }
     tokio::spawn(async move {
-        let result = if kind == "landing" {
+        let result = if matches!(kind.as_str(), "command" | "report") {
+            scoped::execute(&daemon, &project, execution).await
+        } else if kind == "landing" {
             queue::land(&daemon, &project, execution).await
         } else {
             capacity::effect(&daemon, &project, execution, async {
@@ -588,8 +591,22 @@ pub fn spawn(daemon: &Arc<Daemon>, project: &Arc<Project>, kind: &str, execution
             let _ = project.tx(|tx| {
                 let row = executions::get(tx, execution)?;
                 if row.status == "running" {
+                    if row.scope.is_some() {
+                        return executions::end(
+                            tx,
+                            execution,
+                            executions::End {
+                                outcome: "error",
+                                detail: Some(&fail.message),
+                                ..Default::default()
+                            },
+                        );
+                    }
                     let ended = row.kind != "cleanup"
-                        && attempts::get(tx, row.attempt)?.outcome.as_deref() == Some("abandoned");
+                        && attempts::get(tx, row.required_attempt()?)?
+                            .outcome
+                            .as_deref()
+                            == Some("abandoned");
                     executions::end(
                         tx,
                         execution,
@@ -599,7 +616,7 @@ pub fn spawn(daemon: &Arc<Daemon>, project: &Arc<Project>, kind: &str, execution
                             ..Default::default()
                         },
                     )?;
-                    let attempt = attempts::get(tx, row.attempt)?;
+                    let attempt = attempts::get(tx, row.required_attempt()?)?;
                     // A gate or seat that read a pre-edit candidate records nothing.
                     let edited = row.parent.is_none()
                         && matches!(row.kind.as_str(), "gate" | "review")
@@ -628,7 +645,7 @@ pub fn spawn(daemon: &Arc<Daemon>, project: &Arc<Project>, kind: &str, execution
                                 kind: "red",
                                 reason: "error",
                                 ticket: Some(attempt.ticket),
-                                attempt: (row.kind != "landing").then_some(row.attempt),
+                                attempt: (row.kind != "landing").then_some(row.attempt).flatten(),
                                 execution: Some(execution),
                                 payload: json!({ "detail": fail.message }),
                                 text: Some(&fail.message),
@@ -662,7 +679,7 @@ fn runnable(
     if attempt.admission.is_none() && loaded.config.workflow(&attempt.workflow)?.read_only {
         return Ok(None);
     }
-    let executions = executions::for_attempt(conn, attempt.id)?;
+    let executions = executions::attempt_work(conn, attempt.id)?;
     let edited = attempts::edit_pending(conn, attempt.id)?;
     let concurrent = attempt
         .admission
@@ -721,7 +738,7 @@ async fn advance(
             attempts::resolve(tx, &item, "superseded", None)
         })?;
     }
-    let executions = project.read(|conn| executions::for_attempt(conn, attempt.id))?;
+    let executions = project.read(|conn| executions::attempt_work(conn, attempt.id))?;
     let edited = project.read(|conn| attempts::edit_pending(conn, attempt.id))?;
     let ticket = project.read(|conn| tickets::get(conn, attempt.ticket))?;
     if !attempt.lane {
@@ -771,7 +788,7 @@ async fn advance(
     }
 
     let shared = executions::Start {
-        attempt: attempt.id,
+        attempt: Some(attempt.id),
         base: Some(base),
         head: Some(head),
         proof: attempt.proof.as_deref(),
@@ -1254,6 +1271,9 @@ pub async fn command(daemon: &Arc<Daemon>, method: &str, params: Value) -> Resul
         "ticket.depend" => admit::ticket_depend(&project, &params),
         "ticket.done" => admit::ticket_close(&project, &params, "done"),
         "ticket.abandon" => admit::ticket_close(&project, &params, "abandoned"),
+        "execution.start" => scoped::start(daemon, &project, params).await,
+        "execution.show" => scoped::show(&project, &params),
+        "execution.stop" => scoped::stop(daemon, &project, &params),
         "attempt.start" => admit::attempt_start(daemon, &project, &params).await,
         "attempt.revise" => admit::attempt_revise(daemon, &project, &params).await,
         "attempt.stop" => admit::attempt_stop(daemon, &project, &params),
@@ -1335,7 +1355,7 @@ pub fn propose(grant: &crate::mcp::Grant, arguments: &Value) -> Result<Value, Fa
     }
     let id = grant.project.tx(|tx| {
         let execution = executions::get(tx, grant.execution)?;
-        let attempt = attempts::get(tx, execution.attempt)?;
+        let attempt = attempts::get(tx, execution.required_attempt()?)?;
         let mut payload = Value::Object(object.clone());
         if kind == "edit" {
             // Bind the revision the proposing execution read, so accepting

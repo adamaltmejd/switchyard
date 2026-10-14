@@ -485,7 +485,8 @@ async fn attention(daemon: &Daemon, params: &Value) -> Result<Value, Fail> {
                         fresh
                     }
                 };
-                let mut idle = items.is_empty() && crate::store::attempts::live(conn)?.is_empty();
+                let mut idle = items.is_empty() && crate::store::attempts::live(conn)?.is_empty()
+                    && crate::store::executions::query(conn, "status = 'running' OR reserved = 1", [])?.is_empty();
                 if idle {
                     let Some(_) = &loaded else {
                         return Ok((seq, items, fresh, false));
@@ -503,7 +504,7 @@ async fn attention(daemon: &Daemon, params: &Value) -> Result<Value, Fail> {
                 }
                 if idle && let Some(since) = since {
                     idle = conn.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM audit WHERE event = 'attempt.ended' AND seq > ?1)",
+                    "SELECT EXISTS(SELECT 1 FROM audit WHERE event IN ('attempt.ended', 'execution.ended') AND seq > ?1)",
                     [since],
                     |row| row.get::<_, bool>(0),
                 )?;

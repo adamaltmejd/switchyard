@@ -37,7 +37,40 @@ pub fn publish(grant: &Grant, arguments: &Value) -> Result<Value, Fail> {
     }
     grant.project.tx(|tx| {
         let row = executions::get(tx, grant.execution)?;
-        let attempt = attempts::get(tx, row.attempt)?;
+        if let Some(scope) = &row.scope {
+            if row.status != "running" {
+                return Err(Fail::refused("execution_ended"));
+            }
+            if row.kind != "report"
+                || scope["policy"]["node"]["access"] != "read-only"
+                || scope["policy"]["node"]["outputs"]["result"] != "report"
+                || publication.outcome != "complete"
+            {
+                return Err(Fail::refused("standalone_authority"));
+            }
+            if row.report.is_some() {
+                return Err(Fail::refused("duplicate_report"));
+            }
+            let report = json!({"execution": row.id, "attempt": row.attempt, "scope": scope,
+                "outcome": publication.outcome, "report": publication.report});
+            tx.execute(
+                "UPDATE execution SET report = ?2 WHERE id = ?1 AND report IS NULL",
+                rusqlite::params![row.id, report.to_string()],
+            )?;
+            store::audit(
+                tx,
+                "report.published",
+                store::Target {
+                    execution: Some(row.id),
+                    attempt: row.attempt,
+                    ..Default::default()
+                },
+                None,
+                json!({"outcome": publication.outcome}),
+            )?;
+            return Ok(json!({"published": row.id}));
+        }
+        let attempt = attempts::get(tx, row.required_attempt()?)?;
         if row.status != "running" || attempt.state != "live" {
             return Err(Fail::refused("execution_ended"));
         }
@@ -85,7 +118,7 @@ pub fn publish(grant: &Grant, arguments: &Value) -> Result<Value, Fail> {
             "report.published",
             store::Target {
                 execution: Some(row.id),
-                attempt: Some(row.attempt),
+                attempt: row.attempt,
                 ticket: Some(attempt.ticket),
                 ..Default::default()
             },

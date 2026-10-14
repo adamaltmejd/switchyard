@@ -171,7 +171,7 @@ pub fn for_execution(
     conn: &Connection,
     execution: &super::executions::Execution,
 ) -> Result<Attempt, Fail> {
-    let mut attempt = get(conn, execution.attempt)?;
+    let mut attempt = get(conn, execution.required_attempt()?)?;
     attempt.admission = match execution.plan_revision {
         Some(revision_id) => Some(
             revision(conn, attempt.id, revision_id)?

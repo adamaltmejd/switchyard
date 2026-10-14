@@ -254,4 +254,68 @@ CREATE INDEX attention_open ON attention(state) WHERE state = 'open';
         PRIMARY KEY (attempt, revision)
      );",
     "ALTER TABLE execution ADD COLUMN verification TEXT;",
+    // No historical scope is inferred during the nullable association rebuild.
+    r#"
+CREATE TABLE execution_next (
+    id INTEGER PRIMARY KEY,
+    attempt INTEGER REFERENCES attempt(id),
+    parent INTEGER REFERENCES execution(id),
+    kind TEXT NOT NULL CHECK (kind IN ('implementation', 'review', 'gate', 'landing', 'cleanup', 'command', 'report')),
+    reason TEXT,
+    status TEXT NOT NULL CHECK (status IN ('running', 'ended')),
+    outcome TEXT,
+    detail TEXT,
+    base TEXT,
+    head TEXT,
+    ticket_revision INTEGER,
+    digest TEXT,
+    name TEXT,
+    round INTEGER,
+    handle TEXT,
+    image_id TEXT,
+    agent TEXT,
+    harness TEXT,
+    harness_version TEXT,
+    provider TEXT,
+    model TEXT,
+    effort TEXT,
+    resumed INTEGER REFERENCES execution(id),
+    session_id TEXT,
+    exit_cause TEXT,
+    tokens_in INTEGER,
+    tokens_out INTEGER,
+    cost REAL,
+    exit_code INTEGER,
+    oom_kills INTEGER,
+    progress TEXT,
+    approval INTEGER REFERENCES approval(id),
+    intent_old TEXT,
+    intent_merged TEXT,
+    intent_state TEXT CHECK (intent_state IN ('open', 'resolved')),
+    started_at TEXT NOT NULL,
+    ended_at TEXT,
+    proof TEXT,
+    mcp TEXT,
+    body TEXT,
+    reserved INTEGER NOT NULL DEFAULT 0,
+    lock_contract INTEGER NOT NULL DEFAULT 1,
+    intent_ref TEXT,
+    plan_revision INTEGER,
+    usage_fields TEXT,
+    node TEXT,
+    inputs TEXT,
+    result TEXT,
+    teardown INTEGER,
+    report TEXT,
+    prepared TEXT,
+    verification TEXT,
+    scope TEXT
+);
+INSERT INTO execution_next (id, attempt, parent, kind, reason, status, outcome, detail, base, head, ticket_revision, digest, name, round, handle, image_id, agent, harness, harness_version, provider, model, effort, resumed, session_id, exit_cause, tokens_in, tokens_out, cost, exit_code, oom_kills, progress, approval, intent_old, intent_merged, intent_state, started_at, ended_at, proof, mcp, body, reserved, lock_contract, intent_ref, plan_revision, usage_fields, node, inputs, result, teardown, report, prepared, verification)
+SELECT id, attempt, parent, kind, reason, status, outcome, detail, base, head, ticket_revision, digest, name, round, handle, image_id, agent, harness, harness_version, provider, model, effort, resumed, session_id, exit_cause, tokens_in, tokens_out, cost, exit_code, oom_kills, progress, approval, intent_old, intent_merged, intent_state, started_at, ended_at, proof, mcp, body, reserved, lock_contract, intent_ref, plan_revision, usage_fields, node, inputs, result, teardown, report, prepared, verification FROM execution;
+DROP TABLE execution;
+ALTER TABLE execution_next RENAME TO execution;
+CREATE INDEX execution_attempt ON execution(attempt);
+CREATE INDEX execution_running ON execution(status) WHERE status = 'running';
+"#,
 ];

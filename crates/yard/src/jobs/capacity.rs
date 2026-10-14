@@ -16,12 +16,12 @@ tokio::task_local! {
 pub fn dir(project: &Project, row: &executions::Execution) -> PathBuf {
     if row.kind == "landing" {
         super::queue::landing_dir(project, row.id)
-    } else if row.kind == "cleanup" {
+    } else if row.kind == "cleanup" || row.scope.is_some() {
         // Cleanup removes its attempt, so its current lock must survive it.
         project.local().join("effects").join(row.id.to_string())
     } else {
         project
-            .attempt_dir(row.attempt)
+            .attempt_dir(row.attempt.expect("attempt-backed effect"))
             .join("effects")
             .join(row.id.to_string())
     }
@@ -64,8 +64,7 @@ pub async fn effect<T>(
             None => false,
         };
         let row = project.read(|conn| executions::get(conn, execution))?;
-        let attempt = project.read(|conn| attempts::get(conn, row.attempt))?;
-        if row.status != "running" || (row.kind != "cleanup" && attempt.state != "live") {
+        if !project.read(|conn| row.eligible_to_act(conn))? {
             return Err(Fail::refused("execution no longer eligible to act"));
         }
         if spare {
@@ -73,10 +72,7 @@ pub async fn effect<T>(
                 // Stop and reservation race on this row, not on a missing
                 // in-memory stop handle.
                 let current = executions::get(tx, execution)?;
-                if current.status != "running"
-                    || (current.kind != "cleanup"
-                        && attempts::get(tx, current.attempt)?.state != "live")
-                {
+                if !current.eligible_to_act(tx)? {
                     return Err(Fail::refused("execution no longer eligible to act"));
                 }
                 executions::reserve(tx, execution, true)
@@ -90,8 +86,11 @@ pub async fn effect<T>(
                     tx,
                     "execution.waiting",
                     crate::store::Target {
-                        ticket: Some(attempt.ticket),
-                        attempt: Some(row.attempt),
+                        ticket: row
+                            .attempt
+                            .map(|id| attempts::get(tx, id).map(|a| a.ticket))
+                            .transpose()?,
+                        attempt: row.attempt,
                         execution: Some(row.id),
                         ..Default::default()
                     },
@@ -160,7 +159,7 @@ pub async fn reap(daemon: &Daemon, project: &Project) -> Result<(), Fail> {
                         .as_ref()
                         .is_some_and(|prepared| !prepared["durable"].is_null())
                 {
-                    let attempt = attempts::get(tx, row.attempt)?;
+                    let attempt = attempts::get(tx, row.required_attempt()?)?;
                     if attempt.state == "live" {
                         attempts::raise(
                             tx,
@@ -168,7 +167,7 @@ pub async fn reap(daemon: &Daemon, project: &Project) -> Result<(), Fail> {
                                 kind: "stopped",
                                 reason: "interrupted",
                                 ticket: Some(attempt.ticket),
-                                attempt: Some(row.attempt),
+                                attempt: row.attempt,
                                 execution: Some(row.id),
                                 payload: json!({"detail": "external owner is now proved gone"}),
                                 text: None,
@@ -201,7 +200,7 @@ pub async fn release(
     let host_gone = if row.lock_contract {
         (!matches!(
             row.kind.as_str(),
-            "cleanup" | "implementation" | "review" | "gate"
+            "cleanup" | "implementation" | "review" | "gate" | "command" | "report"
         ) || dir(project, row).join("lock").is_file())
             && super::supervise::lock_free(&dir(project, row)).unwrap_or(false)
     } else {
@@ -212,7 +211,7 @@ pub async fn release(
         } else if row.kind == "gate" && row.handle.as_deref().is_some_and(|h| h.starts_with('{')) {
             Some(match row.parent {
                 Some(parent) => super::queue::landing_dir(project, parent),
-                None => project.attempt_dir(row.attempt),
+                None => project.attempt_dir(row.required_attempt()?),
             })
         } else {
             None
@@ -280,6 +279,13 @@ pub async fn release(
                     .as_ref()
                     .is_some_and(|admission| admission["runtime"] == "packaged-audit")
                 && dir(project, &released).join("lock").is_file();
+            if released.scope.is_some() {
+                for item in attempts::open_attention(tx)? {
+                    if item.reason == "ownership" && item.execution == Some(row.id) {
+                        attempts::resolve(tx, &item, "reconciled", None)?;
+                    }
+                }
+            }
             if completed_cleanup
                 || completed_candidate
                 || completed_judgment
@@ -292,7 +298,7 @@ pub async fn release(
                         .is_some_and(|prepared| !prepared["durable"].is_null())
                     && dir(project, &released).join("lock").is_file())
             {
-                for item in attempts::open_for_attempt(tx, current.attempt)? {
+                for item in attempts::open_for_attempt(tx, current.required_attempt()?)? {
                     if item.kind == "red"
                         && item.reason == "ownership"
                         && item.execution == Some(current.id)
@@ -305,14 +311,20 @@ pub async fn release(
             .iter()
             .any(|a| a.reason == "ownership" && a.execution == Some(row.id))
         {
-            let attempt = attempts::get(tx, row.attempt)?;
+            let ticket = row
+                .attempt
+                .filter(|_| row.scope.is_none())
+                .map(|id| attempts::get(tx, id).map(|a| a.ticket))
+                .transpose()?;
             attempts::raise(
                 tx,
                 attempts::Raise {
                     kind: "red",
                     reason: "ownership",
-                    ticket: Some(attempt.ticket),
-                    attempt: (row.kind != "landing").then_some(row.attempt),
+                    ticket,
+                    attempt: (row.kind != "landing" && row.scope.is_none())
+                        .then_some(row.attempt)
+                        .flatten(),
                     execution: Some(row.id),
                     payload: json!({ "detail": detail, "lock_contract": row.lock_contract }),
                     text: None,

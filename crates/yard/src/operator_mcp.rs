@@ -24,6 +24,12 @@ const OPERATIONS: &[(&str, &str)] = &[
         "plan.validate",
         "project! target preset workflow graph:o overrides:o",
     ),
+    (
+        "execution.start",
+        "project! target! input! node:o! timeout_seconds:i! attempt:i",
+    ),
+    ("execution.show", "project! execution:i!"),
+    ("execution.stop", "project! execution:i!"),
     ("sync", "project! branch default:b"),
     ("status", "project!"),
     ("events", "project! since:i"),
@@ -92,6 +98,7 @@ fn schema(fields: &str) -> Value {
                 "inputs": {"type": "object", "additionalProperties": output_schema()},
                 "nodes": {"type": "object", "additionalProperties": node_schema()}
             }, "required": ["nodes"], "additionalProperties": false}),
+            "node" => node_schema(),
             "overrides" => json!({"type": "object", "additionalProperties": node_schema()}),
             _ => match kind {
                 "o" => json!({"type": "object"}),

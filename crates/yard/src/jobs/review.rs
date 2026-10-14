@@ -294,7 +294,7 @@ pub fn publish(grant: &crate::mcp::Grant, arguments: &Value) -> Result<Value, Fa
     let project = &grant.project;
     let attempt = project.read(|conn| {
         let row = executions::get(conn, grant.execution)?;
-        attempts::get(conn, row.attempt)
+        attempts::get(conn, row.required_attempt()?)
     })?;
     let blocking = if let Some(admission) = &attempt.admission {
         admission["review"]["blocking"]
@@ -317,7 +317,7 @@ pub fn publish(grant: &crate::mcp::Grant, arguments: &Value) -> Result<Value, Fa
             return Err(Fail::refused("this seat has already published"));
         }
         let row = executions::get(tx, grant.execution)?;
-        let attempt = attempts::get(tx, row.attempt)?;
+        let attempt = attempts::get(tx, row.required_attempt()?)?;
         if attempt.state != "live" {
             return Err(Fail::refused("the attempt has ended"));
         }

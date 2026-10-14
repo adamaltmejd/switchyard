@@ -27,7 +27,9 @@ pub async fn next(daemon: &Arc<Daemon>, project: &Arc<Project>) -> Result<(), Fa
         )? {
             let target = match row.intent_ref {
                 Some(target) => target,
-                None => crate::git::target_ref(attempts::get(conn, row.attempt)?.target_branch()?),
+                None => crate::git::target_ref(
+                    attempts::get(conn, row.required_attempt()?)?.target_branch()?,
+                ),
             };
             targets.insert(target);
         }
@@ -85,7 +87,7 @@ pub async fn next(daemon: &Arc<Daemon>, project: &Arc<Project>) -> Result<(), Fa
             let id = executions::start(
                 tx,
                 executions::Start {
-                    attempt: attempt.id,
+                    attempt: Some(attempt.id),
                     kind: "landing",
                     reason: Some("queue"),
                     base: Some(&approval.base),
@@ -249,7 +251,7 @@ pub fn failed_evidence(
     {
         return Ok(None);
     }
-    let attempt = attempts::get(conn, original.attempt)?;
+    let attempt = attempts::get(conn, original.required_attempt()?)?;
     let Some(admission) = &attempt.admission else {
         return Ok(None);
     };
@@ -270,7 +272,7 @@ pub fn failed_evidence(
         return Ok(None);
     }
     let input = checks::Input {
-        attempt: child.attempt,
+        attempt: child.required_attempt()?,
         base: target.into(),
         head: merged.into(),
         proof: child.proof.clone().unwrap_or_default(),
@@ -311,7 +313,7 @@ pub fn skipped_evidence(
         return Ok(None);
     };
     let nodes: serde_json::Value = serde_json::from_str(&request).map_err(|e| e.to_string())?;
-    let attempt = attempts::get(conn, original.attempt)?;
+    let attempt = attempts::get(conn, original.required_attempt()?)?;
     let ticket = tickets::get(conn, attempt.ticket)?;
     let mut identity = super::skipped_identity(&attempt, &ticket);
     identity["skipped"] = json!(super::landing_skipped(&attempt));
@@ -353,7 +355,7 @@ fn accepted_child(
     let Some(evidence) = failed_evidence(conn, child, original)? else {
         return Ok(false);
     };
-    Ok(checks::decision(conn, row.attempt, &evidence)?.as_deref() == Some("accept"))
+    Ok(checks::decision(conn, row.required_attempt()?, &evidence)?.as_deref() == Some("accept"))
 }
 
 fn retire_preparation(tx: &rusqlite::Connection, execution: i64, reason: &str) -> Result<(), Fail> {
@@ -545,7 +547,7 @@ async fn admit<T>(
 ) -> Result<Result<T, (Current, Lapse)>, Fail> {
     let (approval, ticket, attempt) = project.read(|conn| {
         let row = executions::get(conn, execution)?;
-        let attempt = attempts::get(conn, row.attempt)?;
+        let attempt = attempts::get(conn, row.required_attempt()?)?;
         Ok((
             checks::approval(conn, approval)?,
             tickets::get(conn, attempt.ticket)?,
@@ -577,7 +579,7 @@ async fn admit<T>(
             return Err(Fail::refused("execution no longer eligible to act"));
         }
         // An ended attempt lapses its approval; it is not an effect failure.
-        if project.read(|conn| Ok(attempts::get(conn, row.attempt)?.state != "live"))? {
+        if project.read(|conn| Ok(attempts::get(conn, row.required_attempt()?)?.state != "live"))? {
             return Ok(Err((now, Lapse::Superseded("the attempt ended"))));
         }
         if project
@@ -596,7 +598,7 @@ async fn admit<T>(
                     "execution.waiting",
                     store::Target {
                         ticket: Some(now.ticket.id),
-                        attempt: Some(row.attempt),
+                        attempt: row.attempt,
                         execution: Some(row.id),
                         ..Default::default()
                     },
@@ -635,7 +637,7 @@ pub async fn land(
     let row = project.read(|conn| executions::get(conn, execution))?;
     let approval = project
         .read(|conn| checks::approval(conn, row.approval.expect("a landing binds an approval")))?;
-    let attempt = project.read(|conn| attempts::get(conn, row.attempt))?;
+    let attempt = project.read(|conn| attempts::get(conn, row.required_attempt()?))?;
     let ticket = project.read(|conn| tickets::get(conn, attempt.ticket))?;
     let canonical = project.canonical_dir();
     let head = approval.head.clone();
@@ -688,7 +690,7 @@ pub async fn land(
                 return Ok(None);
             }
             project.tx(|tx| store::audit(tx, "landing.continued", store::Target {
-                attempt: Some(row.attempt), execution: Some(execution), ..Default::default()
+                attempt: row.attempt, execution: Some(execution), ..Default::default()
             }, None, json!({"original": original.id, "prepared": prepared,
                 "children": retained.iter().filter(|child| passing_child(child, &row, old, merged)).map(|child| child.id).collect::<Vec<_>>()})))?;
             return Ok(Some((loaded, target_ref, target, merged.to_string())));
@@ -867,7 +869,7 @@ pub async fn land(
                     if node.operator_failure
                         && current.outcome.as_deref() == Some("fail")
                         && let Some(evidence) = failed_evidence(tx, &current, &original)?
-                        && checks::decision(tx, row.attempt, &evidence)?.as_deref()
+                        && checks::decision(tx, row.required_attempt()?, &evidence)?.as_deref()
                             == Some("repair")
                     {
                         return Ok(true);
@@ -899,7 +901,7 @@ pub async fn land(
                 && project
                     .read(|conn| {
                         let evidence = failed_evidence(conn, child, &original)?.unwrap_or_default();
-                        checks::decision(conn, row.attempt, &evidence)
+                        checks::decision(conn, row.required_attempt()?, &evidence)
                     })?
                     .as_deref()
                     == Some("repair")
@@ -938,7 +940,7 @@ pub async fn land(
                 executions::start(
                     tx,
                     executions::Start {
-                        attempt: attempt.id,
+                        attempt: Some(attempt.id),
                         parent: Some(execution),
                         kind: "gate",
                         reason: Some("landing"),
@@ -1289,7 +1291,7 @@ pub fn record_landing(tx: &rusqlite::Connection, execution: i64) -> Result<(), F
     if row.intent_state.as_deref() != Some("open") {
         return Ok(());
     }
-    let attempt = attempts::get(tx, row.attempt)?;
+    let attempt = attempts::get(tx, row.required_attempt()?)?;
     let approval = checks::approval(tx, row.approval.expect("a landing binds an approval"))?;
     executions::resolve_intent(tx, execution)?;
     if row.status == "running" {
@@ -1384,7 +1386,7 @@ async fn returned(
     let (attempt, approval) = project.read(|conn| {
         let row = executions::get(conn, execution)?;
         let approval = checks::approval(conn, row.approval.expect("a landing binds an approval"))?;
-        Ok((attempts::get(conn, row.attempt)?, approval))
+        Ok((attempts::get(conn, row.required_attempt()?)?, approval))
     })?;
     let ticket = attempt.ticket;
     let input = project.attempt_dir(attempt.id).join("input");

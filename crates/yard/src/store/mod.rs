@@ -66,12 +66,34 @@ impl Store {
             ));
         }
         for (index, migration) in schema::MIGRATIONS.iter().enumerate().skip(version) {
+            // Rebuild incoming execution references without drop-table actions.
+            let rebuild = migration.contains("CREATE TABLE execution_next");
+            if rebuild {
+                self.conn
+                    .pragma_update(None, "foreign_keys", "OFF")
+                    .map_err(|error| error.to_string())?;
+            }
             let tx = self.conn.transaction().map_err(|error| error.to_string())?;
             tx.execute_batch(migration)
                 .map_err(|error| error.to_string())?;
             tx.pragma_update(None, "user_version", (index + 1) as i64)
                 .map_err(|error| error.to_string())?;
+            if rebuild {
+                let violation = tx
+                    .prepare("PRAGMA foreign_key_check")
+                    .map_err(|error| error.to_string())?
+                    .exists([])
+                    .map_err(|error| error.to_string())?;
+                if violation {
+                    return Err("migration violated foreign keys".into());
+                }
+            }
             tx.commit().map_err(|error| error.to_string())?;
+            if rebuild {
+                self.conn
+                    .pragma_update(None, "foreign_keys", "ON")
+                    .map_err(|error| error.to_string())?;
+            }
         }
         Ok(())
     }

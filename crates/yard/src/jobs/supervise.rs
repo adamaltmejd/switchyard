@@ -58,7 +58,7 @@ pub fn start_implementation(
     let id = executions::start(
         tx,
         executions::Start {
-            attempt: attempt.id,
+            attempt: Some(attempt.id),
             kind: "implementation",
             reason: Some(reason),
             base: Some(&attempt.base),
@@ -390,9 +390,9 @@ pub async fn run_harness(
                                 project.tx(|tx| {
                                     let current = executions::get(tx, execution)?;
                                     executions::set_worker(tx, execution, None, Some(spent))?;
-                                    if kind == crate::mcp::Kind::Audit && current.usage != *spent {
+                                    if matches!(kind, crate::mcp::Kind::Audit | crate::mcp::Kind::StandaloneReport) && current.usage != *spent {
                                         store::audit(tx, "execution.usage", store::Target {
-                                            execution: Some(execution), attempt: Some(current.attempt),
+                                            execution: Some(execution), attempt: current.attempt,
                                             ..Default::default()
                                         }, None, json!(spent))?;
                                     }
@@ -1346,7 +1346,7 @@ async fn harness_stopped(daemon: &Daemon, project: &Project, execution: i64) -> 
     let stopped = take_stop(daemon, project, execution).await;
     project.read(|conn| {
         let row = executions::get(conn, execution)?;
-        Ok(stopped || row.status != "running" || attempts::get(conn, row.attempt)?.state != "live")
+        Ok(stopped || !row.eligible_to_act(conn)?)
     })
 }
 
@@ -1379,7 +1379,7 @@ async fn stop_preparation(
         if row.status != "running" {
             return Ok(true);
         }
-        let attempt = attempts::get(tx, row.attempt)?;
+        let attempt = attempts::get(tx, row.required_attempt()?)?;
         if attempt.state != "live" {
             executions::end(tx, execution, executions::End {
                 outcome: "abandoned", ticket: Some(attempt.ticket), detail, ..Default::default()
@@ -1408,7 +1408,7 @@ fn notify_if_edited(project: &Project, execution: i64, stop: &tokio::sync::Notif
     let moved = project
         .read(|conn| {
             let row = executions::get(conn, execution)?;
-            let attempt = attempts::get(conn, row.attempt)?;
+            let attempt = attempts::get(conn, row.required_attempt()?)?;
             let ticket = tickets::get(conn, attempt.ticket)?;
             Ok(row.parent.is_none()
                 && row
@@ -2170,13 +2170,16 @@ pub async fn birth(pid: u32) -> Option<String> {
 pub async fn context(daemon: &Arc<Daemon>, grant: &crate::mcp::Grant) -> Result<Value, Fail> {
     let project = &grant.project;
     let row = project.read(|conn| executions::get(conn, grant.execution))?;
-    let attempt = project.read(|conn| attempts::get(conn, row.attempt))?;
+    if let Some(scope) = &row.scope {
+        return Ok(json!({"execution": row.id, "attempt": row.attempt, "scope": scope}));
+    }
+    let attempt = project.read(|conn| attempts::get(conn, row.required_attempt()?))?;
     let ticket = project.read(|conn| tickets::get(conn, attempt.ticket))?;
     let (base, head) = match grant.kind {
         crate::mcp::Kind::Review => (row.base.clone().unwrap_or_default(), row.head.clone()),
-        crate::mcp::Kind::Implementation | crate::mcp::Kind::Audit => {
-            (attempt.base.clone(), attempt.head.clone())
-        }
+        crate::mcp::Kind::Implementation
+        | crate::mcp::Kind::Audit
+        | crate::mcp::Kind::StandaloneReport => (attempt.base.clone(), attempt.head.clone()),
     };
     let stat = match &head {
         Some(head) => daemon

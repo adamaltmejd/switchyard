@@ -26,6 +26,7 @@ pub enum Kind {
     Implementation,
     Review,
     Audit,
+    StandaloneReport,
 }
 
 #[derive(Default)]
@@ -212,6 +213,7 @@ fn tools(kind: Kind) -> Vec<Value> {
         Kind::Implementation => vec![context, progress, propose],
         Kind::Review => vec![context, progress, publish],
         Kind::Audit => vec![context, progress, propose, report],
+        Kind::StandaloneReport => vec![context, progress, report],
     }
 }
 
@@ -324,7 +326,9 @@ async fn call(daemon: &Arc<Daemon>, grant: &Grant, params: &Value) -> Value {
     let granted = tools(grant.kind)
         .iter()
         .any(|tool| tool["name"].as_str() == Some(name));
-    let outcome = if !granted {
+    let outcome = if name.starts_with("yard_execution_") {
+        Err(Fail::refused("operator_only").with(json!({"execution": grant.execution})))
+    } else if !granted {
         Err(Fail::refused(format!(
             "{name} is not granted to this execution"
         )))
@@ -356,7 +360,7 @@ async fn call(daemon: &Arc<Daemon>, grant: &Grant, params: &Value) -> Value {
                         ..Default::default()
                     },
                     Some(&fail.message),
-                    json!({ "tool": name, "code": fail.code }),
+                    json!({ "tool": name, "code": fail.code, "reason": fail.message }),
                 )
             });
             json!({

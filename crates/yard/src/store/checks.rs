@@ -263,7 +263,7 @@ pub fn reusable(
     execution: &super::executions::Execution,
     evidence: &Value,
 ) -> Result<Option<Value>, Fail> {
-    let attempt = super::attempts::get(conn, execution.attempt)?;
+    let attempt = super::attempts::get(conn, execution.required_attempt()?)?;
     if execution.parent.is_none()
         && attempt
             .admission
@@ -495,6 +495,7 @@ pub struct Record<'a> {
 
 pub fn record(tx: &Connection, record: Record) -> Result<i64, Fail> {
     let row = super::executions::get(tx, record.execution)?;
+    row.required_attempt()?;
     tx.execute(
         "INSERT INTO \"check\" (execution, kind, verdict, created_at) VALUES (?1, ?2, ?3, ?4)",
         params![record.execution, record.kind, record.verdict, now()],
@@ -505,7 +506,7 @@ pub fn record(tx: &Connection, record: Record) -> Result<i64, Fail> {
         "check.recorded",
         Target {
             ticket: Some(record.ticket),
-            attempt: Some(row.attempt),
+            attempt: row.attempt,
             execution: Some(record.execution),
             attention: None,
         },

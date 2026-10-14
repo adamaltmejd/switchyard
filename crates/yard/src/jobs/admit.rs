@@ -868,7 +868,7 @@ pub fn ticket_list(project: &Project) -> Result<Value, Fail> {
 /// Commands refused while a landing intent names the ticket.
 fn refuse_during_intent(conn: &rusqlite::Connection, ticket: i64) -> Result<(), Fail> {
     for intent in executions::open_intents(conn)? {
-        let attempt = attempts::get(conn, intent.attempt)?;
+        let attempt = attempts::get(conn, intent.required_attempt()?)?;
         if attempt.ticket == ticket {
             return Err(Fail::refused(format!(
                 "{} has a landing intent (execution {}) that is not yet resolved",
@@ -1035,7 +1035,7 @@ fn steer(tx: &rusqlite::Connection, id: i64) -> Result<Vec<i64>, Fail> {
     let Some(attempt) = attempts::live_for(tx, id)? else {
         return Ok(Vec::new());
     };
-    let running: Vec<_> = executions::for_attempt(tx, attempt.id)?
+    let running: Vec<_> = executions::attempt_work(tx, attempt.id)?
         .into_iter()
         .filter(|row| row.status == "running")
         .collect();
@@ -1424,7 +1424,7 @@ pub async fn attempt_revise(
             return Err(candidate_stale("attempt", json!(attempt.id), json!(current.id)));
         }
         attempts::require_plan(tx, current.id, Some(expected))?;
-        let executions = executions::for_attempt(tx, current.id)?;
+        let executions = executions::attempt_work(tx, current.id)?;
         let open = attempts::open_for_attempt(tx, current.id)?;
         if adopting && executions.iter().any(|row| row.status == "running" && matches!(row.kind.as_str(), "gate" | "review"))
         {
@@ -1570,7 +1570,7 @@ pub async fn attempt_start(
     let ticket = project.read(|conn| tickets::get(conn, id))?;
     if let Some(attempt) = &live
         && let Some(owner) = project.read(|conn| {
-            Ok(executions::for_attempt(conn, attempt.id)?
+            Ok(executions::attempt_work(conn, attempt.id)?
                 .into_iter()
                 .find(|row| {
                     row.reserved
@@ -1759,7 +1759,7 @@ pub fn attempt_stop(daemon: &Daemon, project: &Project, params: &Value) -> Resul
     let running = project.read(|conn| {
         let attempt = attempts::live_for(conn, id)?
             .ok_or_else(|| Fail::refused(format!("{} has no live attempt", ticket_name(id))))?;
-        Ok(executions::for_attempt(conn, attempt.id)?
+        Ok(executions::attempt_work(conn, attempt.id)?
             .into_iter()
             .find(|row| row.status == "running" && row.kind == "implementation"))
     })?;
@@ -1799,7 +1799,7 @@ pub fn attempt_stop(daemon: &Daemon, project: &Project, params: &Value) -> Resul
         })?;
         attempts::raise(tx, attempts::Raise {
             kind: "stopped", reason: "unchanged", ticket: Some(id),
-            attempt: Some(row.attempt), execution: Some(row.id),
+            attempt: row.attempt, execution: Some(row.id),
             payload: json!({ "detail": "the operator stopped the execution before external work" }),
             text: None,
         })?;
@@ -1816,7 +1816,7 @@ pub fn attempt_stop(daemon: &Daemon, project: &Project, params: &Value) -> Resul
             "attempt.stopped",
             store::Target {
                 ticket: Some(id),
-                attempt: Some(running.attempt),
+                attempt: running.attempt,
                 execution: Some(running.id),
                 ..Default::default()
             },
@@ -2508,7 +2508,7 @@ pub fn attempt_abandon(daemon: &Daemon, project: &Project, params: &Value) -> Re
             None,
             json!({ "outcome": "abandoned" }),
         )?;
-        Ok(executions::for_attempt(tx, attempt.id)?
+        Ok(executions::attempt_work(tx, attempt.id)?
             .into_iter()
             .filter(|row| row.status == "running")
             .map(|row| row.id)
@@ -2606,7 +2606,7 @@ pub fn attempt_tail(project: &Project, params: &Value) -> Result<Value, Fail> {
         .read(|conn| attempts::live_for(conn, id))?
         .ok_or_else(|| Fail::not_found(format!("{} has no live attempt", ticket_name(id))))?;
     let execution = project
-        .read(|conn| executions::for_attempt(conn, attempt.id))?
+        .read(|conn| executions::attempt_work(conn, attempt.id))?
         .into_iter()
         .rfind(|row| row.kind == "implementation" || row.kind == "review")
         .ok_or_else(|| Fail::not_found("no worker has run"))?;

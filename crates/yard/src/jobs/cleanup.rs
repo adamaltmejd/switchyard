@@ -11,14 +11,17 @@ pub fn next(daemon: &Arc<Daemon>, project: &Arc<Project>) -> Result<(), Fail> {
     let running =
         project.read(|conn| executions::query(conn, "status = 'running' OR reserved = 1", []))?;
     for attempt in project.read(attempts::uncleaned)? {
-        if running.iter().any(|row| row.attempt == attempt.id) {
+        if running
+            .iter()
+            .any(|row| row.scope.is_none() && row.attempt == Some(attempt.id))
+        {
             continue;
         }
         let execution = project.tx(|tx| {
             executions::start(
                 tx,
                 executions::Start {
-                    attempt: attempt.id,
+                    attempt: Some(attempt.id),
                     kind: "cleanup",
                     reason: attempt.outcome.as_deref(),
                     ticket: Some(attempt.ticket),
@@ -33,7 +36,7 @@ pub fn next(daemon: &Arc<Daemon>, project: &Arc<Project>) -> Result<(), Fail> {
 
 pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -> Result<(), Fail> {
     let row = project.read(|conn| executions::get(conn, execution))?;
-    let others = project.read(|conn| executions::for_attempt(conn, row.attempt))?;
+    let others = project.read(|conn| executions::attempt_work(conn, row.required_attempt()?))?;
     for other in &others {
         if other.kind != "cleanup" && other.handle.is_some() {
             daemon
@@ -45,7 +48,7 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
             remove(&super::queue::landing_dir(project, other.id))?;
         }
     }
-    remove(&project.attempt_dir(row.attempt))?;
+    remove(&project.attempt_dir(row.required_attempt()?))?;
     project.tx(|tx| {
         tx.execute(
             "UPDATE attempt SET cleaned = 1 WHERE id = ?1",

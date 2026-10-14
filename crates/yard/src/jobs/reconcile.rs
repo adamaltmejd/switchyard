@@ -68,7 +68,7 @@ pub async fn project(daemon: &Daemon, project: &Project) -> Result<(), Fail> {
                     ..Default::default()
                 })?;
                 if row.kind == "implementation" {
-                    let attempt = attempts::get(tx, row.attempt)?;
+                    let attempt = attempts::get(tx, row.required_attempt()?)?;
                     if attempt.state == "live" {
                         attempts::raise(tx, attempts::Raise {
                             kind: "stopped",
@@ -103,7 +103,7 @@ pub async fn project(daemon: &Daemon, project: &Project) -> Result<(), Fail> {
                 },
             )?;
             if !free {
-                let attempt = attempts::get(tx, row.attempt)?;
+                let attempt = attempts::get(tx, row.required_attempt()?)?;
                 attempts::raise(
                     tx,
                     attempts::Raise {
@@ -178,7 +178,7 @@ pub async fn decide_intent(
                 .into_iter()
                 .any(|item| item.execution == Some(row.id) && item.kind == "red");
             if !open {
-                let attempt = attempts::get(tx, row.attempt)?;
+                let attempt = attempts::get(tx, row.required_attempt()?)?;
                 attempts::raise(tx, attempts::Raise {
                     kind: "red",
                     reason: "intent",
