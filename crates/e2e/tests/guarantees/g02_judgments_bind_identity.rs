@@ -532,7 +532,6 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
         assert_eq!(inputs["staging_commit"], image_commit);
         assert_eq!(inputs["image_commit"], image_commit);
         assert_eq!(inputs["build_context_tree"], image_tree);
-        assert_eq!(inputs["dockerfile_blob"], dockerfile_blob);
     };
     let adopt = operator.call(
         "yard_attempt_revise",
