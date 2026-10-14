@@ -235,10 +235,31 @@ fi",
     approval(&mut watch);
     let log = std::fs::read_to_string(&commands).unwrap();
     for (name, count) in [("closed", 6), ("other", 4), ("unknown", 5)] {
+        // Failure-only, bounded identities distinguish work between sync and
+        // adoption from replay on the same frozen inputs. Never dump results,
+        // commands, launch environment or operator/worker connection data.
         assert_eq!(
             log.lines().filter(|line| *line == name).count(),
             count,
-            "{log}"
+            "{log}\nimage adoption execution identities (latest 48): {}",
+            json!(project.rows(
+                "SELECT e.id, e.kind, e.name, e.node, e.reason, e.status,
+                    e.outcome, e.head, e.base, e.proof, e.plan_revision,
+                    e.ticket_revision, e.image_id,
+                    json_extract(e.inputs, '$.candidate.source.execution') AS candidate_producer,
+                    json_extract(e.verification, '$.reference') AS reference,
+                    json_extract(e.verification, '$.candidate.tree') AS candidate_tree,
+                    json_extract(e.verification, '$.candidate.base_tree') AS base_tree,
+                    json_extract(e.verification, '$.policy.node.operator_failure') AS operator_failure,
+                    json_extract(e.verification, '$.policy.definition.dockerfile_blob') AS dockerfile_blob,
+                    json_extract(e.verification, '$.policy.definition.build_context_tree') AS build_context_tree,
+                    json_extract(COALESCE(p.evidence, a.admission), '$.inputs.definition_commit') AS definition_commit,
+                    json_extract(COALESCE(p.evidence, a.admission), '$.inputs.staging_commit') AS staging_commit,
+                    json_extract(COALESCE(p.evidence, a.admission), '$.inputs.image_commit') AS image_commit
+                 FROM execution e JOIN attempt a ON a.id = e.attempt
+                 LEFT JOIN plan_revision p ON p.attempt = e.attempt AND p.revision = e.plan_revision
+                 ORDER BY e.id DESC LIMIT 48"
+            ))
         );
     }
     let observed =
