@@ -8,7 +8,7 @@ protected_paths = ["AGENTS.md", "CLAUDE.md", ".agents/", ".claude/", ".codex/", 
 
 [isolation]
 # A candidate that adds a crate fetches it through here.
-egress = ["index.crates.io", "static.crates.io"]
+egress = ["index.crates.io", "static.crates.io", "registry.npmjs.org"]
 
 [agents.implementer]
 harness = "codex"
