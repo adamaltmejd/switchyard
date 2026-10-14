@@ -727,6 +727,7 @@ fn only_the_declared_choice_is_checked_and_landed() {
             .contains(&picker["inputs"]["r1"]["value"]["publication"])
     );
     // B's selected base advanced; this retained producer has never fetched it.
+    // Observe its ancestry without resolving the absent target object locally.
     let hex = "build-gate-model"
         .bytes()
         .map(|b| format!("{b:02x}"))
@@ -753,8 +754,17 @@ fn only_the_declared_choice_is_checked_and_landed() {
     let current = project.rows("SELECT base, choice FROM attempt WHERE state = 'live'");
     assert_eq!(current, vec![json!({"base": target, "choice": null})]);
     assert_eq!(
-        git(&independent_clone, &["merge-base", "HEAD", &target]).trim(),
+        git(
+            &independent_clone,
+            &["merge-base", "HEAD", &independent_base]
+        )
+        .trim(),
         independent_base
+    );
+    assert!(
+        !git(&independent_clone, &["rev-list", "HEAD"])
+            .lines()
+            .any(|commit| commit == target)
     );
     assert_eq!(
         git(&independent_clone, &["show", "HEAD:.yard/worker.txt"]).trim(),
@@ -795,8 +805,17 @@ fn only_the_declared_choice_is_checked_and_landed() {
         .trim()
         .to_owned();
     assert_eq!(
-        git(&independent_clone, &["merge-base", "HEAD", &target]).trim(),
+        git(
+            &independent_clone,
+            &["merge-base", "HEAD", &independent_base]
+        )
+        .trim(),
         independent_base
+    );
+    assert!(
+        !git(&independent_clone, &["rev-list", "HEAD"])
+            .lines()
+            .any(|commit| commit == target)
     );
     assert!(
         git(
