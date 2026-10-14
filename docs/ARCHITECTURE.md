@@ -502,8 +502,10 @@ Each execution reads its recorded plan revision. Template-only sync
 affects future admissions; active plans and matching checks stay unchanged
 through sync and restart. No execution row adopts a new plan revision.
 Legacy unknown admissions retain current-template behavior and their supported
-exits. Old execution and approval plan bindings stay unknown; migration never
-fabricates historical evidence. Ordinary candidate checks can retain an older
+exits. Missing candidate gates and reviews can start without admitted input
+bindings, including after repair or retry. Old execution and approval plan
+bindings stay unknown; migration never fabricates historical evidence.
+Ordinary candidate checks can retain an older
 recorded plan revision only when candidate, ticket, node policy, consumed
 definitions and typed producer inputs still match. Node policy includes runner,
 access, declared inputs, outputs, outcomes, required inputs, failure handling

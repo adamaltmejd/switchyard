@@ -864,18 +864,20 @@ async fn advance(
                 unfinished = true;
                 continue;
             }
-            if !project.read(|conn| {
-                executions::inputs_ready(
-                    conn,
-                    attempt,
-                    &executions::Start {
-                        kind,
-                        name: Some(name),
-                        digest: Some(digest),
-                        ..shared
-                    },
-                )
-            })? {
+            if attempt.admission.is_some()
+                && !project.read(|conn| {
+                    executions::inputs_ready(
+                        conn,
+                        attempt,
+                        &executions::Start {
+                            kind,
+                            name: Some(name),
+                            digest: Some(digest),
+                            ..shared
+                        },
+                    )
+                })?
+            {
                 unfinished = true;
                 continue;
             }
