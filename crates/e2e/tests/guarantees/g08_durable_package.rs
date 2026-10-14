@@ -1225,7 +1225,6 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     project.git(&["add", "runners/durable-audit/runner.mjs"]);
     project.git(&["commit", "-qm", "Freeze supplied six-field controller"]);
     project.json(&["sync"]);
-    image(&project, "");
     launch(&project, 7, "Frozen old controller");
     let old_config = std::fs::read_to_string(project.path.join(".yard/config.toml")).unwrap();
     project.reconfigure(&old_config.replace(
@@ -1463,7 +1462,6 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
             "Select actual capability qualification runtime",
         ]);
         project.json(&["sync"]);
-        image(&project, "");
         launch(&project, attempt_number, "Preserved capable controller");
         let configuration =
             std::fs::read_to_string(project.path.join(".yard/config.toml")).unwrap();
