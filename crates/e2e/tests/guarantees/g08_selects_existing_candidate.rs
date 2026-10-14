@@ -51,6 +51,9 @@ fn approval(watch: &mut Watch) -> Value {
 /// review limit. Explicit exact approval keeps its own failed review while
 /// a losing candidate root is named review-0. Sabotage: classify that writer
 /// as a reviewer in limit_checks and index its absent candidate input.
+/// A losing writer named landing-gate-other still omits that configured gate.
+/// Sabotage: derive skipped verification by name alone, hiding the omission
+/// and refusing the exact observe/accept control despite its supported graph.
 #[test]
 fn only_the_declared_choice_is_checked_and_landed() {
     let holds: Vec<_> = (0..5).map(|_| Latch::new()).collect();
@@ -236,6 +239,7 @@ fn only_the_declared_choice_is_checked_and_landed() {
             0 => "implementer".into(),
             2 => "build-gate-model".into(),
             3 => "review-0".into(),
+            4 => "landing-gate-other".into(),
             _ => format!("writer-{n}"),
         };
         let reviewer = format!("review-{}", if n == 0 { 5 } else { n });
@@ -269,7 +273,7 @@ fn only_the_declared_choice_is_checked_and_landed() {
         "runner": {"kind": "command", "gate": "check"}, "access": "write-allowed",
         "inputs": {"candidate": {"node": "selector", "output": "result", "kind": "selection"}},
         "requires": ["candidate"], "outputs": {"result": "verdict"}, "outcomes": ["complete", "failed"],
-        "routes": {"complete": [{"to": "landing-gate-check"}], "failed": [{"to": "implementer", "repeat": 3}]}
+        "routes": {"complete": [{"to": "landing-gate-check"}], "failed": [{"to": "implementer", "repeat": 1}]}
     }));
     nodes.insert("landing-gate-check".into(), json!({
         "runner": {"kind": "command", "gate": "check"}, "access": "write-allowed",
@@ -333,6 +337,7 @@ fn only_the_declared_choice_is_checked_and_landed() {
             0 => "implementer".into(),
             2 => "build-gate-model".into(),
             3 => "review-0".into(),
+            4 => "landing-gate-other".into(),
             _ => format!("writer-{n}"),
         };
         let row = writers.iter().find(|row| row["workspace"] == node).unwrap();
@@ -390,6 +395,10 @@ fn only_the_declared_choice_is_checked_and_landed() {
     assert!(retry.get("error").is_none(), "{retry}");
     let first = approval(&mut watch);
     assert_eq!(first["head"], heads[1]);
+    let skipped = first["skipped"].as_array().unwrap();
+    assert_eq!(skipped.len(), 2);
+    assert!(skipped.contains(&json!("landing-gate-other")));
+    assert!(skipped.contains(&json!("review-0")));
     let history = rows(
         &project,
         "SELECT * FROM execution WHERE result IS NOT NULL ORDER BY id",
@@ -666,6 +675,7 @@ fn only_the_declared_choice_is_checked_and_landed() {
     landing_repair.release();
     let fourth = approval(&mut watch);
     assert_eq!(fourth["head"], landed_head);
+    assert_eq!(fourth["skipped"], first["skipped"]);
     assert_ne!(fourth["choice"], third["choice"]);
     let after_conflict = rows(
         &project,
@@ -716,6 +726,11 @@ fn only_the_declared_choice_is_checked_and_landed() {
     });
     let payload = &omission["data"]["payload"];
     assert_eq!(payload["choice"], fourth["choice"]);
+    assert_eq!(payload["evidence"]["nodes"], json!(["landing-gate-other"]));
+    assert_eq!(
+        payload["evidence"]["identity"]["skipped"],
+        json!(["landing-gate-other"])
+    );
     let identity = &payload["evidence"]["landing"];
     watch.find("selected omission released", |event| {
         event["event"] == "execution.released" && event["execution"] == identity["execution"]

@@ -231,11 +231,7 @@ fn admit(
         }
     }
     let ordinary = loaded.config.workflow_plan(&name)?;
-    let skipped: Vec<_> = ordinary
-        .nodes
-        .keys()
-        .filter(|name| !plan.nodes.contains_key(*name))
-        .collect();
+    let skipped = skipped_nodes(&plan, &ordinary);
     let unreviewed = !plan.nodes.values().any(|node| {
         matches!(node.runner, crate::plan::Runner::Agent { .. })
             && node.outputs.get("result") == Some(&crate::plan::Output::Verdict)
@@ -287,6 +283,26 @@ fn admit(
         json!({ "target": loaded.branch, "base": loaded.head, "workflow": name, "implementer": implementer }),
     )?;
     super::supervise::start_implementation(tx, &row, "first", None)
+}
+
+fn skipped_nodes(plan: &crate::plan::Plan, ordinary: &crate::plan::Plan) -> Vec<String> {
+    use crate::plan::Runner;
+    ordinary
+        .nodes
+        .iter()
+        .filter(|(name, expected)| {
+            plan.nodes.get(*name).is_none_or(|node| {
+                expected.outputs.get("result") == Some(&crate::plan::Output::Verdict)
+                    && (node.outputs != expected.outputs
+                        || !matches!(
+                            (&node.runner, &expected.runner),
+                            (Runner::Agent { .. }, Runner::Agent { .. })
+                                | (Runner::Command { .. }, Runner::Command { .. })
+                        ))
+            })
+        })
+        .map(|(name, _)| name.clone())
+        .collect()
 }
 
 fn writer_profiles(
@@ -1466,11 +1482,7 @@ pub async fn attempt_revise(
         evidence["config_head"] = json!(loaded.head);
     }
     let ordinary = loaded.config.workflow_plan(&attempt.workflow)?;
-    let skipped: Vec<_> = ordinary
-        .nodes
-        .keys()
-        .filter(|name| !plan.nodes.contains_key(*name))
-        .collect();
+    let skipped = skipped_nodes(&plan, &ordinary);
     evidence["revision"] = json!(
         expected
             .checked_add(1)
