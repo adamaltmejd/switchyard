@@ -1135,7 +1135,19 @@ fn five_writer_candidates_survive_continuation_and_restart() {
         "SELECT * FROM execution WHERE attempt = 2 AND kind = 'implementation' ORDER BY node",
     );
     assert_eq!(writers.len(), 5);
-    assert_eq!(machine.boxes("dev.yard.project").len(), 5);
+    // The host runtime also holds unrelated projects. Pinfold supplies this
+    // project's label on a held writer, without duplicating Yard's key logic.
+    let worker = machine
+        .boxes("dev.yard.project")
+        .into_iter()
+        .find(|listed| listed["name"] == writers[0]["handle"])
+        .expect("the held writer has a box");
+    let label = format!(
+        "dev.yard.project={}",
+        worker["labels"]["dev.yard.project"].as_str().unwrap()
+    );
+    let boxes = machine.boxes(&label);
+    assert_eq!(boxes.len(), 5, "{boxes:?}");
     let root = project.path.join(".yard/local/attempts/2");
     let mut indexes = std::collections::BTreeSet::new();
     let mut states = std::collections::BTreeSet::new();
@@ -1148,6 +1160,7 @@ fn five_writer_candidates_survive_continuation_and_restart() {
             format!("writer-{n}")
         };
         let row = writers.iter().find(|row| row["workspace"] == name).unwrap();
+        assert!(boxes.iter().any(|listed| listed["name"] == row["handle"]));
         assert_eq!(row["base"], frozen_target);
         assert_eq!(row["settings"]["model"], format!("trial-model-{n}"));
         assert_eq!(row["ticket_revision"], writers[0]["ticket_revision"]);
