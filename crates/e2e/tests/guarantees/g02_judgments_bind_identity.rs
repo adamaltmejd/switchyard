@@ -11,7 +11,8 @@ const GATE: &str = "[gates.check]\ncommand = \"test -f feature.txt\"\nstage = \"
 /// identity across distinct launches. Expected inputs come from fixture
 /// literals, Git and real Pinfold/runtime. Observe store and operator MCP.
 /// Sabotage: accept stdout claims, omit the declaration, include box names,
-/// or overwrite launch/result/check history.
+/// or overwrite launch/result/check history. Dropping the exact base source
+/// must fail even when host Git gives two base commits the same tree.
 #[test]
 fn closed_box_gate_inputs_are_declared_stable_and_immutable() {
     let machine = Machine::new("g2-closed-inputs", worker(vec![]));
@@ -19,7 +20,21 @@ fn closed_box_gate_inputs_are_declared_stable_and_immutable() {
     machine.wrapper(
         "pinfold",
         &format!(
-            "if [ \"$1 $2\" = 'box up' ]; then \"$REAL\" \"$@\" | tee -a '{}'; exit $?; fi",
+            "if [ \"$1 $2\" = 'box up' ]; then
+  fifo='{}.'$$
+  mkfifo \"$fifo\" || exit $?
+  trap 'rm -f \"$fifo\"' 0
+  while IFS= read -r line; do
+    printf '%s\\n' \"$line\" >> '{}'
+    printf '%s\\n' \"$line\"
+  done < \"$fifo\" &
+  reader=$!
+  \"$REAL\" \"$@\" > \"$fifo\"
+  result=$?
+  wait \"$reader\"
+  exit \"$result\"
+fi",
+            machine.root.join("closed-input-images.fifo").display(),
             observed.display()
         ),
     );
@@ -33,6 +48,20 @@ fn closed_box_gate_inputs_are_declared_stable_and_immutable() {
     ));
     let project = Project::new(&machine, "p", &configuration);
     let admitted_source = project.git(&["rev-parse", "HEAD"]).trim().to_string();
+    project.git(&["commit", "--quiet", "--allow-empty", "-m", "Same-tree base"]);
+    let base_source = project.git(&["rev-parse", "HEAD"]).trim().to_string();
+    project.json(&["sync"]);
+    let base_tree = project
+        .git(&["rev-parse", &format!("{base_source}^{{tree}}")])
+        .trim()
+        .to_string();
+    assert_ne!(base_source, admitted_source);
+    assert_eq!(
+        base_tree,
+        project
+            .git(&["rev-parse", &format!("{admitted_source}^{{tree}}")])
+            .trim()
+    );
     let mut watch = project.watch(0);
     project.json(&["ticket", "new", "--title", "Feature"]);
     approval(&mut watch);
@@ -71,6 +100,9 @@ fn closed_box_gate_inputs_are_declared_stable_and_immutable() {
     .trim()
     .to_string();
     assert_eq!(evidence["identity"]["candidate"]["tree"], tree);
+    assert_eq!(evidence["identity"]["candidate"]["base"], base_source);
+    assert_ne!(evidence["identity"]["candidate"]["base"], admitted_source);
+    assert_eq!(evidence["identity"]["candidate"]["base_tree"], base_tree);
     let supplier = project.rows(
         "SELECT id, proof FROM execution WHERE kind = 'implementation' AND outcome = 'candidate'",
     )[0]

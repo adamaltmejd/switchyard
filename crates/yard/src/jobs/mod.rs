@@ -118,12 +118,12 @@ pub async fn verification(
             .as_object_mut()
             .expect("recorded gate")
             .remove("name");
-        // Provenance commits and per-launch handles do not describe consumed
-        // bytes. The original evidence still retains them for inspection.
+        // The base commit is also the declared YARD_BASE source. Tree equality
+        // cannot replace it. Per-launch handles remain outside semantic inputs.
         evidence["identity"] = json!({
             "declaration": declaration,
             "candidate": {"tree": evidence["candidate"]["tree"],
-                "base_tree": evidence["candidate"]["base_tree"], "proof": row.proof},
+                "base": row.base, "base_tree": evidence["candidate"]["base_tree"], "proof": row.proof},
             "inputs": row.inputs, "definition": definition,
             "launch": evidence["launch"], "image": evidence["image"],
             "runtime": evidence["runtime"], "yard": evidence["tools"]["yard"]});
