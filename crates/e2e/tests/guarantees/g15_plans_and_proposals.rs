@@ -134,18 +134,30 @@ fn archived_binary(revision: &str, name: &str) -> PathBuf {
     let source = target.join("source");
     std::fs::create_dir_all(&source).unwrap();
     // Compile real archived source; each old daemon creates its own fresh store.
-    let archive = Command::new("git")
+    // Pre-target source predates runners; later source embeds their sealed bytes.
+    let runners = Command::new("git")
         .current_dir(&root)
-        .args([
-            "archive",
-            revision,
-            "Cargo.toml",
-            "Cargo.lock",
-            "crates",
-            ".agents/skills",
-        ])
+        .args(["ls-tree", "--name-only", revision, "--", "runners"])
         .output()
         .unwrap();
+    assert!(
+        runners.status.success(),
+        "{}",
+        String::from_utf8_lossy(&runners.stderr)
+    );
+    let mut archive = Command::new("git");
+    archive.current_dir(&root).args([
+        "archive",
+        revision,
+        "Cargo.toml",
+        "Cargo.lock",
+        "crates",
+        ".agents/skills",
+    ]);
+    if !runners.stdout.is_empty() {
+        archive.arg("runners");
+    }
+    let archive = archive.output().unwrap();
     assert!(
         archive.status.success(),
         "{}",
