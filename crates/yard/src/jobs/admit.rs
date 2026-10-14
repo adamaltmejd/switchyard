@@ -2159,7 +2159,13 @@ fn limit_checks(
             plan.nodes
                 .get(&format!("review-{index}"))
                 .is_some_and(|node| {
-                    producer.is_none() || node.inputs["candidate"].node.as_deref() == producer
+                    matches!(node.runner, crate::plan::Runner::Agent { .. })
+                        && node.outputs.get("result") == Some(&crate::plan::Output::Verdict)
+                        && (producer.is_none()
+                            || node
+                                .inputs
+                                .get("candidate")
+                                .is_some_and(|input| input.node.as_deref() == producer))
                 })
         })
     {

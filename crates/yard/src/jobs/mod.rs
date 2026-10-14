@@ -845,7 +845,10 @@ async fn advance(
             }
             if !matches!(node.runner, crate::plan::Runner::Agent { .. })
                 || node.outputs.get("result") != Some(&crate::plan::Output::Verdict)
-                || node.inputs["candidate"].node.as_deref() != Some(producer)
+                || node
+                    .inputs
+                    .get("candidate")
+                    .is_none_or(|input| input.node.as_deref() != Some(producer))
             {
                 continue;
             }

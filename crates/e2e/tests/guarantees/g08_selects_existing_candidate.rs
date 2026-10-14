@@ -47,6 +47,10 @@ fn approval(watch: &mut Watch) -> Value {
 /// actual producer fetches the target bundle through its own input mount,
 /// resolves the conflict and earns fresh review, choice, checks and approval.
 /// Sabotage: stage target.bundle in the shared attempt input instead of B's.
+/// B's candidate-gate repair receives a blocking review at the configured
+/// review limit. Explicit exact approval keeps its own failed review while
+/// a losing candidate root is named review-0. Sabotage: classify that writer
+/// as a reviewer in limit_checks and index its absent candidate input.
 #[test]
 fn only_the_declared_choice_is_checked_and_landed() {
     let holds: Vec<_> = (0..5).map(|_| Latch::new()).collect();
@@ -117,9 +121,10 @@ fn only_the_declared_choice_is_checked_and_landed() {
                     .split_whitespace()
                     .next()
                     .unwrap();
-                let n: usize = seat.parse().unwrap();
+                let index: usize = seat.parse().unwrap();
+                let n = if index == 5 { 0 } else { index };
                 return Reply::Tools(vec![bash(&format!(
-                    "case \"$(cat same.txt)\" in writer-{n}-*) test \"$(cat same.txt)\" = \"$(cat /yard/proof/evidence.txt)\";; *) exit 93;; esac && ! (echo bad > same.txt) 2>/dev/null && echo exact-review",
+                    "case \"$(cat same.txt)\" in writer-{n}-*) test \"$(cat same.txt)\" = \"$(cat /yard/proof/evidence.txt)\";; *) exit 93;; esac && ! (echo bad > same.txt) 2>/dev/null && echo exact-review-$(cat same.txt)",
                 ))]);
             }
             if request
@@ -127,8 +132,19 @@ fn only_the_declared_choice_is_checked_and_landed() {
                 .last()
                 .is_some_and(|(_, text)| text.contains("exact-review"))
             {
+                let priority = if request
+                    .tool_results()
+                    .last()
+                    .unwrap()
+                    .1
+                    .contains("exact-review-writer-1-2")
+                {
+                    "P1"
+                } else {
+                    "P3"
+                };
                 return Reply::Tools(vec![publish(
-                    json!([{ "priority": "P3", "body": "Fixture review evidence." }]),
+                    json!([{ "priority": priority, "body": "Fixture review evidence." }]),
                 )]);
             }
             return Reply::Text("reviewed".into());
@@ -219,16 +235,17 @@ fn only_the_declared_choice_is_checked_and_landed() {
         let writer = match n {
             0 => "implementer".into(),
             2 => "build-gate-model".into(),
-            3 => "review-model".into(),
+            3 => "review-0".into(),
             _ => format!("writer-{n}"),
         };
+        let reviewer = format!("review-{}", if n == 0 { 5 } else { n });
         nodes.insert(
             writer.clone(),
             json!({"profile": format!("p{n}"), "routes": {"complete": [
-            {"to": format!("review-{n}")}, {"to": "selector"}]}}),
+            {"to": reviewer}, {"to": "selector"}]}}),
         );
         nodes.insert(
-            format!("review-{n}"),
+            reviewer.clone(),
             json!({"profile": "reader",
             "inputs": {"candidate": {"node": writer, "output": "result", "kind": "candidate"}},
             "requires": ["candidate"], "routes": {"complete": [{"to": "selector"}]}}),
@@ -239,9 +256,13 @@ fn only_the_declared_choice_is_checked_and_landed() {
         );
         inputs.insert(
             format!("r{n}"),
-            json!({"node": format!("review-{n}"), "output": "result", "kind": "verdict"}),
+            json!({"node": reviewer, "output": "result", "kind": "verdict"}),
         );
     }
+    seats.push("r5".into());
+    extra.push_str(
+        "\n[review.seats.r5]\nagent = 'worker'\ninstructions = 'Same frozen reviewer.'\n",
+    );
     nodes.insert("selector".into(), json!({"profile": "picker", "inputs": inputs,
         "requires": inputs.keys().collect::<Vec<_>>(), "routes": {"complete": [{"to": "candidate-gate-check"}]}}));
     nodes.insert("candidate-gate-check".into(), json!({
@@ -256,6 +277,7 @@ fn only_the_declared_choice_is_checked_and_landed() {
         "requires": ["merged"], "outputs": {"result": "verdict"}, "outcomes": ["complete"], "routes": {}
     }));
     let configuration = config(&extra)
+        .replace("max_rounds = 3", "max_rounds = 1")
         .replace("max_lanes = 2", "max_lanes = 2\nmax_executions = 5")
         .replace(
             "review = [\"correctness\"]",
@@ -310,7 +332,7 @@ fn only_the_declared_choice_is_checked_and_landed() {
         let node = match n {
             0 => "implementer".into(),
             2 => "build-gate-model".into(),
-            3 => "review-model".into(),
+            3 => "review-0".into(),
             _ => format!("writer-{n}"),
         };
         let row = writers.iter().find(|row| row["workspace"] == node).unwrap();
@@ -385,7 +407,7 @@ fn only_the_declared_choice_is_checked_and_landed() {
         );
         assert_eq!(
             picker["inputs"][format!("r{n}")]["source"]["node"],
-            format!("review-{n}")
+            format!("review-{}", if n == 0 { 5 } else { n })
         );
         let review = &picker["inputs"][format!("r{n}")]["value"]["review"];
         assert_eq!(
@@ -519,7 +541,15 @@ fn only_the_declared_choice_is_checked_and_landed() {
         "selected-B-repaired"
     );
     repair.release();
-    let third = approval(&mut watch);
+    let limited = watch.find("selected blocking review limit", |event| {
+        event["event"] == "attention.raised"
+            && event["data"]["kind"] == "stopped"
+            && event["data"]["reason"] == "limit"
+    });
+    let third = limited["data"]["payload"].clone();
+    assert_eq!(third["rounds"], 1);
+    assert_eq!(third["findings"][0]["seat"], "r1");
+    assert_eq!(third["findings"][0]["finding"]["priority"], "P1");
     assert_eq!(third["head"], repaired_head);
     assert_ne!(third["proof"], first["proof"]);
     let now = rows(
@@ -572,6 +602,38 @@ fn only_the_declared_choice_is_checked_and_landed() {
     );
     assert!(approved.get("error").is_none(), "{approved}");
     landing_repair.wait_held();
+    let limited_picker = before_conflict
+        .iter()
+        .find(|row| row["id"] == third["choice"])
+        .unwrap();
+    let blocked_review = before_conflict
+        .iter()
+        .find(|row| row["id"] == limited_picker["inputs"]["r1"]["source"]["execution"])
+        .unwrap();
+    assert_eq!(
+        blocked_review["inputs"]["candidate"],
+        limited_picker["inputs"]["c1"]
+    );
+    let overridden = project.rows("SELECT * FROM approval ORDER BY id");
+    assert_eq!(overridden.len(), 1);
+    assert_eq!(overridden[0]["overrode"], 1);
+    assert_eq!(overridden[0]["choice"], third["choice"]);
+    let selected_checks: Value =
+        serde_json::from_str(overridden[0]["checks"].as_str().unwrap()).unwrap();
+    assert_eq!(selected_checks.as_array().unwrap().len(), 2);
+    assert!(
+        selected_checks
+            .as_array()
+            .unwrap()
+            .contains(&limited_picker["inputs"]["r1"]["value"]["publication"])
+    );
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT verdict FROM \"check\" WHERE id = {}",
+            limited_picker["inputs"]["r1"]["value"]["publication"]
+        )),
+        vec![json!({"verdict": "fail"})]
+    );
     let repairs = rows(
         &project,
         "SELECT * FROM execution WHERE kind = 'implementation' AND reason = 'repair' ORDER BY id",
