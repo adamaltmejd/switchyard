@@ -1757,6 +1757,9 @@ build boundary as the CLI. It never opens a store or starts a daemon. Run it
 only on the trusted host. Worker HTTP MCP capabilities are separate;
 an execution bearer grants none of the operator tools.
 
+Operator tool schemas keep node identities as strings for attempt acceptance
+and repair. Standalone execution start takes a node definition object.
+
 `initialize`, `notifications/initialized`, `ping`, `tools/list` and
 `tools/call` are served. Operator tools are `yard_` plus the daemon method
 with dots replaced by underscores. They cover `daemon.status`,

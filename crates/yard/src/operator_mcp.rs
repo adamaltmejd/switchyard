@@ -98,7 +98,7 @@ fn schema(fields: &str) -> Value {
                 "inputs": {"type": "object", "additionalProperties": output_schema()},
                 "nodes": {"type": "object", "additionalProperties": node_schema()}
             }, "required": ["nodes"], "additionalProperties": false}),
-            "node" => node_schema(),
+            "node" if kind == "o" => node_schema(),
             "overrides" => json!({"type": "object", "additionalProperties": node_schema()}),
             _ => match kind {
                 "o" => json!({"type": "object"}),
