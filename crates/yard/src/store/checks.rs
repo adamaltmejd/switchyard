@@ -114,6 +114,17 @@ pub fn current(
     )?;
     for check in candidates {
         let execution = super::executions::get(conn, check.execution)?;
+        // A declared gate crossing a plan revision records an explicit launch
+        // reference, even when its candidate and own definition did not move.
+        if check.verdict == "pass"
+            && execution.plan_revision != input.plan_revision
+            && execution
+                .verification
+                .as_ref()
+                .is_some_and(|v| v["reuse"] == "eligible")
+        {
+            continue;
+        }
         if super::executions::qualifies(conn, &attempt, &execution, &input.digest)? {
             return Ok(Some(check));
         }
@@ -304,12 +315,20 @@ pub fn evidence(conn: &Connection, check: &Check, input: &Input) -> Result<Value
         || input.head != check.head
         || input.proof != check.proof
         || input.ticket_revision != check.ticket_revision
+        || input.plan_revision != check.plan_revision
     {
         evidence["consumer"] = json!({"attempt": input.attempt, "base": input.base,
             "head": input.head, "proof": input.proof, "ticket_revision": input.ticket_revision,
             "plan_revision": input.plan_revision});
-        evidence["reference"] = json!({"execution": check.execution, "check": check.id,
-            "result": {"execution": check.execution}});
+        if check.verdict == "pass"
+            && execution
+                .verification
+                .as_ref()
+                .is_some_and(|v| v["reuse"] == "eligible")
+        {
+            evidence["reference"] = json!({"execution": check.execution, "check": check.id,
+                "result": {"execution": check.execution}});
+        }
     }
     if input.plan_revision != check.plan_revision {
         evidence["plan_revision"] = json!(input.plan_revision);

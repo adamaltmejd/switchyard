@@ -6,7 +6,7 @@ use std::io::Write;
 
 const GATE: &str = "[gates.check]\ncommand = \"test -f feature.txt\"\nstage = \"candidate\"\n";
 
-/// G2: a second producer publishes the same Git tree and proof after a ticket
+/// G2/G3: a second producer publishes the same Git tree and proof after a ticket
 /// edit. Fixture command/model counts distinguish reference reuse from replay;
 /// immutable rows and MCP distinguish it from a copied verdict or a skip.
 /// Existing definition-adoption cases keep the same supplier and cannot show
@@ -22,20 +22,20 @@ fn candidate_reuses_original_pass_after_bookkeeping_with_unknown_rerun() {
             counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
         let contents = if request.last_user().contains("change-tree") {
-            "changed"
+            "printf changed > feature.txt"
         } else {
-            "feature"
+            "test -f feature.txt || printf feature > feature.txt"
         };
         let proof = if request.last_user().contains("change-") {
-            "second"
+            "printf second > /yard/proof/evidence.txt"
         } else {
-            "first"
+            "test -f /yard/proof/evidence.txt || printf first > /yard/proof/evidence.txt"
         };
         act(
             request,
             vec![bash(&format!(
-                "cd /workspace && printf '{contents}' > feature.txt && git add feature.txt \
-             && git commit --allow-empty -qm Revision && printf '{proof}' > /yard/proof/evidence.txt"
+                "cd /workspace && ({contents}) && git add feature.txt \
+             && git commit --allow-empty -qm Revision && ({proof})"
             ))],
         )
     });
@@ -163,6 +163,255 @@ fi",
             assert_ne!(tree, initial_tree);
         }
     }
+    // Explicit definition adoption changes only the consuming gate. A runtime
+    // declaration changes its declared tool/configuration identity separately.
+    // Sabotage: omit command, declaration or image from matching, or rerun
+    // unrelated consumers despite identical consumed definitions.
+    let changed_command = configuration.replace(
+        "test -f feature.txt # reuse-closed",
+        "test -f feature.txt && test -s feature.txt # reuse-closed",
+    );
+    let changed_runtime = changed_command.replacen("runtime-v1", "runtime-v2", 1);
+    let mut plan_revision = 1;
+    for (definition, expected_closed) in [(&changed_command, 4), (&changed_runtime, 5)] {
+        let retained = project.rows("SELECT * FROM \"check\" WHERE execution = (SELECT max(id) FROM execution WHERE name = 'other' AND outcome = 'pass')")[0].clone();
+        project.reconfigure(definition);
+        let source = project.git(&["rev-parse", "HEAD"]).trim().to_string();
+        let revised = operator.call(
+            "yard_attempt_revise",
+            json!({"project": project.path,
+            "ticket": "Y-1", "plan_revision": plan_revision, "definition_commit": source}),
+        );
+        plan_revision += 1;
+        assert_eq!(
+            revised["result"]["plan_revision"], plan_revision,
+            "{revised}"
+        );
+        let item = approval(&mut watch);
+        let log = std::fs::read_to_string(&commands).unwrap();
+        for (name, count) in [("closed", expected_closed), ("other", 3), ("unknown", 4)] {
+            assert_eq!(
+                log.lines().filter(|line| *line == name).count(),
+                count,
+                "{log}"
+            );
+        }
+        assert!(
+            item["payload"]["checks"]
+                .as_array()
+                .unwrap()
+                .contains(&retained["id"])
+        );
+        let references = project.rows("SELECT verification FROM execution WHERE name = 'other' AND outcome = 'reused' ORDER BY id");
+        let reference: Value =
+            serde_json::from_str(references.last().unwrap()["verification"].as_str().unwrap())
+                .unwrap();
+        assert_eq!(reference["reference"]["check"], retained["id"]);
+    }
+    // A changed observed image and its declared tool source invalidates every
+    // boxed consumer, while preserving the exact frozen command definitions.
+    let dockerfile = project.git(&["show", "HEAD:.yard/Dockerfile"]);
+    project.write(
+        ".yard/Dockerfile",
+        &format!("{dockerfile}\nENV Y150_IMAGE_REVISION=second\n"),
+    );
+    project.git(&["commit", "--quiet", "-am", "Change declared image tools"]);
+    let image = project.git(&["rev-parse", "HEAD"]).trim().to_string();
+    let blob = project
+        .git(&["rev-parse", "HEAD:.yard/Dockerfile"])
+        .trim()
+        .to_string();
+    project.json(&["sync"]);
+    let revised = operator.call(
+        "yard_attempt_revise",
+        json!({"project": project.path,
+        "ticket": "Y-1", "plan_revision": plan_revision, "image_commit": image}),
+    );
+    plan_revision += 1;
+    assert_eq!(
+        revised["result"]["plan_revision"], plan_revision,
+        "{revised}"
+    );
+    approval(&mut watch);
+    let log = std::fs::read_to_string(&commands).unwrap();
+    for (name, count) in [("closed", 6), ("other", 4), ("unknown", 5)] {
+        assert_eq!(
+            log.lines().filter(|line| *line == name).count(),
+            count,
+            "{log}"
+        );
+    }
+    let observed =
+        project.rows("SELECT verification FROM execution WHERE name = 'closed' ORDER BY id");
+    let observed: Value =
+        serde_json::from_str(observed.last().unwrap()["verification"].as_str().unwrap()).unwrap();
+    assert_eq!(observed["identity"]["definition"]["dockerfile_blob"], blob);
+
+    // A failure is never a reusable pass. Omit the undeclared gate at this
+    // boundary to observe skip, reference and accepted failure together.
+    // Sabotage: reference failed results, carry acceptance to a new identity,
+    // or manufacture a check for the omitted node.
+    let failed_definition = changed_runtime.replace(
+        "test -f feature.txt && test -s feature.txt # reuse-closed",
+        "exit 7 # reuse-closed",
+    );
+    project.reconfigure(&failed_definition);
+    let source = project.git(&["rev-parse", "HEAD"]).trim().to_string();
+    let mut graph = project.json(&["attempt", "show", "Y-1"])["attempt"]["plan"]["plan"].clone();
+    graph["nodes"]
+        .as_object_mut()
+        .unwrap()
+        .remove("candidate-gate-unknown");
+    graph["nodes"]["candidate-gate-other"]["routes"]
+        .as_object_mut()
+        .unwrap()
+        .remove("complete");
+    graph["nodes"]["candidate-gate-closed"]["operator_failure"] = json!(true);
+    let revised = operator.call("yard_attempt_revise", json!({"project": project.path,
+        "ticket": "Y-1", "plan_revision": plan_revision, "definition_commit": source, "graph": graph}));
+    plan_revision += 1;
+    assert_eq!(
+        revised["result"]["plan_revision"], plan_revision,
+        "{revised}"
+    );
+    let mut accepted = Vec::new();
+    let mut failed_executions = Vec::new();
+    let mut decisions = Vec::new();
+    let mut final_item = Value::Null;
+    for (body, expected_closed) in [(None, 7), (Some("Bookkeeping after acceptance"), 8)] {
+        if let Some(body) = body {
+            let revision = project.json(&["ticket", "show", "Y-1"])["revision"]
+                .as_i64()
+                .unwrap();
+            project.json(&[
+                "ticket",
+                "edit",
+                "Y-1",
+                "--revision",
+                &revision.to_string(),
+                "--body",
+                body,
+            ]);
+        }
+        let raised = watch.attention();
+        let item = raised["data"].clone();
+        assert_eq!(item["kind"], "candidate", "{item}");
+        let check = &item["payload"]["evidence"]["check"];
+        assert_eq!(check["verdict"], "fail");
+        let answer = operator.call(
+            "yard_attempt_accept",
+            json!({"project": project.path, "ticket": "Y-1",
+            "attention": raised["attention"], "check": check["check"], "plan_revision": plan_revision,
+            "target": "main", "head": item["payload"]["head"], "proof": item["payload"]["proof"],
+            "text": "Keep this exact known failure"}),
+        );
+        assert!(answer.get("error").is_none(), "{answer}");
+        let approved = approval(&mut watch);
+        assert_eq!(
+            approved["payload"]["skipped"],
+            json!(["candidate-gate-unknown"])
+        );
+        assert!(
+            approved["payload"]["checks"]
+                .as_array()
+                .unwrap()
+                .contains(&check["check"])
+        );
+        let log = std::fs::read_to_string(&commands).unwrap();
+        assert_eq!(
+            log.lines().filter(|line| *line == "closed").count(),
+            expected_closed
+        );
+        assert_eq!(log.lines().filter(|line| *line == "unknown").count(), 5);
+        assert_eq!(log.lines().filter(|line| *line == "other").count(), 4);
+        accepted.push(
+            project.rows(&format!(
+                "SELECT * FROM \"check\" WHERE id = {}",
+                check["check"]
+            ))[0]
+                .clone(),
+        );
+        failed_executions.push(
+            project.rows(&format!(
+                "SELECT * FROM execution WHERE id = {}",
+                check["execution"]
+            ))[0]
+                .clone(),
+        );
+        decisions.push(
+            project.rows(&format!(
+                "SELECT * FROM attention WHERE id = {}",
+                raised["attention"]
+            ))[0]
+                .clone(),
+        );
+        final_item = approved;
+    }
+    assert_ne!(accepted[0]["id"], accepted[1]["id"]);
+    let shown = operator.call(
+        "yard_attempt_show",
+        json!({"project": project.path, "ticket": "Y-1"}),
+    );
+    assert!(shown.get("error").is_none(), "{shown}");
+    let retained = shown["result"]["executions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|row| row["name"] == "other")
+        .unwrap();
+    assert_eq!(retained["outcome"], "reused");
+    assert!(
+        final_item["payload"]["checks"]
+            .as_array()
+            .unwrap()
+            .contains(&retained["result"]["reference"]["check"])
+    );
+    assert!(project.rows(&format!("SELECT id FROM execution WHERE node = 'candidate-gate-unknown' AND plan_revision = {plan_revision}")).is_empty());
+    for failed in &accepted {
+        let execution = shown["result"]["executions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["execution"] == failed["execution"])
+            .unwrap();
+        assert_eq!(execution["outcome"], "fail");
+        assert_eq!(execution["result"]["judgment"]["verdict"], "fail");
+        assert_eq!(execution["result"]["reference"], Value::Null);
+    }
+    assert_eq!(
+        project.rows(
+            "SELECT count(*) AS n FROM attention WHERE kind = 'candidate' AND resolution = 'accept'"
+        ),
+        vec![json!({"n": 2})]
+    );
+    // G3: the queue rechecks the original selected reference under the exact
+    // current approval. Sabotage: drop references from queue qualification.
+    let current = project.json(&["attempt", "show", "Y-1"]);
+    let approved = operator.call(
+        "yard_attempt_approve",
+        json!({"project": project.path,
+        "ticket": "Y-1", "target": "main", "base": final_item["payload"]["base"],
+        "head": final_item["payload"]["head"], "proof": final_item["payload"]["proof"],
+        "revision": final_item["payload"]["revision"], "plan_revision": plan_revision,
+        "attention": current["attention"][0]["attention"],
+        "accept_skipped": ["candidate-gate-unknown"], "text": "Accept this exact omitted gate"}),
+    );
+    assert!(approved.get("error").is_none(), "{approved}");
+    watch.event("landing.recorded", &[]);
+    git(
+        &project.canonical(),
+        &[
+            "merge-base",
+            "--is-ancestor",
+            final_item["payload"]["head"].as_str().unwrap(),
+            "refs/heads/main",
+        ],
+    );
+    assert_eq!(
+        project.rows("SELECT checks FROM approval ORDER BY id DESC LIMIT 1"),
+        vec![json!({"checks": final_item["payload"]["checks"].to_string()})]
+    );
     assert_eq!(
         project.rows(&format!(
             "SELECT * FROM execution WHERE kind = 'gate' AND id <= {} ORDER BY id",
@@ -179,10 +428,33 @@ fi",
     );
     machine.kill();
     machine.start();
-    assert_eq!(
-        project.rows("SELECT count(*) AS n FROM execution WHERE outcome = 'reused'"),
-        vec![json!({"n": 2})]
-    );
+    for failed in &accepted {
+        assert_eq!(
+            project.rows(&format!(
+                "SELECT * FROM \"check\" WHERE id = {}",
+                failed["id"]
+            )),
+            vec![failed.clone()]
+        );
+    }
+    for execution in failed_executions {
+        assert_eq!(
+            project.rows(&format!(
+                "SELECT * FROM execution WHERE id = {}",
+                execution["id"]
+            )),
+            vec![execution]
+        );
+    }
+    for decision in decisions {
+        assert_eq!(
+            project.rows(&format!(
+                "SELECT * FROM attention WHERE id = {}",
+                decision["id"]
+            )),
+            vec![decision]
+        );
+    }
 }
 
 /// G2: equivalent consumers on one candidate, then changed declared
