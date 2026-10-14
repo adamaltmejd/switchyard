@@ -2319,7 +2319,8 @@ fn durable_checkpoint_scenario(name: &str, changed: bool, corrupt: bool) {
             watch.said_before_end(&machine.root.join("debug-held"), Some(id)),
             "held\n"
         );
-        watch.until("committed execution usage", |event| {
+        // Usage precedes the paused tool; the held-point wait may have read it.
+        watch.find("committed execution usage", |event| {
             event["event"] == "execution.usage"
                 && event["execution"] == id
                 && event["data"]["input"] == PROMPT_TOKENS
