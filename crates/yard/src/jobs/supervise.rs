@@ -84,6 +84,12 @@ pub fn start_writer(
         .as_str()
         .and_then(crate::harness::get)
         .map(|harness| harness.version());
+    // Choice invalidation clears next. Freeze its instructions in this execution.
+    let pending_feedback = attempt.next.as_ref().map(|next| {
+        next.get("feedback").cloned().unwrap_or_else(
+            || json!({"kind": "verdict", "source": {"external": "feedback"}, "value": next}),
+        )
+    });
     let id = executions::start(
         tx,
         executions::Start {
@@ -103,7 +109,7 @@ pub fn start_writer(
             ticket: Some(ticket.id),
             agent: Some((name, &implementer)),
             harness_version,
-            feedback,
+            feedback: feedback.or(pending_feedback.as_ref()),
             ..Default::default()
         },
     )?;

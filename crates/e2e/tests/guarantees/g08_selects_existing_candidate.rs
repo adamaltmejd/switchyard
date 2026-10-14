@@ -19,7 +19,7 @@ fn rows(project: &Project<'_>, sql: &str) -> Vec<Value> {
 }
 
 fn approval(watch: &mut Watch) -> Value {
-    watch.find("selected candidate approval", |event| {
+    watch.until("selected candidate approval", |event| {
         event["event"] == "attention.raised" && event["data"]["kind"] == "approval"
     })["data"]["payload"]
         .clone()
@@ -38,12 +38,17 @@ fn approval(watch: &mut Watch) -> Value {
 /// replacement is refused. Sabotage: omit the intent fence in start_writer.
 /// Gate- and review-shaped candidate names exercise selected admission and
 /// current consumers. Sabotage: filter roots or reviewers by lexical name.
+/// B's replacement fails the native candidate gate. Only its producer receives
+/// the fixture failure marker and repairs it. Sabotage: drop root feedback or
+/// clear choice before recording the repair execution's bound failure inputs.
 #[test]
 fn only_the_declared_choice_is_checked_and_landed() {
     let holds: Vec<_> = (0..5).map(|_| Latch::new()).collect();
     let writer_holds = holds.clone();
     let replacement = Latch::new();
     let replacement_hold = replacement.clone();
+    let repair = Latch::new();
+    let repair_hold = repair.clone();
     let turns: Vec<_> = (0..5).map(|_| AtomicUsize::new(0)).collect();
     let picker_finishes = AtomicUsize::new(0);
     let machine = Machine::new("g8-select", move |request| {
@@ -129,8 +134,18 @@ fn only_the_declared_choice_is_checked_and_landed() {
             .unwrap();
         if request.opens() {
             let version = turns[n].fetch_add(1, Ordering::SeqCst);
+            let fix = if n == 1 && version == 2 {
+                assert!(
+                    request
+                        .last_user()
+                        .contains("selected-B-needs-repair-marker")
+                );
+                "printf 'selected-B-repaired\\n' > repair.txt && git add repair.txt && "
+            } else {
+                ""
+            };
             return Reply::Tools(vec![bash(&format!(
-                "printf 'writer-{n}-{version}\\n' > same.txt && printf 'writer-{n}-{version}\\n' > /yard/proof/evidence.txt && git add same.txt && git commit -qm Independent && echo producer-ready"
+                "{fix}printf 'writer-{n}-{version}\\n' > same.txt && printf 'writer-{n}-{version}\\n' > /yard/proof/evidence.txt && git add same.txt && git commit -qm Independent && echo producer-ready"
             ))]);
         }
         if request
@@ -140,6 +155,8 @@ fn only_the_declared_choice_is_checked_and_landed() {
         {
             let hold = if turns[n].load(Ordering::SeqCst) == 1 {
                 writer_holds[n].clone()
+            } else if n == 1 && turns[n].load(Ordering::SeqCst) == 3 {
+                repair_hold.clone()
             } else {
                 replacement_hold.clone()
             };
@@ -168,7 +185,7 @@ fn only_the_declared_choice_is_checked_and_landed() {
     let mut extra = String::from(
         "\n[profiles.picker]\nrunner = {kind = 'agent', agent = 'worker', instructions = 'Compare frozen inputs.'}\naccess = 'read-only'\noutputs = {result = 'selection'}\noutcomes = ['complete']\n\
          [profiles.reader]\nrunner = {kind = 'agent', agent = 'worker', instructions = 'Same frozen reviewer.'}\naccess = 'read-only'\noutputs = {result = 'verdict'}\noutcomes = ['complete', 'blocked']\n\
-         [gates.check]\ncommand = 'case \"$(cat same.txt)\" in writer-1-*) test \"$(cat same.txt)\" = \"$(cat /yard/proof/evidence.txt)\";; *) exit 91;; esac'\nstage = 'candidate'\n",
+         [gates.check]\ncommand = 'case \"$(cat same.txt)\" in writer-1-*) test \"$(cat same.txt)\" = \"$(cat /yard/proof/evidence.txt)\" || exit 91;; *) exit 91;; esac; if test \"$(cat same.txt)\" != writer-1-0 && ! grep -qx selected-B-repaired repair.txt 2>/dev/null; then echo selected-B-needs-repair-marker; exit 94; fi'\nstage = 'candidate'\n",
     );
     let mut nodes = serde_json::Map::new();
     let mut inputs = serde_json::Map::new();
@@ -442,8 +459,49 @@ fn only_the_declared_choice_is_checked_and_landed() {
     let replacement_head = git(&clone, &["rev-parse", "HEAD"]).trim().to_owned();
     assert_ne!(replacement_head, heads[1]);
     replacement.release();
+    repair.wait_held();
+    let repairing = rows(
+        &project,
+        "SELECT * FROM execution WHERE kind = 'implementation' AND reason = 'repair' ORDER BY id",
+    );
+    assert_eq!(repairing.len(), 1);
+    let repairing = &repairing[0];
+    assert_eq!(repairing["workspace"], "writer-1");
+    assert_eq!(repairing["settings"]["model"], "producer-1");
+    assert_eq!(repairing["head"], replacement_head);
+    let failed_gates = rows(
+        &project,
+        "SELECT * FROM execution WHERE kind = 'gate' AND outcome = 'fail' ORDER BY id",
+    );
+    assert_eq!(failed_gates.len(), 1);
+    let failed_gate = &failed_gates[0];
+    assert_eq!(failed_gate["head"], replacement_head);
+    assert_eq!(failed_gate["exit_code"], 94);
+    let feedback = &repairing["inputs"]["feedback"];
+    assert_eq!(feedback["source"]["execution"], failed_gate["id"]);
+    assert_eq!(feedback["source"]["node"], "candidate-gate-check");
+    assert_eq!(feedback["source"]["output"], "result");
+    assert_eq!(feedback["value"]["verdict"], "fail");
+    assert_eq!(feedback["value"]["gate"], "check");
+    assert!(
+        feedback["value"]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("selected-B-needs-repair-marker")
+    );
+    assert_eq!(
+        project.rows("SELECT choice FROM attempt WHERE state = 'live'")[0]["choice"],
+        Value::Null
+    );
+    let repaired_head = git(&clone, &["rev-parse", "HEAD"]).trim().to_owned();
+    assert_ne!(repaired_head, replacement_head);
+    assert_eq!(
+        git(&clone, &["show", "HEAD:repair.txt"]).trim(),
+        "selected-B-repaired"
+    );
+    repair.release();
     let third = approval(&mut watch);
-    assert_eq!(third["head"], replacement_head);
+    assert_eq!(third["head"], repaired_head);
     assert_ne!(third["proof"], first["proof"]);
     let now = rows(
         &project,
@@ -452,6 +510,10 @@ fn only_the_declared_choice_is_checked_and_landed() {
     for old in &retained {
         assert_eq!(now.iter().find(|row| row["id"] == old["id"]), Some(old));
     }
+    assert_eq!(
+        now.iter().find(|row| row["id"] == failed_gate["id"]),
+        Some(failed_gate)
+    );
     assert_eq!(
         now.iter().find(|row| row["id"] == failed[0]["id"]),
         Some(&failed[0])
@@ -481,7 +543,7 @@ fn only_the_declared_choice_is_checked_and_landed() {
     let mut watch = project.watch(since);
     std::fs::write(&armed, "").unwrap();
     let approved = operator.call("yard_attempt_approve", json!({"project": project.path, "ticket": "Y-1",
-        "target": "feature/a", "head": replacement_head, "proof": third["proof"], "choice": third["choice"]}));
+        "target": "feature/a", "head": repaired_head, "proof": third["proof"], "choice": third["choice"]}));
     assert!(approved.get("error").is_none(), "{approved}");
     assert_eq!(watch.said(&said), "held\n");
     let intents = project.rows("SELECT * FROM execution WHERE intent_state = 'open'");
@@ -522,7 +584,7 @@ fn only_the_declared_choice_is_checked_and_landed() {
     });
     assert_eq!(
         git(&project.canonical(), &["show", "feature/a:same.txt"]).trim(),
-        "writer-1-1"
+        "writer-1-2"
     );
     assert_eq!(project.canonical_head(), main);
     let gates = rows(
@@ -542,8 +604,15 @@ fn only_the_declared_choice_is_checked_and_landed() {
     assert!(
         gates
             .iter()
+            .any(|row| row["parent"].is_null() && row["head"] == repaired_head)
+    );
+    assert!(
+        gates
+            .iter()
             .filter(|row| row["parent"].is_null())
-            .all(|row| row["head"] == heads[1] || row["head"] == replacement_head)
+            .all(|row| row["head"] == heads[1]
+                || row["head"] == replacement_head
+                || row["head"] == repaired_head)
     );
     let approved = project.rows("SELECT * FROM approval ORDER BY id");
     assert_eq!(approved.len(), 1);

@@ -745,6 +745,11 @@ pub fn binding(
                 "plan_revision": producer.plan_revision}, "value": value}),
             );
         }
+        if start.kind == "implementation"
+            && let Some(feedback) = start.feedback
+        {
+            inputs.insert("feedback".into(), feedback.clone());
+        }
         return Ok(Some((node, Value::Object(inputs))));
     }
     let declared = serde_json::to_value(
