@@ -1338,6 +1338,17 @@ pub async fn attempt_revise(
         };
         let mut settings = loaded.config.agents[agent].clone();
         let previous = &frozen.config.agents[agent];
+        if packaged
+            && !crate::pi::package_effort_capable(&evidence)
+            && settings.effort.is_some()
+            && settings.effort != previous.effort
+        {
+            return Err(
+                Fail::refused("recorded package cannot control requested effort")
+                    .with(json!({"reason": "unsupported_effort", "identity": "effort",
+                    "expected": settings.effort, "current": previous.effort})),
+            );
+        }
         settings.model = previous.model.clone();
         settings.effort = previous.effort.clone();
         if settings != *previous || loaded.config.egress != frozen.config.egress {

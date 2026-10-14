@@ -719,13 +719,7 @@ pub async fn implement(
             let mut launch = json!({"provider": provider, "model": implementer["model"],
             "prompt": prompt, "files": declared, "skill": format!("trusted:{skill}"),
             "identity": admitted["inputs"]["package"]});
-            // Before capability recording, only these exact compiled package
-            // bytes establish effort support. Other preserved packages keep
-            // their original six-field protocol, regardless of declared effort.
-            let effort_capable = admitted["package_launch"] == "effort"
-                || (admitted.get("package_launch").is_none()
-                    && admitted["inputs"]["package"] == crate::pi::package_identity());
-            if effort_capable && !implementer["effort"].is_null() {
+            if crate::pi::package_effort_capable(admitted) && !implementer["effort"].is_null() {
                 launch["effort"] = implementer["effort"].clone();
             }
             let bytes = launch.to_string();

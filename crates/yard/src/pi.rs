@@ -58,6 +58,14 @@ pub fn package_identity() -> Value {
         "lock_sha256": crate::config::hex(&Sha256::digest(include_bytes!("../../../runners/durable-audit/package-lock.json")))})
 }
 
+pub fn package_effort_capable(admission: &Value) -> bool {
+    // Before capability recording, only these exact compiled package bytes
+    // establish effort support. Other packages retain the six-field protocol.
+    admission["package_launch"] == "effort"
+        || (admission.get("package_launch").is_none()
+            && admission["inputs"]["package"] == package_identity())
+}
+
 // Admission hashes belong to that attempt, not to a later daemon binary.
 pub fn valid_package_identity(identity: &Value) -> bool {
     identity.as_object().is_some_and(|fields| {
