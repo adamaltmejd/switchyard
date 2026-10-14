@@ -249,6 +249,40 @@ fn selected_start(project: &Project<'_>, title: &str) {
     project.json(&["ticket", "new", "--title", title, "--workflow", "plan"]);
 }
 
+fn controller_request_path(machine: &Machine) -> std::path::PathBuf {
+    let path = machine.root.join("controller-request");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success()
+    );
+    path
+}
+
+fn assert_private_controller(project: &Project<'_>) {
+    let machine = project.machine;
+    for request in controller_requests(machine) {
+        assert_eq!(
+            request.header("authorization"),
+            Some(format!("Bearer {SECRET}").as_str())
+        );
+        assert!(!request.body.to_string().contains(SECRET));
+    }
+    for table in ["execution", "attempt", "audit"] {
+        assert!(
+            !serde_json::to_string(&project.rows(&format!("SELECT * FROM {table}")))
+                .unwrap()
+                .contains(SECRET)
+        );
+    }
+    assert_eq!(
+        machine.model.requests().len(),
+        controller_requests(machine).len()
+    );
+}
+
 fn audit_report() -> ToolCall {
     tool(
         "yard_publish_report",
@@ -400,7 +434,7 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
         }
         assert!(!request.has_tool("bash"));
     };
-    let machine = Machine::new("g8-durable-package", move |request| {
+    let model_script = move |request: &ModelRequest| {
         let phase = model_phase.load(std::sync::atomic::Ordering::SeqCst);
         let staged = matches!(phase, 2 | 3);
         if request.opens() {
@@ -470,7 +504,8 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
                 "outcome": "complete", "report": {"summary": "é".repeat(4001), "findings": []}
             }),
         )])
-    });
+    };
+    let machine = Machine::new("g8-durable-package", model_script.clone());
     machine.start();
     let project = fixture(&machine);
     image(
@@ -540,14 +575,7 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     // Sabotage: require an unsupported launch field or reject valid launch data.
     // Observe the request itself and terminal history, not refusal prose or a
     // latch deadline. The fixture holds its reply until this observer releases it.
-    let request_path = machine.root.join("controller-request");
-    assert!(
-        std::process::Command::new("mkfifo")
-            .arg(&request_path)
-            .status()
-            .unwrap()
-            .success()
-    );
+    let request_path = controller_request_path(&machine);
     let valid_hold = Latch::new();
     *request_hold.lock().unwrap() = Some((request_path.clone(), valid_hold.clone()));
     selected_start(&project, "Corrected packaged asset");
@@ -1231,190 +1259,204 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     let old_source =
         packaged_daemon_source("pre-effort", "559f730724a89222a4e57868b4770a2a4da65485", "");
     machine.kill();
-    machine.use_binary(Some(old_source.parent().unwrap().join("debug/yard")));
-    machine.start();
-    let old_runner =
-        std::fs::read_to_string(old_source.join("runners/durable-audit/runner.mjs")).unwrap();
-    project.write("runners/durable-audit/runner.mjs", &old_runner);
-    project.git(&["add", "runners/durable-audit/runner.mjs"]);
-    project.git(&["commit", "-qm", "Freeze supplied six-field controller"]);
-    project.json(&["sync"]);
-    launch(&project, 7, "Frozen old controller");
-    let old_config = std::fs::read_to_string(project.path.join(".yard/config.toml")).unwrap();
-    project.reconfigure(&old_config.replace(
-        "model = \"fake-model\"",
-        "model = \"fake-model\"\neffort = \"medium\"",
-    ));
-    let old_hold = Latch::new();
-    *request_hold.lock().unwrap() = Some((request_path.clone(), old_hold.clone()));
-    let mut watch = project.watch(project.json(&["status"])["seq"].as_i64().unwrap());
-    selected_start(&project, "Old controller with declared effort");
-    let old_execution = held_controller_request(&mut watch, "Y-9", &request_path);
-    old_hold.wait_held();
-    let old_admission = project.json(&["attempt", "show", "Y-9"])["attempt"]["admission"].clone();
-    assert_eq!(
-        old_admission["agents"]["worker"]["settings"]["effort"],
-        "medium"
-    );
-    assert_eq!(
-        std::fs::read_to_string(machine.root.join("asset-7")).unwrap(),
-        old_runner
-    );
-    project.json(&["attempt", "stop", "Y-9"]);
-    watch.until("old controller stopped", |event| {
-        event["event"] == "execution.ended" && event["execution"] == old_execution
-    });
-    watch.until("old controller checked release", |event| {
-        event["event"] == "execution.released" && event["execution"] == old_execution
-    });
-    old_hold.release();
-    let old_rows = project.rows(&format!(
-        "SELECT * FROM execution WHERE id = {old_execution}"
-    ));
-    machine.kill();
-    machine.use_binary(None);
-    machine.start();
-    let successor_hold = Latch::new();
-    *request_hold.lock().unwrap() = Some((request_path.clone(), successor_hold.clone()));
-    let mut watch = project.watch(project.json(&["status"])["seq"].as_i64().unwrap());
-    project.json(&["attempt", "start", "Y-9"]);
-    let successor = held_controller_request(&mut watch, "Y-9", &request_path);
-    successor_hold.wait_held();
-    let old_request = controller_requests(&machine).last().unwrap().clone();
-    assert_eq!(old_request.body["model"], "fake-model");
-    assert!(old_request.body.get("reasoning").is_none());
-    assert!(old_request.body.get("reasoning_effort").is_none());
-
-    // G2/G8: a changed explicit effort cannot be recorded and silently omitted
-    // by this six-field controller. Sabotage: remove the adoption capability
-    // guard while keeping the launch guard. The original medium startup above
-    // still succeeds, so it cannot detect this new unsupported control request.
-    // Committed max/omitted fixture settings supply expectations. Hold the real
-    // successor request throughout refusal so its ownership cannot race writes.
-    let historical_config =
-        std::fs::read_to_string(project.path.join(".yard/config.toml")).unwrap();
-    project.reconfigure(&historical_config.replace("effort = \"medium\"", "effort = \"max\""));
-    let unsupported_definition = project.git(&["rev-parse", "HEAD"]).trim().to_string();
-    let attempt = project.json(&["attempt", "show", "Y-9"])["attempt"]["attempt"]
-        .as_i64()
-        .unwrap();
-    let recorded_rows = || {
-        [
-            ("attempt", "id"),
-            ("plan_revision", "attempt"),
-            ("execution", "attempt"),
-            ("attention", "attempt"),
-            ("approval", "attempt"),
-            ("check", "execution"),
-            ("audit", "attempt"),
-        ]
-        .map(|(table, key)| {
-            let predicate = if table == "check" {
-                format!("{key} IN (SELECT id FROM execution WHERE attempt = {attempt})")
-            } else {
-                format!("{key} = {attempt}")
-            };
-            project.rows(&format!(
-                "SELECT * FROM \"{table}\" WHERE {predicate} ORDER BY rowid"
-            ))
-        })
-    };
-    let before_refusal = recorded_rows();
-    let mut operator = machine.operator();
-    operator.initialize();
-    let unsupported = operator.call(
-        "yard_attempt_revise",
-        json!({
-            "project": project.path, "ticket": "Y-9", "plan_revision": 1,
-            "definition_commit": unsupported_definition
-        }),
-    );
-    assert_eq!(unsupported["error"]["code"], "refused");
-    assert_eq!(
-        unsupported["error"]["data"],
-        json!({
-            "reason": "unsupported_effort", "identity": "effort", "expected": "max", "current": "medium"
-        })
-    );
-    assert_eq!(recorded_rows(), before_refusal);
-    let frozen_successor = project.rows(&format!(
-        "SELECT plan_revision, inputs, effort FROM execution WHERE id = {successor}"
-    ));
-
-    // Omission is a supported adjustment in this same project. Checked stop
-    // and explicit start retain the old frozen startup and publish with the
-    // adopted contract, without promising an effort control the package lacks.
-    project.reconfigure(&historical_config.replace("\neffort = \"medium\"", ""));
-    let supported_definition = project.git(&["rev-parse", "HEAD"]).trim().to_string();
-    let supported = operator.call(
-        "yard_attempt_revise",
-        json!({
-            "project": project.path, "ticket": "Y-9", "plan_revision": 1,
-            "definition_commit": supported_definition
-        }),
-    );
-    assert_eq!(supported["result"]["plan_revision"], 2, "{supported}");
-    project.json(&["attempt", "stop", "Y-9"]);
-    watch.until("historical-effort successor stopped", |event| {
-        event["event"] == "execution.ended" && event["execution"] == successor
-    });
-    watch.until("historical-effort successor released", |event| {
-        event["event"] == "execution.released" && event["execution"] == successor
-    });
-    successor_hold.release();
-    let successor_rows = project.rows(&format!("SELECT * FROM execution WHERE id = {successor}"));
-    let omitted_old_hold = Latch::new();
-    *request_hold.lock().unwrap() = Some((request_path.clone(), omitted_old_hold.clone()));
-    project.json(&["attempt", "start", "Y-9"]);
-    let productive = held_controller_request(&mut watch, "Y-9", &request_path);
-    omitted_old_hold.wait_held();
-    let omitted_old_request = controller_requests(&machine).last().unwrap().clone();
-    assert_eq!(omitted_old_request.body["model"], "fake-model");
-    assert!(omitted_old_request.body.get("reasoning").is_none());
-    assert!(omitted_old_request.body.get("reasoning_effort").is_none());
-    omitted_old_hold.release();
-    watch.until("old package successor ended", |event| {
-        event["event"] == "execution.ended" && event["execution"] == productive
-    });
-    watch.until("old package successor released", |event| {
-        event["event"] == "execution.released" && event["execution"] == productive
-    });
-    let preserved = project.json(&["attempt", "show", "Y-9"]);
-    assert_eq!(preserved["attempt"]["admission"], old_admission);
-    let published = preserved["executions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|row| row["execution"] == productive)
-        .unwrap();
-    assert_eq!(published["report"]["report"], expected_report());
-    assert_eq!(published["result_eligible"], true);
-    assert_eq!(
-        project.rows(&format!(
-            "SELECT plan_revision, inputs, effort FROM execution WHERE id = {successor}"
-        )),
-        frozen_successor
-    );
-    assert_eq!(published["plan_revision"], 2);
-    assert_eq!(
-        preserved["attempt"]["plan"]["agents"]["worker"]["settings"]["effort"],
-        Value::Null
-    );
-    assert_eq!(
-        project.rows(&format!("SELECT * FROM execution WHERE id = {successor}")),
-        successor_rows
-    );
-    assert_eq!(
-        project.rows(&format!(
+    // Each admitting daemon creates a fresh store; only upgrade it afterwards.
+    // Downgrading today's store would make this fixture depend on its schema.
+    {
+        let machine = Machine::new("g8-durable-pre-effort", model_script.clone());
+        machine.use_binary(Some(old_source.parent().unwrap().join("debug/yard")));
+        machine.start();
+        let project = fixture(&machine);
+        image(&project, "");
+        let request_path = controller_request_path(&machine);
+        let old_runner =
+            std::fs::read_to_string(old_source.join("runners/durable-audit/runner.mjs")).unwrap();
+        project.write("runners/durable-audit/runner.mjs", &old_runner);
+        project.git(&["add", "runners/durable-audit/runner.mjs"]);
+        project.git(&["commit", "-qm", "Freeze supplied six-field controller"]);
+        project.json(&["sync"]);
+        launch(&project, 7, "Frozen old controller");
+        let old_config = std::fs::read_to_string(project.path.join(".yard/config.toml")).unwrap();
+        project.reconfigure(&old_config.replace(
+            "model = \"fake-model\"",
+            "model = \"fake-model\"\neffort = \"medium\"",
+        ));
+        let old_hold = Latch::new();
+        *request_hold.lock().unwrap() = Some((request_path.clone(), old_hold.clone()));
+        let mut watch = project.watch(project.json(&["status"])["seq"].as_i64().unwrap());
+        selected_start(&project, "Old controller with declared effort");
+        let old_execution = held_controller_request(&mut watch, "Y-1", &request_path);
+        old_hold.wait_held();
+        let old_admission =
+            project.json(&["attempt", "show", "Y-1"])["attempt"]["admission"].clone();
+        assert_eq!(
+            old_admission["agents"]["worker"]["settings"]["effort"],
+            "medium"
+        );
+        assert_eq!(
+            std::fs::read_to_string(machine.root.join("asset-7")).unwrap(),
+            old_runner
+        );
+        project.json(&["attempt", "stop", "Y-1"]);
+        watch.until("old controller stopped", |event| {
+            event["event"] == "execution.ended" && event["execution"] == old_execution
+        });
+        watch.until("old controller checked release", |event| {
+            event["event"] == "execution.released" && event["execution"] == old_execution
+        });
+        old_hold.release();
+        let mut old_rows = project.rows(&format!(
             "SELECT * FROM execution WHERE id = {old_execution}"
-        )),
-        old_rows
-    );
-    watch.until("older omission control cleanup ended", |event| {
-        event["event"] == "execution.ended"
-            && event["attempt"] == attempt
-            && event["data"]["kind"] == "cleanup"
-    });
+        ));
+        // G2: migration leaves historical verification evidence unknown.
+        // Sabotage: backfill ended executions from current definitions.
+        old_rows[0]["verification"] = Value::Null;
+        machine.kill();
+        machine.use_binary(None);
+        machine.start();
+        let successor_hold = Latch::new();
+        *request_hold.lock().unwrap() = Some((request_path.clone(), successor_hold.clone()));
+        let mut watch = project.watch(project.json(&["status"])["seq"].as_i64().unwrap());
+        project.json(&["attempt", "start", "Y-1"]);
+        let successor = held_controller_request(&mut watch, "Y-1", &request_path);
+        successor_hold.wait_held();
+        let old_request = controller_requests(&machine).last().unwrap().clone();
+        assert_eq!(old_request.body["model"], "fake-model");
+        assert!(old_request.body.get("reasoning").is_none());
+        assert!(old_request.body.get("reasoning_effort").is_none());
+
+        // G2/G8: a changed explicit effort cannot be recorded and silently omitted
+        // by this six-field controller. Sabotage: remove the adoption capability
+        // guard while keeping the launch guard. The original medium startup above
+        // still succeeds, so it cannot detect this new unsupported control request.
+        // Committed max/omitted fixture settings supply expectations. Hold the real
+        // successor request throughout refusal so its ownership cannot race writes.
+        let historical_config =
+            std::fs::read_to_string(project.path.join(".yard/config.toml")).unwrap();
+        project.reconfigure(&historical_config.replace("effort = \"medium\"", "effort = \"max\""));
+        let unsupported_definition = project.git(&["rev-parse", "HEAD"]).trim().to_string();
+        let attempt = project.json(&["attempt", "show", "Y-1"])["attempt"]["attempt"]
+            .as_i64()
+            .unwrap();
+        let recorded_rows = || {
+            [
+                ("attempt", "id"),
+                ("plan_revision", "attempt"),
+                ("execution", "attempt"),
+                ("attention", "attempt"),
+                ("approval", "attempt"),
+                ("check", "execution"),
+                ("audit", "attempt"),
+            ]
+            .map(|(table, key)| {
+                let predicate = if table == "check" {
+                    format!("{key} IN (SELECT id FROM execution WHERE attempt = {attempt})")
+                } else {
+                    format!("{key} = {attempt}")
+                };
+                project.rows(&format!(
+                    "SELECT * FROM \"{table}\" WHERE {predicate} ORDER BY rowid"
+                ))
+            })
+        };
+        let before_refusal = recorded_rows();
+        let mut operator = machine.operator();
+        operator.initialize();
+        let unsupported = operator.call(
+            "yard_attempt_revise",
+            json!({
+                "project": project.path, "ticket": "Y-1", "plan_revision": 1,
+                "definition_commit": unsupported_definition
+            }),
+        );
+        assert_eq!(unsupported["error"]["code"], "refused");
+        assert_eq!(
+            unsupported["error"]["data"],
+            json!({
+                "reason": "unsupported_effort", "identity": "effort", "expected": "max", "current": "medium"
+            })
+        );
+        assert_eq!(recorded_rows(), before_refusal);
+        let frozen_successor = project.rows(&format!(
+            "SELECT plan_revision, inputs, effort FROM execution WHERE id = {successor}"
+        ));
+
+        // Omission is a supported adjustment in this same project. Checked stop
+        // and explicit start retain the old frozen startup and publish with the
+        // adopted contract, without promising an effort control the package lacks.
+        project.reconfigure(&historical_config.replace("\neffort = \"medium\"", ""));
+        let supported_definition = project.git(&["rev-parse", "HEAD"]).trim().to_string();
+        let supported = operator.call(
+            "yard_attempt_revise",
+            json!({
+                "project": project.path, "ticket": "Y-1", "plan_revision": 1,
+                "definition_commit": supported_definition
+            }),
+        );
+        assert_eq!(supported["result"]["plan_revision"], 2, "{supported}");
+        project.json(&["attempt", "stop", "Y-1"]);
+        watch.until("historical-effort successor stopped", |event| {
+            event["event"] == "execution.ended" && event["execution"] == successor
+        });
+        watch.until("historical-effort successor released", |event| {
+            event["event"] == "execution.released" && event["execution"] == successor
+        });
+        successor_hold.release();
+        let successor_rows =
+            project.rows(&format!("SELECT * FROM execution WHERE id = {successor}"));
+        let omitted_old_hold = Latch::new();
+        *request_hold.lock().unwrap() = Some((request_path.clone(), omitted_old_hold.clone()));
+        project.json(&["attempt", "start", "Y-1"]);
+        let productive = held_controller_request(&mut watch, "Y-1", &request_path);
+        omitted_old_hold.wait_held();
+        let omitted_old_request = controller_requests(&machine).last().unwrap().clone();
+        assert_eq!(omitted_old_request.body["model"], "fake-model");
+        assert!(omitted_old_request.body.get("reasoning").is_none());
+        assert!(omitted_old_request.body.get("reasoning_effort").is_none());
+        omitted_old_hold.release();
+        watch.until("old package successor ended", |event| {
+            event["event"] == "execution.ended" && event["execution"] == productive
+        });
+        watch.until("old package successor released", |event| {
+            event["event"] == "execution.released" && event["execution"] == productive
+        });
+        let preserved = project.json(&["attempt", "show", "Y-1"]);
+        assert_eq!(preserved["attempt"]["admission"], old_admission);
+        let published = preserved["executions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["execution"] == productive)
+            .unwrap();
+        assert_eq!(published["report"]["report"], expected_report());
+        assert_eq!(published["result_eligible"], true);
+        assert_eq!(
+            project.rows(&format!(
+                "SELECT plan_revision, inputs, effort FROM execution WHERE id = {successor}"
+            )),
+            frozen_successor
+        );
+        assert_eq!(published["plan_revision"], 2);
+        assert_eq!(
+            preserved["attempt"]["plan"]["agents"]["worker"]["settings"]["effort"],
+            Value::Null
+        );
+        assert_eq!(
+            project.rows(&format!("SELECT * FROM execution WHERE id = {successor}")),
+            successor_rows
+        );
+        assert_eq!(
+            project.rows(&format!(
+                "SELECT * FROM execution WHERE id = {old_execution}"
+            )),
+            old_rows
+        );
+        watch.until("older omission control cleanup ended", |event| {
+            event["event"] == "execution.ended"
+                && event["attempt"] == attempt
+                && event["data"]["kind"] == "cleanup"
+        });
+        assert_private_controller(&project);
+    }
 
     // G8: independently exercise both capability paths across real daemon
     // changes. Sabotage: remove the metadata arm (different compiled package),
@@ -1426,13 +1468,13 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     for (attempt_number, ticket, source, contract) in [
         (
             8,
-            "Y-10",
+            "Y-1",
             packaged_daemon_source("effort-metadata", "HEAD", CAPABILITY_VARIANT),
             Some("effort"),
         ),
         (
             9,
-            "Y-11",
+            "Y-1",
             packaged_daemon_source(
                 "effort-fallback",
                 "b9e374f59b2141edc3d2666f07796805c865764b",
@@ -1465,15 +1507,22 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
                 .unwrap()
             );
         }
-        machine.kill();
+        let machine = Machine::new(
+            &format!("g8-durable-capability-{attempt_number}"),
+            model_script.clone(),
+        );
         machine.use_binary(Some(source.parent().unwrap().join("debug/yard")));
         machine.start();
+        let project = fixture(&machine);
+        image(&project, "");
+        let request_path = controller_request_path(&machine);
         project.write("runners/durable-audit/runner.mjs", &source_runner);
         project.git(&["add", "runners/durable-audit/runner.mjs"]);
         project.git(&[
             "commit",
             "-qm",
             "Select actual capability qualification runtime",
+            "--allow-empty",
         ]);
         project.json(&["sync"]);
         launch(&project, attempt_number, "Preserved capable controller");
@@ -1510,9 +1559,12 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
             event["event"] == "execution.released" && event["execution"] == admitting_execution
         });
         admitting_hold.release();
-        let historical = project.rows(&format!(
+        let mut historical = project.rows(&format!(
             "SELECT * FROM execution WHERE id = {admitting_execution}"
         ));
+        if contract.is_none() {
+            historical[0]["verification"] = Value::Null;
+        }
         machine.kill();
         machine.use_binary(None);
         machine.start();
@@ -1609,15 +1661,9 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
                 && event["attempt"] == publication["attempt"]
                 && event["data"]["kind"] == "cleanup"
         });
+        assert_private_controller(&project);
     }
-    let requests = controller_requests(&machine);
-    for request in requests {
-        assert_eq!(
-            request.header("authorization"),
-            Some(format!("Bearer {SECRET}").as_str())
-        );
-        assert!(!request.body.to_string().contains(SECRET));
-    }
+    assert_private_controller(&project);
     let probe = std::fs::read_to_string(machine.root.join("probe-3")).unwrap();
     for token in [
         "upstream_in_env=1",
@@ -1640,25 +1686,6 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
         assert_ne!(status, "0", "{probe}");
     }
     assert!(!transcript(&project, 3).contains(SECRET));
-    assert!(
-        !serde_json::to_string(&project.rows("SELECT * FROM execution"))
-            .unwrap()
-            .contains(SECRET)
-    );
-    assert!(
-        !serde_json::to_string(&project.rows("SELECT * FROM attempt"))
-            .unwrap()
-            .contains(SECRET)
-    );
-    assert!(
-        !serde_json::to_string(&project.rows("SELECT * FROM audit"))
-            .unwrap()
-            .contains(SECRET)
-    );
-    assert_eq!(
-        machine.model.requests().len(),
-        controller_requests(&machine).len()
-    );
 }
 
 /// G8: a model repeatedly asks to read instead of publishing. The packaged
