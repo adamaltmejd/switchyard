@@ -307,7 +307,7 @@ command = "git rev-parse HEAD"
             _ => vec![],
         };
         assert_eq!(gates, expected);
-        // Passing landing children need no operator evidence check.
+        // Only selected judgments produce checks, including actual landing passes.
         let checks = project.rows(&format!(
             "SELECT e.node, c.verdict FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE e.attempt = {attempt} ORDER BY c.id"
         ));
@@ -317,12 +317,15 @@ command = "git rev-parse HEAD"
                 json!({"node": "review-0", "verdict": "pass"}),
                 json!({"node": "review-1", "verdict": "pass"}),
                 json!({"node": "review-2", "verdict": "pass"}),
+                json!({"node": "landing-gate-check", "verdict": "pass"}),
+                json!({"node": "landing-gate-final", "verdict": "pass"}),
             ],
             1 => vec![
                 json!({"node": "review-0", "verdict": "fail"}),
                 json!({"node": "review-2", "verdict": "pass"}),
                 json!({"node": "review-0", "verdict": "pass"}),
                 json!({"node": "review-2", "verdict": "pass"}),
+                json!({"node": "landing-gate-final", "verdict": "pass"}),
             ],
             _ => vec![],
         };
