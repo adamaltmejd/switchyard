@@ -9,6 +9,7 @@ use hyper::service::service_fn;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -131,8 +132,15 @@ async fn serve() -> Result<(), String> {
     let state = api::state_dir();
     std::fs::create_dir_all(&state).map_err(|error| format!("{}: {error}", state.display()))?;
     let lock = File::create(state.join("daemon.lock")).map_err(|error| error.to_string())?;
-    let lock = nix::fcntl::Flock::lock(lock, nix::fcntl::FlockArg::LockExclusiveNonblock)
-        .map_err(|_| "another daemon is running on this machine".to_string())?;
+    let lock = nix::fcntl::Flock::lock(lock, nix::fcntl::FlockArg::LockExclusiveNonblock).map_err(
+        |(file, error)| {
+            let identity = match file.metadata() {
+                Ok(metadata) => format!("dev={} inode={}", metadata.dev(), metadata.ino()),
+                Err(error) => format!("metadata_errno={:?}", error.raw_os_error()),
+            };
+            format!("daemon lock refused: errno={} {identity}", error as i32)
+        },
+    )?;
 
     let machine = read_machine()?;
     let path = std::env::var("PATH").unwrap_or_default();
