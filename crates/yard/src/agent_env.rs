@@ -39,7 +39,7 @@ const ARG_MAX_BYTES: usize = 128 * 1024 - 1;
 const WORKSPACE_SKILL_ROOTS: [&str; 2] = [".agents/skills", ".codex/skills"];
 const WALK_DEPTH: usize = 32;
 
-/// Paths the harness stages or reads as trusted prompt guidance.
+/// Admission source paths; effective staging can shadow entries.
 pub(crate) fn consumed_path(harness: &str, path: &str) -> bool {
     GUIDANCE.contains(&path)
         || path.starts_with(".agents/skills/")
@@ -145,13 +145,30 @@ impl AgentEnv {
         })
     }
 
-    /// Bytes loaded from trusted Git, after harness configuration filtering.
+    /// Effective staged bytes; shadowed admission sources stay provenance.
     pub fn evidence(&self, harness: &str) -> serde_json::Value {
         use sha2::{Digest, Sha256};
+        let mut files: Vec<_> = self
+            .files
+            .iter()
+            .filter(|file| consumed_path(harness, &file.path))
+            .filter(|file| {
+                harness != "claude"
+                    || !crate::claude::SKILL_ROOTS
+                        .iter()
+                        .any(|prefix| file.path.starts_with(prefix))
+            })
+            .collect();
+        if harness == "claude" {
+            files.extend(
+                self.dir_files(&crate::claude::SKILL_ROOTS)
+                    .into_iter()
+                    .map(|(_, file)| file),
+            );
+        }
         serde_json::json!(
-            self.files
-                .iter()
-                .filter(|file| consumed_path(harness, &file.path))
+            files
+                .into_iter()
                 .map(
                     |file| serde_json::json!({"path": file.path, "executable": file.exec,
                         "sha256": crate::config::hex(&Sha256::digest(&file.bytes))})
@@ -213,19 +230,30 @@ impl AgentEnv {
     /// later one.
     pub fn stage_dir(&self, state: &Path, rel: &str, prefixes: &[&str]) -> std::io::Result<()> {
         let dest = prepare(state, rel)?;
+        for (rest, file) in self.dir_files(prefixes) {
+            write(&dest.join(rest), file)?;
+        }
+        Ok(())
+    }
+
+    fn dir_files<'a>(&'a self, prefixes: &[&str]) -> Vec<(&'a str, &'a File)> {
         let top = |rest: &str| rest.split('/').next().unwrap_or_default().to_string();
         let mut taken = std::collections::BTreeSet::new();
+        let mut selected = Vec::new();
         for prefix in prefixes {
             let mut names = Vec::new();
-            for (rest, file) in self.under(prefix) {
+            for file in &self.files {
+                let Some(rest) = file.path.strip_prefix(prefix) else {
+                    continue;
+                };
                 if !taken.contains(&top(rest)) {
-                    write(&dest.join(rest), file)?;
+                    selected.push((rest, file));
                 }
                 names.push(top(rest));
             }
             taken.extend(names);
         }
-        Ok(())
+        selected
     }
 
     /// Every `SKILL.md` Codex would discover in the workspace, by the path the

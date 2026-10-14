@@ -842,6 +842,13 @@ fn a_seat_that_always_blocks_gets_max_rounds() {
 /// Sabotage: pass the real upstream credential into the box, or omit the
 /// injecting/login route; the search or header fails. Accept a second
 /// `initialize` in `Grants::open_session`; the rogue call succeeds.
+/// G2: Claude's whole top-level skill shadowing is reflected in real launch
+/// byte evidence. An upper skill hides a lower skill and a lower-only file;
+/// an unshadowed shared skill still loads. Read effective bytes inside the
+/// real review box and compare evidence hashes with host SHA-256 of fixtures.
+/// Broader admission blobs remain provenance. Sabotage: enumerate all loaded
+/// sources as effective bytes, or shadow only identical relative file paths.
+/// Existing G2 source adoption uses Pi and cannot expose Claude's root merge.
 #[test]
 fn a_committed_pi_extension_never_loads_and_the_box_holds_no_secret() {
     let extension = r#"import { writeFileSync } from "node:fs";
@@ -1696,6 +1703,9 @@ curl -s -X POST http://yard.mcp/mcp \
     let base_settings = r#"{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"echo base-claude-hook"}]}]}}"#;
     let base_skill = "---\nname: baseskill\ndescription: baseskillmarker\n---\nBody.\n";
     let agents_skill = "---\nname: agentsskill\ndescription: agentsskillmarker\n---\nBody.\n";
+    let upper_skill = "---\nname: shadow\ndescription: upperskillmarker\n---\nUpper body.\n";
+    let lower_skill = "---\nname: shadow\ndescription: lowerskillmarker\n---\nLower body.\n";
+    let skill_probe = "printf '\\nEFFECTIVE-SKILL-BEGIN\\n'; cat \"$HOME/.claude/skills/shadow/SKILL.md\"; test ! -e \"$HOME/.claude/skills/shadow/only-lower.txt\" && printf 'WHOLE-TOP-LEVEL-SHADOWED\\n'; printf 'EFFECTIVE-SKILL-END\\n'";
     let candidate_skill =
         "---\nname: candidateskill\ndescription: candidateskillmarker\n---\nBody.\n";
     let machine = Machine::new("g8-claude", move |request| {
@@ -1731,7 +1741,9 @@ curl -s -X POST http://yard.mcp/mcp \
             return Reply::Text("done".into());
         }
         match request.tool_results().len() {
-            0 => Reply::Tools(vec![claude_bash(ROGUE_SESSION)]),
+            0 => Reply::Tools(vec![claude_bash(&format!(
+                "{ROGUE_SESSION}\n{skill_probe}"
+            ))]),
             1 => Reply::Tools(vec![claude_publish(
                 json!([{ "priority": "P3", "body": "the seat's own" }]),
             )]),
@@ -1748,6 +1760,9 @@ curl -s -X POST http://yard.mcp/mcp \
     project.write(".claude/settings.json", base_settings);
     project.write(".claude/skills/baseskill/SKILL.md", base_skill);
     project.write(".agents/skills/agentsskill/SKILL.md", agents_skill);
+    project.write(".claude/skills/shadow/SKILL.md", upper_skill);
+    project.write(".agents/skills/shadow/SKILL.md", lower_skill);
+    project.write(".agents/skills/shadow/only-lower.txt", "lower-only bytes\n");
     std::os::unix::fs::symlink(
         "../../.agents/skills/agentsskill",
         project.path.join(".claude/skills/agentsskill"),
@@ -1774,12 +1789,79 @@ curl -s -X POST http://yard.mcp/mcp \
             "baseskillmarker",
             "agentsskillmarker",
             "base-claude-hook",
+            "upperskillmarker",
         ] {
             assert!(context.contains(marker), "a request lacks {marker}");
         }
-        for marker in ["candidateskillmarker", "the candidate's rule"] {
+        for marker in [
+            "candidateskillmarker",
+            "the candidate's rule",
+            "lowerskillmarker",
+        ] {
             assert!(!context.contains(marker), "the candidate's {marker} loaded");
         }
+    }
+    let observed = requests
+        .iter()
+        .filter(seat)
+        .flat_map(|request| request.tool_results())
+        .find(|(_, text)| text.contains("EFFECTIVE-SKILL-BEGIN"))
+        .expect("the real review box read its effective skill bytes")
+        .1;
+    assert!(observed.contains(upper_skill));
+    assert!(observed.contains("WHOLE-TOP-LEVEL-SHADOWED"));
+    let rows = project.rows("SELECT verification FROM execution WHERE kind = 'review'");
+    let verification: Value =
+        serde_json::from_str(rows[0]["verification"].as_str().unwrap()).unwrap();
+    let effective = verification["launch"]["trusted_bytes"].as_array().unwrap();
+    for path in [
+        ".claude/skills/shadow/SKILL.md",
+        ".agents/skills/agentsskill/SKILL.md",
+    ] {
+        let output = std::process::Command::new("shasum")
+            .args(["-a", "256"])
+            .arg(project.path.join(path))
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let hash = String::from_utf8(output.stdout)
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            effective
+                .iter()
+                .find(|source| source["path"] == path)
+                .unwrap()["sha256"],
+            hash
+        );
+    }
+    assert!(!effective.iter().any(|source| {
+        source["path"]
+            .as_str()
+            .unwrap()
+            .starts_with(".agents/skills/shadow/")
+    }));
+    let provenance = verification["policy"]["definition"]["trusted_staged_sources"]
+        .as_array()
+        .unwrap();
+    for path in [
+        ".agents/skills/shadow/SKILL.md",
+        ".agents/skills/shadow/only-lower.txt",
+    ] {
+        let blob = project
+            .git(&["rev-parse", &format!("HEAD:{path}")])
+            .trim()
+            .to_string();
+        assert_eq!(
+            provenance
+                .iter()
+                .find(|source| source["path"] == path)
+                .unwrap()["blob"],
+            blob
+        );
     }
     assert_credential_route(&machine, SECRET, "/v1/messages", None);
     assert_own_session_only(&project, &machine, |request| seat(&request));

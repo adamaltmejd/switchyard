@@ -170,8 +170,22 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
     machine.wrapper(
         "pinfold",
         &format!(
-        "if [ \"$1 $2\" = 'box up' ]; then \"$REAL\" \"$@\" | while IFS= read -r line; do printf '%s\\n' \"$line\" >> '{}'; printf '%s\\n' \"$line\"; done; exit $?; fi",
-            observed_images.display()
+            "if [ \"$1 $2\" = 'box up' ]; then
+  fifo='{}.'$$
+  mkfifo \"$fifo\" || exit $?
+  trap 'rm -f \"$fifo\"' 0
+  while IFS= read -r line; do
+    printf '%s\\n' \"$line\" >> '{}'
+    printf '%s\\n' \"$line\"
+  done < \"$fifo\" &
+  reader=$!
+  \"$REAL\" \"$@\" > \"$fifo\"
+  result=$?
+  wait \"$reader\"
+  exit \"$result\"
+fi",
+            machine.root.join("observed-images.fifo").display(),
+            observed_images.display(),
         ),
     );
     let sha256 = |bytes: &[u8]| {
