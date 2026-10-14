@@ -32,6 +32,7 @@ fn packaged_daemon_source_assets(
 ) -> std::path::PathBuf {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let target = yard().parent().unwrap().join(name);
+    let build_target = yard().parent().unwrap().join("packaged-daemon-build");
     let source = target.join("source");
     std::fs::create_dir_all(&source).unwrap();
     // Build real runtime assets; the optional comment changes sealed bytes,
@@ -85,15 +86,31 @@ fn packaged_daemon_source_assets(
         )
         .unwrap();
     }
+    // Concurrent scenarios share dependencies. Hold clean/build/copy together:
+    // Cargo's command locks do not protect the copied executable between calls.
+    // Discard Yard artifacts so archived timestamps cannot reuse another seal.
+    static BUILD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _build = BUILD.lock().expect("packaged fixture build lock");
     assert!(
         std::process::Command::new(env!("CARGO"))
             .current_dir(&source)
-            .args(["build", "-p", "yard", "--locked", "--target-dir"])
-            .arg(&target)
+            .args(["clean", "-p", "yard", "--target-dir"])
+            .arg(&build_target)
             .status()
             .unwrap()
             .success()
     );
+    assert!(
+        std::process::Command::new(env!("CARGO"))
+            .current_dir(&source)
+            .args(["build", "-p", "yard", "--locked", "--target-dir"])
+            .arg(&build_target)
+            .status()
+            .unwrap()
+            .success()
+    );
+    std::fs::create_dir_all(target.join("debug")).unwrap();
+    std::fs::copy(build_target.join("debug/yard"), target.join("debug/yard")).unwrap();
     source
 }
 
