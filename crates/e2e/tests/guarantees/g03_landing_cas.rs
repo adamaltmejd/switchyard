@@ -78,6 +78,8 @@ fi"#,
 /// result only on the actual prepared inputs. Host Git supplies trees/base;
 /// literal command stdout supplies counts. Existing continuation cases hold
 /// the remaining host child; this case proves the cross-stage matcher itself.
+/// The default graph runs all four definitions at landing. On a changed tree,
+/// its first known gate runs; the later equivalent gate references that pass.
 /// Sabotage: rerun every audit event, match candidate head alone, reuse unknown
 /// inputs, copy a verdict, or omit prepared input qualification before intent.
 #[test]
@@ -110,7 +112,7 @@ fn identical_prepared_inputs_reference_candidate_pass_and_changed_tree_reruns() 
     operator.initialize();
     let project = Project::new(&machine, "p", &configuration);
     let mut watch = project.watch(0);
-    for (ticket, advance, known_count, unknown_count) in [("Y-1", false, 1, 2), ("Y-2", true, 3, 4)]
+    for (ticket, advance, known_count, unknown_count) in [("Y-1", false, 1, 3), ("Y-2", true, 3, 6)]
     {
         project.json(&["sync"]);
         let base = project.git(&["rev-parse", "HEAD"]).trim().to_string();
@@ -119,7 +121,7 @@ fn identical_prepared_inputs_reference_candidate_pass_and_changed_tree_reruns() 
         assert_eq!(approval["data"]["kind"], "approval");
         let head = approval["data"]["payload"]["head"].as_str().unwrap();
         let proof = approval["data"]["payload"]["proof"].as_str().unwrap();
-        let original = project.rows("SELECT * FROM execution WHERE name = 'candidate' AND attempt = (SELECT max(id) FROM attempt)");
+        let original = project.rows("SELECT * FROM execution WHERE name = 'candidate' AND parent IS NULL AND attempt = (SELECT max(id) FROM attempt)");
         let original_checks = project.rows("SELECT * FROM \"check\" ORDER BY id");
         let check = original_checks
             .iter()
@@ -155,7 +157,21 @@ fn identical_prepared_inputs_reference_candidate_pass_and_changed_tree_reruns() 
         .to_string();
         let rows = project
             .rows("SELECT * FROM execution WHERE parent IS NOT NULL AND kind = 'gate' AND attempt = (SELECT max(id) FROM attempt) ORDER BY id");
-        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.len(), 4);
+        assert_eq!(
+            rows.iter()
+                .map(|row| row["node"].clone())
+                .collect::<Vec<_>>(),
+            vec![
+                json!("landing-gate-candidate"),
+                json!("landing-gate-candidate_unknown"),
+                json!("landing-gate-landing"),
+                json!("landing-gate-landing_unknown")
+            ]
+        );
+        let first = &rows[0];
+        let first_result: serde_json::Value =
+            serde_json::from_str(first["result"].as_str().unwrap()).unwrap();
         let selected = rows.iter().find(|row| row["name"] == "landing").unwrap();
         let evidence: serde_json::Value =
             serde_json::from_str(selected["verification"].as_str().unwrap()).unwrap();
@@ -170,41 +186,64 @@ fn identical_prepared_inputs_reference_candidate_pass_and_changed_tree_reruns() 
             .trim()
         );
         assert_eq!(selected["head"], landed);
+        assert_eq!(first["head"], landed);
+        assert_eq!(
+            first_result["verification"]["candidate"]["tree"],
+            merged_tree
+        );
+        assert_eq!(
+            first_result["verification"]["candidate"]["provenance"]["base"],
+            target
+        );
         let result: serde_json::Value =
             serde_json::from_str(selected["result"].as_str().unwrap()).unwrap();
         if advance {
             assert_ne!(candidate_tree, merged_tree);
             assert_ne!(base, target);
-            assert_eq!(selected["outcome"], "pass");
-            assert_eq!(result["reference"], serde_json::Value::Null);
+            assert_eq!(first["outcome"], "pass");
+            assert_eq!(first_result["reference"], serde_json::Value::Null);
+            let fresh_check = project.rows(&format!(
+                "SELECT * FROM \"check\" WHERE execution = {}",
+                first["id"]
+            ));
+            assert_eq!(fresh_check.len(), 1);
+            assert_eq!(fresh_check[0]["verdict"], "pass");
+            assert_eq!(
+                result["reference"],
+                json!({"execution": first["id"],
+                "check": fresh_check[0]["id"], "result": {"execution": first["id"]}})
+            );
         } else {
             assert_eq!(candidate_tree, merged_tree);
             assert_eq!(base, target);
-            assert_eq!(selected["outcome"], "reused");
+            assert_eq!(first["outcome"], "reused");
             assert_eq!(
                 result["reference"],
                 json!({"execution": original[0]["id"], "check": check["id"],
                 "result": {"execution": original[0]["id"]}})
             );
-            assert_eq!(result["judgment"], serde_json::Value::Null);
-            assert_eq!(result["outputs"], json!({}));
-            assert!(project.rows("SELECT * FROM \"check\" WHERE execution IN (SELECT id FROM execution WHERE outcome = 'reused')").is_empty());
+            assert_eq!(first_result["reference"], result["reference"]);
         }
-        let unknown = rows
-            .iter()
-            .find(|row| row["name"] == "landing_unknown")
-            .unwrap();
-        assert_eq!(unknown["outcome"], "pass");
-        let unknown_evidence: serde_json::Value =
-            serde_json::from_str(unknown["verification"].as_str().unwrap()).unwrap();
-        assert_eq!(unknown_evidence["reuse"], "disabled");
+        assert_eq!(selected["outcome"], "reused");
+        assert_eq!(result["judgment"], serde_json::Value::Null);
+        assert_eq!(result["outputs"], json!({}));
+        assert!(project.rows("SELECT * FROM \"check\" WHERE execution IN (SELECT id FROM execution WHERE outcome = 'reused')").is_empty());
+        for unknown in [&rows[1], &rows[3]] {
+            assert_eq!(unknown["outcome"], "pass");
+            let unknown_evidence: serde_json::Value =
+                serde_json::from_str(unknown["verification"].as_str().unwrap()).unwrap();
+            assert_eq!(unknown_evidence["reuse"], "disabled");
+        }
         let final_row = project
             .rows("SELECT inputs, approval, intent_old FROM execution WHERE outcome = 'landed' ORDER BY id DESC LIMIT 1")[0]
             .clone();
         assert_eq!(final_row["intent_old"], target);
         let inputs: serde_json::Value =
             serde_json::from_str(final_row["inputs"].as_str().unwrap()).unwrap();
-        assert_eq!(inputs["children"], json!([rows[0]["id"], rows[1]["id"]]));
+        assert_eq!(
+            inputs["children"],
+            json!(rows.iter().map(|row| row["id"].clone()).collect::<Vec<_>>())
+        );
         let approved = project.rows("SELECT * FROM approval ORDER BY id DESC LIMIT 1")[0].clone();
         assert_eq!(final_row["approval"], approved["id"]);
         assert_eq!(approved["base"], base);
@@ -217,7 +256,7 @@ fn identical_prepared_inputs_reference_candidate_pass_and_changed_tree_reruns() 
             serde_json::from_str(approved["checks"].as_str().unwrap()).unwrap();
         assert!(approved_checks.as_array().unwrap().contains(&check["id"]));
         assert_eq!(
-            project.rows("SELECT * FROM execution WHERE name = 'candidate' AND attempt = (SELECT max(id) FROM attempt)"),
+            project.rows("SELECT * FROM execution WHERE name = 'candidate' AND parent IS NULL AND attempt = (SELECT max(id) FROM attempt)"),
             original
         );
         assert_eq!(
