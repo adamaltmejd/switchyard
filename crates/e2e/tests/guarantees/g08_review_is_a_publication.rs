@@ -374,6 +374,8 @@ fn a_standalone_report_retains_its_owner_across_restart_and_checked_stop() {
 fn published_owner_scenario(standalone: bool) {
     let hold = Latch::new();
     let held = hold.clone();
+    let request_signal = std::sync::Arc::new(Mutex::new(None::<std::path::PathBuf>));
+    let model_signal = request_signal.clone();
     let machine = Machine::new(
         if standalone {
             "g68-held-owner"
@@ -384,6 +386,9 @@ fn published_owner_scenario(standalone: bool) {
             if standalone {
                 if request.turn() == 0 {
                     return Reply::Tools(vec![publish_report()]);
+                }
+                if let Some(path) = model_signal.lock().unwrap().take() {
+                    std::fs::write(path, "request\n").unwrap();
                 }
                 return Reply::Hold(held.clone(), Box::new(Reply::Text("done".into())));
             }
@@ -401,10 +406,17 @@ fn published_owner_scenario(standalone: bool) {
                 1 => Reply::Tools(vec![publish(json!([
                     { "priority": "P0", "body": "second thoughts" }
                 ]))]),
-                _ => Reply::Hold(held.clone(), Box::new(Reply::Text("never".into()))),
+                _ => {
+                    if let Some(path) = model_signal.lock().unwrap().take() {
+                        std::fs::write(path, "request\n").unwrap();
+                    }
+                    Reply::Hold(held.clone(), Box::new(Reply::Text("never".into())))
+                }
             }
         },
     );
+    let request_held = machine.root.join("request-held");
+    *request_signal.lock().unwrap() = Some(request_held.clone());
     let owners = machine.root.join("owners");
     std::fs::create_dir(&owners).unwrap();
     let selected_owner = machine.root.join("selected-owner");
@@ -417,6 +429,7 @@ fn published_owner_scenario(standalone: bool) {
     let up_ended = machine.root.join("up-ended");
     let exec_ended = machine.root.join("exec-ended");
     for fifo in [
+        &request_held,
         &owner_release,
         &teardown_held,
         &teardown_release,
@@ -437,12 +450,20 @@ fn published_owner_scenario(standalone: bool) {
         .write(true)
         .open(&owner_release)
         .unwrap();
+    // Save the spec pipe before the shell redirects asynchronous stdin.
+    // Pick a closed descriptor so the inherited execution lock is untouched.
+    // Neither the wrapper nor its real child retains the extra descriptor.
     machine.wrapper(
         "pinfold",
         &format!(
             "observe=0; if [ -f '{}' ]; then observe=1; fi\n\
              if [ \"$1 $2\" = 'box up' ]; then\n\
-             \"$REAL\" \"$@\" <&0 & child=$!; echo \"$child\" > '{}';\n\
+             spec_fd=''; for fd in 3 4 5 6 7 8 9; do\n\
+             if ! (eval \": <&$fd\") 2>/dev/null; then spec_fd=$fd; break; fi; done\n\
+             [ -n \"$spec_fd\" ] || exit 1\n\
+             eval \"exec $spec_fd<&0\"\n\
+             eval '\"$REAL\" \"$@\" <&'\"$spec_fd $spec_fd\"'<&- &'\n\
+             child=$!; eval \"exec $spec_fd<&-\"; echo \"$child\" > '{}';\n\
              wait \"$child\"; result=$?\n\
              if [ \"$observe\" = 1 ]; then echo \"$child\" > '{}'; fi; exit \"$result\"; fi\n\
              if [ \"$1 $2\" = 'box down' ] && [ -f '{}' ] && [ \"$3\" = \"$(cat '{}')\" ]; then\n\
@@ -505,7 +526,23 @@ fn published_owner_scenario(standalone: bool) {
         None
     };
     let kind = if standalone { "report" } else { "review" };
+    let mut setup = project.watch(0);
+    let started = setup.find("owner execution started", |event| {
+        event["event"] == "execution.started"
+            && event["data"]["kind"] == kind
+            && if let Some(id) = scope_id {
+                event["execution"] == id
+            } else {
+                event["ticket"] == "Y-1"
+            }
+    });
+    let execution = started["execution"].as_i64().unwrap();
+    assert_eq!(
+        setup.said_before_end(&request_held, Some(execution)),
+        "request\n"
+    );
     hold.wait_held();
+    drop(setup);
     assert!(project.rows("SELECT id FROM finding").is_empty());
     if !standalone {
         assert_eq!(
