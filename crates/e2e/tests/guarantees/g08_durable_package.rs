@@ -19,17 +19,18 @@ fn copy_tree(from: &Path, to: &Path) {
     }
 }
 
-fn pre_effort_source() -> std::path::PathBuf {
+fn packaged_daemon_source(name: &str, revision: &str, runner_suffix: &str) -> std::path::PathBuf {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let target = yard().parent().unwrap().join("pre-effort");
+    let target = yard().parent().unwrap().join(name);
     let source = target.join("source");
     std::fs::create_dir_all(&source).unwrap();
-    // Actual supplied six-field controller and daemon, not a schema imitation.
+    // Build real runtime assets; the optional comment changes sealed bytes,
+    // not the controller's launch behavior or an admission field.
     let archive = std::process::Command::new("git")
         .current_dir(root)
         .args([
             "archive",
-            "559f730724a89222a4e57868b4770a2a4da65485",
+            revision,
             "Cargo.toml",
             "Cargo.lock",
             "crates",
@@ -55,6 +56,11 @@ fn pre_effort_source() -> std::path::PathBuf {
             .unwrap()
             .success()
     );
+    if !runner_suffix.is_empty() {
+        let runner = source.join("runners/durable-audit/runner.mjs");
+        let bytes = std::fs::read_to_string(&runner).unwrap();
+        std::fs::write(runner, format!("{bytes}{runner_suffix}")).unwrap();
+    }
     assert!(
         std::process::Command::new(env!("CARGO"))
             .current_dir(&source)
@@ -548,6 +554,9 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     );
     assert_context(&initial_request, false);
     let held = project.json(&["attempt", "show", "Y-3"]);
+    // G8: fallback must not hide missing admission launch-contract metadata.
+    // Sabotage: omit package_launch in admit(); the spec supplies this token.
+    assert_eq!(held["attempt"]["admission"]["package_launch"], "effort");
     let source = project.git(&["rev-parse", "HEAD"]).trim().to_string();
     let inputs = &held["attempt"]["admission"]["inputs"];
     for key in ["definition_commit", "staging_commit", "image_commit"] {
@@ -662,6 +671,8 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
         }),
     );
     assert_eq!(adopted["result"]["plan_revision"], 2, "{adopted}");
+    // Sabotage: drop the recorded launch contract during definition adoption.
+    assert_eq!(adopted["result"]["plan"]["package_launch"], "effort");
     assert_eq!(
         adopted["result"]["plan"]["inputs"]["staging_commit"],
         source
@@ -802,6 +813,7 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
         }),
     );
     assert_eq!(staged["result"]["plan_revision"], 3, "{staged}");
+    assert_eq!(staged["result"]["plan"]["package_launch"], "effort");
     phase.store(2, std::sync::atomic::Ordering::SeqCst);
     std::fs::write(machine.root.join("release-3"), "go\n").unwrap();
     third.wait_held();
@@ -897,6 +909,7 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
         image_adopted["result"]["plan_revision"], 4,
         "{image_adopted}"
     );
+    assert_eq!(image_adopted["result"]["plan"]["package_launch"], "effort");
     phase.store(3, std::sync::atomic::Ordering::SeqCst);
     std::fs::write(machine.root.join("release-3"), "go\n").unwrap();
     fourth.wait_held();
@@ -1199,7 +1212,8 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     // The old daemon admits and stops a held real controller. Only after checked
     // release does the new daemon start its successor from that frozen admission.
     // Current-package controls cannot catch this six-field protocol failure.
-    let old_source = pre_effort_source();
+    let old_source =
+        packaged_daemon_source("pre-effort", "559f730724a89222a4e57868b4770a2a4da65485", "");
     machine.kill();
     machine.use_binary(Some(old_source.parent().unwrap().join("debug/yard")));
     machine.start();
@@ -1376,6 +1390,207 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
         )),
         old_rows
     );
+    watch.until("older omission control cleanup ended", |event| {
+        event["event"] == "execution.ended"
+            && event["ticket"] == "Y-9"
+            && event["data"]["kind"] == "cleanup"
+    });
+
+    // G8: independently exercise both capability paths across real daemon
+    // changes. Sabotage: remove the metadata arm (different compiled package),
+    // or remove the exact-package arm (real b9e374 admission without metadata).
+    // Same-package new admissions mask either fault. Actual archived source,
+    // a fixture comment compiled into a real sealed asset, and boxed asset
+    // reads establish the package relation without forged store identities.
+    const CAPABILITY_VARIANT: &str = "\n// Y136 recorded-launch capability fixture asset.\n";
+    for (attempt_number, ticket, source, contract) in [
+        (
+            8,
+            "Y-10",
+            packaged_daemon_source("effort-metadata", "HEAD", CAPABILITY_VARIANT),
+            Some("effort"),
+        ),
+        (
+            9,
+            "Y-11",
+            packaged_daemon_source(
+                "effort-fallback",
+                "b9e374f59b2141edc3d2666f07796805c865764b",
+                "",
+            ),
+            None,
+        ),
+    ] {
+        let source_runner =
+            std::fs::read_to_string(source.join("runners/durable-audit/runner.mjs")).unwrap();
+        assert_eq!(
+            source_runner,
+            format!(
+                "{original}{}",
+                if contract.is_some() {
+                    CAPABILITY_VARIANT
+                } else {
+                    ""
+                }
+            )
+        );
+        for asset in ["launch", "package-lock.json"] {
+            assert_eq!(
+                std::fs::read(source.join("runners/durable-audit").join(asset)).unwrap(),
+                std::fs::read(
+                    Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("../../runners/durable-audit")
+                        .join(asset)
+                )
+                .unwrap()
+            );
+        }
+        machine.kill();
+        machine.use_binary(Some(source.parent().unwrap().join("debug/yard")));
+        machine.start();
+        project.write("runners/durable-audit/runner.mjs", &source_runner);
+        project.git(&["add", "runners/durable-audit/runner.mjs"]);
+        project.git(&[
+            "commit",
+            "-qm",
+            "Select actual capability qualification runtime",
+        ]);
+        project.json(&["sync"]);
+        image(&project, "");
+        launch(&project, attempt_number, "Preserved capable controller");
+        let configuration =
+            std::fs::read_to_string(project.path.join(".yard/config.toml")).unwrap();
+        project.reconfigure(&configuration.replace(
+            "model = \"fake-model\"",
+            "model = \"fake-model\"\neffort = \"medium\"",
+        ));
+        let admitting_hold = Latch::new();
+        *request_hold.lock().unwrap() = Some((request_path.clone(), admitting_hold.clone()));
+        let mut watch = project.watch(project.json(&["status"])["seq"].as_i64().unwrap());
+        selected_start(&project, "Preserved capable controller");
+        let admitting_execution = held_controller_request(&mut watch, ticket, &request_path);
+        admitting_hold.wait_held();
+        let admission = project.json(&["attempt", "show", ticket])["attempt"]["admission"].clone();
+        assert_eq!(
+            admission.get("package_launch").and_then(Value::as_str),
+            contract
+        );
+        assert_eq!(
+            std::fs::read_to_string(machine.root.join(format!("asset-{attempt_number}"))).unwrap(),
+            source_runner
+        );
+        assert_eq!(
+            controller_requests(&machine).last().unwrap().body["reasoning"]["effort"],
+            "medium"
+        );
+        project.json(&["attempt", "stop", ticket]);
+        watch.until("capable admitting execution stopped", |event| {
+            event["event"] == "execution.ended" && event["execution"] == admitting_execution
+        });
+        watch.until("capable admitting execution released", |event| {
+            event["event"] == "execution.released" && event["execution"] == admitting_execution
+        });
+        admitting_hold.release();
+        let historical = project.rows(&format!(
+            "SELECT * FROM execution WHERE id = {admitting_execution}"
+        ));
+        machine.kill();
+        machine.use_binary(None);
+        machine.start();
+        let mut operator = machine.operator();
+        operator.initialize();
+        let receiving_selection = operator.call(
+            "yard_plan_validate",
+            json!({
+                "project": project.path, "workflow": "plan",
+                "overrides": {"implementer": {"profile": "durable"}}
+            }),
+        );
+        assert_eq!(receiving_selection["result"]["shape"], "packaged-audit");
+        assert_eq!(
+            receiving_selection["result"]["bindings"]["selected_inputs"]["package"]
+                == admission["inputs"]["package"],
+            contract.is_none()
+        );
+        let receiving_hold = Latch::new();
+        *request_hold.lock().unwrap() = Some((request_path.clone(), receiving_hold.clone()));
+        let mut watch = project.watch(project.json(&["status"])["seq"].as_i64().unwrap());
+        project.json(&["attempt", "start", ticket]);
+        let receiving_execution = held_controller_request(&mut watch, ticket, &request_path);
+        receiving_hold.wait_held();
+        assert_eq!(
+            std::fs::read_to_string(machine.root.join(format!("asset-{attempt_number}"))).unwrap(),
+            source_runner
+        );
+        // This provider-wire observation cannot be satisfied by the other arm.
+        assert_eq!(
+            controller_requests(&machine).last().unwrap().body["reasoning"]["effort"],
+            "medium"
+        );
+        let frozen = project.rows(&format!(
+            "SELECT plan_revision, inputs, effort FROM execution WHERE id = {receiving_execution}"
+        ));
+        let configuration =
+            std::fs::read_to_string(project.path.join(".yard/config.toml")).unwrap();
+        project.reconfigure(&configuration.replace("effort = \"medium\"", "effort = \"max\""));
+        let definition = project.git(&["rev-parse", "HEAD"]).trim().to_string();
+        let adopted = operator.call("yard_attempt_revise", json!({
+            "project": project.path, "ticket": ticket, "plan_revision": 1, "definition_commit": definition
+        }));
+        assert_eq!(adopted["result"]["plan_revision"], 2, "{adopted}");
+        assert_eq!(
+            adopted["result"]["plan"]
+                .get("package_launch")
+                .and_then(Value::as_str),
+            contract
+        );
+        project.json(&["attempt", "stop", ticket]);
+        watch.until("capable receiving execution stopped", |event| {
+            event["event"] == "execution.ended" && event["execution"] == receiving_execution
+        });
+        watch.until("capable receiving execution released", |event| {
+            event["event"] == "execution.released" && event["execution"] == receiving_execution
+        });
+        receiving_hold.release();
+        let publishing_hold = Latch::new();
+        *request_hold.lock().unwrap() = Some((request_path.clone(), publishing_hold.clone()));
+        project.json(&["attempt", "start", ticket]);
+        let publishing_execution = held_controller_request(&mut watch, ticket, &request_path);
+        publishing_hold.wait_held();
+        assert_eq!(
+            controller_requests(&machine).last().unwrap().body["reasoning"]["effort"],
+            "max"
+        );
+        publishing_hold.release();
+        watch.until("capable publication ended", |event| {
+            event["event"] == "execution.ended" && event["execution"] == publishing_execution
+        });
+        watch.until("capable publication released", |event| {
+            event["event"] == "execution.released" && event["execution"] == publishing_execution
+        });
+        let preserved = project.json(&["attempt", "show", ticket]);
+        assert_eq!(preserved["attempt"]["admission"], admission);
+        let publication = preserved["executions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["execution"] == publishing_execution)
+            .unwrap();
+        assert_eq!(publication["report"]["report"], expected_report());
+        assert_eq!(publication["result_eligible"], true);
+        assert_eq!(
+            project.rows(&format!(
+                "SELECT * FROM execution WHERE id = {admitting_execution}"
+            )),
+            historical
+        );
+        assert_eq!(project.rows(&format!("SELECT plan_revision, inputs, effort FROM execution WHERE id = {receiving_execution}")), frozen);
+        watch.until("capable controller cleanup ended", |event| {
+            event["event"] == "execution.ended"
+                && event["ticket"] == ticket
+                && event["data"]["kind"] == "cleanup"
+        });
+    }
     let requests = controller_requests(&machine);
     for request in requests {
         assert_eq!(
@@ -1523,6 +1738,8 @@ fn a_packaged_audit_bounds_iterations_and_requires_native_publication() {
     selected_start(&project, "Stop selected controller");
     stop.wait_held();
     let before = project.json(&["attempt", "show", "Y-3"]);
+    // G8: record the same launch contract before held stopped-owner adoption.
+    assert_eq!(before["attempt"]["admission"]["package_launch"], "effort");
     let old = before["executions"][0].clone();
     let id = old["execution"].as_i64().unwrap();
     let handle =
@@ -1663,6 +1880,8 @@ fn a_packaged_audit_bounds_iterations_and_requires_native_publication() {
         adopted["result"]["plan"]["inputs"]["definition_commit"],
         definition
     );
+    // Sabotage: drop package_launch while adopting for a stopped owner.
+    assert_eq!(adopted["result"]["plan"]["package_launch"], "effort");
     assert_eq!(
         project.rows(&format!("SELECT * FROM execution WHERE id = {id}")),
         frozen_rows
