@@ -473,6 +473,7 @@ impl Config {
                     } else {
                         plan.ordinary_selection(&ordinary, self.review.max_rounds, &self.profiles)
                             .is_some()
+                            || plan.read_only_selection(&ordinary, self)
                     }
                 })
             })
@@ -499,19 +500,232 @@ impl Plan {
     pub fn runtime(&self) -> &'static str {
         if self.packaged().is_some() {
             "packaged-audit"
+        } else if self.concurrent() {
+            "read-only-graph"
         } else {
             "ordinary-linear"
         }
     }
     pub fn admitted(admission: &Value) -> Result<Self, serde_json::Error> {
         let mut plan: Self = serde_json::from_value(admission["plan"].clone())?;
-        if admission["runtime"] != "ordinary-linear"
+        if admission["runtime"] != "read-only-graph"
+            && admission["runtime"] != "ordinary-linear"
             && admission["runtime"] != "packaged-audit"
             && !plan.inputs.contains_key("feedback")
         {
             plan.ordinary_routes(admission["review"]["max_rounds"].as_u64().unwrap_or(3) as u32);
         }
         Ok(plan)
+    }
+
+    pub fn concurrent(&self) -> bool {
+        self.nodes.values().any(|node| {
+            node.routes
+                .get("complete")
+                .is_some_and(|routes| routes.len() > 1)
+                || node.inputs.iter().any(|(name, input)| {
+                    name != "panel" && input.node.is_some() && input.kind == Output::Verdict
+                })
+        }) || self.nodes.iter().any(|(name, node)| {
+            name.starts_with("candidate-gate-") && node.access == Access::ReadOnly
+        })
+    }
+
+    /// Complete edges define a DAG. Required inputs must come from an ancestor.
+    pub fn complete_order(&self) -> Option<Vec<&str>> {
+        let mut order = Vec::new();
+        let mut reached = BTreeSet::from(["implementer"]);
+        while order.len() < self.nodes.len() {
+            let next = self.nodes.keys().map(String::as_str).find(|name| {
+                reached.contains(name)
+                    && !order.contains(name)
+                    && self.nodes.iter().all(|(source, node)| {
+                        !node
+                            .routes
+                            .get("complete")
+                            .is_some_and(|routes| routes.iter().any(|route| route.to == *name))
+                            || order.contains(&source.as_str())
+                    })
+            })?;
+            order.push(next);
+            for route in self.nodes[next]
+                .routes
+                .get("complete")
+                .into_iter()
+                .flatten()
+            {
+                if route.repeat.is_some() {
+                    return None;
+                }
+                reached.insert(route.to.as_str());
+            }
+        }
+        Some(order)
+    }
+
+    fn read_only_selection(&self, ordinary: &Self, config: &Config) -> bool {
+        if !self.concurrent()
+            || self.inputs != ordinary.inputs
+            || !self.nodes.contains_key("implementer")
+        {
+            return false;
+        }
+        let Some(order) = self.complete_order() else {
+            return false;
+        };
+        let mut landing = false;
+        for (position, name) in order.iter().enumerate() {
+            let node = &self.nodes[*name];
+            let Some(defined) = ordinary.nodes.get(*name) else {
+                return false;
+            };
+            let mut expected = defined.clone();
+            expected.routes.remove("complete");
+            let mut provided = node.clone();
+            provided.routes.remove("complete");
+            if *name == "implementer" || name.starts_with("landing-gate-") {
+                if name.starts_with("landing-gate-") {
+                    let incoming: Vec<_> =
+                        self.nodes
+                            .iter()
+                            .filter(|(_, source)| {
+                                source.routes.get("complete").is_some_and(|routes| {
+                                    routes.iter().any(|route| route.to == *name)
+                                })
+                            })
+                            .map(|(source, _)| source.as_str())
+                            .collect();
+                    if incoming.len() != 1 || (landing && incoming[0] != order[position - 1]) {
+                        return false;
+                    }
+                    if node.routes.get("complete").is_some_and(|r| r.len() > 1) {
+                        return false;
+                    }
+                    landing = true;
+                    expected.operator_failure = node.operator_failure;
+                }
+                if provided != expected {
+                    return false;
+                }
+                continue;
+            }
+            if landing || node.access != Access::ReadOnly {
+                return false;
+            }
+            if let Runner::Command { gate } = &node.runner {
+                if !config
+                    .gates
+                    .iter()
+                    .any(|g| g.name == *gate && g.runs_in == crate::config::RunsIn::Box)
+                {
+                    return false;
+                }
+            } else if node.runner != expected.runner {
+                if !config.profiles.values().any(|profile| {
+                    profile.runner == node.runner
+                        && profile.access == Access::ReadOnly
+                        && profile.outputs == expected.outputs
+                        && profile.outcomes.iter().any(|o| o == "complete")
+                        && profile
+                            .outcomes
+                            .iter()
+                            .all(|o| o == "complete" || o == "blocked")
+                }) {
+                    return false;
+                }
+                expected.runner = node.runner.clone();
+            }
+            expected.access = Access::ReadOnly;
+            expected.operator_failure = node.operator_failure;
+            expected.inputs.remove("panel");
+            expected.requires = vec!["candidate".into()];
+            let outcome = if name.starts_with("review-") {
+                "blocked"
+            } else {
+                "failed"
+            };
+            expected.outcomes = vec!["complete".into(), outcome.into()];
+            expected.routes = BTreeMap::from([(
+                outcome.into(),
+                vec![Route {
+                    to: "implementer".into(),
+                    repeat: Some(if outcome == "blocked" {
+                        config.review.max_rounds
+                    } else {
+                        1
+                    }),
+                }],
+            )]);
+            if node.inputs.get("candidate") != expected.inputs.get("candidate")
+                || node.requires.len() != node.inputs.len()
+                || node
+                    .inputs
+                    .keys()
+                    .any(|input| !node.requires.contains(input))
+            {
+                return false;
+            }
+            for (input, reference) in &node.inputs {
+                if input == "candidate" {
+                    continue;
+                }
+                let Some(source) = reference.node.as_deref() else {
+                    return false;
+                };
+                if reference.output != "result"
+                    || reference.kind != Output::Verdict
+                    || !order[..position].contains(&source)
+                    || source.starts_with("landing-gate-")
+                    || source == "implementer"
+                {
+                    return false;
+                }
+                let mut ancestors = BTreeSet::from([*name]);
+                for predecessor in order[..position].iter().rev() {
+                    if self.nodes[*predecessor]
+                        .routes
+                        .get("complete")
+                        .is_some_and(|routes| {
+                            routes
+                                .iter()
+                                .any(|route| ancestors.contains(route.to.as_str()))
+                        })
+                    {
+                        ancestors.insert(*predecessor);
+                    }
+                }
+                if !ancestors.contains(source) {
+                    return false;
+                }
+            }
+            let incoming: Vec<_> = self
+                .nodes
+                .iter()
+                .filter(|(_, predecessor)| {
+                    predecessor
+                        .routes
+                        .get("complete")
+                        .is_some_and(|routes| routes.iter().any(|route| route.to == *name))
+                })
+                .map(|(source, _)| source.as_str())
+                .collect();
+            if incoming.len() > 1
+                && incoming.iter().any(|source| {
+                    !node
+                        .inputs
+                        .values()
+                        .any(|input| input.node.as_deref() == Some(source))
+                })
+            {
+                return false;
+            }
+            expected.inputs = node.inputs.clone();
+            expected.requires = node.requires.clone();
+            if provided != expected {
+                return false;
+            }
+        }
+        true
     }
 
     /// Retained definitions and repair bounds stay ordinary. Panel links follow

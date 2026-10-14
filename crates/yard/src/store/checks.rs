@@ -263,6 +263,16 @@ pub fn reusable(
     execution: &super::executions::Execution,
     evidence: &Value,
 ) -> Result<Option<Value>, Fail> {
+    let attempt = super::attempts::get(conn, execution.attempt)?;
+    if execution.parent.is_none()
+        && attempt
+            .admission
+            .as_ref()
+            .is_some_and(|admission| admission["runtime"] == "read-only-graph")
+    {
+        // Graph joins consume actual same-revision command results.
+        return Ok(None);
+    }
     let Some(identity) = matching_identity(conn, execution, evidence)? else {
         return Ok(None);
     };

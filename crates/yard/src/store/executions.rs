@@ -526,7 +526,7 @@ pub fn check_digest(
     Ok(crate::config::digest(&[b"consumer", &definition]))
 }
 
-/// Bind only the admitted ordinary chain. Merge, cleanup and old history have no node.
+/// Merge, cleanup and old history have no graph node.
 fn binding(
     conn: &Connection,
     attempt: &super::attempts::Attempt,
@@ -583,6 +583,59 @@ fn binding(
             .as_str()
             .filter(|node| *node != "implementer")
         {
+            if plan.concurrent() {
+                let (kind, supplier) = match &plan.nodes[source].runner {
+                    crate::plan::Runner::Command { gate } => ("gate", gate.as_str()),
+                    crate::plan::Runner::Agent { .. } => {
+                        let index = source
+                            .strip_prefix("review-")
+                            .and_then(|index| index.parse::<usize>().ok())
+                            .ok_or_else(|| Fail::refused("invalid result supplier"))?;
+                        (
+                            "review",
+                            admission["workflow"]["review"][index]
+                                .as_str()
+                                .ok_or_else(|| Fail::refused("invalid result supplier"))?,
+                        )
+                    }
+                    _ => return Err(Fail::refused("invalid result supplier")),
+                };
+                let input = super::checks::Input {
+                    attempt: attempt.id,
+                    base: start.base.unwrap_or_default().into(),
+                    head: start.head.unwrap_or_default().into(),
+                    proof: start.proof.unwrap_or_default().into(),
+                    ticket_revision: start.ticket_revision.unwrap_or_default(),
+                    plan_revision: attempt.plan_revision(),
+                    digest: start.digest.unwrap_or_default().into(),
+                };
+                let Some(check) = super::checks::current(conn, kind, supplier, &input)? else {
+                    return Ok(None);
+                };
+                let producer = get(conn, check.execution)?;
+                if producer.node.as_deref() != Some(source)
+                    || producer.plan_revision != attempt.plan_revision()
+                    || !producer.result_eligible
+                {
+                    return Ok(None);
+                }
+                let output = &producer
+                    .result
+                    .as_ref()
+                    .ok_or_else(|| Fail::refused("missing supplier result"))?["outputs"]
+                    [reference["output"].as_str().unwrap_or_default()];
+                if output["kind"] != reference["kind"] {
+                    return Ok(None);
+                }
+                inputs.insert(
+                    name.clone(),
+                    json!({"kind": reference["kind"],
+                    "source": {"execution": producer.id, "node": source,
+                        "output": reference["output"], "plan_revision": producer.plan_revision},
+                    "value": output["value"]}),
+                );
+                continue;
+            }
             let index = source
                 .strip_prefix("review-")
                 .and_then(|index| index.parse::<usize>().ok())
@@ -684,6 +737,14 @@ fn binding(
     Ok(Some((node, Value::Object(inputs))))
 }
 
+pub fn inputs_ready(
+    conn: &Connection,
+    attempt: &super::attempts::Attempt,
+    start: &Start,
+) -> Result<bool, Fail> {
+    Ok(binding(conn, attempt, start)?.is_some())
+}
+
 /// Reuse an actual producer, never relabel its revision. Complete routing
 /// selects successors; every other node policy and its typed inputs bind evidence.
 pub fn qualifies(
@@ -710,6 +771,12 @@ pub fn qualifies(
         crate::plan::Plan::admitted(&original).map_err(|error| Fail::refused(error.to_string()))?;
     let current =
         crate::plan::Plan::admitted(current).map_err(|error| Fail::refused(error.to_string()))?;
+    if current.concurrent()
+        && execution.kind != "implementation"
+        && execution.plan_revision != attempt.plan_revision()
+    {
+        return Ok(false);
+    }
     let Some(mut old) = original.nodes.get(node).cloned() else {
         return Ok(false);
     };
@@ -939,9 +1006,16 @@ pub fn end(tx: &Connection, id: i64, end: End) -> Result<(), Fail> {
                 let mut blocked = execution
                     .inputs
                     .as_ref()
-                    .and_then(|inputs| inputs["panel"]["value"]["blocked"].as_array())
+                    .and_then(Value::as_object)
+                    .into_iter()
+                    .flat_map(|inputs| inputs.values())
+                    .filter(|input| input["kind"] == "verdict")
+                    .filter_map(|input| input["value"]["blocked"].as_array())
+                    .flatten()
                     .cloned()
-                    .unwrap_or_default();
+                    .collect::<Vec<_>>();
+                blocked.sort_by_key(Value::as_i64);
+                blocked.dedup();
                 if let Some(check) = &publication
                     && check.verdict == "fail"
                 {

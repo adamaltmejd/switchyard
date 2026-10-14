@@ -1834,7 +1834,23 @@ async fn box_gate(
     let mut mounts = vec![Mount {
         host: checkout.into(),
         guest: "/workspace".into(),
-        readonly: false,
+        readonly: project
+            .read(|conn| {
+                let row = executions::get(conn, execution)?;
+                let attempt = attempts::for_execution(conn, &row)?;
+                Ok(attempt
+                    .admission
+                    .as_ref()
+                    .and_then(|admission| {
+                        let plan = crate::plan::Plan::admitted(admission).ok()?;
+                        Some(
+                            plan.nodes.get(row.node.as_deref()?)?.access
+                                == crate::plan::Access::ReadOnly,
+                        )
+                    })
+                    .unwrap_or(false))
+            })
+            .map_err(|fail| fail.message)?,
     }];
     if let Some(proof) = proof {
         mounts.push(Mount {

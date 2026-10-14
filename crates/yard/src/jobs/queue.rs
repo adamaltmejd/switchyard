@@ -810,13 +810,12 @@ pub async fn land(
         .await;
     }
     let mut selected = Vec::new();
-    let mut current = "implementer";
-    while let Some(route) = plan.nodes[current]
-        .routes
-        .get("complete")
-        .and_then(|routes| routes.first())
+    for current in plan
+        .complete_order()
+        .ok_or_else(|| Fail::refused("unsupported admitted complete routes"))?
+        .into_iter()
+        .filter(|node| *node != "implementer")
     {
-        current = &route.to;
         let node = &plan.nodes[current];
         if !node
             .inputs

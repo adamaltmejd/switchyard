@@ -437,19 +437,21 @@ pub async fn load_attempt(
 
     let admitted =
         crate::plan::Plan::admitted(admission).map_err(|error| Fail::refused(error.to_string()))?;
-    let expected =
-        if admission["runtime"] == "ordinary-linear" || admission["runtime"] == "packaged-audit" {
-            let mut selection = admission["selection"].clone();
-            selection["project"] = json!(project.root);
-            let request = serde_json::from_value(selection)
-                .map_err(|error| Fail::refused(error.to_string()))?;
-            loaded
-                .config
-                .resolve_plan(&request)
-                .map_err(|error| Fail::refused(error.to_string()))?
-        } else {
-            loaded.config.workflow_plan(&attempt.workflow)?
-        };
+    let expected = if matches!(
+        admission["runtime"].as_str(),
+        Some("ordinary-linear" | "packaged-audit" | "read-only-graph")
+    ) {
+        let mut selection = admission["selection"].clone();
+        selection["project"] = json!(project.root);
+        let request =
+            serde_json::from_value(selection).map_err(|error| Fail::refused(error.to_string()))?;
+        loaded
+            .config
+            .resolve_plan(&request)
+            .map_err(|error| Fail::refused(error.to_string()))?
+    } else {
+        loaded.config.workflow_plan(&attempt.workflow)?
+    };
     let mut recorded_inputs = admission["inputs"].clone();
     if admitted.packaged().is_some() {
         if admission.get("package_checkpoint").is_some()
@@ -661,15 +663,30 @@ fn runnable(
         return Ok(None);
     }
     let executions = executions::for_attempt(conn, attempt.id)?;
-    if executions
-        .iter()
-        .any(|row| row.status == "running" || row.reserved)
-    {
+    let edited = attempts::edit_pending(conn, attempt.id)?;
+    let concurrent = attempt
+        .admission
+        .as_ref()
+        .and_then(|admission| crate::plan::Plan::admitted(admission).ok())
+        .filter(|plan| plan.concurrent());
+    if executions.iter().any(|row| {
+        (row.status == "running" || row.reserved)
+            && !concurrent.as_ref().is_some_and(|plan| {
+                !edited
+                    && attempt.next.is_none()
+                    && row.parent.is_none()
+                    && row.plan_revision == attempt.plan_revision()
+                    && row
+                        .node
+                        .as_ref()
+                        .and_then(|node| plan.nodes.get(node))
+                        .is_some_and(|node| node.access == crate::plan::Access::ReadOnly)
+            })
+    }) {
         return Ok(None);
     }
     let open = attempts::open_for_attempt(conn, attempt.id)?;
     // A pending edit outranks an edit proposal made from the pre-edit text.
-    let edited = attempts::edit_pending(conn, attempt.id)?;
     if open.iter().any(|item| {
         (item.kind != "proposal" && item.kind != "approval")
             || (item.reason == "edit" && !(edited && item.kind == "proposal"))
@@ -780,26 +797,41 @@ async fn advance(
     let mut selected = Vec::new();
     let mut accepted = Vec::new();
     let mut blocked = Vec::new();
-    let mut current = "implementer";
+    let concurrent = plan.concurrent();
+    let active = executions
+        .iter()
+        .any(|row| row.status == "running" || row.reserved);
+    let mut unfinished = false;
+    let mut completed = std::collections::BTreeSet::from(["implementer"]);
     let routed = attempt
         .admission
         .as_ref()
         .is_some_and(|admission| admission["plan"]["inputs"].get("feedback").is_some());
     // Only the candidate/review portion consumes routes here. The queue owns
     // the external merged input and all effects beyond this boundary.
-    while let Some(route) = plan.nodes[current]
-        .routes
-        .get("complete")
-        .and_then(|routes| routes.first())
+    for current in plan
+        .complete_order()
+        .ok_or_else(|| Fail::refused("unsupported admitted complete routes"))?
+        .into_iter()
+        .filter(|node| *node != "implementer")
     {
-        current = &route.to;
         let node = &plan.nodes[current];
         if node
             .inputs
             .values()
             .any(|input| input.node.is_none() && input.output == "merged")
         {
-            break;
+            continue;
+        }
+        if plan.nodes.iter().any(|(source, predecessor)| {
+            predecessor
+                .routes
+                .get("complete")
+                .is_some_and(|routes| routes.iter().any(|route| route.to == current))
+                && !completed.contains(source.as_str())
+        }) {
+            unfinished = true;
+            continue;
         }
         let (kind, name, digest) = match &node.runner {
             crate::plan::Runner::Command { gate } => {
@@ -826,6 +858,27 @@ async fn advance(
         };
         let check = project.read(|conn| checks::current(conn, kind, name, &input))?;
         let Some(check) = check else {
+            if executions.iter().any(|row| {
+                row.node.as_deref() == Some(current) && (row.status == "running" || row.reserved)
+            }) {
+                unfinished = true;
+                continue;
+            }
+            if !project.read(|conn| {
+                executions::inputs_ready(
+                    conn,
+                    attempt,
+                    &executions::Start {
+                        kind,
+                        name: Some(name),
+                        digest: Some(digest),
+                        ..shared
+                    },
+                )
+            })? {
+                unfinished = true;
+                continue;
+            }
             let agent = match &node.runner {
                 crate::plan::Runner::Agent { agent, .. } => Some(agent.as_str()),
                 _ => None,
@@ -859,7 +912,11 @@ async fn advance(
             if let Some(execution) = execution {
                 spawn(daemon, project, kind, execution);
             }
-            return Ok(());
+            if !concurrent {
+                return Ok(());
+            }
+            unfinished = true;
+            continue;
         };
         let result = project.read(|conn| executions::get(conn, check.execution))?;
         // Intermediate seats publish their own verdict; the final result also
@@ -929,7 +986,12 @@ async fn advance(
             || (kind == "gate" && decision.as_deref() == Some("accept"))
             || (kind == "review" && blocked.is_empty())
         {
+            completed.insert(current);
             continue;
+        }
+        // A repair is a writer. Every reader must release before it starts.
+        if active || unfinished {
+            return Ok(());
         }
         let route = node
             .routes
@@ -968,6 +1030,9 @@ async fn advance(
         if let Some(execution) = execution {
             spawn(daemon, project, "implementation", execution);
         }
+        return Ok(());
+    }
+    if unfinished || active {
         return Ok(());
     }
 

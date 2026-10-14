@@ -414,6 +414,455 @@ fn racing_workers_share_one_execution_slot() {
     );
 }
 
+/// G4/G5/G13: two readers in one attempt race an independent worker for two
+/// effect slots. A join requires both exact ended results. Crash with left
+/// published and right held before publication; restart must retain left and
+/// rerun only the incomplete right after checked ownership. A new revision
+/// then requires fresh results instead of consuming the old join's inputs.
+/// Expected names, counts, cap and routes come from the literal graph; Git,
+/// real boxes/locks and store rows supply candidate and supplier identities.
+/// Existing worker races have one execution per attempt and no exact join.
+/// Sabotage: count attempts, reserve after launch, replay finished branches,
+/// consume any publication or a pre-revision result, or mount a reader writable.
+#[test]
+fn concurrent_readers_share_capacity_and_join_exact_results_across_restart() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let implementation = Latch::new();
+    let independent = Latch::new();
+    let left = Latch::new();
+    let right = Latch::new();
+    let restarted = Latch::new();
+    let revised = Latch::new();
+    let held = [
+        implementation.clone(),
+        independent.clone(),
+        left.clone(),
+        right.clone(),
+        restarted.clone(),
+        revised.clone(),
+    ];
+    let right_runs = Arc::new(AtomicUsize::new(0));
+    let runs = right_runs.clone();
+    let (reader_opened, reader_openings) = std::sync::mpsc::channel();
+    let machine = Machine::new("g4-graph-join", move |request| {
+        if request.has_tool("yard_publish_report") {
+            return planned(request);
+        }
+        let prompt = request.prompt();
+        if request.has_tool("yard_publish_review") {
+            if prompt.contains("Graph") && request.opens() {
+                let latch = if prompt.contains("Left reader.") {
+                    reader_opened.send("review-0").unwrap();
+                    Some(&held[2])
+                } else if prompt.contains("Revised right reader.") {
+                    Some(&held[5])
+                } else if prompt.contains("Right reader.") {
+                    reader_opened.send("review-1").unwrap();
+                    Some(if runs.fetch_add(1, Ordering::SeqCst) == 0 {
+                        &held[3]
+                    } else {
+                        &held[4]
+                    })
+                } else {
+                    None
+                };
+                if let Some(latch) = latch {
+                    return Reply::Hold(
+                        latch.clone(),
+                        Box::new(Reply::Tools(vec![publish(json!([]))])),
+                    );
+                }
+            }
+            return act(request, vec![publish(json!([]))]);
+        }
+        let graph = prompt.contains("Graph");
+        let reply = act(
+            request,
+            vec![commit_file(
+                if graph {
+                    "graph.txt"
+                } else {
+                    "independent.txt"
+                },
+                "fixture\n",
+                "Fixture",
+            )],
+        );
+        if request.opens() {
+            if !graph {
+                reader_opened.send("implementer").unwrap();
+            }
+            Reply::Hold(held[if graph { 0 } else { 1 }].clone(), Box::new(reply))
+        } else {
+            reply
+        }
+    });
+    machine.start();
+    let fixture = config(r#"
+[review.seats.left]
+agent = "worker"
+instructions = "Left reader."
+[review.seats.right]
+agent = "worker"
+instructions = "Right reader."
+[review.seats.join]
+agent = "worker"
+instructions = "Exact join."
+[profiles.revised]
+runner = {kind = "agent", agent = "worker", instructions = "Revised right reader."}
+access = "read-only"
+outputs = {result = "verdict"}
+outcomes = ["complete", "blocked"]
+[gates.read]
+stage = "candidate"
+command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 97; fi; else test -f independent.txt; fi"
+"#).replace("max_lanes = 2", "max_lanes = 2\nmax_executions = 2")
+        .replace("review = [\"correctness\"]", "review = [\"left\", \"right\", \"join\"]")
+        .replace("[workflows.default]", "[workflows.default]\ninstructions = \"Implement fixture.\"");
+    let project = Project::new(&machine, "p", &fixture);
+    project.git(&["checkout", "-qb", "feature/a"]);
+    project.json(&["sync", "feature/a"]);
+    project.git(&["checkout", "-q", "main"]);
+
+    let candidate = json!({"node": "implementer", "output": "result", "kind": "candidate"});
+    let mut graph = json!({"inputs": {"feedback": "verdict", "merged": "candidate"}, "nodes": {
+        "implementer": {"runner": {"kind": "agent", "agent": "worker", "instructions": "Implement fixture."},
+            "access": "write-allowed", "inputs": {"feedback": {"node": null, "output": "feedback", "kind": "verdict"}},
+            "outputs": {"result": "candidate"}, "outcomes": ["complete"], "requires": [],
+            "routes": {"complete": [{"to": "candidate-gate-read", "repeat": null},
+                {"to": "review-0", "repeat": null}, {"to": "review-1", "repeat": null}]}},
+        "candidate-gate-read": {"runner": {"kind": "command", "gate": "read"}, "access": "read-only",
+            "inputs": {"candidate": candidate}, "outputs": {"result": "verdict"}, "outcomes": ["complete", "failed"],
+            "requires": ["candidate"], "routes": {
+                "complete": [{"to": "review-2", "repeat": null}],
+                "failed": [{"to": "implementer", "repeat": 1}]}},
+        "review-0": {"runner": {"kind": "agent", "agent": "worker", "instructions": "Left reader."}, "access": "read-only",
+            "inputs": {"candidate": candidate}, "outputs": {"result": "verdict"}, "outcomes": ["complete", "blocked"],
+            "requires": ["candidate"], "routes": {"complete": [{"to": "review-2", "repeat": null}],
+                "blocked": [{"to": "implementer", "repeat": 3}]}},
+        "review-1": {"runner": {"kind": "agent", "agent": "worker", "instructions": "Right reader."}, "access": "read-only",
+            "inputs": {"candidate": candidate}, "outputs": {"result": "verdict"}, "outcomes": ["complete", "blocked"],
+            "requires": ["candidate"], "routes": {"complete": [{"to": "review-2", "repeat": null}],
+                "blocked": [{"to": "implementer", "repeat": 3}]}},
+        "review-2": {"runner": {"kind": "agent", "agent": "worker", "instructions": "Exact join."}, "access": "read-only",
+            "inputs": {"candidate": candidate,
+                "command": {"node": "candidate-gate-read", "output": "result", "kind": "verdict"},
+                "left": {"node": "review-0", "output": "result", "kind": "verdict"},
+                "right": {"node": "review-1", "output": "result", "kind": "verdict"}},
+            "outputs": {"result": "verdict"}, "outcomes": ["complete", "blocked"],
+            "requires": ["candidate", "command", "left", "right"], "routes": {"blocked": [{"to": "implementer", "repeat": 3}]}}
+    }});
+    let mut operator = machine.operator();
+    operator.initialize();
+    let resolved = operator.call(
+        "yard_plan_resolve",
+        json!({"project": project.path, "graph": graph}),
+    );
+    assert_eq!(resolved["result"]["plan"], graph);
+    assert_eq!(resolved["result"]["shape"], "read-only-graph");
+    assert_eq!(resolved["result"]["runnable"], true);
+    let mut watch = project.watch(0);
+    // Planning runs once automatically. Its ended ticket is a supported seam
+    // for explicit selected admission without racing the ordinary scheduler.
+    for (ticket, title, target) in [
+        ("Y-1", "Graph", "main"),
+        ("Y-2", "Independent", "feature/a"),
+    ] {
+        project.json(&[
+            "ticket",
+            "new",
+            "--title",
+            title,
+            "--target",
+            target,
+            "--workflow",
+            "plan",
+        ]);
+        let planner = watch.find("planner ended", |event| {
+            event["event"] == "attempt.ended"
+                && event["ticket"] == ticket
+                && event["data"]["outcome"] == "planned"
+        });
+        let cleanup = watch.find("planner cleanup", |event| {
+            event["event"] == "execution.ended"
+                && event["data"]["kind"] == "cleanup"
+                && event["attempt"] == planner["attempt"]
+        });
+        watch.find("planner cleanup release", |event| {
+            event["event"] == "execution.released" && event["execution"] == cleanup["execution"]
+        });
+    }
+    let started = operator.call(
+        "yard_attempt_start",
+        json!({"project": project.path, "ticket": "Y-1", "graph": graph}),
+    );
+    assert!(started.get("error").is_none(), "{started}");
+    implementation.wait_held();
+    let mut racing_operator = machine.operator();
+    racing_operator.initialize();
+    std::thread::scope(|scope| {
+        let racer = scope.spawn(|| {
+            racing_operator.call(
+                "yard_attempt_start",
+                json!({"project": project.path, "ticket": "Y-2", "workflow": "default"}),
+            )
+        });
+        implementation.release();
+        let response = racer.join().unwrap();
+        assert!(response.get("error").is_none(), "{response}");
+    });
+    let waiting = watch.find("branch/independent capacity race", |event| {
+        event["event"] == "execution.waiting"
+    });
+    assert_eq!(waiting["data"]["reason"], "capacity");
+    assert!(waiting["attempt"] == 3 || waiting["attempt"] == 4);
+    // Observe fixture-held actors; the short command can release after denial.
+    let mut expected_owners = Vec::new();
+    for _ in 0..2 {
+        let node = reader_openings.recv_timeout(e2e::DEADLINE).unwrap();
+        match node {
+            "review-0" => left.wait_held(),
+            "review-1" => right.wait_held(),
+            "implementer" => independent.wait_held(),
+            _ => unreachable!(),
+        }
+        expected_owners
+            .push(json!({"attempt": if node == "implementer" {4} else {3}, "node": node}));
+    }
+    expected_owners.sort_by_key(|row| {
+        (
+            row["attempt"].as_i64(),
+            row["node"].as_str().unwrap().to_owned(),
+        )
+    });
+    assert_eq!(
+        project
+            .rows("SELECT attempt, node FROM execution WHERE reserved = 1 ORDER BY attempt, node"),
+        expected_owners
+    );
+    independent.release();
+    left.wait_held();
+    right.wait_held();
+    let readers = project.rows("SELECT id, attempt, node, handle, reserved, teardown FROM execution WHERE reserved = 1 ORDER BY node");
+    assert_eq!(readers.len(), 2, "{readers:?}");
+    assert_eq!(
+        readers
+            .iter()
+            .map(|row| row["node"].clone())
+            .collect::<Vec<_>>(),
+        [json!("review-0"), json!("review-1")]
+    );
+    let boxes = machine.boxes("dev.yard.project");
+    for reader in &readers {
+        assert!(boxes.iter().any(|row| row["name"] == reader["handle"]));
+    }
+    let opens = |instructions: &str| {
+        machine
+            .model
+            .requests()
+            .iter()
+            .filter(|request| {
+                request.opens()
+                    && request.prompt().contains("Graph")
+                    && request.prompt().contains(instructions)
+            })
+            .count()
+    };
+    assert_eq!(opens("Left reader."), 1);
+    assert_eq!(opens("Right reader."), 1);
+    assert_eq!(opens("Exact join."), 0);
+    let head = git(
+        &project.path.join(".yard/local/attempts/3/clone"),
+        &["rev-parse", "HEAD"],
+    )
+    .trim()
+    .to_string();
+    left.release();
+    watch.find("left checked release", |event| {
+        event["event"] == "execution.released" && event["execution"] == readers[0]["id"]
+    });
+    let published = project.rows("SELECT * FROM execution WHERE attempt = 3 AND node = 'review-0'");
+    assert_eq!(published[0]["reserved"], 0);
+    assert_eq!(published[0]["teardown"], 1);
+    assert!(
+        project
+            .rows("SELECT id FROM execution WHERE attempt = 3 AND node = 'review-2'")
+            .is_empty()
+    );
+    // Settle the independent allowed control before the crash so no unrelated
+    // implementation is interrupted while Right holds its reader slot.
+    let independent_head = approval_of(&mut watch, "Y-2");
+    let command =
+        project.rows("SELECT id FROM execution WHERE node = 'candidate-gate-read' AND attempt = 3");
+    assert_eq!(command.len(), 1);
+    watch.find("command checked release", |event| {
+        event["event"] == "execution.released" && event["execution"] == command[0]["id"]
+    });
+    assert_eq!(project.rows("SELECT exit_code, outcome FROM execution WHERE node = 'candidate-gate-read' AND attempt = 3"),
+        vec![json!({"exit_code": 0, "outcome": "pass"})]);
+    // Right's live box and inherited effect lock hold the crash point.
+    let lock = std::fs::File::open(project.path.join(format!(
+        ".yard/local/attempts/3/effects/{}/lock",
+        readers[1]["id"]
+    )))
+    .unwrap();
+    assert!(matches!(
+        lock.try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ));
+    assert_eq!(
+        project.rows(
+            "SELECT status, reserved, result FROM execution WHERE attempt = 3 AND node = 'review-1'"
+        ),
+        vec![json!({"status": "running", "reserved": 1, "result": null})]
+    );
+    machine.kill();
+    machine.start();
+    restarted.wait_held();
+    assert!(
+        !machine
+            .boxes("dev.yard.project")
+            .iter()
+            .any(|row| row["name"] == readers[1]["handle"])
+    );
+    lock.try_lock().unwrap();
+    lock.unlock().unwrap();
+    assert_eq!(
+        project.rows("SELECT * FROM execution WHERE attempt = 3 AND node = 'review-0'"),
+        published
+    );
+    assert_eq!(opens("Left reader."), 1);
+    assert_eq!(opens("Right reader."), 2);
+    assert_eq!(
+        project
+            .rows("SELECT id FROM execution WHERE attempt = 3 AND node = 'candidate-gate-read'")
+            .len(),
+        1
+    );
+    assert!(
+        project
+            .rows("SELECT id FROM execution WHERE attempt = 3 AND node = 'review-2'")
+            .is_empty()
+    );
+    right.release();
+    restarted.release();
+    drop(watch);
+    let mut watch = project.watch(0);
+    assert_eq!(approval_of(&mut watch, "Y-1"), head);
+    let first_join =
+        project.rows("SELECT * FROM execution WHERE attempt = 3 AND node = 'review-2'");
+    assert_eq!(first_join.len(), 1);
+    let first_inputs: Value =
+        serde_json::from_str(first_join[0]["inputs"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        first_inputs["command"]["source"],
+        json!({"execution": command[0]["id"],
+        "node": "candidate-gate-read", "output": "result", "plan_revision": 1})
+    );
+    assert_eq!(
+        first_inputs["left"]["source"]["execution"],
+        readers[0]["id"]
+    );
+    let right_supplier = project.rows(
+        "SELECT id FROM execution WHERE attempt = 3 AND node = 'review-1' AND outcome = 'pass'",
+    );
+    assert_eq!(right_supplier.len(), 1);
+    assert_eq!(
+        first_inputs["right"]["source"]["execution"],
+        right_supplier[0]["id"]
+    );
+    assert_eq!(first_inputs["left"]["source"]["plan_revision"], 1);
+    assert_eq!(first_inputs["right"]["source"]["plan_revision"], 1);
+    assert_eq!(opens("Exact join."), 1);
+
+    // An explicit revision invalidates branch consumers, never old evidence.
+    let changed = operator.call(
+        "yard_attempt_revise",
+        json!({"project": project.path, "ticket": "Y-1", "plan_revision": 1,
+        "overrides": {"review-1": {"profile": "revised"}}}),
+    );
+    assert_eq!(changed["result"]["plan_revision"], 2, "{changed}");
+    revised.wait_held();
+    assert_eq!(
+        project.rows(
+            "SELECT * FROM execution WHERE attempt = 3 AND node = 'review-2' AND plan_revision = 1"
+        ),
+        first_join
+    );
+    assert!(project.rows("SELECT id FROM execution WHERE attempt = 3 AND node = 'review-2' AND plan_revision = 2").is_empty());
+    revised.release();
+    let approved = watch.until("revision two join approves", |event| {
+        is_approval(event, "Y-1") && event["data"]["payload"]["plan_revision"] == 2
+    });
+    assert_eq!(approved["data"]["payload"]["head"], head);
+    let suppliers = project.rows("SELECT id, node FROM execution WHERE attempt = 3 AND plan_revision = 2 AND kind = 'review' ORDER BY node");
+    assert_eq!(suppliers.len(), 3, "{suppliers:?}");
+    let joined = project.rows("SELECT inputs FROM execution WHERE attempt = 3 AND node = 'review-2' AND plan_revision = 2");
+    let inputs: Value = serde_json::from_str(joined[0]["inputs"].as_str().unwrap()).unwrap();
+    let fresh_command = project.rows("SELECT id FROM execution WHERE attempt = 3 AND node = 'candidate-gate-read' AND plan_revision = 2");
+    assert_eq!(fresh_command.len(), 1);
+    assert_eq!(
+        inputs["command"]["source"],
+        json!({"execution": fresh_command[0]["id"],
+        "node": "candidate-gate-read", "output": "result", "plan_revision": 2})
+    );
+    assert_ne!(fresh_command[0]["id"], command[0]["id"]);
+    for (name, index) in [("left", 0), ("right", 1)] {
+        assert_eq!(
+            inputs[name]["source"],
+            json!({"execution": suppliers[index]["id"], "node": format!("review-{index}"), "output": "result", "plan_revision": 2})
+        );
+        assert_ne!(
+            inputs[name]["source"]["execution"],
+            first_inputs[name]["source"]["execution"]
+        );
+    }
+    assert_eq!(opens("Left reader."), 2);
+    assert_eq!(opens("Revised right reader."), 1);
+    assert_eq!(opens("Exact join."), 2);
+    graph["nodes"]["review-1"]["runner"]["instructions"] = json!("Revised right reader.");
+    let shown = project.json(&["attempt", "show", "Y-1"]);
+    assert_eq!(shown["attempt"]["admission"]["plan"], graph);
+    project.json(&[
+        "attempt", "approve", "--target", "main", "Y-1", "--head", &head,
+    ]);
+    watch.find("graph lands", |event| {
+        event["event"] == "landing.recorded" && event["ticket"] == "Y-1"
+    });
+    project.json(&[
+        "attempt",
+        "approve",
+        "--target",
+        "feature/a",
+        "Y-2",
+        "--head",
+        &independent_head,
+    ]);
+    watch.find("independent lands", |event| {
+        event["event"] == "landing.recorded" && event["ticket"] == "Y-2"
+    });
+    for attempt in [3, 4] {
+        let removed = watch.find("cleanup", |event| {
+            event["event"] == "execution.ended"
+                && event["data"]["kind"] == "cleanup"
+                && event["attempt"] == attempt
+        });
+        watch.find("cleanup checked release", |event| {
+            event["event"] == "execution.released" && event["execution"] == removed["execution"]
+        });
+    }
+    assert_eq!(
+        git(&project.canonical(), &["show", "main:graph.txt"]),
+        "fixture\n"
+    );
+    assert_eq!(
+        git(&project.canonical(), &["show", "feature/a:independent.txt"]),
+        "fixture\n"
+    );
+}
+
 fn fifo(path: &std::path::Path) {
     assert!(
         std::process::Command::new("mkfifo")
