@@ -423,7 +423,8 @@ fn racing_workers_share_one_execution_slot() {
 /// real boxes/locks and store rows supply candidate and supplier identities.
 /// Existing worker races have one execution per attempt and no exact join.
 /// Sabotage: count attempts, reserve after launch, replay finished branches,
-/// consume any publication or a pre-revision result, or mount a reader writable.
+/// consume any publication or a pre-revision result, rewrite original admission,
+/// or mount a reader writable or an ordinary command read-only.
 #[test]
 fn concurrent_readers_share_capacity_and_join_exact_results_across_restart() {
     use std::sync::Arc;
@@ -517,7 +518,7 @@ outputs = {result = "verdict"}
 outcomes = ["complete", "blocked"]
 [gates.read]
 stage = "candidate"
-command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 97; fi; else test -f independent.txt; fi"
+command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 97; fi; else test -f independent.txt && touch forbidden && test -f forbidden; fi"
 "#).replace("max_lanes = 2", "max_lanes = 2\nmax_executions = 2")
         .replace("review = [\"correctness\"]", "review = [\"left\", \"right\", \"join\"]")
         .replace("[workflows.default]", "[workflows.default]\ninstructions = \"Implement fixture.\"");
@@ -527,7 +528,7 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
     project.git(&["checkout", "-q", "main"]);
 
     let candidate = json!({"node": "implementer", "output": "result", "kind": "candidate"});
-    let mut graph = json!({"inputs": {"feedback": "verdict", "merged": "candidate"}, "nodes": {
+    let graph = json!({"inputs": {"feedback": "verdict", "merged": "candidate"}, "nodes": {
         "implementer": {"runner": {"kind": "agent", "agent": "worker", "instructions": "Implement fixture."},
             "access": "write-allowed", "inputs": {"feedback": {"node": null, "output": "feedback", "kind": "verdict"}},
             "outputs": {"result": "candidate"}, "outcomes": ["complete"], "requires": [],
@@ -600,6 +601,9 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
     );
     assert!(started.get("error").is_none(), "{started}");
     implementation.wait_held();
+    let original_admission =
+        project.json(&["attempt", "show", "Y-1"])["attempt"]["admission"].clone();
+    assert_eq!(original_admission["plan"], graph);
     let mut racing_operator = machine.operator();
     racing_operator.initialize();
     std::thread::scope(|scope| {
@@ -694,6 +698,8 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
     // Settle the independent allowed control before the crash so no unrelated
     // implementation is interrupted while Right holds its reader slot.
     let independent_head = approval_of(&mut watch, "Y-2");
+    assert_eq!(project.rows("SELECT exit_code, outcome FROM execution WHERE attempt = 4 AND node = 'candidate-gate-read'"),
+        vec![json!({"exit_code": 0, "outcome": "pass"})]);
     let command =
         project.rows("SELECT id FROM execution WHERE node = 'candidate-gate-read' AND attempt = 3");
     assert_eq!(command.len(), 1);
@@ -822,11 +828,21 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
     assert_eq!(opens("Left reader."), 2);
     assert_eq!(opens("Revised right reader."), 1);
     assert_eq!(opens("Exact join."), 2);
-    graph["nodes"]["review-1"]["runner"]["instructions"] = json!("Revised right reader.");
+    let mut revised_graph = graph.clone();
+    revised_graph["nodes"]["review-1"]["runner"]["instructions"] = json!("Revised right reader.");
     let shown = project.json(&["attempt", "show", "Y-1"]);
-    assert_eq!(shown["attempt"]["admission"]["plan"], graph);
+    assert_eq!(shown["attempt"]["admission"], original_admission);
+    assert_eq!(shown["attempt"]["plan"]["plan"], revised_graph);
     project.json(&[
-        "attempt", "approve", "--target", "main", "Y-1", "--head", &head,
+        "attempt",
+        "approve",
+        "--target",
+        "main",
+        "Y-1",
+        "--head",
+        &head,
+        "--plan-revision",
+        "2",
     ]);
     watch.find("graph lands", |event| {
         event["event"] == "landing.recorded" && event["ticket"] == "Y-1"
