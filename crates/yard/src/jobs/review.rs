@@ -153,18 +153,28 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
     );
     let live = supervise::up_worker(daemon, project, execution, &spec, &secrets).await?;
     let timeout = Duration::from_secs(loaded.config.review.timeout_minutes * 60);
-    let run = supervise::run_harness(
-        daemon,
-        project,
-        execution,
-        crate::mcp::Kind::Review,
-        harness,
-        &argv,
-        &state,
-        &supervise::transcript(project, attempt.id, execution),
-        timeout,
-        tokio::time::Instant::now() + timeout,
-    )
+    let run = async {
+        let launch = json!({
+            "argv_digest": crate::config::digest(&argv.iter().map(|arg| arg.as_bytes()).collect::<Vec<_>>()),
+            "trusted_bytes": env.evidence(&agent.harness),
+        });
+        super::verification(
+            daemon, project, execution, &checkout, launch, supervise::runtime_evidence(&spec),
+        ).await?;
+        supervise::run_harness(
+            daemon,
+            project,
+            execution,
+            crate::mcp::Kind::Review,
+            harness,
+            &argv,
+            &state,
+            &supervise::transcript(project, attempt.id, execution),
+            timeout,
+            tokio::time::Instant::now() + timeout,
+        )
+        .await
+    }
     .await;
     daemon.grants.revoke(project, execution);
     live.down(supervise::DOWN_TIMEOUT).await?;

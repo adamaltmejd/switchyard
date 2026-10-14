@@ -285,7 +285,7 @@ fn admit(
 }
 
 /// The admission daemon's tool implementation identity, read once per process.
-fn runner_identity() -> Result<&'static str, Fail> {
+pub(super) fn runner_identity() -> Result<&'static str, Fail> {
     use sha2::{Digest, Sha256};
     static ID: std::sync::OnceLock<Result<String, String>> = std::sync::OnceLock::new();
     ID.get_or_init(|| {

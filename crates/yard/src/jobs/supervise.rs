@@ -24,6 +24,14 @@ pub fn box_name(project: &Project, execution: i64) -> String {
     format!("yard-{}-{execution}", project.key)
 }
 
+/// Names only: route headers and environment values can contain credentials.
+pub fn runtime_evidence(spec: &BoxSpec) -> Value {
+    json!({"runs_in": "box", "memory": spec.memory,
+        "environment": {"status": "unknown", "names": spec.env.keys().collect::<Vec<_>>()},
+        "egress": spec.egress.as_ref().map(|egress| json!({"allow": egress.allow,
+            "routes": egress.routes.keys().collect::<Vec<_>>() }))})
+}
+
 pub fn transcript(project: &Project, attempt: i64, execution: i64) -> PathBuf {
     project
         .attempt_dir(attempt)
@@ -979,18 +987,39 @@ pub async fn implement(
         let total = (workflow.total_work_timeout_minutes * 60_000) as i64;
         tokio::time::Instant::now() + Duration::from_millis((total - spent).max(0) as u64)
     };
-    let run = run_harness(
-        daemon,
-        project,
-        execution,
-        kind,
-        harness,
-        &argv,
-        &state,
-        &transcript(project, attempt.id, execution),
-        Duration::from_secs(workflow.inactivity_timeout_minutes * 60),
-        deadline,
-    )
+    let run = async {
+        if workflow.read_only {
+            let audit = if packaged.is_some() {
+                let bytes = std::fs::read(input.join("audit.json"))
+                    .map_err(|error| Fail::invalid(error.to_string()))?;
+                Some(crate::config::digest(&[&bytes]))
+            } else {
+                None
+            };
+            let launch = json!({
+                "argv_digest": crate::config::digest(&argv.iter().map(|arg| arg.as_bytes()).collect::<Vec<_>>()),
+                "trusted_bytes": env.evidence(implementer["harness"].as_str().unwrap_or_default()),
+                "audit_launch_digest": audit,
+                "proof_snapshot": proof_dir.file_name().and_then(|name| name.to_str()),
+            });
+            super::verification(
+                daemon, project, execution, &clone, launch, runtime_evidence(&spec),
+            ).await?;
+        }
+        run_harness(
+            daemon,
+            project,
+            execution,
+            kind,
+            harness,
+            &argv,
+            &state,
+            &transcript(project, attempt.id, execution),
+            Duration::from_secs(workflow.inactivity_timeout_minutes * 60),
+            deadline,
+        )
+        .await
+    }
     .await;
     let mut run = match run {
         Ok(run) => run,
@@ -1663,6 +1692,7 @@ pub async fn gate(
                     }
                     RunsIn::Host => {
                         host_gate(
+                            daemon,
                             project,
                             execution,
                             gate,
@@ -1844,9 +1874,27 @@ async fn box_gate(
             return Err(format!("the gate box did not come up: {error}"));
         }
     };
-    let _ = project
+    let recorded = project
         .read(|conn| executions::set_handle(conn, execution, &live.name, live.image_id.as_deref()));
     drop(target);
+    let recorded = match recorded {
+        Ok(()) => {
+            super::verification(
+                daemon,
+                project,
+                execution,
+                checkout,
+                json!({"command": gate.command}),
+                runtime_evidence(&spec),
+            )
+            .await
+        }
+        Err(fail) => Err(fail),
+    };
+    if let Err(fail) = recorded {
+        live.down(DOWN_TIMEOUT).await?;
+        return Err(fail.message);
+    }
     let argv = [
         "sh".to_string(),
         "-c".to_string(),
@@ -1902,6 +1950,7 @@ async fn box_gate(
 // only rename them.
 #[allow(clippy::too_many_arguments)]
 async fn host_gate(
+    daemon: &Daemon,
     project: &Project,
     execution: i64,
     gate: &crate::config::Gate,
@@ -1955,6 +2004,18 @@ async fn host_gate(
             )
         })
         .map_err(|fail| fail.message)?;
+    super::verification(
+        daemon,
+        project,
+        execution,
+        checkout,
+        json!({"command": gate.command}),
+        json!({"runs_in": "host", "environment": {"status": "unknown",
+            "inherited_names": ["PATH", "HOME"], "selected_names": gate.env,
+            "yard_names": ["YARD_BASE", "YARD_PROOF"]}}),
+    )
+    .await
+    .map_err(|fail| fail.message)?;
     let mut stdin = child.stdin.take().expect("stdin is piped");
     tokio::io::AsyncWriteExt::write_all(&mut stdin, b"go\n")
         .await

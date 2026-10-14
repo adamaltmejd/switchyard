@@ -18,6 +18,7 @@ const MCP_ENDPOINT: &str = "http://yard.mcp/mcp";
 const MCP_FILE: &str = "yard-mcp.json";
 /// The staged settings, read-only in the box.
 const SETTINGS_FILE: &str = "yard-claude-settings.json";
+pub(crate) const SKILL_ROOTS: [&str; 2] = [".claude/skills/", ".agents/skills/"];
 /// The server name the staged MCP client registers under.
 const MCP_SERVER: &str = "yard";
 /// The prefix Claude Code gives an MCP server's tools.
@@ -91,11 +92,8 @@ impl Harness for Claude {
         // The base's skills and settings are Claude's user level; its own
         // settings ride `--settings`, which outranks them. Claude reads no
         // `.agents/skills`, so those join its own under the same names.
-        st.env.stage_dir(
-            st.state,
-            "home/.claude/skills",
-            &[".claude/skills/", ".agents/skills/"],
-        )?;
+        st.env
+            .stage_dir(st.state, "home/.claude/skills", &SKILL_ROOTS)?;
         st.env.stage_file(
             st.state,
             "home/.claude/settings.json",
