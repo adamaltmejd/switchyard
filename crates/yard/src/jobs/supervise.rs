@@ -964,7 +964,9 @@ pub async fn implement(
         _ => None,
     };
     project.read(|conn| {
-        conn.execute("UPDATE attempt SET next = NULL WHERE id = ?1", [attempt.id])?;
+        if !plan.writers() {
+            conn.execute("UPDATE attempt SET next = NULL WHERE id = ?1", [attempt.id])?;
+        }
         if checkpoint.is_none() {
             conn.execute(
                 "UPDATE execution SET resumed = ?2 WHERE id = ?1",

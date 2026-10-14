@@ -7,6 +7,46 @@ use crate::store::{attempts, executions, tickets};
 use serde_json::json;
 use std::sync::Arc;
 
+/// A ticket edit takes its stopped exits only after every old owner drains.
+/// Ownership attention belongs to checked release, never to an edit.
+pub fn steer(tx: &rusqlite::Connection, attempt: &attempts::Attempt) -> Result<Vec<i64>, Fail> {
+    let rows = executions::attempt_work(tx, attempt.id)?;
+    let readers = rows
+        .iter()
+        .filter(|row| row.status == "running" && row.kind == "review")
+        .map(|row| row.id)
+        .collect();
+    if rows
+        .iter()
+        .any(|row| row.status == "running" || row.reserved)
+    {
+        return Ok(readers);
+    }
+    let ticket = tickets::get(tx, attempt.ticket)?;
+    for item in attempts::open_for_attempt(tx, attempt.id)? {
+        if !matches!(item.kind.as_str(), "stopped" | "red") || item.reason == "ownership" {
+            continue;
+        }
+        let source = match item.execution {
+            Some(id) => rows.iter().find(|row| row.id == id),
+            None if item.reason == "candidates" => {
+                rows.iter().rev().find(|row| row.kind == "implementation")
+            }
+            None => None,
+        };
+        if source.is_some_and(|row| {
+            row.ticket_revision
+                .is_some_and(|read| read < ticket.revision)
+        }) {
+            attempts::resolve(tx, &item, "edit", None)?;
+            if item.kind == "stopped" && item.reason == "timeout" {
+                attempts::renew_clock(tx, attempt.id)?;
+            }
+        }
+    }
+    Ok(readers)
+}
+
 pub async fn advance(
     daemon: &Arc<Daemon>,
     project: &Arc<Project>,
@@ -16,6 +56,7 @@ pub async fn advance(
 ) -> Result<(), Fail> {
     let ticket = project.read(|conn| tickets::get(conn, attempt.ticket))?;
     let rows = project.read(|conn| executions::attempt_work(conn, attempt.id))?;
+    project.tx(|tx| steer(tx, attempt))?;
     if project.read(|conn| {
         Ok(attempts::open_for_attempt(conn, attempt.id)?
             .iter()
@@ -28,31 +69,6 @@ pub async fn advance(
         if !admit::take_lane(daemon, project, &default, attempt.id)? {
             return Ok(());
         }
-    }
-    if let Some(next) = &attempt.next {
-        let node = next["workspace"]
-            .as_str()
-            .ok_or_else(|| Fail::refused("undeclared_workspace"))?;
-        if rows
-            .iter()
-            .any(|row| row.status == "running" || row.reserved)
-        {
-            return Ok(());
-        }
-        let execution = project.tx(|tx| {
-            attempts::require_plan(tx, attempt.id, attempt.plan_revision())?;
-            let execution = supervise::start_writer(
-                tx,
-                attempt,
-                node,
-                next["reason"].as_str().unwrap_or("retry"),
-                None,
-            )?;
-            attempts::set_next(tx, attempt.id, None)?;
-            Ok(execution)
-        })?;
-        spawn(daemon, project, "implementation", execution);
-        return Ok(());
     }
     // Edits and live definition handoffs drain every old writer first. Each
     // successor then rereads the frozen revision in its own retained workspace.

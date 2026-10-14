@@ -1061,6 +1061,14 @@ fn steer(tx: &rusqlite::Connection, id: i64) -> Result<Vec<i64>, Fail> {
     let Some(attempt) = attempts::live_for(tx, id)? else {
         return Ok(Vec::new());
     };
+    if attempt
+        .admission
+        .as_ref()
+        .and_then(|admission| crate::plan::Plan::admitted(admission).ok())
+        .is_some_and(|plan| plan.writers())
+    {
+        return super::writers::steer(tx, &attempt);
+    }
     let running: Vec<_> = executions::attempt_work(tx, attempt.id)?
         .into_iter()
         .filter(|row| row.status == "running")
@@ -1853,6 +1861,61 @@ async fn answer_start(
         .execution
         .map(|id| project.read(|conn| executions::get(conn, id)))
         .transpose()?;
+    if let Some(previous) = execution
+        .as_ref()
+        .filter(|row| row.kind == "implementation")
+    {
+        let attempt = project.read(|conn| attempts::get(conn, previous.required_attempt()?))?;
+        if attempt
+            .admission
+            .as_ref()
+            .and_then(|admission| crate::plan::Plan::admitted(admission).ok())
+            .is_some_and(|plan| plan.writers())
+        {
+            let workspace = previous
+                .workspace
+                .as_deref()
+                .ok_or_else(|| Fail::refused("undeclared_workspace"))?;
+            let default = super::load(daemon, project).await?;
+            if !attempt.lane && !take_lane(daemon, project, &default, attempt.id)? {
+                return Err(Fail::refused("no lane is free").with(json!({"reason": "capacity"})));
+            }
+            let successor = project.tx(|tx| {
+                attempts::require_plan(tx, attempt.id, attempt.plan_revision())?;
+                if attempts::get(tx, attempt.id)?.state != "live" {
+                    return Err(Fail::refused("the attempt has ended"));
+                }
+                if let Some(blocker) =
+                    attempts::open_for_attempt(tx, attempt.id)?
+                        .iter()
+                        .find(|open| {
+                            (open.kind == "stopped" && open.reason == "timeout")
+                                || (open.kind == "proposal" && open.reason == "edit")
+                        })
+                {
+                    return Err(Fail::refused(
+                        "continuation requires the pending attention to be answered",
+                    )
+                    .with(json!({"reason": blocker.reason, "attention": blocker.id})));
+                }
+                let successor = super::supervise::start_writer(
+                    tx,
+                    &attempt,
+                    workspace,
+                    if item.reason == "unchanged" {
+                        "restart"
+                    } else {
+                        "retry"
+                    },
+                    None,
+                )?;
+                attempts::resolve(tx, item, "start", None)?;
+                Ok(successor)
+            })?;
+            spawn(daemon, project, "implementation", successor);
+            return Ok(json!({"started": item.id, "execution": successor, "workspace": workspace}));
+        }
+    }
     if let Some(landing) = execution.as_ref().filter(|row| row.kind == "landing") {
         if landing.intent_state.as_deref() == Some("open") {
             // Read canonical against the restart table again.
