@@ -637,6 +637,12 @@ impl Watch {
     /// the held call will never come, as when a landing fails before it.
     #[track_caller]
     pub fn said(&mut self, path: &Path) -> String {
+        self.said_before_end(path, None)
+    }
+
+    /// Observe a fixture-held request, failing if its execution ends first.
+    #[track_caller]
+    pub fn said_before_end(&mut self, path: &Path, execution: Option<i64>) -> String {
         let send = self.send.clone();
         let fifo = path.to_owned();
         std::thread::spawn(move || {
@@ -652,6 +658,12 @@ impl Watch {
                     let event: Value =
                         serde_json::from_str(&line).expect("watch prints JSON lines");
                     self.seen.push(event.clone());
+                    assert!(
+                        !(event["event"] == "execution.ended"
+                            && execution.is_some_and(|id| event["execution"] == id)),
+                        "execution ended before the fixture request at {}: {event}",
+                        path.display()
+                    );
                     assert!(
                         event["event"] != "attention.raised",
                         "waiting for a call held at {}, the daemon raised: {event}",

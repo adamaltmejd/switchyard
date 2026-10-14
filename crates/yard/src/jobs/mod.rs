@@ -352,6 +352,9 @@ pub async fn load_attempt(
         };
     let mut recorded_inputs = admission["inputs"].clone();
     if admitted.packaged().is_some() {
+        if admission.get("package_launch").is_some() && admission["package_launch"] != "effort" {
+            return Err(Fail::refused("invalid admitted package launch contract"));
+        }
         if !crate::pi::valid_package_identity(&recorded_inputs["package"]) {
             return Err(Fail::refused("invalid admitted package identity"));
         }

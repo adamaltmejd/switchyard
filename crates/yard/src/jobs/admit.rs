@@ -240,7 +240,7 @@ fn admit(
     if plan.packaged().is_some() {
         inputs["package"] = crate::pi::package_identity();
     }
-    let admission = json!({
+    let mut admission = json!({
         "status": "recorded",
         "runtime": plan.runtime(),
         "revision": 1,
@@ -260,6 +260,9 @@ fn admit(
         "inputs": inputs,
         "yard_runner": {"version": env!("CARGO_PKG_VERSION"), "sha256": runner_identity()?},
     });
+    if plan.packaged().is_some() {
+        admission["package_launch"] = json!("effort");
+    }
     let attempt = attempts::insert(
         tx,
         ticket.id,

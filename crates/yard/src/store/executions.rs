@@ -395,6 +395,9 @@ pub fn consumed_definition(
             }
             if packaged {
                 definition["package"] = inputs.get("package")?.clone();
+                if let Some(contract) = admission.get("package_launch") {
+                    definition["package_launch"] = contract.clone();
+                }
             }
         }
     }
