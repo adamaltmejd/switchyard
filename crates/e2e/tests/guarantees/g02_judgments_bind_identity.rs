@@ -13,6 +13,8 @@ const GATE: &str = "[gates.check]\ncommand = \"test -f feature.txt\"\nstage = \"
 /// Sabotage: accept stdout claims, omit the declaration, include box names,
 /// or overwrite launch/result/check history. Dropping the exact base source
 /// must fail even when host Git gives two base commits the same tree.
+/// Sabotage: bind a gate to the producer's input proof instead of its published
+/// candidate proof. Their original public records must agree on publication.
 #[test]
 fn closed_box_gate_inputs_are_declared_stable_and_immutable() {
     let machine = Machine::new("g2-closed-inputs", worker(vec![]));
@@ -104,21 +106,21 @@ fi",
     assert_ne!(evidence["identity"]["candidate"]["base"], admitted_source);
     assert_eq!(evidence["identity"]["candidate"]["base_tree"], base_tree);
     let supplier = project.rows(
-        "SELECT id, proof FROM execution WHERE kind = 'implementation' AND outcome = 'candidate'",
+        "SELECT id, result FROM execution WHERE kind = 'implementation' AND outcome = 'candidate'",
     )[0]
     .clone();
+    let producer_result: Value =
+        serde_json::from_str(supplier["result"].as_str().unwrap()).unwrap();
+    let published_proof = &producer_result["outputs"]["result"]["value"]["proof"];
     assert_eq!(
         evidence["identity"]["inputs"]["candidate"]["source"]["execution"],
         supplier["id"]
     );
-    assert_eq!(
-        evidence["identity"]["candidate"]["proof"],
-        supplier["proof"]
-    );
+    assert_eq!(evidence["identity"]["candidate"]["proof"], *published_proof);
     assert_eq!(
         std::fs::read_to_string(project.path.join(format!(
             ".yard/local/attempts/1/proof-snapshots/{}/evidence.txt",
-            supplier["proof"].as_str().unwrap()
+            published_proof.as_str().unwrap()
         )))
         .unwrap(),
         "first"
@@ -224,6 +226,13 @@ fi",
             .unwrap();
         assert_eq!(old["verification"], evidence);
         assert_eq!(old["result"], result);
+        let producer = shown["result"]["executions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["execution"] == supplier["id"])
+            .unwrap();
+        assert_eq!(producer["result"], producer_result);
     }
     machine.kill();
     machine.start();
