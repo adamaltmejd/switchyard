@@ -1200,9 +1200,11 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
         .unwrap();
     assert!(omitted_request.body.get("reasoning").is_none());
     assert!(omitted_request.body.get("reasoning_effort").is_none());
+    // Cleanup terminal events name the attempt, not the ticket. Sabotage:
+    // omit this attempt's cleanup completion; another attempt must not satisfy it.
     watch.until("corrected controller cleanup ended", |event| {
         event["event"] == "execution.ended"
-            && event["ticket"] == "Y-8"
+            && event["attempt"] == corrected["attempt"]
             && event["data"]["kind"] == "cleanup"
     });
 
@@ -1392,7 +1394,7 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
     );
     watch.until("older omission control cleanup ended", |event| {
         event["event"] == "execution.ended"
-            && event["ticket"] == "Y-9"
+            && event["attempt"] == attempt
             && event["data"]["kind"] == "cleanup"
     });
 
@@ -1587,7 +1589,7 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
         assert_eq!(project.rows(&format!("SELECT plan_revision, inputs, effort FROM execution WHERE id = {receiving_execution}")), frozen);
         watch.until("capable controller cleanup ended", |event| {
             event["event"] == "execution.ended"
-                && event["ticket"] == ticket
+                && event["attempt"] == publication["attempt"]
                 && event["data"]["kind"] == "cleanup"
         });
     }
