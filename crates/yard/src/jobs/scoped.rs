@@ -10,6 +10,7 @@ use crate::store::{self, Target, attempts, executions};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
+use std::os::fd::AsRawFd;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -208,24 +209,40 @@ pub async fn execute(daemon: &Arc<Daemon>, project: &Arc<Project>, id: i64) -> R
         .cloned()
         .expect("spawn stop handle");
     let deadline = tokio::time::Instant::now() + Duration::from_millis(remaining);
-    let result = tokio::select! {
+    let acquired = tokio::select! {
         biased;
         _ = stop.notified() => Err(Fail::new("stopped", "operator stopped execution")),
         _ = tokio::time::sleep_until(deadline) => Err(Fail::new("timeout", "original execution lifetime expired")),
-        result = capacity::effect(daemon, project, id, work(daemon, project, &row, deadline)) => result,
+        result = capacity::acquire(daemon, project, id) => result,
+    };
+    let result = match acquired {
+        Ok(lock) => {
+            let result = capacity::HOST_LOCK.scope(lock.as_raw_fd(), async {
+                let result = tokio::select! {
+                    biased;
+                    _ = stop.notified() => Err(Fail::new("stopped", "operator stopped execution")),
+                    _ = tokio::time::sleep_until(deadline) => Err(Fail::new("timeout", "original execution lifetime expired")),
+                    result = work(daemon, project, &row, deadline) => result,
+                };
+                if result.is_err() {
+                    daemon.grants.revoke(project, id);
+                    // Cancellation can drop a launch before it returns a handle.
+                    // Its teardown child must inherit this same execution lock.
+                    let _ = daemon.pinfold.down(&supervise::box_name(project, id)).await;
+                }
+                result
+            }).await;
+            drop(lock);
+            result
+        }
+        Err(fail) => Err(fail),
     };
     daemon
         .activity
         .lock()
         .expect("activity lock")
         .remove(&(project.key.clone(), id));
-    if result.is_ok() {
-        return Ok(());
-    }
     daemon.grants.revoke(project, id);
-    // Dropping a launch can leave pinfold's teardown in progress. Never assume
-    // that a missing returned handle proves the box or inherited owner absent.
-    let _ = daemon.pinfold.down(&supervise::box_name(project, id)).await;
     if let Err(fail) = result {
         project.tx(|tx| {
             let row = executions::get(tx, id)?;

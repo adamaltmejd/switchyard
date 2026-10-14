@@ -35,6 +35,24 @@ pub async fn effect<T>(
     execution: i64,
     work: impl Future<Output = Result<T, Fail>>,
 ) -> Result<T, Fail> {
+    let lock = acquire(daemon, project, execution).await?;
+    let row = project.read(|conn| executions::get(conn, execution))?;
+    let result = HOST_LOCK.scope(lock.as_raw_fd(), work).await;
+    drop(lock);
+    if !release(daemon, project, &row).await? {
+        return Err(Fail::from(
+            "execution ownership is unknown; capacity retained".to_string(),
+        ));
+    }
+    result
+}
+
+/// A cancellable wait. Once acquired, keep this lock through effect teardown.
+pub async fn acquire(
+    daemon: &Daemon,
+    project: &Project,
+    execution: i64,
+) -> Result<std::fs::File, Fail> {
     let mut announced = false;
     loop {
         // Register before reading: a release or sync between read and wait
@@ -105,21 +123,13 @@ pub async fn effect<T>(
         changed.await;
     }
     let row = project.read(|conn| executions::get(conn, execution))?;
-    let lock = match super::supervise::hold_lock(&dir(project, &row)) {
-        Ok(lock) => lock,
+    match super::supervise::hold_lock(&dir(project, &row)) {
+        Ok(lock) => Ok(lock),
         Err(error) => {
             release(daemon, project, &row).await?;
-            return Err(Fail::from(error));
+            Err(Fail::from(error))
         }
-    };
-    let result = HOST_LOCK.scope(lock.as_raw_fd(), work).await;
-    drop(lock);
-    if !release(daemon, project, &row).await? {
-        return Err(Fail::from(
-            "execution ownership is unknown; capacity retained".to_string(),
-        ));
     }
-    result
 }
 
 /// Unknown owners are probed again by scheduler ticks. These rows have no

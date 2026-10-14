@@ -364,6 +364,8 @@ fn a_seat_killed_after_publishing_has_published() {
 /// G5/G6/G13: the same real delegated owner with no attempt association.
 /// Sabotage: resolve scope from an attempt, release on box absence alone,
 /// replay the report, reset its deadline, or turn raw publication into approval.
+/// Cancel outside HOST_LOCK: the held teardown child cannot retain ownership
+/// after the original up/exec processes exit and the daemon dies.
 #[test]
 fn a_standalone_report_retains_its_owner_across_restart_and_checked_stop() {
     published_owner_scenario(true);
@@ -407,13 +409,28 @@ fn published_owner_scenario(standalone: bool) {
     std::fs::create_dir(&owners).unwrap();
     let selected_owner = machine.root.join("selected-owner");
     let owner_release = machine.root.join("owner-release");
-    assert!(
-        std::process::Command::new("mkfifo")
-            .arg(&owner_release)
-            .status()
-            .unwrap()
-            .success()
-    );
+    let teardown_owner = machine.root.join("teardown-owner");
+    let teardown_held = machine.root.join("teardown-held");
+    let teardown_release = machine.root.join("teardown-release");
+    let up_owner = machine.root.join("up-owner");
+    let monitor_teardown = machine.root.join("monitor-teardown");
+    let up_ended = machine.root.join("up-ended");
+    let exec_ended = machine.root.join("exec-ended");
+    for fifo in [
+        &owner_release,
+        &teardown_held,
+        &teardown_release,
+        &up_ended,
+        &exec_ended,
+    ] {
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
     // Dropping the writer also frees the child if an assertion fails.
     let mut release_owner = std::fs::OpenOptions::new()
         .read(true)
@@ -423,13 +440,36 @@ fn published_owner_scenario(standalone: bool) {
     machine.wrapper(
         "pinfold",
         &format!(
-            "if [ \"$1 $2\" = 'box exec' ]; then\n\
+            "observe=0; if [ -f '{}' ]; then observe=1; fi\n\
+             if [ \"$1 $2\" = 'box up' ]; then\n\
+             \"$REAL\" \"$@\" <&0 & child=$!; echo \"$child\" > '{}';\n\
+             wait \"$child\"; result=$?\n\
+             if [ \"$observe\" = 1 ]; then echo \"$child\" > '{}'; fi; exit \"$result\"; fi\n\
+             if [ \"$1 $2\" = 'box down' ] && [ -f '{}' ] && [ \"$3\" = \"$(cat '{}')\" ]; then\n\
+             rm '{}'; \"$REAL\" \"$@\"; result=$?\n\
+             read up_pid < '{}'; read exec_pid < '{}';\n\
+             echo \"$$ $3 $result\" > '{}'; read line < '{}'; exit \"$result\"; fi\n\
+             if [ \"$1 $2\" = 'box exec' ]; then\n\
              echo \"$$ $3\" > '{}/'$3\n\
              \"$REAL\" \"$@\" & child=$!\n\
+             echo \"$child\" > '{}/'$3'-child'\n\
              wait \"$child\"; result=$?\n\
+             if [ \"$observe\" = 1 ]; then echo \"$child\" > '{}'; fi\n\
              if [ -f '{}' ] && [ \"$3\" = \"$(cat '{}')\" ]; then read line < '{}'; fi\n\
              exit \"$result\"; fi",
+            monitor_teardown.display(),
+            up_owner.display(),
+            up_ended.display(),
+            teardown_owner.display(),
+            teardown_owner.display(),
+            teardown_owner.display(),
+            up_ended.display(),
+            exec_ended.display(),
+            teardown_held.display(),
+            teardown_release.display(),
             owners.display(),
+            owners.display(),
+            exec_ended.display(),
             selected_owner.display(),
             selected_owner.display(),
             owner_release.display(),
@@ -795,6 +835,134 @@ fn published_owner_scenario(standalone: bool) {
             )),
             original
         );
+        // G5/G6: hold the actual cancellation down child after it removed
+        // the box. The original up/exec owners must be gone before restart;
+        // only this teardown child can retain the inherited execution lock.
+        // FIFO handshakes follow wait/reap of the real up and exec children.
+        std::fs::write(&monitor_teardown, "").unwrap();
+        let tearing_down = super::g07_operator_mcp::scoped_start(
+            &mut operator,
+            &project,
+            &project.canonical_head(),
+            true,
+        );
+        watch.find("teardown report publication", |e| {
+            e["event"] == "report.published" && e["execution"] == tearing_down
+        });
+        let before_down = project.rows(&format!(
+            "SELECT handle, scope, report FROM execution WHERE id = {tearing_down}"
+        ))[0]
+            .clone();
+        let down_box = before_down["handle"].as_str().unwrap();
+        let exec_pid = std::fs::read_to_string(owners.join(format!("{down_box}-child"))).unwrap();
+        let up_pid = std::fs::read_to_string(&up_owner).unwrap();
+        std::fs::write(&teardown_owner, down_box).unwrap();
+        let mut release_down = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&teardown_release)
+            .unwrap();
+        let stopped = operator.call(
+            "yard_execution_stop",
+            json!({"project": project.path, "execution": tearing_down}),
+        );
+        assert!(stopped.get("error").is_none(), "{stopped}");
+        let down = watch.said_before_end(&teardown_held, Some(tearing_down));
+        std::fs::remove_file(&monitor_teardown).unwrap();
+        let down_fields = down.split_whitespace().collect::<Vec<_>>();
+        assert_eq!(&down_fields[1..], &[down_box, "0"]);
+        let down_pid = down_fields[0];
+        machine.kill();
+        for pid in [exec_pid.trim(), up_pid.trim()] {
+            assert!(
+                !std::process::Command::new("kill")
+                    .args(["-0", pid])
+                    .output()
+                    .unwrap()
+                    .status
+                    .success(),
+                "original owner {pid} must be gone before recovery"
+            );
+        }
+        assert!(
+            std::process::Command::new("kill")
+                .args(["-0", down_pid])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            !machine
+                .boxes("dev.yard.project")
+                .iter()
+                .any(|listed| listed["name"] == down_box)
+        );
+        let down_lock = std::fs::OpenOptions::new()
+            .read(true)
+            .open(
+                project
+                    .path
+                    .join(format!(".yard/local/effects/{tearing_down}/lock")),
+            )
+            .unwrap();
+        assert!(matches!(
+            down_lock.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        assert_eq!(
+            project.rows(&format!(
+                "SELECT status, reserved, teardown, result FROM execution WHERE id = {tearing_down}"
+            )),
+            vec![json!({"status": "running", "reserved": 1, "teardown": 0, "result": null})]
+        );
+        drop(watch);
+        machine.start();
+        watch = project.watch(0);
+        let down_attention = watch.find("teardown child ownership", |e| {
+            e["event"] == "attention.raised" && e["execution"] == tearing_down
+        });
+        assert_eq!(down_attention["data"]["reason"], "ownership");
+        operator = machine.operator();
+        operator.initialize();
+        let retained = project.rows(&format!(
+            "SELECT * FROM execution WHERE id = {tearing_down}"
+        ));
+        let refused = operator.call(
+            "yard_execution_stop",
+            json!({"project": project.path, "execution": tearing_down}),
+        );
+        assert_eq!(refused["error"]["message"], "ownership");
+        assert_eq!(refused["error"]["data"]["execution"], tearing_down);
+        assert_eq!(
+            project.rows(&format!(
+                "SELECT * FROM execution WHERE id = {tearing_down}"
+            )),
+            retained
+        );
+        assert!(matches!(
+            down_lock.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        release_down.write_all(b"go\n").unwrap();
+        watch.find("teardown checked release", |e| {
+            e["event"] == "execution.released" && e["execution"] == tearing_down
+        });
+        watch.find("teardown interrupted", |e| {
+            e["event"] == "execution.ended" && e["execution"] == tearing_down
+        });
+        assert_eq!(project.rows(&format!(
+            "SELECT outcome, reserved, teardown, scope, report, json_extract(result, '$.outputs') AS outputs FROM execution WHERE id = {tearing_down}"
+        )), vec![json!({"outcome": "interrupted", "reserved": 0, "teardown": 1,
+            "scope": before_down["scope"], "report": before_down["report"], "outputs": "{}"})]);
+        assert_eq!(
+            project.rows(&format!(
+                "SELECT state, resolution FROM attention WHERE id = {}",
+                down_attention["attention"]
+            )),
+            vec![json!({"state": "resolved", "resolution": "reconciled"})]
+        );
+        down_lock.try_lock().unwrap();
+        down_lock.unlock().unwrap();
         hold.release();
         let fresh = super::g07_operator_mcp::scoped_start(
             &mut operator,
