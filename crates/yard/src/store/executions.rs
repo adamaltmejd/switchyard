@@ -791,7 +791,7 @@ pub fn set_handle(
     Ok(())
 }
 
-/// Append the real launch inputs once. Qualification does not read this evidence.
+/// Append real launch inputs and any original-result reference once.
 pub fn verification(conn: &Connection, id: i64, evidence: &Value) -> Result<(), Fail> {
     if conn.execute(
         "UPDATE execution SET verification = ?2 WHERE id = ?1 AND status = 'running' AND verification IS NULL",
@@ -962,6 +962,7 @@ pub fn end(tx: &Connection, id: i64, end: End) -> Result<(), Fail> {
             "outcome": output.as_ref().map(|_| outcome),
             "infrastructure": {"outcome": infrastructure, "exit_cause": end.exit_cause, "exit_code": end.exit_code},
             "judgment": judgment,
+            "reference": execution.verification.as_ref().and_then(|v| v.get("reference")),
             "verification": execution.verification.clone().unwrap_or_else(|| json!({"status": "unknown"})),
             "outputs": output.map_or_else(|| json!({}), |output| json!({"result": output})),
         });

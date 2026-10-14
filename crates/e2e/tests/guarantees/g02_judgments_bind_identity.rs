@@ -6,6 +6,185 @@ use std::io::Write;
 
 const GATE: &str = "[gates.check]\ncommand = \"test -f feature.txt\"\nstage = \"candidate\"\n";
 
+/// G2: a second producer publishes the same Git tree and proof after a ticket
+/// edit. Fixture command/model counts distinguish reference reuse from replay;
+/// immutable rows and MCP distinguish it from a copied verdict or a skip.
+/// Existing definition-adoption cases keep the same supplier and cannot show
+/// this boundary. Git supplies trees; the fixture supplies counts and proof.
+/// Sabotage: rerun every gate, qualify by head alone, accept unknown inputs,
+/// copy a passing check, or carry an old operator identity to approval.
+#[test]
+fn candidate_reuses_original_pass_after_bookkeeping_with_unknown_rerun() {
+    let implementations = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = implementations.clone();
+    let machine = Machine::new("g2-reference-reuse", move |request| {
+        if request.opens() {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        let contents = if request.last_user().contains("change-tree") {
+            "changed"
+        } else {
+            "feature"
+        };
+        let proof = if request.last_user().contains("change-") {
+            "second"
+        } else {
+            "first"
+        };
+        act(
+            request,
+            vec![bash(&format!(
+                "cd /workspace && printf '{contents}' > feature.txt && git add feature.txt \
+             && git commit --allow-empty -qm Revision && printf '{proof}' > /yard/proof/evidence.txt"
+            ))],
+        )
+    });
+    let commands = machine.root.join("gate-commands");
+    machine.wrapper(
+        "pinfold",
+        &format!(
+            "if [ \"$1 $2\" = 'box exec' ]; then
+  case \"$*\" in
+    *reuse-closed*) printf 'closed\\n' >> '{}' ;;
+    *reuse-other*) printf 'other\\n' >> '{}' ;;
+    *reuse-unknown*) printf 'unknown\\n' >> '{}' ;;
+  esac
+fi",
+            commands.display(),
+            commands.display(),
+            commands.display()
+        ),
+    );
+    machine.start();
+    let configuration = unreviewed(
+        "[gates.closed]\ncommand = 'test -f feature.txt # reuse-closed'\nstage = 'candidate'\nclosed_inputs = 'runtime-v1'\n\
+         [gates.other]\ncommand = 'test -f feature.txt # reuse-other'\nstage = 'candidate'\nclosed_inputs = 'runtime-v1'\n\
+         [gates.unknown]\ncommand = 'test -f feature.txt # reuse-unknown'\nstage = 'candidate'\n",
+    );
+    let project = Project::new(&machine, "p", &configuration);
+    let mut watch = project.watch(0);
+    project.json(&["ticket", "new", "--title", "Feature"]);
+    let original_item = approval(&mut watch);
+    let original = project.rows("SELECT * FROM execution WHERE kind = 'gate' ORDER BY id");
+    let original_checks = project.rows("SELECT * FROM \"check\" ORDER BY id");
+    let initial_tree = git(
+        &project.canonical(),
+        &["rev-parse", &format!("{}^{{tree}}", head(&original_item))],
+    )
+    .trim()
+    .to_string();
+    let mut operator = machine.operator();
+    operator.initialize();
+    for (body, expected_known, expected_unknown) in [
+        ("Bookkeeping only", 1, 2),
+        ("change-proof", 2, 3),
+        ("change-tree", 3, 4),
+    ] {
+        let revision = project.json(&["ticket", "show", "Y-1"])["revision"]
+            .as_i64()
+            .unwrap();
+        project.json(&[
+            "ticket",
+            "edit",
+            "Y-1",
+            "--revision",
+            &revision.to_string(),
+            "--body",
+            body,
+        ]);
+        // approval consumes future events. Searching retained history here would
+        // return the old approval before the replacement executions finish.
+        let item = approval(&mut watch);
+        let log = std::fs::read_to_string(&commands).unwrap();
+        for (name, count) in [
+            ("closed", expected_known),
+            ("other", expected_known),
+            ("unknown", expected_unknown),
+        ] {
+            assert_eq!(
+                log.lines().filter(|line| *line == name).count(),
+                count,
+                "{body}: {log}"
+            );
+        }
+        assert_eq!(
+            implementations.load(std::sync::atomic::Ordering::SeqCst),
+            expected_unknown
+        );
+        assert_eq!(item["payload"]["revision"], revision + 1);
+        assert_ne!(head(&item), head(&original_item));
+        let tree = git(
+            &project.canonical(),
+            &["rev-parse", &format!("{}^{{tree}}", head(&item))],
+        )
+        .trim()
+        .to_string();
+        if body == "Bookkeeping only" {
+            assert_eq!(tree, initial_tree);
+            assert_eq!(proof(&item), proof(&original_item));
+            let shown = operator.call(
+                "yard_attempt_show",
+                json!({"project": project.path, "ticket": "Y-1"}),
+            );
+            assert!(shown.get("error").is_none(), "{shown}");
+            let executions = shown["result"]["executions"].as_array().unwrap();
+            for name in ["closed", "other"] {
+                let old = original.iter().find(|row| row["name"] == name).unwrap();
+                let check = original_checks
+                    .iter()
+                    .find(|row| row["execution"] == old["id"])
+                    .unwrap();
+                let current = executions
+                    .iter()
+                    .rev()
+                    .find(|row| row["name"] == name)
+                    .unwrap();
+                assert_eq!(current["outcome"], "reused");
+                assert_eq!(current["ticket_revision"], revision + 1);
+                assert_eq!(current["head"], head(&item));
+                assert_eq!(
+                    current["result"]["reference"],
+                    json!({"execution": old["id"], "check": check["id"], "result": {"execution": old["id"]}})
+                );
+                assert_eq!(current["result"]["judgment"], Value::Null);
+                assert_eq!(current["result"]["outputs"], json!({}));
+                assert!(
+                    item["payload"]["checks"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&check["id"])
+                );
+            }
+            assert!(project.rows("SELECT * FROM \"check\" WHERE execution IN (SELECT id FROM execution WHERE outcome = 'reused')").is_empty());
+        } else if body == "change-proof" {
+            assert_eq!(tree, initial_tree);
+            assert_ne!(proof(&item), proof(&original_item));
+        } else {
+            assert_ne!(tree, initial_tree);
+        }
+    }
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT * FROM execution WHERE kind = 'gate' AND id <= {} ORDER BY id",
+            original.last().unwrap()["id"]
+        )),
+        original
+    );
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT * FROM \"check\" WHERE id <= {} ORDER BY id",
+            original_checks.last().unwrap()["id"]
+        )),
+        original_checks
+    );
+    machine.kill();
+    machine.start();
+    assert_eq!(
+        project.rows("SELECT count(*) AS n FROM execution WHERE outcome = 'reused'"),
+        vec![json!({"n": 2})]
+    );
+}
+
 /// G2: equivalent consumers on one candidate, then changed declared
 /// configuration. Existing adoption cases cannot show stable runtime
 /// identity across distinct launches. Expected inputs come from fixture

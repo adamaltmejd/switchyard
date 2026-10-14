@@ -132,6 +132,9 @@ pub async fn verification(
             "source": "observed-image", "contract": "pinfold-box-v1"});
         evidence["external_services"] = json!({"status": "none"});
     }
+    evidence["reference"] = project
+        .read(|conn| checks::reusable(conn, &row, &evidence))?
+        .unwrap_or(Value::Null);
     project.read(|conn| executions::verification(conn, execution, &evidence))
 }
 

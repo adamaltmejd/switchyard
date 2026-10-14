@@ -118,6 +118,148 @@ pub fn current(
             return Ok(Some(check));
         }
     }
+    referenced(conn, kind, name, input)
+}
+
+/// Commit and producer labels are provenance. The declared gate consumes the
+/// Git tree, exact base source and proof from an eligible publication.
+fn matching_identity(
+    conn: &Connection,
+    execution: &super::executions::Execution,
+    evidence: &Value,
+) -> Result<Option<Value>, Fail> {
+    if execution.kind != "gate" || execution.parent.is_some() || evidence["reuse"] != "eligible" {
+        return Ok(None);
+    }
+    let Some(mut identity) = evidence.get("identity").filter(|v| v.is_object()).cloned() else {
+        return Ok(None);
+    };
+    let Some(inputs) = identity["inputs"].as_object_mut() else {
+        return Ok(None);
+    };
+    if inputs.len() != 1 {
+        return Ok(None);
+    }
+    let Some(candidate) = inputs.get_mut("candidate") else {
+        return Ok(None);
+    };
+    let Some(producer) = candidate["source"]["execution"].as_i64() else {
+        return Ok(None);
+    };
+    let producer = super::executions::get(conn, producer)?;
+    let published = producer
+        .result
+        .as_ref()
+        .map(|r| &r["outputs"]["result"]["value"]);
+    if producer.attempt != execution.attempt
+        || producer.node.as_deref() != Some("implementer")
+        || !producer.result_eligible
+        || published != Some(&candidate["value"])
+        || candidate["value"]["base"] != json!(execution.base)
+        || candidate["value"]["head"] != json!(execution.head)
+        || candidate["value"]["proof"] != json!(execution.proof.clone().unwrap_or_default())
+    {
+        return Ok(None);
+    }
+    candidate["source"]
+        .as_object_mut()
+        .expect("supplier")
+        .remove("execution");
+    candidate["value"]
+        .as_object_mut()
+        .expect("publication")
+        .remove("head");
+    Ok(Some(identity))
+}
+
+/// Reference an original passing check. Failed evidence and its operator
+/// acceptance never participate in matching, and no second verdict is made.
+pub fn reusable(
+    conn: &Connection,
+    execution: &super::executions::Execution,
+    evidence: &Value,
+) -> Result<Option<Value>, Fail> {
+    let Some(identity) = matching_identity(conn, execution, evidence)? else {
+        return Ok(None);
+    };
+    let candidates = super::all(
+        conn,
+        &format!(
+            "{SELECT}
+        WHERE e.attempt = ?1 AND e.name = ?2 AND c.kind = 'gate' AND c.verdict = 'pass'
+        AND e.parent IS NULL AND e.id < ?3 ORDER BY c.id DESC"
+        ),
+        params![execution.attempt, execution.name, execution.id],
+        row,
+    )?;
+    for check in candidates {
+        let original = super::executions::get(conn, check.execution)?;
+        if !original.result_eligible {
+            continue;
+        }
+        let Some(recorded) = original.verification.as_ref() else {
+            continue;
+        };
+        if matching_identity(conn, &original, recorded)?.as_ref() == Some(&identity) {
+            return Ok(Some(json!({"execution": original.id, "check": check.id,
+                "result": {"execution": original.id}})));
+        }
+    }
+    Ok(None)
+}
+
+/// A reference counts after checked teardown, on the exact current operator
+/// identity and actual current supplier binding.
+fn referenced(
+    conn: &Connection,
+    kind: &str,
+    name: &str,
+    input: &Input,
+) -> Result<Option<Check>, Fail> {
+    if kind != "gate" {
+        return Ok(None);
+    }
+    let attempt = super::attempts::get(conn, input.attempt)?;
+    let ids = super::all(
+        conn,
+        "SELECT id FROM execution WHERE attempt = ?1
+        AND kind = 'gate' AND name = ?2 AND parent IS NULL AND base = ?3 AND head = ?4
+        AND ticket_revision = ?5 AND COALESCE(proof, '') = ?6
+        AND status = 'ended' AND outcome = 'reused' AND reserved = 0 AND teardown = 1
+        ORDER BY id DESC",
+        params![
+            input.attempt,
+            name,
+            input.base,
+            input.head,
+            input.ticket_revision,
+            input.proof
+        ],
+        |row| row.get::<_, i64>(0),
+    )?;
+    for id in ids {
+        let execution = super::executions::get(conn, id)?;
+        if !super::executions::qualifies(conn, &attempt, &execution, &input.digest)? {
+            continue;
+        }
+        let Some(evidence) = execution.verification.as_ref() else {
+            continue;
+        };
+        let Some(original) = evidence["reference"]["execution"].as_i64() else {
+            continue;
+        };
+        let Some(check) = for_execution(conn, original)? else {
+            continue;
+        };
+        if check.kind == kind
+            && check.name == name
+            && check.verdict == "pass"
+            && evidence["reference"]["check"] == check.id
+            && reusable(conn, &execution, evidence)?.as_ref() == evidence.get("reference")
+        {
+            return Ok(Some(check));
+        }
+    }
     Ok(None)
 }
 
@@ -158,6 +300,17 @@ pub fn evidence(conn: &Connection, check: &Check, input: &Input) -> Result<Value
     };
     evidence["consumed_definition"] = consumed.unwrap_or_else(|| json!({"status": "unknown"}));
     evidence["inputs"] = json!(execution.inputs);
+    if input.base != check.base
+        || input.head != check.head
+        || input.proof != check.proof
+        || input.ticket_revision != check.ticket_revision
+    {
+        evidence["consumer"] = json!({"attempt": input.attempt, "base": input.base,
+            "head": input.head, "proof": input.proof, "ticket_revision": input.ticket_revision,
+            "plan_revision": input.plan_revision});
+        evidence["reference"] = json!({"execution": check.execution, "check": check.id,
+            "result": {"execution": check.execution}});
+    }
     if input.plan_revision != check.plan_revision {
         evidence["plan_revision"] = json!(input.plan_revision);
     }

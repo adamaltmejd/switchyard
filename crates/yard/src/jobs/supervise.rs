@@ -1714,6 +1714,9 @@ pub async fn gate(
         Ok(result) if result.stopped => {
             ("stopped", String::new(), None, None, result.infrastructure)
         }
+        Ok(result) if result.infrastructure == "reused" => {
+            ("reused", String::new(), None, None, "completed")
+        }
         Ok(result) => {
             let _ = std::fs::write(&log, &result.output);
             let tail = tail(&result.output);
@@ -1767,7 +1770,7 @@ pub async fn gate(
                 ..Default::default()
             },
         )?;
-        if row.parent.is_some() || stopped || moved {
+        if row.parent.is_some() || stopped || moved || verdict == "reused" {
             return Ok(());
         }
         if verdict == "error" {
@@ -1910,6 +1913,21 @@ async fn box_gate(
     if let Err(fail) = recorded {
         live.down(DOWN_TIMEOUT).await?;
         return Err(fail.message);
+    }
+    let reference = project
+        .read(|conn| executions::get(conn, execution))
+        .map_err(|fail| fail.message)?
+        .verification
+        .and_then(|v| v.get("reference").cloned());
+    if reference.is_some_and(|reference| !reference.is_null()) {
+        live.down(DOWN_TIMEOUT).await?;
+        return Ok(GateResult {
+            infrastructure: "reused",
+            stopped: false,
+            code: 0,
+            output: String::new(),
+            oom: None,
+        });
     }
     let argv = [
         "sh".to_string(),
