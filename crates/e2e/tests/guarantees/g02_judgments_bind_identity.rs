@@ -519,11 +519,18 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
         project.rows("SELECT state FROM approval"),
         vec![json!({"state": "active"})]
     );
+    // G2: sync alone keeps completed work's plan, including staged sources.
+    // Sabotage: sync overwrites active evidence before explicit adoption.
+    let frozen_plan = project.json(&["attempt", "show", "Y-1"])["attempt"]["plan"].clone();
     let gate_definition = configuration.replace("echo original >>", "echo adopted >>");
     project.write(".yard/config.toml", &gate_definition);
     project.git(&["add", "-A"]);
     project.git(&["commit", "--quiet", "-m", "Adopt candidate gate"]);
     project.json(&["sync"]);
+    assert_eq!(
+        project.json(&["attempt", "show", "Y-1"])["attempt"]["plan"],
+        frozen_plan
+    );
     let definition_commit = project.git(&["rev-parse", "HEAD"]).trim().to_string();
     let frozen_sources = |definition: &str| {
         let shown = project.json(&["attempt", "show", "Y-1"]);
@@ -628,6 +635,7 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
         (8, "v2", "feature-skill-v2\n"),
         (9, "v2", "feature-image-v2\n"),
     ] {
+        let frozen_plan = project.json(&["attempt", "show", "Y-1"])["attempt"]["plan"].clone();
         let prior_executions =
             project.rows("SELECT * FROM execution WHERE attempt = 1 ORDER BY id");
         let prior_ids = prior_executions
@@ -671,6 +679,10 @@ fn quiescent_plan_cas_retains_only_exact_node_and_producer_evidence() {
             staging_commit = project.git(&["rev-parse", "HEAD"]).trim().to_string();
             ("staging_commit", staging_commit.clone())
         };
+        assert_eq!(
+            project.json(&["attempt", "show", "Y-1"])["attempt"]["plan"],
+            frozen_plan
+        );
         let before = project.rows("SELECT * FROM audit ORDER BY seq");
         let stale = operator.call(
             "yard_attempt_revise",
