@@ -41,6 +41,8 @@ fn approval(watch: &mut Watch) -> Value {
 /// B's replacement fails the native candidate gate. Only its producer receives
 /// the fixture failure marker and repairs it. Sabotage: drop root feedback or
 /// clear choice before recording the repair execution's bound failure inputs.
+/// Selected landing omissions require exact operator acceptance before CAS.
+/// Sabotage: omit choice from landing attention, making valid acceptance stale.
 #[test]
 fn only_the_declared_choice_is_checked_and_landed() {
     let holds: Vec<_> = (0..5).map(|_| Latch::new()).collect();
@@ -187,6 +189,7 @@ fn only_the_declared_choice_is_checked_and_landed() {
          [profiles.reader]\nrunner = {kind = 'agent', agent = 'worker', instructions = 'Same frozen reviewer.'}\naccess = 'read-only'\noutputs = {result = 'verdict'}\noutcomes = ['complete', 'blocked']\n\
          [gates.check]\ncommand = 'case \"$(cat same.txt)\" in writer-1-*) test \"$(cat same.txt)\" = \"$(cat /yard/proof/evidence.txt)\" || exit 91;; *) exit 91;; esac; if test \"$(cat same.txt)\" != writer-1-0 && ! grep -qx selected-B-repaired repair.txt 2>/dev/null; then echo selected-B-needs-repair-marker; exit 94; fi'\nstage = 'candidate'\n",
     );
+    extra.push_str("\n[gates.other]\ncommand = 'true'\nstage = 'landing'\n");
     let mut nodes = serde_json::Map::new();
     let mut inputs = serde_json::Map::new();
     let mut seats = Vec::new();
@@ -543,8 +546,28 @@ fn only_the_declared_choice_is_checked_and_landed() {
     let mut watch = project.watch(since);
     std::fs::write(&armed, "").unwrap();
     let approved = operator.call("yard_attempt_approve", json!({"project": project.path, "ticket": "Y-1",
-        "target": "feature/a", "head": repaired_head, "proof": third["proof"], "choice": third["choice"]}));
+        "target": "feature/a", "head": repaired_head, "proof": third["proof"], "choice": third["choice"],
+        "observe_landing_skipped": ["landing-gate-other"], "text": "Observe the omitted landing gate"}));
     assert!(approved.get("error").is_none(), "{approved}");
+    let omission = watch.find("selected landing omission", |event| {
+        event["event"] == "attention.raised"
+            && event["data"]["kind"] == "candidate"
+            && event["data"]["reason"] == "landing"
+    });
+    let payload = &omission["data"]["payload"];
+    assert_eq!(payload["choice"], third["choice"]);
+    let identity = &payload["evidence"]["landing"];
+    watch.find("selected omission released", |event| {
+        event["event"] == "execution.released" && event["execution"] == identity["execution"]
+    });
+    let accepted = operator.call("yard_attempt_accept", json!({
+        "project": project.path, "ticket": "Y-1", "attention": omission["attention"],
+        "plan_revision": 1, "target": "feature/a", "head": repaired_head, "proof": third["proof"],
+        "base": identity["base"], "revision": identity["revision"], "landing": identity["execution"],
+        "old": identity["prepared"]["old"], "merged": identity["prepared"]["merged"],
+        "accept_skipped": ["landing-gate-other"], "text": "Accept this exact selected landing omission"
+    }));
+    assert_eq!(accepted["result"]["accepted"], true, "{accepted}");
     assert_eq!(watch.said(&said), "held\n");
     let intents = project.rows("SELECT * FROM execution WHERE intent_state = 'open'");
     assert_eq!(intents.len(), 1);

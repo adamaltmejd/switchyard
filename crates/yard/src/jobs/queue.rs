@@ -787,7 +787,7 @@ pub async fn land(
                         ticket: Some(ticket.id),
                         attempt: Some(attempt.id),
                         execution: Some(execution),
-                        payload: json!({"actor": "operator", "target": attempt.target_branch,
+                        payload: json!({"actor": "operator", "target": attempt.target_branch, "choice": attempt.choice,
                         "base": approval.base, "head": approval.head, "proof": approval.proof,
                         "revision": ticket.revision, "plan_revision": attempt.plan_revision(),
                         "gate_digest": now.loaded.gate_digest,
@@ -1095,7 +1095,7 @@ pub async fn land(
                             attempts::raise(tx, attempts::Raise {
                                 kind: "candidate", reason: "landing", ticket: Some(ticket.id),
                                 attempt: Some(attempt.id), execution: Some(child),
-                                payload: json!({"actor": "operator", "target": attempt.target_branch,
+                                payload: json!({"actor": "operator", "target": attempt.target_branch, "choice": attempt.choice,
                                     "base": approval.base, "head": approval.head, "proof": approval.proof,
                                     "revision": ticket.revision, "plan_revision": attempt.plan_revision(),
                                     "gate_digest": now.loaded.gate_digest,
