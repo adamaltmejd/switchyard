@@ -54,6 +54,9 @@ fn approval(watch: &mut Watch) -> Value {
 /// A losing writer named landing-gate-other still omits that configured gate.
 /// Sabotage: derive skipped verification by name alone, hiding the omission
 /// and refusing the exact observe/accept control despite its supported graph.
+/// After B merges an operator .yard change, another retained producer refuses
+/// its own .yard edit, then publishes cleanly at its independent original base.
+/// Sabotage: bind that producer or its publication to the selected attempt base.
 #[test]
 fn only_the_declared_choice_is_checked_and_landed() {
     let holds: Vec<_> = (0..5).map(|_| Latch::new()).collect();
@@ -64,6 +67,10 @@ fn only_the_declared_choice_is_checked_and_landed() {
     let repair_hold = repair.clone();
     let landing_repair = Latch::new();
     let landing_repair_hold = landing_repair.clone();
+    let dirty_writer = Latch::new();
+    let dirty_writer_hold = dirty_writer.clone();
+    let clean_writer = Latch::new();
+    let clean_writer_hold = clean_writer.clone();
     let turns: Vec<_> = (0..5).map(|_| AtomicUsize::new(0)).collect();
     let picker_finishes = AtomicUsize::new(0);
     let machine = Machine::new("g8-select", move |request| {
@@ -176,6 +183,10 @@ fn only_the_declared_choice_is_checked_and_landed() {
                         .contains("selected-B-needs-repair-marker")
                 );
                 "printf 'selected-B-repaired\\n' > repair.txt && git add repair.txt && "
+            } else if n == 2 && version == 1 {
+                "printf 'worker-owned\\n' > .yard/worker.txt && git add .yard/worker.txt && "
+            } else if n == 2 && version == 2 {
+                "git rm .yard/worker.txt && "
             } else {
                 ""
             };
@@ -194,6 +205,10 @@ fn only_the_declared_choice_is_checked_and_landed() {
                 landing_repair_hold.clone()
             } else if n == 1 && turns[n].load(Ordering::SeqCst) == 3 {
                 repair_hold.clone()
+            } else if n == 2 && turns[n].load(Ordering::SeqCst) == 2 {
+                dirty_writer_hold.clone()
+            } else if n == 2 && turns[n].load(Ordering::SeqCst) == 3 {
+                clean_writer_hold.clone()
             } else {
                 replacement_hold.clone()
             };
@@ -314,6 +329,7 @@ fn only_the_declared_choice_is_checked_and_landed() {
         event["event"] == "execution.released" && event["execution"] == cleanup["execution"]
     });
     let target = project.canonical_head();
+    let independent_base = target.clone();
     let mut operator = machine.operator();
     operator.initialize();
     let started = operator.call(
@@ -596,7 +612,11 @@ fn only_the_declared_choice_is_checked_and_landed() {
         "SELECT * FROM execution WHERE status = 'ended' ORDER BY id",
     );
     project.write("same.txt", "operator-target-marker\n");
-    project.git(&["add", "same.txt"]);
+    project.write(
+        ".yard/config.toml",
+        &format!("{configuration}\n# operator-target-marker\n"),
+    );
+    project.git(&["add", "same.txt", ".yard/config.toml"]);
     project.git(&["commit", "-qm", "Advance the actual target against B"]);
     project.json(&["sync", "feature/a"]);
     let target = git(&project.canonical(), &["rev-parse", "refs/heads/feature/a"])
@@ -706,6 +726,135 @@ fn only_the_declared_choice_is_checked_and_landed() {
             .unwrap()
             .contains(&picker["inputs"]["r1"]["value"]["publication"])
     );
+    // B's selected base advanced; this retained producer has never fetched it.
+    let hex = "build-gate-model"
+        .bytes()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    let independent_clone = project.path.join(format!(
+        ".yard/local/attempts/{attempt}/writers/{hex}/clone"
+    ));
+    let retry = operator.call(
+        "yard_attempt_start",
+        json!({
+            "project": project.path, "ticket": "Y-1", "workspace": "build-gate-model"
+        }),
+    );
+    assert!(retry.get("error").is_none(), "{retry}");
+    dirty_writer.wait_held();
+    let continued = rows(
+        &project,
+        "SELECT * FROM execution WHERE workspace = 'build-gate-model' AND kind = 'implementation' ORDER BY id DESC LIMIT 1",
+    );
+    let dirty = &continued[0];
+    assert_eq!(dirty["base"], independent_base);
+    assert_eq!(dirty["head"], heads[2]);
+    assert_eq!(dirty["settings"]["model"], "producer-2");
+    let current = project.rows("SELECT base, choice FROM attempt WHERE state = 'live'");
+    assert_eq!(current, vec![json!({"base": target, "choice": null})]);
+    assert_eq!(
+        git(&independent_clone, &["merge-base", "HEAD", &target]).trim(),
+        independent_base
+    );
+    assert_eq!(
+        git(&independent_clone, &["show", "HEAD:.yard/worker.txt"]).trim(),
+        "worker-owned"
+    );
+    dirty_writer.release();
+    let refused = watch.find("independent .yard edit refused", |event| {
+        event["event"] == "attention.raised"
+            && event["execution"] == dirty["id"]
+            && event["data"]["kind"] == "stopped"
+            && event["data"]["reason"] == "failed"
+    });
+    assert_eq!(refused["attempt"], attempt);
+    watch.find("independent refusal released", |event| {
+        event["event"] == "execution.released" && event["execution"] == dirty["id"]
+    });
+    let refused_history = rows(
+        &project,
+        "SELECT * FROM execution WHERE workspace = 'build-gate-model' AND kind = 'implementation' ORDER BY id DESC LIMIT 1",
+    );
+    assert_eq!(refused_history[0]["outcome"], "refused");
+    assert!(refused_history[0]["result"]["outputs"]["result"].is_null());
+    let retry = operator.call(
+        "yard_attempt_start",
+        json!({
+            "project": project.path, "ticket": "Y-1", "workspace": "build-gate-model"
+        }),
+    );
+    assert!(retry.get("error").is_none(), "{retry}");
+    clean_writer.wait_held();
+    let continued = rows(
+        &project,
+        "SELECT * FROM execution WHERE workspace = 'build-gate-model' AND kind = 'implementation' ORDER BY id DESC LIMIT 1",
+    );
+    assert_eq!(continued[0]["base"], independent_base);
+    assert_eq!(continued[0]["head"], heads[2]);
+    let independent_head = git(&independent_clone, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    assert_eq!(
+        git(&independent_clone, &["merge-base", "HEAD", &target]).trim(),
+        independent_base
+    );
+    assert!(
+        git(
+            &independent_clone,
+            &[
+                "diff",
+                "--name-only",
+                &independent_base,
+                "HEAD",
+                "--",
+                ".yard"
+            ]
+        )
+        .trim()
+        .is_empty()
+    );
+    clean_writer.release();
+    let fifth = approval(&mut watch);
+    assert_eq!(fifth["head"], landed_head);
+    assert_eq!(fifth["skipped"], fourth["skipped"]);
+    assert_ne!(fifth["choice"], fourth["choice"]);
+    let after_continuation = rows(
+        &project,
+        "SELECT * FROM execution WHERE status = 'ended' ORDER BY id",
+    );
+    for old in after_conflict.iter().chain(&refused_history) {
+        assert_eq!(
+            after_continuation.iter().find(|row| row["id"] == old["id"]),
+            Some(old)
+        );
+    }
+    let picker = after_continuation
+        .iter()
+        .find(|row| row["id"] == fifth["choice"])
+        .unwrap();
+    let source = &picker["inputs"]["c2"];
+    assert_eq!(source["source"]["execution"], continued[0]["id"]);
+    assert_eq!(source["value"]["base"], independent_base);
+    assert_eq!(source["value"]["head"], independent_head);
+    assert_eq!(source["value"]["producer"]["execution"], continued[0]["id"]);
+    assert_eq!(
+        source["value"]["producer"]["settings"]["model"],
+        "producer-2"
+    );
+    assert_eq!(
+        picker["inputs"]["c1"]["source"]["execution"],
+        returned["id"]
+    );
+    assert_eq!(picker["inputs"]["c1"]["value"]["base"], target);
+    let review = after_continuation
+        .iter()
+        .find(|row| row["id"] == picker["inputs"]["r2"]["source"]["execution"])
+        .unwrap();
+    assert_eq!(review["inputs"]["candidate"], *source);
+    assert_eq!(
+        project.rows("SELECT base FROM attempt WHERE state = 'live'"),
+        vec![json!({"base": target})]
+    );
     // Reopening revalidates current suppliers without rewriting the immutable choice.
     machine.kill();
     machine.start();
@@ -716,7 +865,7 @@ fn only_the_declared_choice_is_checked_and_landed() {
     let mut watch = project.watch(since);
     std::fs::write(&armed, "").unwrap();
     let approved = operator.call("yard_attempt_approve", json!({"project": project.path, "ticket": "Y-1",
-        "target": "feature/a", "head": landed_head, "proof": fourth["proof"], "choice": fourth["choice"],
+        "target": "feature/a", "head": landed_head, "proof": fifth["proof"], "choice": fifth["choice"],
         "observe_landing_skipped": ["landing-gate-other"], "text": "Observe the omitted landing gate"}));
     assert!(approved.get("error").is_none(), "{approved}");
     let omission = watch.find("selected landing omission", |event| {
@@ -725,7 +874,7 @@ fn only_the_declared_choice_is_checked_and_landed() {
             && event["data"]["reason"] == "landing"
     });
     let payload = &omission["data"]["payload"];
-    assert_eq!(payload["choice"], fourth["choice"]);
+    assert_eq!(payload["choice"], fifth["choice"]);
     assert_eq!(payload["evidence"]["nodes"], json!(["landing-gate-other"]));
     assert_eq!(
         payload["evidence"]["identity"]["skipped"],
@@ -737,7 +886,7 @@ fn only_the_declared_choice_is_checked_and_landed() {
     });
     let accepted = operator.call("yard_attempt_accept", json!({
         "project": project.path, "ticket": "Y-1", "attention": omission["attention"],
-        "plan_revision": 1, "target": "feature/a", "head": landed_head, "proof": fourth["proof"],
+        "plan_revision": 1, "target": "feature/a", "head": landed_head, "proof": fifth["proof"],
         "base": identity["base"], "revision": identity["revision"], "landing": identity["execution"],
         "old": identity["prepared"]["old"], "merged": identity["prepared"]["merged"],
         "accept_skipped": ["landing-gate-other"], "text": "Accept this exact selected landing omission"
@@ -822,6 +971,6 @@ fn only_the_declared_choice_is_checked_and_landed() {
     assert_eq!(approved.len(), 2);
     assert_eq!(approved[0]["choice"], third["choice"]);
     assert_eq!(approved[0]["state"], "retired");
-    assert_eq!(approved[1]["choice"], fourth["choice"]);
+    assert_eq!(approved[1]["choice"], fifth["choice"]);
     assert_eq!(approved[1]["state"], "landed");
 }

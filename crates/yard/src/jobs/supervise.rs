@@ -87,6 +87,24 @@ pub fn start_writer(
         .as_ref()
         .and_then(|row| row.result.as_ref())
         .map(|result| &result["outputs"]["result"]["value"]);
+    let independent = attempt
+        .admission
+        .as_ref()
+        .is_some_and(|a| a["runtime"] == "writer-graph");
+    let base = if !independent {
+        attempt.base.clone()
+    } else if let Some(base) = candidate.and_then(|value| value["base"].as_str()) {
+        base.to_owned()
+    } else {
+        executions::query(
+            tx,
+            "attempt = ?1 AND workspace = ?2 AND kind = 'implementation' ORDER BY id DESC LIMIT 1",
+            rusqlite::params![attempt.id, node],
+        )?
+        .pop()
+        .and_then(|row| row.base)
+        .unwrap_or_else(|| attempt.base.clone())
+    };
     let name = implementer["name"].as_str().unwrap_or("default");
     let harness_version = implementer["harness"]
         .as_str()
@@ -106,7 +124,7 @@ pub fn start_writer(
             node: Some(node),
             workspace: Some(node),
             reason: Some(reason),
-            base: Some(&attempt.base),
+            base: Some(&base),
             head: candidate
                 .and_then(|value| value["head"].as_str())
                 .or(attempt.head.as_deref()),
@@ -800,7 +818,14 @@ pub async fn implement(
                     &project.canonical_dir(),
                     &clone,
                     &writer_branch,
-                    &attempt.base,
+                    if plan.writers() {
+                        row.head
+                            .as_deref()
+                            .or(row.base.as_deref())
+                            .unwrap_or(&attempt.base)
+                    } else {
+                        &attempt.base
+                    },
                 )
                 .await?;
         }
@@ -1262,15 +1287,24 @@ pub async fn implement(
         {
             target.clone()
         }
+        _ if plan.writers() => row
+            .base
+            .clone()
+            .ok_or_else(|| Fail::refused("writer has no base"))?,
         _ => attempt.base.clone(),
     };
     let touches_yard = match &head {
-        Some(head) if Some(head.as_str()) != attempt.head.as_deref() && *head != base => daemon
-            .git
-            .changed_paths(&project.canonical_dir(), &base, head)
-            .await?
-            .iter()
-            .any(|path| path == ".yard" || path.starts_with(".yard/")),
+        Some(head)
+            if (plan.writers() || Some(head.as_str()) != attempt.head.as_deref())
+                && *head != base =>
+        {
+            daemon
+                .git
+                .changed_paths(&project.canonical_dir(), &base, head)
+                .await?
+                .iter()
+                .any(|path| path == ".yard" || path.starts_with(".yard/"))
+        }
         _ => false,
     };
     // The proof directory is worker-written. Snapshot it only once the box is
