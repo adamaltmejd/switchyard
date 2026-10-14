@@ -145,6 +145,15 @@ fn matching_identity(
     let Some(mut identity) = evidence.get("identity").filter(|v| v.is_object()).cloned() else {
         return Ok(None);
     };
+    let Ok(mut policy) =
+        serde_json::from_value::<crate::plan::Node>(evidence["policy"]["node"].clone())
+    else {
+        return Ok(None);
+    };
+    // Qualification permits only successor routing to differ. A replacement
+    // execution cannot authorize reuse of an original with different policy.
+    policy.routes.remove("complete");
+    identity["node_policy"] = json!(policy);
     let Some(inputs) = identity["inputs"].as_object_mut() else {
         return Ok(None);
     };

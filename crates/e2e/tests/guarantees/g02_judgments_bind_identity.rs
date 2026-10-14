@@ -247,6 +247,95 @@ fi",
         serde_json::from_str(observed.last().unwrap()["verification"].as_str().unwrap()).unwrap();
     assert_eq!(observed["identity"]["definition"]["dockerfile_blob"], blob);
 
+    // G2: change only the frozen node policy on an already verified candidate.
+    // Sabotage: compare consumed definitions but omit the original node policy
+    // when matching, then qualify only the replacement execution's policy.
+    let policy_original = project
+        .rows("SELECT * FROM execution WHERE name = 'closed' ORDER BY id DESC LIMIT 1")[0]
+        .clone();
+    let policy_check = project.rows(&format!(
+        "SELECT * FROM \"check\" WHERE execution = {}",
+        policy_original["id"]
+    ))[0]
+        .clone();
+    let retained = project.rows("SELECT * FROM \"check\" WHERE execution = (SELECT max(id) FROM execution WHERE name = 'other' AND outcome = 'pass')")[0].clone();
+    let before_policy = project.json(&["attempt", "show", "Y-1"])["attempt"].clone();
+    let revised = operator.call(
+        "yard_attempt_revise",
+        json!({"project": project.path,
+        "ticket": "Y-1", "plan_revision": plan_revision,
+        "overrides": {"candidate-gate-closed": {"operator_failure": true}}}),
+    );
+    plan_revision += 1;
+    assert_eq!(
+        revised["result"]["plan_revision"], plan_revision,
+        "{revised}"
+    );
+    let item = approval(&mut watch);
+    let log = std::fs::read_to_string(&commands).unwrap();
+    for (name, count) in [("closed", 7), ("other", 4), ("unknown", 5)] {
+        assert_eq!(
+            log.lines().filter(|line| *line == name).count(),
+            count,
+            "{log}"
+        );
+    }
+    for key in ["base", "head", "proof"] {
+        assert_eq!(item["payload"][key], before_policy[key]);
+    }
+    assert_eq!(item["payload"]["plan_revision"], plan_revision);
+    let shown = operator.call(
+        "yard_attempt_show",
+        json!({"project": project.path, "ticket": "Y-1"}),
+    );
+    assert!(shown.get("error").is_none(), "{shown}");
+    let executions = shown["result"]["executions"].as_array().unwrap();
+    let changed = executions
+        .iter()
+        .rev()
+        .find(|row| row["name"] == "closed")
+        .unwrap();
+    assert_ne!(changed["execution"], policy_original["id"]);
+    assert_eq!(changed["outcome"], "pass");
+    assert_eq!(
+        changed["verification"]["policy"]["node"]["operator_failure"],
+        true
+    );
+    assert_eq!(changed["result"]["reference"], Value::Null);
+    assert!(
+        !item["payload"]["checks"]
+            .as_array()
+            .unwrap()
+            .contains(&policy_check["id"])
+    );
+    let unrelated = executions
+        .iter()
+        .rev()
+        .find(|row| row["name"] == "other")
+        .unwrap();
+    assert_eq!(unrelated["outcome"], "reused");
+    assert_eq!(unrelated["result"]["reference"]["check"], retained["id"]);
+    assert!(
+        item["payload"]["checks"]
+            .as_array()
+            .unwrap()
+            .contains(&retained["id"])
+    );
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT * FROM execution WHERE id = {}",
+            policy_original["id"]
+        )),
+        vec![policy_original]
+    );
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT * FROM \"check\" WHERE id = {}",
+            policy_check["id"]
+        )),
+        vec![policy_check]
+    );
+
     // A failure is never a reusable pass. Omit the undeclared gate at this
     // boundary to observe skip, reference and accepted failure together.
     // Sabotage: reference failed results, carry acceptance to a new identity,
@@ -278,7 +367,7 @@ fi",
     let mut failed_executions = Vec::new();
     let mut decisions = Vec::new();
     let mut final_item = Value::Null;
-    for (body, expected_closed) in [(None, 7), (Some("Bookkeeping after acceptance"), 8)] {
+    for (body, expected_closed) in [(None, 8), (Some("Bookkeeping after acceptance"), 9)] {
         if let Some(body) = body {
             let revision = project.json(&["ticket", "show", "Y-1"])["revision"]
                 .as_i64()
