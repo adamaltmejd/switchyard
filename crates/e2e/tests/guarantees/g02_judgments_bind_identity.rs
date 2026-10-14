@@ -441,9 +441,15 @@ fi"#,
         );
         assert!(answer.get("error").is_none(), "{answer}");
         let approved = approval(&mut watch);
+        // Approval exposes the whole selection; omission decisions name only
+        // their candidate or prepared-merge nodes.
         assert_eq!(
             approved["payload"]["skipped"],
-            json!(["candidate-gate-unknown"])
+            json!([
+                "candidate-gate-unknown",
+                "landing-gate-closed",
+                "landing-gate-unknown"
+            ])
         );
         assert!(
             approved["payload"]["checks"]
