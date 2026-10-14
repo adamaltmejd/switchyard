@@ -318,4 +318,9 @@ ALTER TABLE execution_next RENAME TO execution;
 CREATE INDEX execution_attempt ON execution(attempt);
 CREATE INDEX execution_running ON execution(status) WHERE status = 'running';
 "#,
+    // Historical workspace and settings identity remains unknown.
+    "ALTER TABLE execution ADD COLUMN workspace TEXT;
+     ALTER TABLE execution ADD COLUMN settings TEXT;
+     CREATE UNIQUE INDEX execution_workspace_owner ON execution(attempt, workspace)
+       WHERE workspace IS NOT NULL AND (status = 'running' OR reserved = 1);",
 ];

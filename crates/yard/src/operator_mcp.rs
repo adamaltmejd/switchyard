@@ -51,9 +51,9 @@ const OPERATIONS: &[(&str, &str)] = &[
     ("ticket.abandon", "project! ticket! reason"),
     (
         "attempt.start",
-        "project! ticket! attention:i preset workflow graph:o overrides:o",
+        "project! ticket! attention:i preset workflow graph:o overrides:o workspace",
     ),
-    ("attempt.stop", "project! ticket!"),
+    ("attempt.stop", "project! ticket! execution:i"),
     (
         "attempt.revise",
         "project! ticket! plan_revision:i! preset workflow graph:o overrides:o definition_commit staging_commit image_commit",

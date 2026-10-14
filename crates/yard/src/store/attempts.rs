@@ -90,13 +90,18 @@ fn row(row: &Row) -> rusqlite::Result<Attempt> {
 
 impl Attempt {
     /// Launch settings belong to the selected revision, not the original row.
-    pub fn implementation_settings(&self) -> Result<Value, Fail> {
+    pub fn writer_settings(&self, node: &str) -> Result<Value, Fail> {
         let Some(admission) = &self.admission else {
             return Ok(self.implementer.clone());
         };
         let plan = crate::plan::Plan::admitted(admission)
             .map_err(|error| Fail::refused(error.to_string()))?;
-        let agent = match &plan.nodes["implementer"].runner {
+        let agent = match &plan
+            .nodes
+            .get(node)
+            .ok_or_else(|| Fail::refused("undeclared_workspace"))?
+            .runner
+        {
             crate::plan::Runner::Agent { agent, .. }
             | crate::plan::Runner::Packaged { agent, .. } => agent,
             _ => return Err(Fail::refused("implementation runner has no agent")),
@@ -397,6 +402,7 @@ impl Attention {
             ("candidate", _) => &["accept", "repair", "edit", "abandon"],
             ("approval", _) => &["approve", "reject", "abandon"],
             ("proposal", _) => &["accept", "reject"],
+            ("stopped", "candidates") => &["edit", "abandon"],
             ("stopped", "limit") => &["approve", "edit", "abandon"],
             ("stopped", "timeout") => &["edit", "abandon"],
             ("stopped", _) => &["start", "edit", "abandon"],

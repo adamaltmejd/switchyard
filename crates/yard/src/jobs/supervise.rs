@@ -46,10 +46,30 @@ pub fn start_implementation(
     reason: &str,
     feedback: Option<&Value>,
 ) -> Result<i64, Fail> {
+    start_writer(tx, attempt, "implementer", reason, feedback)
+}
+
+pub fn start_writer(
+    tx: &rusqlite::Connection,
+    attempt: &attempts::Attempt,
+    node: &str,
+    reason: &str,
+    feedback: Option<&Value>,
+) -> Result<i64, Fail> {
     // The revision and body are read here: the row names what the prompt carries.
     let attempt = attempts::get(tx, attempt.id)?;
-    let implementer = attempt.implementation_settings()?;
+    let implementer = attempt.writer_settings(node)?;
     let ticket = tickets::get(tx, attempt.ticket)?;
+    let previous = executions::query(
+        tx,
+        "attempt = ?1 AND workspace = ?2 AND kind = 'implementation' AND json_extract(result, '$.outputs.result.kind') = 'candidate' ORDER BY id DESC LIMIT 1",
+        rusqlite::params![attempt.id, node],
+    )?
+    .pop();
+    let candidate = previous
+        .as_ref()
+        .and_then(|row| row.result.as_ref())
+        .map(|result| &result["outputs"]["result"]["value"]);
     let name = implementer["name"].as_str().unwrap_or("default");
     let harness_version = implementer["harness"]
         .as_str()
@@ -60,10 +80,16 @@ pub fn start_implementation(
         executions::Start {
             attempt: Some(attempt.id),
             kind: "implementation",
+            node: Some(node),
+            workspace: Some(node),
             reason: Some(reason),
             base: Some(&attempt.base),
-            head: attempt.head.as_deref(),
-            proof: attempt.proof.as_deref(),
+            head: candidate
+                .and_then(|value| value["head"].as_str())
+                .or(attempt.head.as_deref()),
+            proof: candidate
+                .and_then(|value| value["proof"].as_str())
+                .or(attempt.proof.as_deref()),
             ticket_revision: Some(ticket.revision),
             ticket: Some(ticket.id),
             agent: Some((name, &implementer)),
@@ -76,6 +102,17 @@ pub fn start_implementation(
         "UPDATE execution SET body = ?2 WHERE id = ?1",
         rusqlite::params![id, ticket.body],
     )?;
+    if attempt
+        .admission
+        .as_ref()
+        .is_some_and(|a| a["runtime"] == "writer-graph")
+    {
+        tx.execute(
+            "UPDATE execution SET detail = (SELECT detail FROM execution WHERE attempt = ?2
+            AND workspace = ?3 AND id < ?1 ORDER BY id DESC LIMIT 1) WHERE id = ?1",
+            rusqlite::params![id, attempt.id, node],
+        )?;
+    }
     for item in attempts::open_for_attempt(tx, attempt.id)? {
         if item.kind == "proposal"
             && item.reason == "edit"
@@ -656,7 +693,10 @@ pub async fn implement(
         None => loaded.config.workflow_plan(&attempt.workflow)?,
     };
     let packaged = plan.packaged();
-    let implementer = attempt.implementation_settings()?;
+    let implementer = match &row.settings {
+        Some(settings) => settings.clone(),
+        None => attempt.writer_settings(row.node.as_deref().unwrap_or("implementer"))?,
+    };
     let provider = implementer["provider"].as_str();
     let connection = match provider {
         Some(name) => Some(
@@ -674,10 +714,39 @@ pub async fn implement(
     };
     let dir = project.attempt_dir(attempt.id);
     let audit_dir = dir.join("audits").join(execution.to_string());
+    let writer_dir = if plan.writers() {
+        dir.join("writers").join(crate::config::hex(
+            row.workspace
+                .as_deref()
+                .ok_or_else(|| Fail::refused("undeclared_workspace"))?
+                .as_bytes(),
+        ))
+    } else {
+        dir.clone()
+    };
+    let candidate_ref = if plan.writers() {
+        format!("refs/yard/candidates/{}/{}", attempt.id, execution)
+    } else {
+        crate::git::candidate_ref(attempt.id)
+    };
+    let writer_branch = if plan.writers() {
+        format!(
+            "{}/{}",
+            attempt.branch(),
+            crate::config::hex(
+                row.workspace
+                    .as_deref()
+                    .expect("writer workspace")
+                    .as_bytes()
+            )
+        )
+    } else {
+        attempt.branch()
+    };
     let clone = if workflow.read_only {
         audit_dir.join("checkout")
     } else {
-        dir.join("clone")
+        writer_dir.join("clone")
     };
     if stop_preparation(daemon, project, execution, None).await? {
         return Ok(());
@@ -703,7 +772,7 @@ pub async fn implement(
                 .clone_branch(
                     &project.canonical_dir(),
                     &clone,
-                    &attempt.branch(),
+                    &writer_branch,
                     &attempt.base,
                 )
                 .await?;
@@ -717,7 +786,11 @@ pub async fn implement(
     {
         return Ok(());
     }
-    let storage = if workflow.read_only { &audit_dir } else { &dir };
+    let storage = if workflow.read_only {
+        &audit_dir
+    } else {
+        &writer_dir
+    };
     let state = storage.join("state");
     let input = storage.join("input");
     let checkpoint = if let Some(packaged) = packaged
@@ -751,10 +824,11 @@ pub async fn implement(
             if source.is_none() {
                 std::fs::create_dir(&empty).map_err(|error| error.to_string())?;
             }
-            let digest = proof::snapshot(source.as_deref().unwrap_or(&empty), &snapshots)?;
+            let digest =
+                proof::snapshot(source.as_deref().unwrap_or(&empty), &snapshots, execution)?;
             Ok::<_, Fail>(snapshots.join(digest))
         } else {
-            let live = dir.join("proof");
+            let live = writer_dir.join("proof");
             std::fs::create_dir_all(&live).map_err(|error| error.to_string())?;
             Ok(live)
         }
@@ -1131,11 +1205,7 @@ pub async fn implement(
             .fetch(
                 &project.canonical_dir(),
                 &clone,
-                &format!(
-                    "+refs/heads/{}:{}",
-                    attempt.branch(),
-                    crate::git::candidate_ref(attempt.id)
-                ),
+                &format!("+refs/heads/{}:{}", writer_branch, candidate_ref),
             )
             .await
     };
@@ -1146,10 +1216,7 @@ pub async fn implement(
             Ok(()) => {
                 daemon
                     .git
-                    .rev_parse(
-                        &project.canonical_dir(),
-                        &crate::git::candidate_ref(attempt.id),
-                    )
+                    .rev_parse(&project.canonical_dir(), &candidate_ref)
                     .await?
             }
             Err(_) => None,
@@ -1187,7 +1254,7 @@ pub async fn implement(
     let snapshots = dir.join("proof-snapshots");
     let proof_snapshot =
         (teardown.is_ok() && fetched.is_ok() && clean && !touches_yard && !workflow.read_only)
-            .then(|| proof::snapshot(&proof_dir, &snapshots));
+            .then(|| proof::snapshot(&proof_dir, &snapshots, execution));
     run.stopped |= take_stop(daemon, project, execution).await;
     project.tx(|tx| {
         let current = attempts::get(tx, attempt.id)?;
@@ -1222,7 +1289,8 @@ pub async fn implement(
             _ => None,
         };
         let report = executions::get(tx, execution)?.report;
-        let edited = attempts::edit_pending(tx, attempt.id)?;
+        let edited = if plan.writers() { ticket.revision != tickets::get(tx, attempt.ticket)?.revision
+            || executions::plan_superseded(tx, &current, &row)? } else { attempts::edit_pending(tx, attempt.id)? };
         let failure = failure.or_else(|| {
             (workflow.read_only && !run.stopped && !edited && report.is_none())
                 .then(|| ("failed", Some("publication"), "missing_report".to_string()))
@@ -1302,7 +1370,8 @@ pub async fn implement(
             if row.reason.as_deref() == Some("dirty") {
                 return stop(tx, "dirty", &format!("the clone is still dirty:\n{listing}"));
             }
-            return attempts::set_next(tx, attempt.id, Some(&json!({ "reason": "dirty", "detail": listing })));
+            if plan.writers() { return Ok(()); }
+            return attempts::set_next(tx, attempt.id, Some(&json!({ "reason": "dirty", "detail": listing, "workspace": row.workspace })));
         }
         if touches_yard {
             let detail = ".yard changes only through the operator's `yard sync`; the candidate touching it is refused. Take the .yard change out of your commits.";
@@ -1313,7 +1382,8 @@ pub async fn implement(
                 ticket: Some(ticket.id),
                 ..Default::default()
             })?;
-            return attempts::set_next(tx, attempt.id, Some(&json!({ "reason": "repair", "detail": detail })));
+            if plan.writers() { return stop(tx, "failed", detail); }
+            return attempts::set_next(tx, attempt.id, Some(&json!({ "reason": "repair", "detail": detail, "workspace": row.workspace })));
         }
         if let Some(Err(error)) = &proof_snapshot {
             let detail = error.clone();
@@ -1326,11 +1396,10 @@ pub async fn implement(
             })?;
             return stop(tx, "failed", &detail);
         }
-        let previous = current.head.clone().unwrap_or_else(|| current.base.clone());
+        let previous = if plan.writers() { row.head.clone().unwrap_or_else(|| row.base.clone().unwrap_or_else(|| current.base.clone())) }
+            else { current.head.clone().unwrap_or_else(|| current.base.clone()) };
         let new_head = head.clone().unwrap_or_else(|| previous.clone());
-        let current_proof = current
-            .proof
-            .clone()
+        let current_proof = if plan.writers() { row.proof.clone() } else { current.proof.clone() }
             .unwrap_or_else(proof::empty_digest);
         let digest = match &proof_snapshot {
             Some(Ok(digest)) => digest.clone(),
@@ -1342,11 +1411,11 @@ pub async fn implement(
         // An edit run that leaves the existing candidate as it is sends it to
         // judgment at the new revision.
         let rejudge = row.reason.as_deref() == Some("edit")
-            && current.head.is_some()
+            && (current.head.is_some() || (plan.writers() && row.head.is_some()))
             && !workflow.read_only
             && !edited;
         let advanced = !run.stopped
-            && (new_head != previous || (!workflow.read_only && current_proof != digest) || rejudge);
+            && (new_head != previous || (!workflow.read_only && current_proof != digest) || rejudge || (plan.writers() && new_head != base));
         if !advanced {
             executions::end(tx, execution, executions::End {
                 outcome: "unchanged",
@@ -1365,19 +1434,29 @@ pub async fn implement(
             }
             return stop(tx, "unchanged", "the worker stopped without a new commit");
         }
-        tx.execute(
+        if !plan.writers() { tx.execute(
             "UPDATE attempt SET head = ?2, base = ?3, proof = ?4 WHERE id = ?1",
             rusqlite::params![attempt.id, new_head, base, digest],
-        )?;
+        )?; }
+        let mut candidate = json!({"base": base, "head": new_head, "proof": digest});
+        if plan.writers() {
+            candidate["candidate"] = json!(execution);
+            candidate["workspace"] = json!(row.workspace);
+            candidate["producer"] = json!({
+                "execution": execution, "node": row.node, "settings": row.settings,
+                "profile": attempt.admission.as_ref().map(|a| &a["writer_profiles"][row.node.as_deref().unwrap_or("implementer")])
+            });
+        }
         executions::end(tx, execution, executions::End {
             outcome: "candidate",
-            output: Some(json!({"kind": "candidate", "value": {"base": base, "head": new_head, "proof": digest}})),
+            output: Some(json!({"kind": "candidate", "value": candidate})),
             exit_code: run.exit_code,
             ticket: Some(ticket.id),
             ..Default::default()
         })?;
         super::audit_attempt(tx, "attempt.candidate", &current, None, json!({
             "base": base, "head": new_head, "proof": digest,
+            "candidate": execution, "workspace": row.workspace,
             "proof_path": proof::snapshot_path(project, attempt.id, &digest).display().to_string(),
         }))?;
         Ok(())
@@ -1508,11 +1587,19 @@ async fn implementer_prompt(
         .map_err(|error| Fail::refused(error.to_string()))?;
     let instructions = plan
         .as_ref()
-        .and_then(|plan| match &plan.nodes["implementer"].runner {
-            crate::plan::Runner::Agent { instructions, .. } => Some(instructions.as_str()),
-            _ => None,
+        .and_then(|plan| {
+            match &plan.nodes[execution.node.as_deref().unwrap_or("implementer")].runner {
+                crate::plan::Runner::Agent { instructions, .. } => Some(instructions.as_str()),
+                _ => None,
+            }
         })
         .unwrap_or(&workflow.instructions);
+    let writer_graph = plan.as_ref().is_some_and(|plan| plan.writers());
+    let previous_candidate = if writer_graph {
+        execution.base.as_deref().zip(execution.head.as_deref())
+    } else {
+        attempt.candidate()
+    };
     let mut prompt = String::new();
     // The resumed session's owner launched its harness with this body.
     let body_read: Option<String> = match resumed {
@@ -1544,7 +1631,7 @@ async fn implementer_prompt(
             prompt.push_str("Work in /workspace on the current branch. Commit your work with git and leave the tree clean; uncommitted or untracked files send the work back to you. Do not change .yard/. Record progress with yard_progress. Files under /yard/proof are snapshotted with the candidate and are not merged. Propose follow-up tickets with yard_propose; if the ticket is too large, propose the split and stop.\n\n");
         }
         if reason != "first"
-            && let Some((base, head)) = attempt.candidate()
+            && let Some((base, head)) = previous_candidate
         {
             let stat = daemon
                 .git
@@ -1554,6 +1641,7 @@ async fn implementer_prompt(
             let notes = project.read(|conn| {
                 Ok(executions::for_attempt(conn, attempt.id)?
                     .into_iter()
+                    .filter(|row| !writer_graph || row.workspace == execution.workspace)
                     .filter_map(|row| row.progress)
                     .collect::<Vec<_>>())
             })?;
@@ -1566,7 +1654,10 @@ async fn implementer_prompt(
             }
         }
     }
-    let detail = next["detail"].as_str().unwrap_or_default();
+    let detail = next["detail"]
+        .as_str()
+        .or(execution.detail.as_deref())
+        .unwrap_or_default();
     match reason {
         "dirty" => prompt.push_str(&format!(
             "Your clone was not clean when you stopped. Commit or remove these files:\n{detail}\n"
@@ -1601,7 +1692,15 @@ async fn implementer_prompt(
         _ => {}
     }
     if resumed && let Some(read) = body_read.as_deref().filter(|read| *read != ticket.body) {
-        let diff = body_diff(daemon, project, attempt.id, read, &ticket.body).await?;
+        let diff = body_diff(
+            daemon,
+            project,
+            attempt.id,
+            execution.id,
+            read,
+            &ticket.body,
+        )
+        .await?;
         prompt.push_str(&format!("\nThe operator edited the ticket:\n{diff}\n"));
     }
     prompt.push_str(&plan_handoff(daemon, project, attempt, execution).await?);
@@ -1621,7 +1720,11 @@ async fn plan_handoff(
         Ok(executions::for_attempt(conn, attempt.id)?
             .into_iter()
             .rev()
-            .find(|row| row.kind == "implementation" && row.id < execution.id))
+            .find(|row| {
+                row.kind == "implementation"
+                    && row.id < execution.id
+                    && (execution.workspace.is_none() || row.workspace == execution.workspace)
+            }))
     })?;
     if let Some(previous) = previous
         && previous.plan_revision != execution.plan_revision
@@ -1654,7 +1757,7 @@ async fn plan_handoff(
         };
         let old = evidence(&before)?;
         let new = evidence(attempt)?;
-        let diff = body_diff(daemon, project, attempt.id, &old, &new).await?;
+        let diff = body_diff(daemon, project, attempt.id, execution.id, &old, &new).await?;
         return Ok(format!("\nThe operator revised the plan:\n{diff}\n"));
     }
     Ok(String::new())
@@ -1665,10 +1768,14 @@ async fn body_diff(
     daemon: &Daemon,
     project: &Project,
     attempt: i64,
+    execution: i64,
     before: &str,
     after: &str,
 ) -> Result<String, Fail> {
-    let dir = project.attempt_dir(attempt).join("edit");
+    let dir = project
+        .attempt_dir(attempt)
+        .join("edit")
+        .join(execution.to_string());
     std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
     std::fs::write(dir.join("before"), before).map_err(|error| error.to_string())?;
     std::fs::write(dir.join("after"), after).map_err(|error| error.to_string())?;
@@ -2236,6 +2343,10 @@ pub async fn context(daemon: &Arc<Daemon>, grant: &crate::mcp::Grant) -> Result<
     let ticket = project.read(|conn| tickets::get(conn, attempt.ticket))?;
     let (base, head) = match grant.kind {
         crate::mcp::Kind::Review => (row.base.clone().unwrap_or_default(), row.head.clone()),
+        crate::mcp::Kind::Implementation if row.workspace.is_some() => (
+            row.base.clone().unwrap_or_else(|| attempt.base.clone()),
+            row.head.clone(),
+        ),
         crate::mcp::Kind::Implementation
         | crate::mcp::Kind::Audit
         | crate::mcp::Kind::StandaloneReport => (attempt.base.clone(), attempt.head.clone()),

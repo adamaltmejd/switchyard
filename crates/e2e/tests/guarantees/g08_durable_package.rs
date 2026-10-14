@@ -1338,6 +1338,8 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
         // Sabotage: backfill ended executions from current definitions.
         old_rows[0]["verification"] = Value::Null;
         old_rows[0]["scope"] = Value::Null;
+        old_rows[0]["workspace"] = Value::Null;
+        old_rows[0]["settings"] = Value::Null;
         machine.kill();
         machine.use_binary(None);
         machine.start();
@@ -1596,6 +1598,16 @@ fn a_packaged_audit_refuses_missing_assets_then_publishes_in_a_corrected_box() {
             "SELECT * FROM execution WHERE id = {admitting_execution}"
         ));
         historical[0]["scope"] = Value::Null;
+        historical[0]
+            .as_object_mut()
+            .unwrap()
+            .entry("workspace")
+            .or_insert(Value::Null);
+        historical[0]
+            .as_object_mut()
+            .unwrap()
+            .entry("settings")
+            .or_insert(Value::Null);
         if contract.is_none() {
             historical[0]["verification"] = Value::Null;
         }

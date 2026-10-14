@@ -474,6 +474,7 @@ impl Config {
                         plan.ordinary_selection(&ordinary, self.review.max_rounds, &self.profiles)
                             .is_some()
                             || plan.read_only_selection(&ordinary, self)
+                            || plan.writer_selection(self, name)
                     }
                 })
             })
@@ -500,6 +501,8 @@ impl Plan {
     pub fn runtime(&self) -> &'static str {
         if self.packaged().is_some() {
             "packaged-audit"
+        } else if self.writers() {
+            "writer-graph"
         } else if self.concurrent() {
             "read-only-graph"
         } else {
@@ -508,7 +511,8 @@ impl Plan {
     }
     pub fn admitted(admission: &Value) -> Result<Self, serde_json::Error> {
         let mut plan: Self = serde_json::from_value(admission["plan"].clone())?;
-        if admission["runtime"] != "read-only-graph"
+        if admission["runtime"] != "writer-graph"
+            && admission["runtime"] != "read-only-graph"
             && admission["runtime"] != "ordinary-linear"
             && admission["runtime"] != "packaged-audit"
             && !plan.inputs.contains_key("feedback")
@@ -519,22 +523,32 @@ impl Plan {
     }
 
     pub fn concurrent(&self) -> bool {
-        self.nodes.values().any(|node| {
-            node.routes
-                .get("complete")
-                .is_some_and(|routes| routes.len() > 1)
-                || node.inputs.iter().any(|(name, input)| {
-                    name != "panel" && input.node.is_some() && input.kind == Output::Verdict
-                })
-        }) || self.nodes.iter().any(|(name, node)| {
-            name.starts_with("candidate-gate-") && node.access == Access::ReadOnly
-        })
+        self.writers()
+            || self.nodes.values().any(|node| {
+                node.routes
+                    .get("complete")
+                    .is_some_and(|routes| routes.len() > 1)
+                    || node.inputs.iter().any(|(name, input)| {
+                        name != "panel" && input.node.is_some() && input.kind == Output::Verdict
+                    })
+            })
+            || self.nodes.iter().any(|(name, node)| {
+                name.starts_with("candidate-gate-") && node.access == Access::ReadOnly
+            })
     }
 
     /// Complete edges define a DAG. Required inputs must come from an ancestor.
     pub fn complete_order(&self) -> Option<Vec<&str>> {
         let mut order = Vec::new();
-        let mut reached = BTreeSet::from(["implementer"]);
+        let mut reached = if self.writers() {
+            self.nodes
+                .iter()
+                .filter(|(_, node)| node.access == Access::WriteAllowed)
+                .map(|(name, _)| name.as_str())
+                .collect()
+        } else {
+            BTreeSet::from(["implementer"])
+        };
         while order.len() < self.nodes.len() {
             let next = self.nodes.keys().map(String::as_str).find(|name| {
                 reached.contains(name)
@@ -561,6 +575,113 @@ impl Plan {
             }
         }
         Some(order)
+    }
+
+    /// Independent writers are roots. Each reader names exactly one producer.
+    /// Selection and integration of these candidates belong to later graphs.
+    pub fn writers(&self) -> bool {
+        self.nodes
+            .values()
+            .filter(|node| {
+                node.access == Access::WriteAllowed
+                    && node.outputs.get("result") == Some(&Output::Candidate)
+            })
+            .count()
+            > 1
+    }
+
+    fn writer_selection(&self, config: &Config, workflow: &str) -> bool {
+        if config
+            .workflow(workflow)
+            .map_or(true, |workflow| workflow.read_only)
+            || !self.writers()
+            || !self.inputs.is_empty()
+            || self
+                .nodes
+                .get("implementer")
+                .is_none_or(|node| node.access != Access::WriteAllowed)
+        {
+            return false;
+        }
+        for (name, node) in &self.nodes {
+            if name.is_empty()
+                || !name
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+                || !matches!(node.runner, Runner::Agent { .. })
+                || node.operator_failure
+            {
+                return false;
+            }
+            if node.access == Access::WriteAllowed {
+                if !node.inputs.is_empty()
+                    || !node.requires.is_empty()
+                    || node.outputs != BTreeMap::from([("result".into(), Output::Candidate)])
+                    || node.outcomes != ["complete"]
+                    || node.routes.keys().any(|outcome| outcome != "complete")
+                    || !config.profiles.values().any(|profile| {
+                        profile.runner == node.runner
+                            && profile.access == node.access
+                            && profile.outputs == node.outputs
+                            && profile.outcomes == node.outcomes
+                    })
+                {
+                    return false;
+                }
+                for route in node.routes.values().flatten() {
+                    if route.repeat.is_some()
+                        || self.nodes.get(&route.to).is_none_or(|reader| {
+                            reader.access != Access::ReadOnly
+                                || reader
+                                    .inputs
+                                    .get("candidate")
+                                    .is_none_or(|input| input.node.as_deref() != Some(name))
+                        })
+                    {
+                        return false;
+                    }
+                }
+            } else {
+                let Some(index) = name
+                    .strip_prefix("review-")
+                    .and_then(|i| i.parse::<usize>().ok())
+                else {
+                    return false;
+                };
+                if config
+                    .workflow(workflow)
+                    .map_or(true, |workflow| index >= workflow.review.len())
+                    || !node.routes.is_empty()
+                    || node.inputs.len() != 1
+                    || node.requires != ["candidate"]
+                    || node.outputs != BTreeMap::from([("result".into(), Output::Verdict)])
+                    || node.outcomes != ["complete", "blocked"]
+                {
+                    return false;
+                }
+                let Some(input) = node.inputs.get("candidate") else {
+                    return false;
+                };
+                let Some(source) = input
+                    .node
+                    .as_ref()
+                    .and_then(|source| self.nodes.get(source))
+                else {
+                    return false;
+                };
+                if input.kind != Output::Candidate
+                    || input.output != "result"
+                    || source.access != Access::WriteAllowed
+                    || !source
+                        .routes
+                        .get("complete")
+                        .is_some_and(|routes| routes.iter().any(|route| route.to == *name))
+                {
+                    return false;
+                }
+            }
+        }
+        self.complete_order().is_some()
     }
 
     fn read_only_selection(&self, ordinary: &Self, config: &Config) -> bool {

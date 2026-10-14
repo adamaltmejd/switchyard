@@ -14,22 +14,23 @@ pub(super) fn pre_target_binary() -> PathBuf {
         .clone()
 }
 
-fn pre_standalone_binary() -> PathBuf {
-    static BINARY: OnceLock<PathBuf> = OnceLock::new();
-    BINARY
-        .get_or_init(|| {
-            archived_binary("fb3f727f793524534965480f86e71af06b0ad646", "pre-standalone")
-        })
-        .clone()
-}
-
-/// G5/G6: actual Y-67 rows survive the nullable execution rebuild unchanged.
+/// G5/G6: actual Y-67 and Y-68 rows survive execution migrations unchanged.
 /// The historical daemon creates a fresh store, completes verification,
 /// approval, landing and cleanup. Host Git and the fixture supply identities.
-/// Sabotage: omit a column, remap IDs, lose a foreign key or backfill scope.
+/// Sabotage: omit a column, remap IDs, lose a foreign key or invent scope,
+/// workspace or settings for retained historical rows.
 /// The pre-target upgrade lacks Y-67's bound results and owner records.
 #[test]
 fn nullable_execution_upgrade_preserves_real_results_approvals_and_owners() {
+    for (revision, label) in [
+        ("fb3f727f793524534965480f86e71af06b0ad646", "pre-standalone"),
+        ("c2e7986", "pre-writers"),
+    ] {
+        historical_execution_upgrade(revision, label);
+    }
+}
+
+fn historical_execution_upgrade(revision: &str, label: &str) {
     let machine = Machine::new("g68-migration", |request| {
         if request.has_tool("yard_publish_review") {
             return act(request, vec![publish(json!([]))]);
@@ -42,7 +43,7 @@ fn nullable_execution_upgrade_preserves_real_results_approvals_and_owners() {
             ],
         )
     });
-    machine.use_binary(Some(pre_standalone_binary()));
+    machine.use_binary(Some(archived_binary(revision, label)));
     machine.start();
     let project = Project::new(
         &machine,
@@ -94,7 +95,12 @@ runs_in = "box"
     machine.kill();
     let mut executions = project.rows("SELECT * FROM execution ORDER BY id");
     for row in &mut executions {
-        row["scope"] = Value::Null;
+        row.as_object_mut()
+            .unwrap()
+            .entry("scope")
+            .or_insert(Value::Null);
+        row["workspace"] = Value::Null;
+        row["settings"] = Value::Null;
     }
     let tables = [
         "attempt",

@@ -164,10 +164,14 @@ pub async fn reap(daemon: &Daemon, project: &Project) -> Result<(), Fail> {
                     },
                 )?;
                 if row.kind == "implementation"
-                    && row
+                    && (row
                         .prepared
                         .as_ref()
                         .is_some_and(|prepared| !prepared["durable"].is_null())
+                        || attempts::get(tx, row.required_attempt()?)?
+                            .admission
+                            .as_ref()
+                            .is_some_and(|admission| admission["runtime"] == "writer-graph"))
                 {
                     let attempt = attempts::get(tx, row.required_attempt()?)?;
                     if attempt.state == "live" {
@@ -300,6 +304,13 @@ pub async fn release(
                 || completed_candidate
                 || completed_judgment
                 || stopped_implementation
+                || (released.kind == "implementation"
+                    && released.lock_contract
+                    && attempts::for_execution(tx, &released)?
+                        .admission
+                        .as_ref()
+                        .is_some_and(|admission| admission["runtime"] == "writer-graph")
+                    && dir(project, &released).join("lock").is_file())
                 || (released.kind == "implementation"
                     && released.lock_contract
                     && released

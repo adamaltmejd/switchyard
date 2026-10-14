@@ -240,7 +240,9 @@ fn admit(
     if plan.packaged().is_some() {
         inputs["package"] = crate::pi::package_identity();
     }
+    let writer_profiles = writer_profiles(&loaded.config, &plan, request, None);
     let mut admission = json!({
+        "writer_profiles": writer_profiles,
         "status": "recorded",
         "runtime": plan.runtime(),
         "revision": 1,
@@ -282,6 +284,30 @@ fn admit(
         json!({ "target": loaded.branch, "base": loaded.head, "workflow": name, "implementer": implementer }),
     )?;
     super::supervise::start_implementation(tx, &row, "first", None)
+}
+
+fn writer_profiles(
+    config: &crate::config::Config,
+    plan: &crate::plan::Plan,
+    request: &crate::plan::Request,
+    previous: Option<&Value>,
+) -> Value {
+    json!(plan.nodes.iter()
+        .filter(|(_, node)| node.access == crate::plan::Access::WriteAllowed)
+        .map(|(name, node)| {
+            let selected = request.overrides.get(name)
+                .or_else(|| request.graph.as_ref().and_then(|graph| graph.nodes.get(name)))
+                .or_else(|| request.preset.as_ref().and_then(|preset| config.presets.get(preset))
+                    .and_then(|graph| graph.nodes.get(name)))
+                .and_then(|spec| spec.profile.as_deref());
+            let mut definition = json!({"name": selected, "runner": node.runner, "access": node.access,
+                "outputs": node.outputs, "outcomes": node.outcomes});
+            if selected.is_none() && let Some(old) = previous.and_then(|p| p.get(name))
+                && ["runner", "access", "outputs", "outcomes"].iter().all(|key| old[key] == definition[key]) {
+                definition["name"] = old["name"].clone();
+            }
+            (name, definition)
+        }).collect::<std::collections::BTreeMap<_, _>>())
 }
 
 /// The admission daemon's tool implementation identity, read once per process.
@@ -1327,36 +1353,73 @@ pub async fn attempt_revise(
     {
         *instructions = previous.clone();
     }
+    if plan.writers()
+        && (plan
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.access == crate::plan::Access::WriteAllowed)
+            .any(|(name, node)| {
+                old.nodes.get(name).is_none_or(|previous| {
+                    let mut node = node.clone();
+                    let mut previous = previous.clone();
+                    node.routes.clear();
+                    previous.routes.clear();
+                    if let (
+                        crate::plan::Runner::Agent { instructions, .. },
+                        crate::plan::Runner::Agent {
+                            instructions: old, ..
+                        },
+                    ) = (&mut node.runner, &previous.runner)
+                    {
+                        *instructions = old.clone();
+                    }
+                    node != previous
+                })
+            })
+            || old.nodes.iter().any(|(name, node)| {
+                node.access == crate::plan::Access::WriteAllowed && !plan.nodes.contains_key(name)
+            }))
+    {
+        return Err(Fail::refused("adjustment changes frozen writer grants")
+            .with(json!({"reason": "unsupported_revision"})));
+    }
     if implementer != old_implementer {
         return Err(Fail::refused("adjustment changes frozen grants")
             .with(json!({"reason": "unsupported_revision"})));
     }
     if adopting {
-        let (crate::plan::Runner::Agent { agent, .. }
-        | crate::plan::Runner::Packaged { agent, .. }) = &old.nodes["implementer"].runner
-        else {
-            return Err(Fail::refused("unsupported implementer"));
-        };
-        let mut settings = loaded.config.agents[agent].clone();
-        let previous = &frozen.config.agents[agent];
-        if packaged
-            && !crate::pi::package_effort_capable(&evidence)
-            && settings.effort.is_some()
-            && settings.effort != previous.effort
-        {
-            return Err(
-                Fail::refused("recorded package cannot control requested effort")
-                    .with(json!({"reason": "unsupported_effort", "identity": "effort",
+        for (name, node) in &old.nodes {
+            if name != "implementer"
+                && (!old.writers() || node.access != crate::plan::Access::WriteAllowed)
+            {
+                continue;
+            }
+            let (crate::plan::Runner::Agent { agent, .. }
+            | crate::plan::Runner::Packaged { agent, .. }) = &node.runner
+            else {
+                return Err(Fail::refused("unsupported implementer"));
+            };
+            let mut settings = loaded.config.agents[agent].clone();
+            let previous = &frozen.config.agents[agent];
+            if packaged
+                && !crate::pi::package_effort_capable(&evidence)
+                && settings.effort.is_some()
+                && settings.effort != previous.effort
+            {
+                return Err(
+                    Fail::refused("recorded package cannot control requested effort")
+                        .with(json!({"reason": "unsupported_effort", "identity": "effort",
                     "expected": settings.effort, "current": previous.effort})),
-            );
-        }
-        settings.model = previous.model.clone();
-        settings.effort = previous.effort.clone();
-        if settings != *previous || loaded.config.egress != frozen.config.egress {
-            return Err(Fail::refused(
-                "source adoption changes frozen implementation harness, connection or grants",
-            )
-            .with(json!({"reason": "unsupported_revision"})));
+                );
+            }
+            settings.model = previous.model.clone();
+            settings.effort = previous.effort.clone();
+            if settings != *previous || loaded.config.egress != frozen.config.egress {
+                return Err(Fail::refused(
+                    "source adoption changes frozen implementation harness, connection or grants",
+                )
+                .with(json!({"reason": "unsupported_revision"})));
+            }
         }
         let workflow = loaded.config.workflow(&attempt.workflow)?;
         evidence["workflow"] = json!(workflow);
@@ -1414,6 +1477,12 @@ pub async fn attempt_revise(
             });
         }
     }
+    evidence["writer_profiles"] = writer_profiles(
+        &loaded.config,
+        &plan,
+        &request,
+        Some(&evidence["writer_profiles"]),
+    );
     evidence["selection"] = selection;
     evidence["skipped"] = json!(skipped);
     evidence["unreviewed"] = json!(!plan.nodes.keys().any(|name| name.starts_with("review-")));
@@ -1510,6 +1579,7 @@ pub async fn attempt_start(
             "workflow",
             "graph",
             "overrides",
+            "workspace",
         ],
     )?;
     let selected = ["preset", "workflow", "graph", "overrides"]
@@ -1568,6 +1638,77 @@ pub async fn attempt_start(
     let default = super::refresh_default(daemon, project, &canonical).await?;
     let live = project.read(|conn| attempts::live_for(conn, id))?;
     let ticket = project.read(|conn| tickets::get(conn, id))?;
+    if let Some(workspace) = params["workspace"].as_str() {
+        if selected || params.get("attention").is_some() {
+            return Err(Fail::invalid(
+                "workspace continuation cannot select a plan or attention",
+            ));
+        }
+        let attempt = live
+            .as_ref()
+            .ok_or_else(|| Fail::refused("undeclared_workspace"))?;
+        let plan = crate::plan::Plan::admitted(
+            attempt
+                .admission
+                .as_ref()
+                .ok_or_else(|| Fail::refused("undeclared_workspace"))?,
+        )
+        .map_err(|error| Fail::refused(error.to_string()))?;
+        if !plan.writers()
+            || plan
+                .nodes
+                .get(workspace)
+                .is_none_or(|node| node.access != crate::plan::Access::WriteAllowed)
+        {
+            return Err(Fail::refused("undeclared_workspace")
+                .with(json!({"reason": "undeclared_workspace", "workspace": workspace})));
+        }
+        let open = project.read(|conn| attempts::open_for_attempt(conn, attempt.id))?;
+        if let Some(item) = open.iter().find(|item| {
+            (item.kind == "stopped" && item.reason == "timeout")
+                || (item.kind == "proposal" && item.reason == "edit")
+        }) {
+            return Err(Fail::refused(
+                "continuation requires the pending attention to be answered",
+            )
+            .with(json!({"reason": item.reason, "attention": item.id})));
+        }
+        if !attempt.lane && !take_lane(daemon, project, &default, attempt.id)? {
+            return Err(Fail::refused("no lane is free").with(json!({"reason": "capacity"})));
+        }
+        let execution = project.tx(|tx| {
+            attempts::require_plan(tx, attempt.id, attempt.plan_revision())?;
+            let execution = super::supervise::start_writer(tx, attempt, workspace, "retry", None)?;
+            for item in attempts::open_for_attempt(tx, attempt.id)? {
+                if (item.kind == "stopped" && item.reason == "candidates")
+                    || (matches!(item.kind.as_str(), "stopped" | "red")
+                        && item.exits().contains(&"start")
+                        && item
+                            .execution
+                            .and_then(|id| executions::get(tx, id).ok())
+                            .is_some_and(|row| row.workspace.as_deref() == Some(workspace)))
+                {
+                    attempts::resolve(tx, &item, "start", None)?;
+                }
+            }
+            Ok(execution)
+        })?;
+        spawn(daemon, project, "implementation", execution);
+        return Ok(json!({"execution": execution, "workspace": workspace}));
+    }
+    if let Some(attempt) = &live
+        && attempt
+            .admission
+            .as_ref()
+            .and_then(|a| crate::plan::Plan::admitted(a).ok())
+            .is_some_and(|p| p.writers())
+        && (params["attention"].as_i64().is_none()
+            || item.is_none_or(|item| item.execution.is_none()))
+    {
+        return Err(Fail::refused("undeclared_workspace")
+            .with(json!({"reason": "undeclared_workspace",
+            "attempt": attempt.id})));
+    }
     if let Some(attempt) = &live
         && let Some(owner) = project.read(|conn| {
             Ok(executions::attempt_work(conn, attempt.id)?
@@ -1746,7 +1887,7 @@ async fn answer_start(
             attempts::set_next(
                 tx,
                 attempt,
-                Some(&json!({ "reason": reason, "detail": detail })),
+                Some(&json!({ "reason": reason, "detail": detail, "workspace": execution.as_ref().and_then(|row| row.workspace.as_deref()) })),
             )?;
         }
         Ok(())
@@ -1759,9 +1900,12 @@ pub fn attempt_stop(daemon: &Daemon, project: &Project, params: &Value) -> Resul
     let running = project.read(|conn| {
         let attempt = attempts::live_for(conn, id)?
             .ok_or_else(|| Fail::refused(format!("{} has no live attempt", ticket_name(id))))?;
-        Ok(executions::attempt_work(conn, attempt.id)?
-            .into_iter()
-            .find(|row| row.status == "running" && row.kind == "implementation"))
+        let writers: Vec<_> = executions::attempt_work(conn, attempt.id)?.into_iter()
+            .filter(|row| row.status == "running" && row.kind == "implementation"
+                && params["execution"].as_i64().is_none_or(|id| row.id == id)).collect();
+        if writers.len() > 1 { return Err(Fail::refused("ambiguous_execution").with(json!({
+            "reason": "ambiguous_execution", "executions": writers.iter().map(|row| row.id).collect::<Vec<_>>()}))); }
+        Ok(writers.into_iter().next())
     })?;
     let Some(running) = running else {
         return Err(Fail::refused(format!(
@@ -2542,6 +2686,9 @@ pub fn attempt_show(project: &Project, params: &Value) -> Result<Value, Fail> {
             "ticket": ticket.to_json(),
             "attempt": attempt.to_json(),
             "plan_revisions": attempts::revisions(conn, attempt.id)?,
+            "candidates": executions.iter().filter_map(|row| row["result"]["outputs"]["result"].as_object()
+                .filter(|output| output.get("kind").and_then(Value::as_str) == Some("candidate"))
+                .map(|output| output["value"].clone())).collect::<Vec<_>>(),
             "executions": executions,
             "checks": checks_json,
             "approval": checks::active_for(conn, attempt.id)?.map(|approval| json!({

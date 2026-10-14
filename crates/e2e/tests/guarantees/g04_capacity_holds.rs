@@ -877,6 +877,655 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
         git(&project.canonical(), &["show", "feature/a:independent.txt"]),
         "fixture\n"
     );
+    five_writer_candidates_survive_continuation_and_restart();
+}
+
+/// G9/G13/G14: five graph-declared profiles act on one frozen ticket/target.
+/// Sabotage: share a clone/index/state/proof path, pick the newest attempt head
+/// for a reader, resume another workspace's session, bypass retained ownership,
+/// or delete only the ordinary clone. Git, inode identities and fixture bytes
+/// supply expectations. The host model holds each real harness after its edits;
+/// the fifth writer's real box and inherited lock hold the external crash point.
+fn five_writer_candidates_survive_continuation_and_restart() {
+    use std::os::unix::fs::MetadataExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let held: Vec<_> = (0..5).map(|_| Latch::new()).collect();
+    let readers: Vec<_> = (0..5).map(|_| Latch::new()).collect();
+    let continued = Latch::new();
+    let writer_holds = held.clone();
+    let reader_holds = readers.clone();
+    let continuation_hold = continued.clone();
+    let phases: Vec<_> = (0..5).map(|_| AtomicUsize::new(0)).collect();
+    let machine = Machine::new("g4-five-writers", move |request| {
+        if request.has_tool("yard_publish_report") {
+            return planned(request);
+        }
+        if request.has_tool("yard_publish_review") {
+            let prompt = request.prompt();
+            let n = (0..5)
+                .find(|n| prompt.contains(&format!("Frozen reader {n}.")))
+                .unwrap();
+            if request.opens() {
+                return Reply::Hold(
+                    reader_holds[n].clone(),
+                    Box::new(Reply::Tools(vec![bash(&format!(
+                        "test \"$(cat same.txt)\" = writer-{n} && test \"$(cat /yard/proof/evidence.txt)\" = proof-{n} && \
+                     ! (echo bad > same.txt) 2>/dev/null && \
+                     ! (echo bad > /yard/proof/evidence.txt) 2>/dev/null && echo frozen-{n}"
+                    ))])),
+                );
+            }
+            let results = request.tool_results();
+            if results
+                .last()
+                .is_some_and(|(_, result)| result.contains(&format!("frozen-{n}")))
+            {
+                return Reply::Tools(vec![publish(json!([]))]);
+            }
+            return Reply::Text("done".into());
+        }
+        let model = request.body["model"].as_str().unwrap();
+        let n = model
+            .strip_prefix("trial-model-")
+            .unwrap()
+            .parse::<usize>()
+            .unwrap();
+        if request.opens() {
+            let phase = phases[n].fetch_add(1, Ordering::SeqCst);
+            let mut calls = if phase == 0 {
+                vec![
+                    commit_file("same.txt", &format!("writer-{n}\n"), "Independent writer"),
+                    bash(&format!("printf 'proof-{n}\\n' > /yard/proof/evidence.txt")),
+                ]
+            } else if phase == 1 {
+                vec![bash(
+                    "test \"$(cat partial.txt)\" = partial && git add partial.txt && git commit -qm Continued",
+                )]
+            } else {
+                vec![bash(
+                    "test \"$(cat interrupted.txt)\" = interrupted && git add interrupted.txt && git commit -qm Recovered",
+                )]
+            };
+            if n == 4 && phase < 2 {
+                calls.push(bash(if phase == 0 {
+                    "printf 'partial\\n' > partial.txt"
+                } else {
+                    "printf 'interrupted\\n' > interrupted.txt"
+                }));
+            }
+            calls.push(bash(&format!("echo writer-ready-{n}-{phase}")));
+            return Reply::Tools(calls);
+        }
+        let phase = phases[n].load(Ordering::SeqCst) - 1;
+        assert!(
+            request
+                .tool_results()
+                .last()
+                .is_some_and(|(_, text)| text.contains(&format!("writer-ready-{n}-{phase}"))),
+            "writer tools did not complete"
+        );
+        if phase == 0 {
+            Reply::Hold(
+                writer_holds[n].clone(),
+                Box::new(Reply::Text("done".into())),
+            )
+        } else if phase == 1 {
+            Reply::Hold(
+                continuation_hold.clone(),
+                Box::new(Reply::Text("done".into())),
+            )
+        } else {
+            Reply::Text("done".into())
+        }
+    });
+    let owner = machine.root.join("held-writer");
+    let owner_said = machine.root.join("owner-said");
+    let owner_release = machine.root.join("owner-release");
+    fifo(&owner_said);
+    fifo(&owner_release);
+    let mut release_owner = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&owner_release)
+        .unwrap();
+    // Preserve stdin before asynchronous shell redirection, using a closed
+    // descriptor so the real child's inherited execution lock is untouched.
+    machine.wrapper(
+        "pinfold",
+        &format!(
+            "if [ \"$1 $2\" = 'box exec' ]; then\n\
+         input_fd=''; for fd in 3 4 5 6 7 8 9; do\n\
+         if ! (eval \": <&$fd\") 2>/dev/null; then input_fd=$fd; break; fi; done\n\
+         [ -n \"$input_fd\" ] || exit 1\n\
+         eval \"exec $input_fd<&0\"\n\
+         eval '\"$REAL\" \"$@\" <&'\"$input_fd $input_fd\"'<&- &'\n\
+         child=$!; eval \"exec $input_fd<&-\"\n\
+         wait \"$child\"; result=$?\n\
+         if [ -f '{}' ] && [ \"$3\" = \"$(cat '{}')\" ]; then\n\
+         echo \"$3 $result\" > '{}'; read line < '{}'; fi\n\
+         exit \"$result\"; fi",
+            owner.display(),
+            owner.display(),
+            owner_said.display(),
+            owner_release.display()
+        ),
+    );
+    machine.start();
+    let mut extra = String::new();
+    let mut nodes = serde_json::Map::new();
+    for n in 0..5 {
+        extra.push_str(&format!(
+            "\n[agents.trial{n}]\nharness = \"pi\"\nprovider = \"openrouter\"\nmodel = \"trial-model-{n}\"\n\
+             [profiles.trial{n}]\nrunner = {{kind = \"agent\", agent = \"trial{n}\", instructions = \"Same frozen instructions.\"}}\n\
+             access = \"write-allowed\"\noutputs = {{result = \"candidate\"}}\noutcomes = [\"complete\"]\n\
+             [review.seats.trial{n}]\nagent = \"worker\"\ninstructions = \"Frozen reader {n}.\"\n"
+        ));
+        let writer = if n == 0 {
+            "implementer".to_string()
+        } else {
+            format!("writer-{n}")
+        };
+        nodes.insert(
+            writer.clone(),
+            json!({"profile": format!("trial{n}"),
+            "routes": {"complete": [{"to": format!("review-{n}")}]}}),
+        );
+        nodes.insert(format!("review-{n}"), json!({
+            "runner": {"kind": "agent", "agent": "worker", "instructions": format!("Frozen reader {n}.")},
+            "access": "read-only", "inputs": {"candidate": {"node": writer, "output": "result", "kind": "candidate"}},
+            "outputs": {"result": "verdict"}, "outcomes": ["complete", "blocked"], "requires": ["candidate"], "routes": {}
+        }));
+    }
+    let fixture = config(&extra)
+        .replace("max_lanes = 2", "max_lanes = 2\nmax_executions = 5")
+        .replace(
+            "review = [\"correctness\"]",
+            "review = [\"trial0\", \"trial1\", \"trial2\", \"trial3\", \"trial4\"]",
+        );
+    let project = Project::new(&machine, "p", &fixture);
+    let mut watch = project.watch(0);
+    project.json(&[
+        "ticket",
+        "new",
+        "--title",
+        "Five writer trial",
+        "--workflow",
+        "plan",
+    ]);
+    let planned = watch.find("trial planner ended", |e| e["event"] == "attempt.ended");
+    let cleanup = watch.find("trial planner cleanup", |e| {
+        e["event"] == "execution.ended"
+            && e["data"]["kind"] == "cleanup"
+            && e["attempt"] == planned["attempt"]
+    });
+    watch.find("trial planner released", |e| {
+        e["event"] == "execution.released" && e["execution"] == cleanup["execution"]
+    });
+    let frozen_target = project.canonical_head();
+    let mut operator = machine.operator();
+    operator.initialize();
+    let started = operator.call(
+        "yard_attempt_start",
+        json!({
+            "project": project.path, "ticket": "Y-1", "graph": {"inputs": {}, "nodes": nodes}
+        }),
+    );
+    assert!(started.get("error").is_none(), "{started}");
+    for latch in &held {
+        latch.wait_held();
+    }
+    let writers = writer_rows(
+        &project,
+        "SELECT * FROM execution WHERE attempt = 2 AND kind = 'implementation' ORDER BY node",
+    );
+    assert_eq!(writers.len(), 5);
+    assert_eq!(machine.boxes("dev.yard.project").len(), 5);
+    let root = project.path.join(".yard/local/attempts/2");
+    let mut indexes = std::collections::BTreeSet::new();
+    let mut states = std::collections::BTreeSet::new();
+    let mut sessions = std::collections::BTreeSet::new();
+    let mut expected_heads = Vec::new();
+    for n in 0..5 {
+        let name = if n == 0 {
+            "implementer".to_string()
+        } else {
+            format!("writer-{n}")
+        };
+        let row = writers.iter().find(|row| row["workspace"] == name).unwrap();
+        assert_eq!(row["base"], frozen_target);
+        assert_eq!(row["settings"]["model"], format!("trial-model-{n}"));
+        assert_eq!(row["ticket_revision"], writers[0]["ticket_revision"]);
+        assert_eq!(row["plan_revision"], writers[0]["plan_revision"]);
+        assert_eq!(row["status"], "running");
+        assert_eq!(row["reserved"], 1);
+        assert!(row["resumed"].is_null());
+        let session = row["session_id"].as_str().unwrap();
+        assert!(sessions.insert(session.to_string()));
+        let workspace = writer_workspace(&root, &name);
+        let clone = workspace.join("clone");
+        assert_eq!(
+            std::fs::read_to_string(clone.join("same.txt")).unwrap(),
+            format!("writer-{n}\n")
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("proof/evidence.txt")).unwrap(),
+            format!("proof-{n}\n")
+        );
+        assert!(indexes.insert(std::fs::metadata(clone.join(".git/index")).unwrap().ino()));
+        assert!(states.insert(std::fs::metadata(workspace.join("state")).unwrap().ino()));
+        assert!(!clone.join(".git/objects/info/alternates").exists());
+        let head = git(&clone, &["rev-parse", "HEAD"]).trim().to_string();
+        let object = clone.join(".git/objects").join(&head[..2]).join(&head[2..]);
+        assert_eq!(std::fs::metadata(object).unwrap().nlink(), 1);
+        expected_heads.push(head);
+    }
+    let old = writers
+        .iter()
+        .find(|row| row["workspace"] == "writer-4")
+        .unwrap();
+    let refused = operator.call(
+        "yard_attempt_start",
+        json!({"project": project.path, "ticket": "Y-1", "workspace": "writer-4"}),
+    );
+    assert_eq!(
+        refused["error"]["data"]["reason"], "workspace_owned",
+        "{refused}"
+    );
+    assert_eq!(refused["error"]["data"]["execution"], old["id"]);
+    for workspace in [None, Some("undeclared")] {
+        let mut params = json!({"project": project.path, "ticket": "Y-1"});
+        if let Some(workspace) = workspace {
+            params["workspace"] = json!(workspace);
+        }
+        let refused = operator.call("yard_attempt_start", params);
+        assert_eq!(
+            refused["error"]["data"]["reason"], "undeclared_workspace",
+            "{refused}"
+        );
+    }
+    let refused = operator.call(
+        "yard_attempt_stop",
+        json!({"project": project.path, "ticket": "Y-1"}),
+    );
+    assert_eq!(
+        refused["error"]["data"]["reason"], "ambiguous_execution",
+        "{refused}"
+    );
+    let stopped = operator.call(
+        "yard_attempt_stop",
+        json!({"project": project.path, "ticket": "Y-1", "execution": old["id"]}),
+    );
+    assert!(stopped.get("error").is_none(), "{stopped}");
+    watch.find("fifth checked stop", |e| {
+        e["event"] == "execution.released" && e["execution"] == old["id"]
+    });
+    let fifth = writer_workspace(&root, "writer-4");
+    let clone_inode = std::fs::metadata(fifth.join("clone")).unwrap().ino();
+    assert_eq!(
+        std::fs::read(fifth.join("clone/partial.txt")).unwrap(),
+        b"partial\n"
+    );
+    held[4].release();
+    let resumed = operator.call(
+        "yard_attempt_start",
+        json!({"project": project.path, "ticket": "Y-1", "workspace": "writer-4"}),
+    );
+    assert!(resumed.get("error").is_none(), "{resumed}");
+    continued.wait_held();
+    let successor = writer_rows(
+        &project,
+        "SELECT * FROM execution WHERE workspace = 'writer-4' ORDER BY id DESC LIMIT 1",
+    )[0]
+    .clone();
+    std::fs::write(&owner, successor["handle"].as_str().unwrap()).unwrap();
+    assert_eq!(successor["resumed"], old["id"]);
+    assert_eq!(successor["session_id"], old["session_id"]);
+    assert_eq!(
+        std::fs::metadata(fifth.join("clone")).unwrap().ino(),
+        clone_inode
+    );
+    for latch in &held[..4] {
+        latch.release();
+    }
+    for latch in &readers[..4] {
+        latch.wait_held();
+    }
+    let published = writer_rows(
+        &project,
+        "SELECT * FROM execution WHERE attempt = 2 AND kind = 'implementation' AND outcome = 'candidate' ORDER BY node",
+    );
+    assert_eq!(published.len(), 4);
+    let mut proofs = std::collections::BTreeSet::new();
+    for (n, expected_head) in expected_heads.iter().enumerate().take(4) {
+        let name = if n == 0 {
+            "implementer".to_string()
+        } else {
+            format!("writer-{n}")
+        };
+        let producer = published
+            .iter()
+            .find(|row| row["workspace"] == name)
+            .unwrap();
+        let candidate = &producer["result"]["outputs"]["result"]["value"];
+        assert_eq!(producer["exit_code"], 0);
+        assert_eq!(candidate["candidate"], producer["id"]);
+        assert_eq!(candidate["workspace"], name);
+        assert_eq!(candidate["producer"]["execution"], producer["id"]);
+        assert_eq!(candidate["producer"]["node"], name);
+        assert_eq!(
+            candidate["producer"]["settings"]["model"],
+            format!("trial-model-{n}")
+        );
+        assert_eq!(
+            candidate["producer"]["profile"]["name"],
+            format!("trial{n}")
+        );
+        assert_eq!(candidate["head"], expected_head.as_str());
+        let proof = candidate["proof"].as_str().unwrap();
+        assert!(proofs.insert(proof.to_string()));
+        assert_eq!(
+            std::fs::read(
+                root.join("proof-snapshots")
+                    .join(proof)
+                    .join("evidence.txt")
+            )
+            .unwrap(),
+            format!("proof-{n}\n").as_bytes()
+        );
+        assert_eq!(
+            git(
+                &project.canonical(),
+                &["show", &format!("{}:same.txt", expected_head)]
+            ),
+            format!("writer-{n}\n")
+        );
+        let reader = writer_rows(
+            &project,
+            &format!("SELECT * FROM execution WHERE attempt = 2 AND node = 'review-{n}'"),
+        )[0]
+        .clone();
+        assert_eq!(
+            reader["inputs"]["candidate"]["source"]["execution"],
+            producer["id"]
+        );
+        assert_eq!(reader["inputs"]["candidate"]["value"], *candidate);
+        assert_eq!(reader["head"], expected_head.as_str());
+        assert_eq!(reader["proof"], proof);
+    }
+    // Mutate a live retained writer after publication while its reader is held.
+    std::fs::write(
+        writer_workspace(&root, "implementer").join("clone/same.txt"),
+        "later-live\n",
+    )
+    .unwrap();
+    std::fs::write(
+        writer_workspace(&root, "implementer").join("proof/evidence.txt"),
+        "later-live\n",
+    )
+    .unwrap();
+    for (n, latch) in readers.iter().enumerate().take(4) {
+        latch.release();
+        let row = writer_rows(
+            &project,
+            &format!("SELECT id FROM execution WHERE attempt = 2 AND node = 'review-{n}'"),
+        )[0]
+        .clone();
+        watch.find("frozen reader release", |e| {
+            e["event"] == "execution.released" && e["execution"] == row["id"]
+        });
+        assert_eq!(
+            writer_rows(
+                &project,
+                &format!(
+                    "SELECT outcome, exit_code FROM execution WHERE id = {}",
+                    row["id"]
+                )
+            ),
+            vec![json!({"outcome": "pass", "exit_code": 0})]
+        );
+    }
+    let lock = std::fs::File::open(root.join(format!("effects/{}/lock", successor["id"]))).unwrap();
+    assert!(matches!(
+        lock.try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ));
+    assert!(continued.is_held());
+    assert!(
+        machine
+            .boxes("dev.yard.project")
+            .iter()
+            .any(|row| row["name"] == successor["handle"])
+    );
+    assert_eq!(
+        std::fs::read(fifth.join("clone/interrupted.txt")).unwrap(),
+        b"interrupted\n"
+    );
+    machine.kill();
+    let said = watch.said(&owner_said);
+    assert!(said.starts_with(successor["handle"].as_str().unwrap()));
+    // Prove the held owner and partial tree externally before recovery.
+    assert_eq!(
+        writer_rows(
+            &project,
+            &format!(
+                "SELECT status, reserved FROM execution WHERE id = {}",
+                successor["id"]
+            )
+        ),
+        vec![json!({"status": "running", "reserved": 1})]
+    );
+    assert!(matches!(
+        lock.try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ));
+    assert_eq!(
+        std::fs::read(fifth.join("clone/interrupted.txt")).unwrap(),
+        b"interrupted\n"
+    );
+    machine.start();
+    drop(watch);
+    let mut watch = project.watch(0);
+    let retained = watch.find("crashed writer retained owner", |e| {
+        e["event"] == "attention.raised"
+            && e["data"]["reason"] == "ownership"
+            && e["execution"] == successor["id"]
+    });
+    assert!(matches!(
+        lock.try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ));
+    assert!(
+        !machine
+            .boxes("dev.yard.project")
+            .iter()
+            .any(|row| row["name"] == successor["handle"])
+    );
+    let refused = operator.call(
+        "yard_attempt_start",
+        json!({"project": project.path, "ticket": "Y-1", "workspace": "writer-4"}),
+    );
+    assert_eq!(
+        refused["error"]["data"]["reason"], "workspace_owned",
+        "{refused}"
+    );
+    assert_eq!(refused["error"]["data"]["execution"], successor["id"]);
+    assert_eq!(
+        writer_rows(
+            &project,
+            "SELECT id FROM execution WHERE workspace = 'writer-4'"
+        )
+        .len(),
+        2
+    );
+    assert_eq!(
+        writer_rows(
+            &project,
+            "SELECT * FROM execution WHERE attempt = 2 AND kind = 'implementation' AND outcome = 'candidate' ORDER BY node"
+        ),
+        published
+    );
+    std::fs::remove_file(&owner).unwrap();
+    writeln!(release_owner, "release").unwrap();
+    watch.find("crashed writer checked release", |e| {
+        e["event"] == "execution.released" && e["execution"] == successor["id"]
+    });
+    let ended = watch.find("crashed writer interrupted", |e| {
+        e["event"] == "execution.ended" && e["execution"] == successor["id"]
+    });
+    assert_eq!(ended["data"]["outcome"], "interrupted");
+    let attention = project.json(&["attempt", "show", "Y-1"]);
+    assert!(
+        !attention["attention"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["attention"] == retained["attention"])
+    );
+    lock.try_lock().unwrap();
+    lock.unlock().unwrap();
+    assert!(
+        !machine
+            .boxes("dev.yard.project")
+            .iter()
+            .any(|row| row["name"] == successor["handle"])
+    );
+    assert_eq!(
+        writer_rows(
+            &project,
+            "SELECT * FROM execution WHERE attempt = 2 AND kind = 'implementation' AND outcome = 'candidate' ORDER BY node"
+        ),
+        published
+    );
+    assert_eq!(
+        writer_rows(
+            &project,
+            "SELECT id FROM execution WHERE workspace = 'writer-4'"
+        )
+        .len(),
+        2
+    );
+    assert_eq!(
+        std::fs::read(fifth.join("clone/interrupted.txt")).unwrap(),
+        b"interrupted\n"
+    );
+    continued.release();
+    let resumed = operator.call(
+        "yard_attempt_start",
+        json!({"project": project.path, "ticket": "Y-1", "workspace": "writer-4"}),
+    );
+    assert!(resumed.get("error").is_none(), "{resumed}");
+    readers[4].wait_held();
+    let final_writer = writer_rows(
+        &project,
+        "SELECT * FROM execution WHERE workspace = 'writer-4' ORDER BY id DESC LIMIT 1",
+    )[0]
+    .clone();
+    assert_eq!(final_writer["resumed"], successor["id"]);
+    assert_eq!(final_writer["session_id"], old["session_id"]);
+    assert_eq!(
+        std::fs::metadata(fifth.join("clone")).unwrap().ino(),
+        clone_inode
+    );
+    let head = git(&fifth.join("clone"), &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+    let candidate = &final_writer["result"]["outputs"]["result"]["value"];
+    assert_eq!(final_writer["exit_code"], 0);
+    assert_eq!(
+        git(
+            &project.canonical(),
+            &["show", &format!("{head}:partial.txt")]
+        ),
+        "partial\n"
+    );
+    assert_eq!(
+        git(
+            &project.canonical(),
+            &["show", &format!("{head}:interrupted.txt")]
+        ),
+        "interrupted\n"
+    );
+    let proof = candidate["proof"].as_str().unwrap();
+    assert!(proofs.insert(proof.to_string()));
+    assert_eq!(
+        std::fs::read(
+            root.join("proof-snapshots")
+                .join(proof)
+                .join("evidence.txt")
+        )
+        .unwrap(),
+        b"proof-4\n"
+    );
+    assert_eq!(candidate["head"], head);
+    assert_eq!(candidate["producer"]["execution"], final_writer["id"]);
+    assert_eq!(candidate["producer"]["settings"]["model"], "trial-model-4");
+    assert_eq!(candidate["producer"]["profile"]["name"], "trial4");
+    let final_reader = writer_rows(
+        &project,
+        "SELECT * FROM execution WHERE attempt = 2 AND node = 'review-4'",
+    )[0]
+    .clone();
+    assert_eq!(
+        final_reader["inputs"]["candidate"]["source"]["execution"],
+        final_writer["id"]
+    );
+    assert_eq!(final_reader["inputs"]["candidate"]["value"], *candidate);
+    readers[4].release();
+    watch.find("all candidates retained", |e| {
+        e["event"] == "attention.raised" && e["data"]["reason"] == "candidates"
+    });
+    assert_eq!(
+        writer_rows(
+            &project,
+            &format!(
+                "SELECT outcome, exit_code FROM execution WHERE id = {}",
+                final_reader["id"]
+            )
+        ),
+        vec![json!({"outcome": "pass", "exit_code": 0})]
+    );
+    assert_eq!(
+        project.json(&["attempt", "show", "Y-1"])["candidates"]
+            .as_array()
+            .unwrap()
+            .len(),
+        5
+    );
+    assert_eq!(project.canonical_head(), frozen_target);
+    let untouched = project.path.join(".yard/local/attempts/987/sentinel");
+    std::fs::create_dir_all(untouched.parent().unwrap()).unwrap();
+    std::fs::write(&untouched, "other workspace\n").unwrap();
+    project.json(&["attempt", "abandon", "Y-1"]);
+    let cleanup = watch.find("all writer cleanup", |e| {
+        e["event"] == "execution.ended" && e["data"]["kind"] == "cleanup" && e["attempt"] == 2
+    });
+    watch.find("all writer cleanup released", |e| {
+        e["event"] == "execution.released" && e["execution"] == cleanup["execution"]
+    });
+    assert!(!root.exists());
+    assert_eq!(std::fs::read(untouched).unwrap(), b"other workspace\n");
+}
+
+// Locate the host seam; assertions above observe bytes and inode isolation.
+fn writer_workspace(root: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let key: String = name.bytes().map(|byte| format!("{byte:02x}")).collect();
+    root.join("writers").join(key)
+}
+
+fn writer_rows(project: &Project<'_>, query: &str) -> Vec<Value> {
+    project
+        .rows(query)
+        .into_iter()
+        .map(|mut row| {
+            for field in ["settings", "inputs", "result"] {
+                if let Some(text) = row[field].as_str() {
+                    row[field] = serde_json::from_str(text).unwrap();
+                }
+            }
+            row
+        })
+        .collect()
 }
 
 fn fifo(path: &std::path::Path) {

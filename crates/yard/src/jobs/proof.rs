@@ -58,7 +58,7 @@ pub fn required(digest: &str) -> bool {
 /// Copy `live` into `root/<digest>` and return the digest. Idempotent when
 /// the copy already exists. A copy is staged and renamed into place, so a
 /// crash never leaves a partial `root/<digest>` that a later run trusts.
-pub fn snapshot(live: &Path, root: &Path) -> Result<String, String> {
+pub fn snapshot(live: &Path, root: &Path, execution: i64) -> Result<String, String> {
     // The root is worker-reachable, so it is checked like any entry: a
     // symlink here would redirect the whole walk.
     let metadata = std::fs::symlink_metadata(live)
@@ -79,18 +79,25 @@ pub fn snapshot(live: &Path, root: &Path) -> Result<String, String> {
     if destination.exists() {
         return Ok(digest);
     }
-    let staging = root.join(format!(".staging-{}", std::process::id()));
+    let staging = root.join(format!(".staging-{execution}"));
     let _ = std::fs::remove_dir_all(&staging);
     std::fs::create_dir_all(&staging).map_err(|error| error.to_string())?;
     if let Err(error) = copy(&entries, &staging) {
         let _ = std::fs::remove_dir_all(&staging);
         return Err(error);
     }
-    std::fs::rename(&staging, &destination).map_err(|error| {
-        let _ = std::fs::remove_dir_all(&staging);
-        error.to_string()
-    })?;
-    Ok(digest)
+    match std::fs::rename(&staging, &destination) {
+        Ok(()) => Ok(digest),
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            // Another producer may have published these same bounded bytes.
+            if destination.is_dir() {
+                Ok(digest)
+            } else {
+                Err(error.to_string())
+            }
+        }
+    }
 }
 
 fn copy(entries: &[Entry], staging: &Path) -> Result<(), String> {

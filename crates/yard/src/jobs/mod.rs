@@ -13,6 +13,7 @@ pub mod report;
 pub mod review;
 pub mod scoped;
 pub mod supervise;
+pub mod writers;
 
 use crate::api::Fail;
 use crate::config::{Approve, Config};
@@ -440,7 +441,7 @@ pub async fn load_attempt(
         crate::plan::Plan::admitted(admission).map_err(|error| Fail::refused(error.to_string()))?;
     let expected = if matches!(
         admission["runtime"].as_str(),
-        Some("ordinary-linear" | "packaged-audit" | "read-only-graph")
+        Some("ordinary-linear" | "packaged-audit" | "read-only-graph" | "writer-graph")
     ) {
         let mut selection = admission["selection"].clone();
         selection["project"] = json!(project.root);
@@ -729,6 +730,13 @@ async fn advance(
     loaded: &Loaded,
     attempt: &attempts::Attempt,
 ) -> Result<(), Fail> {
+    if let Some(admission) = &attempt.admission {
+        let plan = crate::plan::Plan::admitted(admission)
+            .map_err(|error| Fail::refused(error.to_string()))?;
+        if plan.writers() {
+            return writers::advance(daemon, project, loaded, attempt, &plan).await;
+        }
+    }
     let Some(superseded) = project.read(|conn| runnable(conn, loaded, attempt))? else {
         return Ok(());
     };

@@ -9,6 +9,8 @@ pub struct Execution {
     pub id: i64,
     pub attempt: Option<i64>,
     pub scope: Option<Value>,
+    pub workspace: Option<String>,
+    pub settings: Option<Value>,
     pub parent: Option<i64>,
     pub kind: String,
     pub reason: Option<String>,
@@ -50,7 +52,7 @@ pub struct Execution {
 const COLUMNS: &str = "id, attempt, parent, kind, reason, status, outcome, detail, base, head,
     proof, ticket_revision, name, round, handle, session_id, approval, intent_old, intent_merged,
     intent_state, progress, harness_version, resumed, reserved, lock_contract, intent_ref, plan_revision,
-    tokens_in, tokens_out, cost, usage_fields, harness, model, node, inputs, result, teardown, report, prepared, verification, scope";
+    tokens_in, tokens_out, cost, usage_fields, harness, model, node, inputs, result, teardown, report, prepared, verification, scope, workspace, settings";
 
 pub const RESULT_ELIGIBLE: &str = "status = 'ended' AND reserved = 0 AND teardown = 1
     AND json_extract(result, '$.outputs.result') IS NOT NULL";
@@ -125,7 +127,9 @@ fn row(row: &Row) -> rusqlite::Result<Execution> {
         prepared: json_column(row, 38)?,
         verification: json_column(row, 39)?,
         scope: json_column(row, 40)?,
-        result_eligible: row.get(41)?,
+        workspace: row.get(41)?,
+        settings: json_column(row, 42)?,
+        result_eligible: row.get(43)?,
     })
 }
 
@@ -161,6 +165,9 @@ impl Execution {
         json!({
             "execution": self.id,
             "attempt": self.attempt,
+            "workspace": self.workspace,
+            "settings": self.settings,
+            "session_id": self.session_id,
             "scope": self.scope.clone().unwrap_or_else(|| json!({"status": "unknown"})),
             "parent": self.parent,
             "kind": self.kind,
@@ -237,7 +244,8 @@ pub fn session(
     let mut owner: Option<Execution> = None;
     for execution in query(
         conn,
-        "attempt = ?1 AND kind = 'implementation' AND id != ?2 ORDER BY id DESC",
+        "attempt = ?1 AND kind = 'implementation' AND id < ?2
+            AND workspace IS (SELECT workspace FROM execution WHERE id = ?2) ORDER BY id DESC",
         params![attempt, current],
     )? {
         if execution.session_id.is_some() {
@@ -253,6 +261,15 @@ pub fn session(
     let Some(owner) = owner else {
         return Ok(None);
     };
+    let active = get(conn, current)?;
+    if owner.reserved
+        || owner.status != "ended"
+        || owner.teardown != Some(true)
+        || owner.settings != active.settings
+        || owner.settings.is_none()
+    {
+        return Ok(None);
+    }
     let mut count = 0;
     let mut next = Some(owner.id);
     while let Some(id) = next {
@@ -349,6 +366,8 @@ pub fn query<P: rusqlite::Params>(
 pub struct Start<'a> {
     pub attempt: Option<i64>,
     pub scope: Option<&'a Value>,
+    pub node: Option<&'a str>,
+    pub workspace: Option<&'a str>,
     pub parent: Option<i64>,
     pub kind: &'a str,
     pub reason: Option<&'a str>,
@@ -402,6 +421,13 @@ pub fn start(tx: &Connection, start: Start) -> Result<i64, Fail> {
             )
         })
         .transpose()?;
+    if let Some(workspace) = start.workspace
+        && let Some(owner) = query(tx, "attempt = ?1 AND kind = 'implementation'
+            AND (workspace = ?2 OR workspace IS NULL) AND (status = 'running' OR reserved = 1) LIMIT 1",
+            params![start.attempt, workspace])?.pop() {
+            return Err(Fail::refused("workspace_owned").with(json!({"reason": "workspace_owned",
+                "workspace": workspace, "execution": owner.id})));
+    }
     let settings = start.agent.map(|(_, settings)| settings);
     let field = |key: &str| settings.and_then(|value| value[key].as_str().map(str::to_string));
     tx.execute(
@@ -431,6 +457,10 @@ pub fn start(tx: &Connection, start: Start) -> Result<i64, Fail> {
         ],
     )?;
     let id = tx.last_insert_rowid();
+    tx.execute(
+        "UPDATE execution SET workspace = ?2, settings = ?3 WHERE id = ?1",
+        params![id, start.workspace, settings.map(Value::to_string)],
+    )?;
     let revision = attempt.as_ref().and_then(|attempt| attempt.plan_revision());
     let binding = if start.scope.is_some() {
         None
@@ -602,31 +632,76 @@ fn binding(
     let Some(admission) = &attempt.admission else {
         return Ok(None);
     };
-    let node = match start.kind {
-        "implementation" => "implementer".to_string(),
-        "gate" => format!(
-            "{}-gate-{}",
-            if start.parent.is_some() {
-                "landing"
-            } else {
-                "candidate"
-            },
-            start.name.unwrap_or_default()
-        ),
-        "review" => {
-            let seats = admission["workflow"]["review"]
-                .as_array()
-                .ok_or_else(|| Fail::refused("invalid admitted panel"))?;
-            let index = seats
-                .iter()
-                .position(|seat| seat.as_str() == start.name)
-                .ok_or_else(|| Fail::refused("seat absent from admitted panel"))?;
-            format!("review-{index}")
+    let node = if let Some(node) = start.node {
+        node.to_string()
+    } else {
+        match start.kind {
+            "implementation" => "implementer".to_string(),
+            "gate" => format!(
+                "{}-gate-{}",
+                if start.parent.is_some() {
+                    "landing"
+                } else {
+                    "candidate"
+                },
+                start.name.unwrap_or_default()
+            ),
+            "review" => {
+                let seats = admission["workflow"]["review"]
+                    .as_array()
+                    .ok_or_else(|| Fail::refused("invalid admitted panel"))?;
+                let index = seats
+                    .iter()
+                    .position(|seat| seat.as_str() == start.name)
+                    .ok_or_else(|| Fail::refused("seat absent from admitted panel"))?;
+                format!("review-{index}")
+            }
+            _ => return Ok(None),
         }
-        _ => return Ok(None),
     };
     let plan =
         crate::plan::Plan::admitted(admission).map_err(|error| Fail::refused(error.to_string()))?;
+    if plan.writers() {
+        let declared = plan
+            .nodes
+            .get(&node)
+            .ok_or_else(|| Fail::refused("undeclared_workspace"))?;
+        let mut inputs = serde_json::Map::new();
+        for (name, reference) in &declared.inputs {
+            let source = reference
+                .node
+                .as_deref()
+                .ok_or_else(|| Fail::refused("missing_producer"))?;
+            let Some(producer) = query(
+                conn,
+                &format!(
+                    "attempt = ?1 AND node = ?2 AND plan_revision = ?3
+                AND ticket_revision = ?4 AND {RESULT_ELIGIBLE} ORDER BY id DESC LIMIT 1"
+                ),
+                params![
+                    attempt.id,
+                    source,
+                    attempt.plan_revision(),
+                    start.ticket_revision
+                ],
+            )?
+            .pop() else {
+                return Ok(None);
+            };
+            let output =
+                &producer.result.as_ref().expect("eligible result")["outputs"][&reference.output];
+            if output["kind"] != serde_json::to_value(&reference.kind).expect("output kind") {
+                return Ok(None);
+            }
+            inputs.insert(
+                name.clone(),
+                json!({"kind": reference.kind, "source": {
+                "execution": producer.id, "node": source, "output": reference.output,
+                "plan_revision": producer.plan_revision}, "value": output["value"]}),
+            );
+        }
+        return Ok(Some((node, Value::Object(inputs))));
+    }
     let declared = serde_json::to_value(
         &plan
             .nodes
@@ -869,6 +944,7 @@ pub fn qualifies(
         &Start {
             attempt: Some(attempt.id),
             kind: &execution.kind,
+            node: execution.node.as_deref(),
             name: execution.name.as_deref(),
             parent: execution.parent,
             base: execution.base.as_deref(),
