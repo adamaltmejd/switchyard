@@ -1034,6 +1034,10 @@ test "$(cat chain.txt)" = cleaned && test "$(cat /yard/input/trusted/repair.md)"
     machine.start();
     let project = fixture(&machine);
     project.write("chain.txt", "base\n");
+    project.write(
+        "implementer.md",
+        "Implement the selected handoff fixture.\n",
+    );
     project.write("repair.md", "trusted-repair\n");
     project.write(
         "runners/durable-audit/launch",
@@ -1063,9 +1067,7 @@ fi
     );
     for (role, output) in [("implementer", "candidate"), ("repair", "candidate")] {
         extra.push_str(&format!("\n[agents.{role}]\nharness = 'pi'\nprovider = 'openrouter'\nmodel = '{role}-selected'\n[profiles.{role}]\naccess = 'write-allowed'\noutcomes = ['complete']\n[profiles.{role}.outputs]\nresult = '{output}'\n[profiles.{role}.runner]\nkind = 'agent'\nagent = '{role}'\ninstructions = 'Selected {role} role.'\n"));
-        if role == "repair" {
-            extra.push_str("skills = ['repair.md']\n");
-        }
+        extra.push_str(&format!("skills = ['{role}.md']\n"));
     }
     for (role, access) in [("audit", "read-only"), ("cleanup", "write-allowed")] {
         extra.push_str(&format!(
@@ -1098,6 +1100,21 @@ files = [{{root = "source", path = "chain.txt"}}]
                 "[workflows.plan]\nimplementer = \"audit\"\nprofile = \"audit\"",
             ),
     );
+    // A failed predecessor cannot reach a cleanup model latch. Observe its
+    // terminal event first so staging/startup failures fail promptly.
+    // Sabotage: stage broad base extensions despite explicit selected inputs.
+    let implemented = |watch: &mut Watch, attempt: i64| {
+        let event = watch.until("selected implementer ended", |event| {
+            event["event"] == "execution.ended"
+                && event["attempt"] == attempt
+                && project.rows(&format!(
+                    "SELECT node FROM execution WHERE id = {}",
+                    event["execution"]
+                ))[0]["node"]
+                    == "implementer"
+        });
+        assert_eq!(event["data"]["outcome"], "candidate", "{event}");
+    };
     let mut watch = project.watch(0);
     project.json(&[
         "ticket",
@@ -1142,6 +1159,7 @@ files = [{{root = "source", path = "chain.txt"}}]
     );
     assert!(started["error"].is_null(), "{started}");
     let attempt = started["result"]["attempt"].as_i64().unwrap();
+    implemented(&mut watch, attempt);
     initial.wait_held();
     let old = project.rows(&format!("SELECT id, handle FROM execution WHERE attempt = {attempt} AND node = 'cleanup' AND status = 'running'"))[0].clone();
     let id = old["id"].as_i64().unwrap();
@@ -1329,6 +1347,7 @@ if printf 'changed\n' > /yard/proof/intrusion; then echo proof=written; else ech
     );
     assert!(started["error"].is_null(), "{started}");
     let attempt = started["result"]["attempt"].as_i64().unwrap();
+    implemented(&mut watch, attempt);
     nested_inspection.wait_held();
     let row = project.rows(&format!("SELECT id, handle FROM execution WHERE attempt = {attempt} AND node = 'cleanup' AND status = 'running'"))[0].clone();
     let clone = project

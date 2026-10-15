@@ -1458,7 +1458,8 @@ sets `source_write = true`; historical audit launches retain their original sche
 components are refused. `commit_source` stages and commits only declared source
 paths with a nonempty message of at most 1024 bytes. Git runs inside the same
 box with explicit cwd, scrubbed environment, disabled hooks, filters, fsmonitor and
-signing, at most 32768 bytes per output stream and 120 seconds per call. Cleanup must leave
+signing, at most 32768 bytes per output stream and 120 seconds per call. Filter
+name discovery refuses non-UTF-8 output before staging or committing. Cleanup must leave
 a clean committed tree before its report can advance to repair. The daemon's
 final packaged cleanliness inspection also uses a scrubbed environment and
 disables repository-configured hooks, filters and fsmonitor. It refuses an

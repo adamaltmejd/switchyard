@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { createReadStream, writeSync } from 'node:fs';
 import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { promisify, TextDecoder } from 'node:util';
 
 const ROOT = '/opt/yard/durable-audit';
 const MAX_READ = 32768;
@@ -293,7 +293,7 @@ async function main() {
       const git = async argv => promisify(execFile)('/usr/bin/git', [
         '-c', 'safe.directory=/workspace', '-c', 'core.hooksPath=/dev/null',
         '-c', 'core.fsmonitor=false', '-c', 'commit.gpgSign=false', ...filters, ...argv,
-      ], { cwd: '/workspace', timeout: 120000, maxBuffer: MAX_READ,
+      ], { cwd: '/workspace', timeout: 120000, maxBuffer: MAX_READ, encoding: 'buffer',
         env: { PATH: '/usr/bin:/bin', HOME: scratch, GIT_CONFIG_NOSYSTEM: '1',
           GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0', GIT_LITERAL_PATHSPECS: '1',
           GIT_AUTHOR_NAME: 'Yard worker', GIT_AUTHOR_EMAIL: 'worker@yard.invalid',
@@ -302,7 +302,11 @@ async function main() {
         // A predecessor owns untrusted Git configuration. Committing source
         // grants no execution of its configured clean/process filters.
         let configured = '';
-        try { configured = (await git(['config', '--null', '--name-only', '--get-regexp', '^filter\\..*\\.(clean|smudge|process|required)$'])).stdout; }
+        try {
+          const output = (await git(['config', '--null', '--name-only', '--get-regexp', '^filter\\..*\\.(clean|smudge|process|required)$'])).stdout;
+          // Lossy decoding could override a different name and leave code enabled.
+          configured = new TextDecoder('utf-8', { fatal: true }).decode(output);
+        }
         catch (error) { if (error.code !== 1) throw error; }
         for (const key of configured.split('\0').filter(Boolean))
           filters.push('-c', `${key}=${key.endsWith('.required') ? 'false' : ''}`);
