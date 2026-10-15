@@ -546,9 +546,10 @@ impl<'a> Project<'a> {
         std::thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 if events.send(Heard::Event(line)).is_err() {
-                    break;
+                    return;
                 }
             }
+            let _ = events.send(Heard::Closed);
         });
         Watch {
             child,
@@ -579,6 +580,7 @@ impl Watch {
             let line = match self.heard.recv_timeout(left) {
                 Ok(Heard::Event(line)) => line,
                 Ok(Heard::Said(_)) => continue,
+                Ok(Heard::Closed) => panic!("history stream closed while waiting for {what}"),
                 Err(_) => panic!(
                     "seen:\n{}\nno event {what} within {DEADLINE:?}",
                     self.seen
@@ -659,6 +661,10 @@ impl Watch {
                         path.display()
                     );
                 }
+                Ok(Heard::Closed) => panic!(
+                    "history stream closed before the held call at {}",
+                    path.display()
+                ),
                 Err(_) => panic!("no call held at {} within {DEADLINE:?}", path.display()),
             }
         }
@@ -679,6 +685,7 @@ impl Watch {
 enum Heard {
     Event(String),
     Said(String),
+    Closed,
 }
 
 /// `Watch::said` where no daemon serves a watch.
