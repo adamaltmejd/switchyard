@@ -131,7 +131,9 @@ fn node_schema() -> Value {
         "operator_failure": {"type": "boolean"},
         "runner": {"oneOf": [
             {"type": "object", "properties": {"kind": {"const": "agent"},
-                "agent": {"type": "string"}, "instructions": {"type": "string"}},
+                "agent": {"type": "string"}, "instructions": {"type": "string"},
+                "skills": {"type": "array", "items": {"type": "string"}},
+                "references": {"type": "array", "items": {"type": "string"}}},
                 "required": ["kind", "agent", "instructions"], "additionalProperties": false},
             {"type": "object", "properties": {"kind": {"const": "command"},
                 "gate": {"type": "string"}}, "required": ["kind", "gate"], "additionalProperties": false},
