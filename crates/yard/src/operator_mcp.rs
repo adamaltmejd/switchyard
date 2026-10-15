@@ -16,6 +16,7 @@ const OPERATIONS: &[(&str, &str)] = &[
     ("project.forget", "path!"),
     ("init", "path!"),
     ("doctor", "project!"),
+    ("plan.catalog", "project! target"),
     (
         "plan.resolve",
         "project! target preset workflow graph:o overrides:o",
@@ -99,6 +100,23 @@ fn schema(fields: &str) -> Value {
         let (key, kind) = key.split_once(':').unwrap_or((key, "s"));
         let value = match key {
             "graph" => json!({"type": "object", "properties": {
+                "classifiers": {"type": "object", "additionalProperties": {
+                    "type": "object", "properties": {
+                        "runner": node_schema()["properties"]["runner"].clone(),
+                        "repeat": {"type": "integer", "minimum": 1},
+                        "outcomes": {"type": "object", "additionalProperties": {
+                            "oneOf": [
+                                {"type": "object", "properties": {
+                                    "kind": {"enum": ["original", "retry", "operator"]}},
+                                    "required": ["kind"], "additionalProperties": false},
+                                {"type": "object", "properties": {
+                                    "kind": {"const": "fixer"}, "profile": {"type": "string"}},
+                                    "required": ["kind", "profile"], "additionalProperties": false},
+                                {"type": "object", "properties": {
+                                    "kind": {"const": "accept"}, "authorization": {"type": "string"}},
+                                    "required": ["kind"], "additionalProperties": false}
+                            ]}}},
+                    "required": ["runner", "repeat", "outcomes"], "additionalProperties": false}},
                 "inputs": {"type": "object", "additionalProperties": output_schema()},
                 "nodes": {"type": "object", "additionalProperties": node_schema()}
             }, "required": ["nodes"], "additionalProperties": false}),
@@ -245,6 +263,7 @@ async fn answer(message: &Value) -> Value {
                 "events" => "One history page, at most 500 events; waits at most 25 seconds.",
                 "attention" => "Wait at most 25 seconds for attention or final drain; cancellation releases only this wait.",
                 "attempt.start" => "Start or retry through the existing attempt lifecycle.",
+                "plan.catalog" => "Inspect target-bound profiles, presets, agent settings and execution capabilities before selecting named node overrides.",
                 "attempt.tail" => "Read the live worker transcript explicitly.",
                 "attempt.stats" => "Read recorded execution statistics; missing values remain null.",
                 _ => method,

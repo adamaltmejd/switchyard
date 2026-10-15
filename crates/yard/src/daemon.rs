@@ -429,7 +429,9 @@ async fn handle(daemon: &Arc<Daemon>, method: &str, params: Value) -> Result<Val
         }
         "events" => events(daemon, &params).await,
         "attention" => attention(daemon, &params).await,
-        "plan.resolve" | "plan.validate" => crate::jobs::command(daemon, method, params).await,
+        "plan.resolve" | "plan.validate" | "plan.catalog" => {
+            crate::jobs::command(daemon, method, params).await
+        }
         _ => {
             let result = crate::jobs::command(daemon, method, params).await;
             daemon.wake.notify_one();
@@ -583,7 +585,7 @@ async fn init(daemon: &Arc<Daemon>, params: &Value) -> Result<Value, Fail> {
             .map_err(|error| error.to_string())?;
     }
     for (name, text) in OPERATOR_SKILLS {
-        let skill = root.join(".agents/skills").join(name).join("SKILL.md");
+        let skill = root.join(".agents/skills").join(name);
         if !skill.exists() {
             std::fs::create_dir_all(skill.parent().expect("skill dir"))
                 .map_err(|error| error.to_string())?;
@@ -611,17 +613,25 @@ async fn init(daemon: &Arc<Daemon>, params: &Value) -> Result<Value, Fail> {
 }
 
 /// The operator skills, embedded from the repository's only copy.
-const OPERATOR_SKILLS: [(&str, &str); 3] = [
+const OPERATOR_SKILLS: [(&str, &str); 5] = [
     (
-        "yard-operator",
+        "test-audit/SKILL.md",
+        include_str!("../../../.agents/skills/test-audit/SKILL.md"),
+    ),
+    (
+        "test-audit/sweep.md",
+        include_str!("../../../.agents/skills/test-audit/sweep.md"),
+    ),
+    (
+        "yard-operator/SKILL.md",
         include_str!("../../../.agents/skills/yard-operator/SKILL.md"),
     ),
     (
-        "yard-drive",
+        "yard-drive/SKILL.md",
         include_str!("../../../.agents/skills/yard-drive/SKILL.md"),
     ),
     (
-        "yard-file",
+        "yard-file/SKILL.md",
         include_str!("../../../.agents/skills/yard-file/SKILL.md"),
     ),
 ];

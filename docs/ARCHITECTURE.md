@@ -169,6 +169,34 @@ keyed by existing node name. With no selection they translate workflow
 its branch and exact `config_head`, the resolved graph and configuration
 bindings. They create no tickets, attempts, executions or audit rows.
 
+`yard_plan_catalog` (`plan.catalog`) takes `project` and optional `target`.
+It returns the target and configuration commit, named profiles and preset
+graphs, agent and gate settings, workflows, and profile publication tools.
+These describe capabilities, never grant authority. Node access, selected
+skills and references remain explicit in each profile. MCP graph schemas
+include the same typed classifiers accepted by TOML.
+
+New project scaffolds include `ordinary`, `small`, `test-audit`, `cleanup`,
+`failed-check`, `review-check-join`, `independent-selector`,
+`independent-integration`, `implementation-model-trial` and
+`review-model-trial` presets. The ordinary preset includes candidate check,
+review and merged landing check. Small retains implementation alone.
+The skill audit is read-only. Cleanup uses the exclusive implementer,
+writable cleanup and repair path. Classification selects bounded original
+repair, retry or operator handling. The join runs check and reviews
+concurrently before its exact result join. Independent writers use a
+candidate selector, optionally after named-input integration.
+The implementation trial declares five isolated implementer profiles,
+the same reviewer profile bound separately to each candidate, and a read-only
+candidate selector. The review trial binds two reviewer profiles to one
+candidate, then joins and groups exact findings for remediation.
+Trial profiles initially share the scaffold's model settings; operators
+choose their models and effort through normal agent definitions. Existing
+execution limits apply. These templates do not change installed projects.
+The operator alone edits and syncs project configuration. Init also installs
+the selected test-audit skill. The scaffold's minimal Git check is replaced
+with project gates by the operator.
+
 A node's `runner` is `{kind = "agent", agent = "NAME", instructions = "TEXT",
 skills = ["PATH"], references = ["PATH"]}`
 or `{kind = "command", gate = "NAME"}`. Names refer to existing agents and
@@ -380,7 +408,9 @@ Ordinary reduced and empty selections require no request or acceptance.
 The complete route must visit every retained node once in these phases.
 Candidate and landing command order may differ from configuration order.
 Node names, access and outputs match one configured workflow's ordinary
-definitions. Runners match those definitions; reviewer runners may also
+definitions. Runners match those definitions; implementer runners may also
+match declared agent profiles with the same access, outputs and outcomes,
+including a different configured agent. Reviewer runners may also
 match declared read-only agent profiles
 with verdict outputs and ordinary complete/blocked outcomes.
 Profile outcomes describe capabilities. The ordinary seat position supplies
@@ -2406,8 +2436,8 @@ combination, lifecycle or historical version.
 | 3 | Landing is compare-and-swap with selected verification and durable exact prepared merged-ref evidence | A held native ref update stays undecided until its outcome is known. Canonical movement before compare-and-swap retires the landing without overwriting newer history. |
 | 4 | Capacity holds | Concurrent starts preserve one live attempt and the lane bound. Two held mixed reader/worker effects have exactly two native project boxes; the join waits for exact results. One-slot landing children exclude a worker and still land. An inherited native owner retains capacity across restart. Identical execution IDs in different projects keep separate grants. |
 | 5 | Intent precedes effect, and a restart loses only the turn; Durable continuation is a new exclusive execution after proved predecessor removal; individually useful work needs no ticket | A real held writable turn survives daemon death as interrupted work and resumes its retained tree. Startup removes a surviving host gate process group before requeue. A legacy owner without trustworthy lock proof remains reserved across upgrade. Matching Durable unsafe intent resumes only after old-box removal; corrupt checkpoint identity refuses before a fresh retry. A completed registered finding picker retains its immutable selection, reservation and exact ownership item across restart while a real runtime descendant holds its inherited effect lock after box removal; checked release reconciles only that item without replay. |
-| 6 | Inputs are validated at the boundary; new supported workflow admissions retain immutable resolved input evidence, and unrecorded history stays unknown; standalone scope is explicit | Malformed worker MCP input writes no proposal; the valid same-turn control succeeds. Unsupported selected admission creates no work, while a supported held execution keeps its frozen inputs across template sync. A real historical store preserves rows, audit and foreign keys and supports current decisions after upgrade. |
-| 7 | A ticket lands end to end and leaves only rows; usage is optional measured data with provenance; Codex token totals retain their meaning and unreported monetary cost is unknown | A real ticket goes through commit, gate, review, approval and native landing, then leaves rows while unrelated live work remains. Actual optional Pi frames retain unknown, interrupted partial and resumed explicit-zero measurements across reopen. Operator stdio preserves worker authorization and stale mutation identity while canceled waits and stdin EOF leave work running. Standalone command/report execution has no ticket or landing authority. |
+| 6 | Inspectable presets and targeted profile overrides resolve declared capabilities at the boundary; inputs are validated; new supported workflow admissions retain immutable resolved input evidence, and unrecorded history stays unknown; standalone scope is explicit | Malformed worker MCP input writes no proposal; the valid same-turn control succeeds. Unavailable role overrides refuse with the exact profile reference; the valid named override resolves the complete fixture plan. Unsupported selected admission creates no work, while a supported held execution keeps its frozen inputs across template sync. A real historical store preserves rows, audit and foreign keys and supports current decisions after upgrade. |
+| 7 | Complete shipped presets cover ordinary, reduced, audit, cleanup, classification, joins and independent model trials through existing executions; a ticket lands end to end and leaves only rows; usage is optional measured data with provenance; Codex token totals retain their meaning and unreported monetary cost is unknown | A real ticket goes through commit, gate, review, approval and native landing, then leaves rows while unrelated live work remains. Actual optional Pi frames retain unknown, interrupted partial and resumed explicit-zero measurements across reopen. Operator stdio preserves worker authorization and stale mutation identity while canceled waits and stdin EOF leave work running. Standalone command/report execution has no ticket or landing authority. |
 | 8 | Reviews, audits, classification and read-only candidate and finding selections are explicit bounded publications; classification chooses bounded continuation while failures remain unchanged; an empty selected panel is unreviewed; selected eligible merged failures require exact operator decisions | Silent or unregistered review publication cannot authorize approval; a proven same-project retry can. Report validation and held publication preserve exact frozen identity and eligibility, and successful text alone creates no report. Five-model selection binds own reviews and one replacement to actual landing. A correctly resealed changed packaged controller refuses before model/code effects; its unmodified control publishes through real Pi. The exact multi-model join picker refuses malformed groups and repeated contributors before a valid subset and two-source duplicate publication. Checked ownership release preserves one typed selection and all raw sources. Named original and fixer repairs retain failing verdicts before an explicit operator acceptance; text without publication is infrastructure failure and a fresh execution retries publication. Command classification retries the same failed node once, then raises attention without resetting its bound on a ticket edit. Its repair prompt carries precisely the selected groups, including an advisory contributor; an excluded required block still refuses stale acceptance before exact acceptance permits approval. |
 | 9 | Each implementer execution starts from its frozen target and the right candidate; independent writers retain isolated reusable workspaces, including integration from named candidates; the bounded implementer, cleanup and repair path retains one exclusive clone, including selected Durable cleanup and read-only audits of immutable publications | A held worker receives operator edits and adopted definitions in its next execution. Stop/start delivers the edit while retaining configured model identity. Five independent writer workspaces preserve their own bytes, sessions and frozen read-only review inputs through continuation and restart. Held integration retains partial work across restart; source writes and canonical access fail while its own write succeeds. Conflicts require repair before selection. Boxed Git inodes, fixture bytes and ancestry survive sequential selected roles; a held cleanup refuses a competing workspace retry, and checked release precedes handoff. Durable cleanup resumes a held unsafe source write in a new exclusive execution after checked release, without replay; its boxed commit passes the same clone to ordinary repair and native landing. |
 | 10 | The queue lands one at a time per target and re-judges what does not merge | Two approvals land in order; a red merge returns for repair. A feature ticket uses its frozen target source, definitions and image, repairs a real conflict, and lands only on that branch. |

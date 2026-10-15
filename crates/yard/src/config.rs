@@ -473,39 +473,6 @@ pub fn valid_env_name(name: &str) -> bool {
 }
 
 /// The scaffold `yard init` writes.
-pub const SCAFFOLD_CONFIG: &str = r#"# Switchyard project configuration. Changes land only through `yard sync`.
-max_lanes = 1
-approve = "manual"
-
-[target]
-ref = "main"
-protected_paths = ["AGENTS.md", "CLAUDE.md", ".agents/", ".claude/", ".codex/", ".pi/"]
-
-[isolation]
-egress = []
-
-[agents.default]
-harness = "pi"
-provider = "openrouter"
-model = "moonshotai/kimi-k2.6"
-effort = "high"
-
-[workflows.default]
-implementer = "default"
-review = ["correctness"]
-access = "write"
-
-[workflows.plan]
-access = "read-only"
-review = "none"
-
-[review]
-max_rounds = 3
-blocking = "P1"
-
-[review.seats.correctness]
-agent = "default"
-instructions = "Review the change for correctness bugs."
-"#;
+pub const SCAFFOLD_CONFIG: &str = include_str!("scaffold/config.toml");
 
 pub const SCAFFOLD_DOCKERFILE: &str = "FROM pinfold/profile-default:latest\n";

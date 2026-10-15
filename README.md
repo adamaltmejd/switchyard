@@ -109,6 +109,29 @@ use `yard_ticket_show`, `yard_attempt_tail` and `yard_attempt_stats` for
 drilldowns. Cancelling a wait releases the request while work continues.
 Workers keep their separate execution-scoped HTTP grants.
 
+Use `yard_plan_catalog` with `project` to inspect target-bound presets,
+profiles, provider/model settings, selected skills and publication tools.
+New projects ship ordinary, small, skill audit, writable cleanup, failed-check
+classifier, concurrent review/check join, independent selector/integration,
+and implementation/review model-trial presets. Existing project templates
+are updated only by the operator through `yard sync`.
+
+For example, resolve `{"project":"/path/to/project","preset":"ordinary",
+"overrides":{"implementer":{"profile":"trial-1"}}}` with
+`yard_plan_validate`, then supply the same selection and `ticket` to
+`yard_attempt_start`. A profile replaces role capabilities and preserves its
+inputs and routes. Define model and effort in normal named agents; profile
+selection grants no additional tools.
+
+`implementation-model-trial` has five isolated implementers, the same
+reviewer bound separately to each candidate, then a read-only candidate
+selector. `review-model-trial` has one implementer, two reviewer profiles,
+an exact join and finding grouping for remediation. Trial agents initially
+use the same model; the operator chooses their settings before sync.
+Existing capacity limits apply. Replace the scaffold's minimal Git gate
+with project checks before use. `test-audit` selects the installed
+`.agents/skills/test-audit/SKILL.md` and reads source without write access.
+
 Before admission, candidate gate, seat and landing gate overrides may select
 `operator_failure = true`. Eligible failures then ask the operator to
 `accept` the named attention with text or take `repair`. Acceptance keeps

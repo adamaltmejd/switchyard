@@ -1,0 +1,293 @@
+# Switchyard project configuration. Changes land only through `yard sync`.
+max_lanes = 1
+approve = "manual"
+
+[target]
+ref = "main"
+protected_paths = ["AGENTS.md", "CLAUDE.md", ".agents/", ".claude/", ".codex/", ".pi/"]
+
+[isolation]
+egress = []
+
+[agents.default]
+harness = "pi"
+provider = "openrouter"
+model = "moonshotai/kimi-k2.6"
+effort = "high"
+
+[workflows.default]
+implementer = "default"
+review = ["correctness"]
+access = "write"
+
+[workflows.plan]
+access = "read-only"
+review = "none"
+
+[review]
+max_rounds = 3
+blocking = "P1"
+
+[review.seats.correctness]
+agent = "default"
+instructions = "Review the change for correctness bugs."
+
+# Replace this minimal gate with the project checks before operator sync.
+[gates.check]
+command = "git show --format= --check HEAD"
+stage = "candidate"
+
+# Seats bind separately to frozen candidates and read-only joins.
+[workflows.trials]
+review = ["correctness", "trial-2", "trial-3", "trial-4", "trial-5"]
+
+[review.seats.trial-2]
+agent = "default"
+instructions = "Review the change for correctness bugs."
+
+[review.seats.trial-3]
+agent = "default"
+instructions = "Review the change for correctness bugs."
+
+[review.seats.trial-4]
+agent = "default"
+instructions = "Review the change for correctness bugs."
+
+[review.seats.trial-5]
+agent = "default"
+instructions = "Review the change for correctness bugs."
+
+[workflows.join]
+review = ["left", "right", "join"]
+
+[review.seats.left]
+agent = "review-left"
+instructions = "Review correctness and isolation."
+
+[review.seats.right]
+agent = "review-right"
+instructions = "Review recovery and identity."
+
+[review.seats.join]
+agent = "default"
+instructions = "Review the exact joined results and preserve required blocks."
+
+[agents.trial-1]
+harness = "pi"
+provider = "openrouter"
+model = "moonshotai/kimi-k2.6"
+effort = "high"
+
+[agents.trial-2]
+harness = "pi"
+provider = "openrouter"
+model = "moonshotai/kimi-k2.6"
+effort = "high"
+
+[agents.trial-3]
+harness = "pi"
+provider = "openrouter"
+model = "moonshotai/kimi-k2.6"
+effort = "high"
+
+[agents.trial-4]
+harness = "pi"
+provider = "openrouter"
+model = "moonshotai/kimi-k2.6"
+effort = "high"
+
+[agents.trial-5]
+harness = "pi"
+provider = "openrouter"
+model = "moonshotai/kimi-k2.6"
+effort = "high"
+
+[profiles.implementer]
+runner = { "kind" = "agent", "agent" = "default", "instructions" = "" }
+access = "write-allowed"
+outputs = { "result" = "candidate" }
+outcomes = ["complete"]
+
+[profiles.reviewer]
+runner = { "kind" = "agent", "agent" = "default", "instructions" = "Review the change for correctness bugs." }
+access = "read-only"
+outputs = { "result" = "verdict" }
+outcomes = ["complete", "blocked"]
+
+[profiles.selector]
+runner = { "kind" = "agent", "agent" = "default", "instructions" = "Select the best frozen candidate using its bound reviews. Publish its exact identity." }
+access = "read-only"
+outputs = { "result" = "selection" }
+outcomes = ["complete"]
+
+[profiles.finding-selector]
+runner = { "kind" = "agent", "agent" = "default", "instructions" = "Group actionable findings from the exact supplied review sources. Publish groups with every selected contributor." }
+access = "read-only"
+outputs = { "result" = "finding-selection" }
+outcomes = ["complete"]
+
+[profiles.cleanup]
+runner = { "kind" = "agent", "agent" = "default", "instructions" = "Simplify the selected module under AGENTS.md. Commit changes and publish a report; remediation publishes the final candidate." }
+access = "write-allowed"
+outputs = { "result" = "report" }
+outcomes = ["complete"]
+
+[profiles.test-audit]
+runner = { "kind" = "agent", "agent" = "default", "instructions" = "Audit tests under AGENTS.md. Publish findings without changing files.", "skills" = [".agents/skills/test-audit/SKILL.md"], "references" = [".agents/skills/test-audit/sweep.md"] }
+access = "read-only"
+outputs = { "result" = "report" }
+outcomes = ["complete"]
+
+[profiles.left]
+runner = { "kind" = "agent", "agent" = "review-left", "instructions" = "Review correctness and isolation." }
+access = "read-only"
+outputs = { "result" = "verdict" }
+outcomes = ["complete", "blocked"]
+
+[profiles.right]
+runner = { "kind" = "agent", "agent" = "review-right", "instructions" = "Review recovery and identity." }
+access = "read-only"
+outputs = { "result" = "verdict" }
+outcomes = ["complete", "blocked"]
+
+[profiles.join]
+runner = { "kind" = "agent", "agent" = "default", "instructions" = "Review the exact joined results and preserve required blocks." }
+access = "read-only"
+outputs = { "result" = "verdict" }
+outcomes = ["complete", "blocked"]
+
+[profiles.trial-1]
+runner = { "kind" = "agent", "agent" = "trial-1", "instructions" = "" }
+access = "write-allowed"
+outputs = { "result" = "candidate" }
+outcomes = ["complete"]
+
+[profiles.trial-2]
+runner = { "kind" = "agent", "agent" = "trial-2", "instructions" = "" }
+access = "write-allowed"
+outputs = { "result" = "candidate" }
+outcomes = ["complete"]
+
+[profiles.trial-3]
+runner = { "kind" = "agent", "agent" = "trial-3", "instructions" = "" }
+access = "write-allowed"
+outputs = { "result" = "candidate" }
+outcomes = ["complete"]
+
+[profiles.trial-4]
+runner = { "kind" = "agent", "agent" = "trial-4", "instructions" = "" }
+access = "write-allowed"
+outputs = { "result" = "candidate" }
+outcomes = ["complete"]
+
+[profiles.trial-5]
+runner = { "kind" = "agent", "agent" = "trial-5", "instructions" = "" }
+access = "write-allowed"
+outputs = { "result" = "candidate" }
+outcomes = ["complete"]
+
+[presets.ordinary]
+inputs = { "feedback" = "verdict", "merged" = "candidate" }
+[presets.ordinary.nodes]
+"implementer" = { "profile" = "implementer", "inputs" = { "feedback" = { "output" = "feedback", "kind" = "verdict" } }, "routes" = { "complete" = [{ "to" = "candidate-gate-check" }] } }
+"candidate-gate-check" = { "runner" = { "kind" = "command", "gate" = "check" }, "access" = "write-allowed", "outputs" = { "result" = "verdict" }, "outcomes" = ["complete", "failed"], "inputs" = { "candidate" = { "node" = "implementer", "output" = "result", "kind" = "candidate" } }, "requires" = ["candidate"], "routes" = { "complete" = [{ "to" = "review-0" }], "failed" = [{ "to" = "implementer", "repeat" = 1 }] } }
+"review-0" = { "profile" = "reviewer", "inputs" = { "candidate" = { "node" = "implementer", "output" = "result", "kind" = "candidate" } }, "requires" = ["candidate"], "routes" = { "complete" = [{ "to" = "landing-gate-check" }], "blocked" = [{ "to" = "implementer", "repeat" = 3 }] } }
+"landing-gate-check" = { "runner" = { "kind" = "command", "gate" = "check" }, "access" = "write-allowed", "outputs" = { "result" = "verdict" }, "outcomes" = ["complete"], "inputs" = { "merged" = { "output" = "merged", "kind" = "candidate" } }, "requires" = ["merged"], "routes" = {  } }
+
+[presets.small]
+inputs = { "feedback" = "verdict" }
+[presets.small.nodes]
+"implementer" = { "profile" = "implementer", "inputs" = { "feedback" = { "output" = "feedback", "kind" = "verdict" } } }
+
+[presets.test-audit]
+inputs = {  }
+[presets.test-audit.nodes]
+"implementer" = { "profile" = "test-audit" }
+
+[presets.cleanup]
+inputs = { "feedback" = "verdict", "merged" = "candidate" }
+[presets.cleanup.nodes]
+"implementer" = { "profile" = "implementer", "inputs" = { "feedback" = { "output" = "feedback", "kind" = "verdict" } }, "routes" = { "complete" = [{ "to" = "cleanup" }] }, "workspace" = "implementer" }
+"candidate-gate-check" = { "runner" = { "kind" = "command", "gate" = "check" }, "access" = "write-allowed", "outputs" = { "result" = "verdict" }, "outcomes" = ["complete", "failed"], "inputs" = { "candidate" = { "node" = "repair", "output" = "result", "kind" = "candidate" } }, "requires" = ["candidate"], "routes" = { "complete" = [{ "to" = "review-0" }], "failed" = [{ "to" = "repair", "repeat" = 1 }] } }
+"review-0" = { "profile" = "reviewer", "inputs" = { "candidate" = { "node" = "repair", "output" = "result", "kind" = "candidate" } }, "requires" = ["candidate"], "routes" = { "complete" = [{ "to" = "landing-gate-check" }], "blocked" = [{ "to" = "repair", "repeat" = 3 }] } }
+"landing-gate-check" = { "runner" = { "kind" = "command", "gate" = "check" }, "access" = "write-allowed", "outputs" = { "result" = "verdict" }, "outcomes" = ["complete"], "inputs" = { "merged" = { "output" = "merged", "kind" = "candidate" } }, "requires" = ["merged"], "routes" = {  } }
+"cleanup" = { "profile" = "cleanup", "workspace" = "implementer", "inputs" = { "candidate" = { "node" = "implementer", "output" = "result", "kind" = "candidate" } }, "requires" = ["candidate"], "routes" = { "complete" = [{ "to" = "repair" }] } }
+"repair" = { "profile" = "implementer", "inputs" = { "feedback" = { "output" = "feedback", "kind" = "verdict" }, "cleanup" = { "node" = "cleanup", "output" = "result", "kind" = "report" } }, "workspace" = "implementer", "requires" = ["cleanup"], "routes" = { "complete" = [{ "to" = "candidate-gate-check" }] } }
+
+[presets.failed-check]
+inputs = { "feedback" = "verdict", "merged" = "candidate" }
+classifiers = { "candidate-gate-check" = { "runner" = { "kind" = "agent", "agent" = "default", "instructions" = "Classify the exact failed check. Choose repair for code defects, retry for transient infrastructure, or operator when uncertain." }, "repeat" = 1, "outcomes" = { "repair" = { "kind" = "original" }, "retry" = { "kind" = "retry" }, "operator" = { "kind" = "operator" } } } }
+[presets.failed-check.nodes]
+"implementer" = { "profile" = "implementer", "inputs" = { "feedback" = { "output" = "feedback", "kind" = "verdict" } }, "routes" = { "complete" = [{ "to" = "candidate-gate-check" }] } }
+"candidate-gate-check" = { "runner" = { "kind" = "command", "gate" = "check" }, "access" = "write-allowed", "outputs" = { "result" = "verdict" }, "outcomes" = ["complete", "failed"], "inputs" = { "candidate" = { "node" = "implementer", "output" = "result", "kind" = "candidate" } }, "requires" = ["candidate"], "routes" = { "complete" = [{ "to" = "review-0" }], "failed" = [{ "to" = "implementer", "repeat" = 1 }] } }
+"review-0" = { "profile" = "reviewer", "inputs" = { "candidate" = { "node" = "implementer", "output" = "result", "kind" = "candidate" } }, "requires" = ["candidate"], "routes" = { "complete" = [{ "to" = "landing-gate-check" }], "blocked" = [{ "to" = "implementer", "repeat" = 3 }] } }
+"landing-gate-check" = { "runner" = { "kind" = "command", "gate" = "check" }, "access" = "write-allowed", "outputs" = { "result" = "verdict" }, "outcomes" = ["complete"], "inputs" = { "merged" = { "output" = "merged", "kind" = "candidate" } }, "requires" = ["merged"], "routes" = {  } }
+
+[presets.review-check-join]
+inputs = { "feedback" = "verdict", "merged" = "candidate" }
+[presets.review-check-join.nodes]
+"implementer" = { "profile" = "implementer", "inputs" = { "feedback" = { "output" = "feedback", "kind" = "verdict" } }, "routes" = { "complete" = [{ "to" = "candidate-gate-check" }, { "to" = "review-0" }, { "to" = "review-1" }] } }
+"candidate-gate-check" = { "runner" = { "kind" = "command", "gate" = "check" }, "access" = "read-only", "outputs" = { "result" = "verdict" }, "outcomes" = ["complete", "failed"], "inputs" = { "candidate" = { "node" = "implementer", "output" = "result", "kind" = "candidate" } }, "requires" = ["candidate"], "routes" = { "complete" = [{ "to" = "review-2" }], "failed" = [{ "to" = "implementer", "repeat" = 1 }] } }
+"review-0" = { "profile" = "left", "inputs" = { "candidate" = { "node" = "implementer", "output" = "result", "kind" = "candidate" } }, "requires" = ["candidate"], "routes" = { "complete" = [{ "to" = "review-2" }], "blocked" = [{ "to" = "implementer", "repeat" = 3 }] } }
+"review-1" = { "profile" = "right", "inputs" = { "candidate" = { "node" = "implementer", "output" = "result", "kind" = "candidate" } }, "requires" = ["candidate"], "routes" = { "complete" = [{ "to" = "review-2" }], "blocked" = [{ "to" = "implementer", "repeat" = 3 }] } }
+"review-2" = { "profile" = "join", "inputs" = { "candidate" = { "node" = "implementer", "output" = "result", "kind" = "candidate" }, "check" = { "node" = "candidate-gate-check", "output" = "result", "kind" = "verdict" }, "left" = { "node" = "review-0", "output" = "result", "kind" = "verdict" }, "right" = { "node" = "review-1", "output" = "result", "kind" = "verdict" } }, "requires" = ["candidate", "check", "left", "right"], "routes" = { "complete" = [{ "to" = "landing-gate-check" }], "blocked" = [{ "to" = "implementer", "repeat" = 3 }] } }
+"landing-gate-check" = { "runner" = { "kind" = "command", "gate" = "check" }, "access" = "write-allowed", "outputs" = { "result" = "verdict" }, "outcomes" = ["complete"], "inputs" = { "merged" = { "output" = "merged", "kind" = "candidate" } }, "requires" = ["merged"] }
+
+[presets.review-model-trial]
+inputs = { "feedback" = "verdict", "merged" = "candidate" }
+[presets.review-model-trial.nodes]
+"implementer" = { "profile" = "implementer", "inputs" = { "feedback" = { "output" = "feedback", "kind" = "verdict" } }, "routes" = { "complete" = [{ "to" = "candidate-gate-check" }, { "to" = "review-0" }, { "to" = "review-1" }] } }
+"candidate-gate-check" = { "runner" = { "kind" = "command", "gate" = "check" }, "access" = "read-only", "outputs" = { "result" = "verdict" }, "outcomes" = ["complete", "failed"], "inputs" = { "candidate" = { "node" = "implementer", "output" = "result", "kind" = "candidate" } }, "requires" = ["candidate"], "routes" = { "complete" = [{ "to" = "review-2" }], "failed" = [{ "to" = "implementer", "repeat" = 1 }] } }
+"review-0" = { "profile" = "left", "inputs" = { "candidate" = { "node" = "implementer", "output" = "result", "kind" = "candidate" } }, "requires" = ["candidate"], "routes" = { "complete" = [{ "to" = "review-2" }], "blocked" = [{ "to" = "implementer", "repeat" = 3 }] } }
+"review-1" = { "profile" = "right", "inputs" = { "candidate" = { "node" = "implementer", "output" = "result", "kind" = "candidate" } }, "requires" = ["candidate"], "routes" = { "complete" = [{ "to" = "review-2" }], "blocked" = [{ "to" = "implementer", "repeat" = 3 }] } }
+"review-2" = { "profile" = "join", "inputs" = { "candidate" = { "node" = "implementer", "output" = "result", "kind" = "candidate" }, "check" = { "node" = "candidate-gate-check", "output" = "result", "kind" = "verdict" }, "left" = { "node" = "review-0", "output" = "result", "kind" = "verdict" }, "right" = { "node" = "review-1", "output" = "result", "kind" = "verdict" } }, "requires" = ["candidate", "check", "left", "right"], "routes" = { "complete" = [{ "to" = "selector" }, { "to" = "landing-gate-check" }], "blocked" = [{ "to" = "implementer", "repeat" = 3 }] } }
+"landing-gate-check" = { "runner" = { "kind" = "command", "gate" = "check" }, "access" = "write-allowed", "outputs" = { "result" = "verdict" }, "outcomes" = ["complete"], "inputs" = { "merged" = { "output" = "merged", "kind" = "candidate" } }, "requires" = ["merged"] }
+"selector" = { "profile" = "finding-selector", "inputs" = { "candidate" = { "node" = "implementer", "output" = "result", "kind" = "candidate" }, "left" = { "node" = "review-0", "output" = "result", "kind" = "verdict" }, "right" = { "node" = "review-1", "output" = "result", "kind" = "verdict" }, "join" = { "node" = "review-2", "output" = "result", "kind" = "verdict" } }, "requires" = ["candidate", "left", "right", "join"], "routes" = {  } }
+
+[presets.implementation-model-trial]
+inputs = { "merged" = "candidate" }
+[presets.implementation-model-trial.nodes]
+"implementer" = { "profile" = "trial-1", "routes" = { "complete" = [{ "to" = "review-0" }, { "to" = "selector" }] } }
+"review-0" = { "profile" = "reviewer", "inputs" = { "candidate" = { "node" = "implementer", "output" = "result", "kind" = "candidate" } }, "requires" = ["candidate"], "routes" = { "complete" = [{ "to" = "selector" }] } }
+"writer-2" = { "profile" = "trial-2", "routes" = { "complete" = [{ "to" = "review-1" }, { "to" = "selector" }] } }
+"review-1" = { "profile" = "reviewer", "inputs" = { "candidate" = { "node" = "writer-2", "output" = "result", "kind" = "candidate" } }, "requires" = ["candidate"], "routes" = { "complete" = [{ "to" = "selector" }] } }
+"writer-3" = { "profile" = "trial-3", "routes" = { "complete" = [{ "to" = "review-2" }, { "to" = "selector" }] } }
+"review-2" = { "profile" = "reviewer", "inputs" = { "candidate" = { "node" = "writer-3", "output" = "result", "kind" = "candidate" } }, "requires" = ["candidate"], "routes" = { "complete" = [{ "to" = "selector" }] } }
+"writer-4" = { "profile" = "trial-4", "routes" = { "complete" = [{ "to" = "review-3" }, { "to" = "selector" }] } }
+"review-3" = { "profile" = "reviewer", "inputs" = { "candidate" = { "node" = "writer-4", "output" = "result", "kind" = "candidate" } }, "requires" = ["candidate"], "routes" = { "complete" = [{ "to" = "selector" }] } }
+"writer-5" = { "profile" = "trial-5", "routes" = { "complete" = [{ "to" = "review-4" }, { "to" = "selector" }] } }
+"review-4" = { "profile" = "reviewer", "inputs" = { "candidate" = { "node" = "writer-5", "output" = "result", "kind" = "candidate" } }, "requires" = ["candidate"], "routes" = { "complete" = [{ "to" = "selector" }] } }
+"selector" = { "profile" = "selector", "inputs" = { "implementer" = { "node" = "implementer", "output" = "result", "kind" = "candidate" }, "review-0" = { "node" = "review-0", "output" = "result", "kind" = "verdict" }, "writer-2" = { "node" = "writer-2", "output" = "result", "kind" = "candidate" }, "review-1" = { "node" = "review-1", "output" = "result", "kind" = "verdict" }, "writer-3" = { "node" = "writer-3", "output" = "result", "kind" = "candidate" }, "review-2" = { "node" = "review-2", "output" = "result", "kind" = "verdict" }, "writer-4" = { "node" = "writer-4", "output" = "result", "kind" = "candidate" }, "review-3" = { "node" = "review-3", "output" = "result", "kind" = "verdict" }, "writer-5" = { "node" = "writer-5", "output" = "result", "kind" = "candidate" }, "review-4" = { "node" = "review-4", "output" = "result", "kind" = "verdict" } }, "requires" = ["implementer", "review-0", "writer-2", "review-1", "writer-3", "review-2", "writer-4", "review-3", "writer-5", "review-4"], "routes" = { "complete" = [{ "to" = "landing-gate-check" }] } }
+"landing-gate-check" = { "runner" = { "kind" = "command", "gate" = "check" }, "access" = "write-allowed", "outputs" = { "result" = "verdict" }, "outcomes" = ["complete"], "inputs" = { "merged" = { "output" = "merged", "kind" = "candidate" } }, "requires" = ["merged"] }
+
+[presets.independent-selector]
+inputs = { "merged" = "candidate" }
+[presets.independent-selector.nodes]
+"implementer" = { "profile" = "trial-1", "routes" = { "complete" = [{ "to" = "review-0" }, { "to" = "selector" }] } }
+"review-0" = { "profile" = "reviewer", "inputs" = { "candidate" = { "node" = "implementer", "output" = "result", "kind" = "candidate" } }, "requires" = ["candidate"], "routes" = { "complete" = [{ "to" = "selector" }] } }
+"writer-2" = { "profile" = "trial-2", "routes" = { "complete" = [{ "to" = "review-1" }, { "to" = "selector" }] } }
+"review-1" = { "profile" = "reviewer", "inputs" = { "candidate" = { "node" = "writer-2", "output" = "result", "kind" = "candidate" } }, "requires" = ["candidate"], "routes" = { "complete" = [{ "to" = "selector" }] } }
+"selector" = { "profile" = "selector", "inputs" = { "implementer" = { "node" = "implementer", "output" = "result", "kind" = "candidate" }, "review-0" = { "node" = "review-0", "output" = "result", "kind" = "verdict" }, "writer-2" = { "node" = "writer-2", "output" = "result", "kind" = "candidate" }, "review-1" = { "node" = "review-1", "output" = "result", "kind" = "verdict" } }, "requires" = ["implementer", "review-0", "writer-2", "review-1"], "routes" = { "complete" = [{ "to" = "landing-gate-check" }] } }
+"landing-gate-check" = { "runner" = { "kind" = "command", "gate" = "check" }, "access" = "write-allowed", "outputs" = { "result" = "verdict" }, "outcomes" = ["complete"], "inputs" = { "merged" = { "output" = "merged", "kind" = "candidate" } }, "requires" = ["merged"] }
+
+[presets.independent-integration]
+inputs = { "merged" = "candidate" }
+[presets.independent-integration.nodes]
+"implementer" = { "profile" = "trial-1", "routes" = { "complete" = [{ "to" = "integrator" }] } }
+"writer-2" = { "profile" = "trial-2", "routes" = { "complete" = [{ "to" = "integrator" }] } }
+"integrator" = { "profile" = "implementer", "inputs" = { "left" = { "node" = "implementer", "output" = "result", "kind" = "candidate" }, "right" = { "node" = "writer-2", "output" = "result", "kind" = "candidate" } }, "requires" = ["left", "right"], "routes" = { "complete" = [{ "to" = "review-0" }, { "to" = "selector" }] } }
+"review-0" = { "profile" = "reviewer", "inputs" = { "candidate" = { "node" = "integrator", "output" = "result", "kind" = "candidate" } }, "requires" = ["candidate"], "routes" = { "complete" = [{ "to" = "selector" }] } }
+"selector" = { "profile" = "selector", "inputs" = { "integrated" = { "node" = "integrator", "output" = "result", "kind" = "candidate" }, "review" = { "node" = "review-0", "output" = "result", "kind" = "verdict" } }, "requires" = ["integrated", "review"], "routes" = { "complete" = [{ "to" = "landing-gate-check" }] } }
+"landing-gate-check" = { "runner" = { "kind" = "command", "gate" = "check" }, "access" = "write-allowed", "outputs" = { "result" = "verdict" }, "outcomes" = ["complete"], "inputs" = { "merged" = { "output" = "merged", "kind" = "candidate" } }, "requires" = ["merged"] }
+
+[agents.review-left]
+harness = "pi"
+provider = "openrouter"
+model = "moonshotai/kimi-k2.6"
+effort = "high"
+
+[agents.review-right]
+harness = "pi"
+provider = "openrouter"
+model = "moonshotai/kimi-k2.6"
+effort = "high"

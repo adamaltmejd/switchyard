@@ -12,6 +12,8 @@ fn call(operator: &mut Operator, project: &Project, tool: &str, mut args: Value)
 /// creates rows or reaches the model. Rewrite persisted selection on sync or
 /// allow selection on a live attempt; inspection or active_plan differs. Drop targeted
 /// overrides or ignore the one-off graph; the literal fixture plan differs.
+/// Sabotage: ignore a profile override or resolve an unavailable profile; the
+/// complete fixture plan or exact unresolved-reference refusal differs.
 /// The predecessor proves graph validation and frozen source recovery; this
 /// block proves the selected admission boundary, not those mechanisms again.
 #[test]
@@ -44,6 +46,17 @@ result = "report"
 
 [presets.report.nodes.implementer]
 profile = "reporter"
+
+[profiles.chosen]
+access = "read-only"
+outcomes = ["complete"]
+runner = { kind = "agent", agent = "chosen", instructions = "Chosen old." }
+outputs = { result = "report" }
+
+[agents.chosen]
+harness = "pi"
+provider = "openrouter"
+model = "fake-model"
 "#,
     );
     let project = Project::new(&machine, "p", &fixture);
@@ -70,6 +83,21 @@ profile = "reporter"
     let attempts = project.rows("SELECT * FROM attempt ORDER BY id");
     let executions = project.rows("SELECT * FROM execution ORDER BY id");
     let requests = machine.model.requests().len();
+    let unavailable = call(
+        &mut operator,
+        &project,
+        "yard_plan_resolve",
+        json!({"preset": "report", "overrides": {
+            "implementer": {"profile": "unavailable"}
+        }}),
+    );
+    assert_eq!(unavailable["error"]["code"], "invalid");
+    assert_eq!(
+        unavailable["error"]["data"],
+        json!({
+            "input": "overrides.implementer.profile", "reason": "unresolved_reference"
+        })
+    );
     let refused = call(
         &mut operator,
         &project,
@@ -94,7 +122,7 @@ profile = "reporter"
     assert_eq!(machine.model.requests().len(), requests);
 
     let expected = json!({"inputs": {}, "nodes": {"implementer": {
-        "runner": {"kind": "agent", "agent": "worker", "instructions": "Chosen old."},
+        "runner": {"kind": "agent", "agent": "chosen", "instructions": "Chosen old."},
         "access": "read-only", "inputs": {}, "outputs": {"result": "report"},
         "outcomes": ["complete"], "routes": {}, "requires": []
     }}});
@@ -104,7 +132,7 @@ profile = "reporter"
         "yard_attempt_start",
         json!({
             "ticket": "Y-1", "preset": "report", "overrides": {"implementer": {
-                "runner": {"kind": "agent", "agent": "worker", "instructions": "Chosen old."}
+                "profile": "chosen"
             }}
         }),
     );

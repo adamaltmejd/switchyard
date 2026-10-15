@@ -1887,7 +1887,9 @@ pub async fn protected_paths(
 pub async fn command(daemon: &Arc<Daemon>, method: &str, params: Value) -> Result<Value, Fail> {
     let project = crate::daemon::project(daemon, &params)?;
     match method {
-        "plan.resolve" | "plan.validate" => inspect_plan(daemon, &project, method, params).await,
+        "plan.resolve" | "plan.validate" | "plan.catalog" => {
+            inspect_plan(daemon, &project, method, params).await
+        }
         "status" => admit::status(daemon, &project).await,
         "sync" => admit::sync(daemon, &project, &params).await,
         "doctor" => admit::doctor(daemon, &project).await,
@@ -2054,6 +2056,29 @@ async fn inspect_plan(
         break (target, canonical);
     };
     let loaded = load_target(daemon, project, &branch).await?;
+    if method == "plan.catalog" {
+        let capabilities = loaded.config.profiles.iter().map(|(name, profile)| {
+            use crate::plan::{Output, Runner};
+            let (agent, kind) = match &profile.runner {
+                Runner::Command { .. } => (None, None),
+                Runner::Agent { agent, .. } | Runner::Packaged { agent, .. } => {
+                    let kind = match profile.outputs.get("result") {
+                        Some(Output::Candidate) => crate::mcp::Kind::Implementation,
+                        Some(Output::Verdict) => crate::mcp::Kind::Review,
+                        Some(Output::Selection | Output::FindingSelection) => crate::mcp::Kind::Selector,
+                        _ => crate::mcp::Kind::Audit,
+                    };
+                    (loaded.config.agents.get(agent), Some(kind))
+                }
+            };
+            (name, json!({"agent": agent, "tools": kind.map(crate::mcp::tool_names).unwrap_or_default()}))
+        }).collect::<std::collections::BTreeMap<_, _>>();
+        return Ok(json!({"target": branch, "config_head": loaded.head,
+            "profiles": loaded.config.profiles, "presets": loaded.config.presets,
+            "profile_capabilities": capabilities,
+            "agents": loaded.config.agents, "gates": loaded.config.gates,
+            "workflows": loaded.config.workflows}));
+    }
     let plan = loaded
         .config
         .resolve_plan(&request)
