@@ -789,7 +789,8 @@ pub fn spawn(daemon: &Arc<Daemon>, project: &Arc<Project>, kind: &str, execution
         let result = if matches!(kind.as_str(), "command" | "report") {
             scoped::execute(&daemon, &project, execution).await
         } else if kind == "landing" {
-            queue::land(&daemon, &project, execution).await
+            // Keep native landing storage out of this large dispatch frame (Y-73).
+            Box::pin(queue::land(&daemon, &project, execution)).await
         } else {
             capacity::effect(&daemon, &project, execution, async {
                 match kind.as_str() {

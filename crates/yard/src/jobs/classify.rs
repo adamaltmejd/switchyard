@@ -520,9 +520,10 @@ pub async fn landing(
         }
         launch(tx, loaded, &now, source, name, policy, &inputs).map(|id| (id, true))
     })?;
+    // Keep native classifier storage out of capacity's task-local wrappers (Y-73).
     if fresh
         && let Err(fail) =
-            super::capacity::effect(daemon, project, id, run(daemon, project, id)).await
+            super::capacity::effect(daemon, project, id, Box::pin(run(daemon, project, id))).await
     {
         project.tx(|tx| {
             if executions::get(tx, id)?.status == "running" {
