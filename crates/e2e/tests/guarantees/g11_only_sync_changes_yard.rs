@@ -14,7 +14,7 @@ const EXTRA_GATE: &str =
 
 /// A worker commit under `.yard` comes back with the reason and no gate
 /// runs on it: the project's candidate gate runs only on the repaired head.
-/// The same change through `yard sync` is in force for the next admission.
+/// The same change through `yard_sync` is in force for the next admission.
 /// The change adds a second candidate gate: refused from the worker, it runs
 /// on a future candidate once the operator syncs it.
 ///
@@ -51,7 +51,7 @@ fn only_the_operators_sync_changes_yard_and_canonical() {
     machine.start();
     let project = Project::new(&machine, "p", &gated);
     let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Add feature"]);
+    project.ok("ticket.new", json!({"title": "Add feature"}));
     let first = watch.attention();
     assert_eq!(first["data"]["kind"], "approval", "{first}");
     let head = first["data"]["payload"]["head"]
@@ -94,13 +94,14 @@ fn only_the_operators_sync_changes_yard_and_canonical() {
     );
 
     project.reconfigure(&configured);
-    project.json(&[
-        "attempt", "approve", "--target", "main", "Y-1", "--head", &head,
-    ]);
+    project.ok(
+        "attempt.approve",
+        json!({"target": "main", "head": &head, "ticket": "Y-1"}),
+    );
     watch.event("landing.recorded", &[]);
     // G11/G2: the allowed operator sync supplies a future admitted gate.
     // Sabotage: keep using the previous admission for future attempts.
-    project.json(&["ticket", "new", "--title", "Future feature"]);
+    project.ok("ticket.new", json!({"title": "Future feature"}));
     let second = watch.attention();
     assert_eq!(second["data"]["kind"], "approval");
     let future = second["data"]["payload"]["head"].as_str().unwrap();
@@ -108,8 +109,8 @@ fn only_the_operators_sync_changes_yard_and_canonical() {
         project.rows("SELECT head, outcome FROM execution WHERE kind = 'gate' AND name = 'extra'"),
         vec![json!({"head": future, "outcome": "pass"})]
     );
-    project.json(&["ticket", "park", "Y-2"]);
-    project.json(&["attempt", "abandon", "Y-2"]);
+    project.ok("ticket.park", json!({"ticket": "Y-2"}));
+    project.ok("attempt.abandon", json!({"ticket": "Y-2"}));
 }
 
 fn branch_head(project: &Project, branch: &str) -> String {
@@ -136,13 +137,14 @@ fn default_branch(project: &Project) -> String {
 /// accept divergence, or allow merge to preserve dirt or update a hidden ref.
 /// Skip image validation when the canonical branch is absent: a commit with
 /// no trusted Dockerfile creates a ref. The restored committed file controls it.
+/// Strip the missing-input reason, commit or path; the structured refusal fails.
 #[test]
 fn named_sync_moves_only_committed_selected_history() {
     let machine = Machine::new("g11-named", |_| Reply::Text("unused".into()));
     machine.start();
     let project = Project::new(&machine, "p", &config(""));
     let main = project.canonical_head();
-    let missing = project.refused(&["sync", "feature/a"]);
+    let missing = project.refused("sync", json!({"branch": "feature/a"}));
     assert_eq!(missing["code"], "refused");
     assert_eq!(
         missing["data"],
@@ -161,7 +163,7 @@ fn named_sync_moves_only_committed_selected_history() {
     project.git(&["add", "b.txt"]);
     project.git(&["commit", "--quiet", "-m", "B"]);
     let b = project.git(&["rev-parse", "HEAD"]).trim().to_string();
-    project.json(&["sync", "feature/b"]);
+    project.ok("sync", json!({"branch": "feature/b"}));
     project.git(&["checkout", "--quiet", "-b", "feature/a", "main"]);
     project.write("a.txt", "branch a\n");
     project.git(&["add", "a.txt"]);
@@ -169,15 +171,15 @@ fn named_sync_moves_only_committed_selected_history() {
     project.git(&["rm", "--quiet", ".yard/Dockerfile"]);
     project.git(&["commit", "--quiet", "-m", "Missing image input"]);
     let invalid_head = project.git(&["rev-parse", "HEAD"]).trim().to_string();
-    let invalid = project.refused(&["sync", "feature/a"]);
+    let invalid = project.refused("sync", json!({"branch": "feature/a"}));
     assert_eq!(invalid["code"], "invalid");
-    assert!(invalid["message"].as_str().unwrap().contains(&invalid_head));
-    assert!(
-        invalid["message"]
-            .as_str()
-            .unwrap()
-            .contains(".yard/Dockerfile")
+    assert_eq!(
+        invalid["data"],
+        json!({"reason": "missing_committed_input", "commit": invalid_head,
+            "path": ".yard/Dockerfile"})
     );
+    assert_eq!(project.canonical_head(), main);
+    assert_eq!(branch_head(&project, "feature/b"), b);
     assert_eq!(
         git(
             &project.canonical(),
@@ -189,7 +191,7 @@ fn named_sync_moves_only_committed_selected_history() {
     project.git(&["commit", "--quiet", "-m", "Restore image input"]);
     let a = project.git(&["rev-parse", "HEAD"]).trim().to_string();
     project.git(&["checkout", "--quiet", "main"]);
-    project.json(&["sync", "feature/a"]);
+    project.ok("sync", json!({"branch": "feature/a"}));
     assert_eq!(branch_head(&project, "feature/a"), a);
     assert_eq!(project.canonical_head(), main);
     assert_eq!(branch_head(&project, "feature/b"), b);
@@ -200,10 +202,10 @@ fn named_sync_moves_only_committed_selected_history() {
     project.write("a.txt", "advanced a\n");
     project.git(&["commit", "--quiet", "-am", "Advance A"]);
     let advanced = project.git(&["rev-parse", "HEAD"]).trim().to_string();
-    project.json(&["sync", "feature/a"]);
+    project.ok("sync", json!({"branch": "feature/a"}));
     project.git(&["reset", "--quiet", "--hard", &a]);
     project.git(&["checkout", "--quiet", "main"]);
-    let wrong = project.refused(&["sync", "feature/a"]);
+    let wrong = project.refused("sync", json!({"branch": "feature/a"}));
     assert_eq!(wrong["code"], "refused");
     assert_eq!(
         wrong["data"],
@@ -216,7 +218,7 @@ fn named_sync_moves_only_committed_selected_history() {
     project.write("README.md", "staged operator change\n");
     project.git(&["add", "README.md"]);
     project.write("untracked.txt", "operator change\n");
-    let dirty = project.refused(&["sync", "feature/a"]);
+    let dirty = project.refused("sync", json!({"branch": "feature/a"}));
     assert_eq!(dirty["code"], "refused");
     assert_eq!(
         dirty["data"],
@@ -233,7 +235,7 @@ fn named_sync_moves_only_committed_selected_history() {
     );
     project.git(&["reset", "--quiet", "--hard", &a]);
     std::fs::remove_file(project.path.join("untracked.txt")).unwrap();
-    project.json(&["sync", "feature/a"]);
+    project.ok("sync", json!({"branch": "feature/a"}));
     assert_eq!(project.git(&["rev-parse", "HEAD"]).trim(), advanced);
     assert_eq!(
         std::fs::read_to_string(project.path.join("a.txt")).unwrap(),
@@ -244,7 +246,7 @@ fn named_sync_moves_only_committed_selected_history() {
     project.write("a.txt", "divergent a\n");
     project.git(&["commit", "--quiet", "-am", "Diverge A"]);
     let diverged = project.git(&["rev-parse", "HEAD"]).trim().to_string();
-    let refused = project.refused(&["sync", "feature/a"]);
+    let refused = project.refused("sync", json!({"branch": "feature/a"}));
     assert_eq!(refused["code"], "refused");
     assert_eq!(
         refused["data"],
@@ -253,7 +255,7 @@ fn named_sync_moves_only_committed_selected_history() {
     assert_eq!(branch_head(&project, "feature/a"), advanced);
     assert_eq!(project.git(&["rev-parse", "HEAD"]).trim(), diverged);
     project.git(&["reset", "--quiet", "--hard", &a]);
-    project.json(&["sync", "feature/a"]);
+    project.ok("sync", json!({"branch": "feature/a"}));
     assert_eq!(project.git(&["rev-parse", "HEAD"]).trim(), advanced);
     assert_eq!(project.canonical_head(), main);
     assert_eq!(branch_head(&project, "feature/b"), b);

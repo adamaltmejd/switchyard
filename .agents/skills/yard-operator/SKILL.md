@@ -1,63 +1,86 @@
 ---
 name: yard-operator
-description: Drive Switchyard (yard) for this project: the commands for filing tickets, answering attention and landing work. The judgment lives in two companions, yard-drive for answering the board and yard-file for filing and proposals; load the one you need.
+description: Drive Switchyard through trusted operator MCP. Load yard-drive for board judgment and yard-file for filing and proposals.
 ---
 
 # Operating yard
 
-Yard turns tickets into landed code. `yard status --json` shows `tickets`,
-`attempts`, `attention`, `queue`, `running` and `seq`. Answer attention as
-it opens; the scheduler runs everything else. `yard status --watch` returns
-as soon as an item is open or the board is idle (no attention: it drained), and
-prints it; `--watch --since SEQ` waits for an item raised after SEQ, or for the
-board to drain after an attempt ended since SEQ. `yard status --history --since
-SEQ` follows the audit stream; it is the only history view.
+Run `yard mcp` on the trusted host with the daemon already serving. Tools
+are `yard_` plus daemon methods with dots replaced by underscores.
+Use `tools/list` for schemas. Pass an absolute registered `project` path
+on every project operation; `yard_init` and `yard_project_forget` take
+an absolute `path` instead. There is no task-management CLI.
 
-This file lists the commands. `yard-drive` says how to answer the board and
-`yard-file` how to file work and decide proposals.
+Results are `structuredContent.result`; errors are
+`structuredContent.error` with `code`, `message`, and `data`.
+Keep expected/current identities on stale refusals. Re-read before a new
+decision; never substitute a new identity into an old judgment.
 
-## The loop
+## Board and filing
 
-`yard ticket new --title T --body B` files a ticket; the body is the plan.
-Add `--priority P`, `--depends-on Y-n`, `--parked`, or `--workflow plan`.
-A planning worker changes no code: it proposes child tickets and an edit to
-its own body. The scheduler admits ready tickets, so a ticket starts on its
-own once it is open, unparked and its dependencies are done. `yard attempt
-start Y-n` admits one now, and is the same command a `stopped` or `red`
-item's exit names.
+`yard_status` shows tickets, attempts, attention, queue, running and seq.
+Ticket bodies are omitted: use `yard_ticket_show` to read one.
+`yard_attention` polls at most 25 seconds. Without `since`, it returns on
+open attention or an idle board. With `since`, it waits for a later open
+item or an idle board after a later attempt/execution end. A bounded poll
+with no item and `idle: false` is not a drained board; poll again with the
+same cursor. Pass the returned seq after an actual wake.
 
-## Attention
+`yard_events` returns at most 500 events after `since`, waiting at most
+25 seconds when empty. Advance only to the last event consumed. Empty pages
+do not advance it. Cancel or close a wait to release observation, not work.
 
-`status --json` lists each open item with its `kind`, `reason`, `ticket`,
-`attempt` and `exits`. Answer with an exit the item names.
+`yard_ticket_new` takes title, body, priority, depends_on, parked, workflow
+and optional target. The body is the plan. Ready unparked tickets start
+automatically once dependencies are done. `yard_attempt_start` admits or
+retries one. Planning workers propose work without changing code.
 
-- `approval` — first read `yard attempt show Y-n` and `yard attempt diff
-  Y-n`, then `yard attempt approve Y-n --target BRANCH --head SHA`, `yard attempt reject
-  Y-n --target BRANCH --head SHA --text T`, or `yard attempt abandon Y-n`. Add the
-  `--proof DIGEST` the item's exit names when the candidate has a proof
-  snapshot. Approval binds the frozen target, exact `--head` and proof; a reject sends its
-  notes back as a repair.
-- `proposal` — `yard proposal accept ID` or `yard proposal reject ID`,
-  where `ID` is the attention id.
-- `candidate` — read the named failed gate or blocking review evidence.
-  `yard attempt accept Y-n --attention ID --check CHECK --plan-revision R --target BRANCH --head SHA --text T`
-  accepts it; `yard attempt repair` with the same bindings takes bounded repair.
-  Add `--proof DIGEST` when present. Acceptance runs all remaining selected
-  checks before approval and preserves the original failure.
-- `stopped` — `yard attempt start Y-n`, `yard ticket edit Y-n`, or abandon.
-  On `timeout` only edit and abandon; on `limit` also `yard attempt approve
-  Y-n --target BRANCH --head SHA`, over the blocking findings. The edit reaches the next
-  execution as a diff.
-- `red` — `start`, `yard ticket edit Y-n` or abandon, except a landing's item (no `attempt`) exits only
-  `yard attempt start Y-n`.
+## Decisions
 
-## Judging and syncing
+Read each item's kind, reason, ticket, attempt and exits. Use only an exit
+it names. The tool schema lists types; the item and inspection supply the
+exact identities. Do not infer missing ones.
 
-- `yard attempt tail Y-n` prints the live transcript.
-- `yard ticket edit Y-n --revision R --body B` needs the revision it read.
-  A stale `--revision` changes nothing; re-read `status` and retry.
-- `yard sync` imports the checkout's commits, `.yard/` changes included,
-  and consumes landed work back into the checkout. A divergence is refused,
-  naming both heads.
-- `yard doctor` reports pinfold, the configuration, the image and the
-  credentials; run it when a connection or the image looks wrong.
+- Approval: read `yard_attempt_show` and `yard_attempt_diff`, then use
+  `yard_attempt_approve`, `yard_attempt_reject`, or `yard_attempt_abandon`.
+  Approve/reject bind the frozen target, head, proof when present and choice
+  when selected. Reject takes nonempty text for repair.
+- Proposal: `yard_proposal_accept` or `yard_proposal_reject` takes the
+  attention id and decision text.
+- Candidate: read the failed gate or review evidence. `yard_attempt_accept`
+  or `yard_attempt_repair` binds attention, check, plan_revision, target,
+  head, proof when present and text. Copy any named landing, child, base,
+  revision, old, merged and node bindings too. Acceptance retains the
+  original failure and runs remaining selected checks before approval.
+  Omitted-node decisions also bind the named omissions and prepared input.
+- Stopped: start, edit or abandon as the item permits. Timeout permits only
+  edit and abandon; limit can also permit exact approval over findings.
+- Red: start, edit or abandon as named. A landing item with no attempt
+  permits only its named start exit.
+
+## Inspection and edits
+
+`yard_attempt_tail` reads the transcript. `yard_attempt_stats`,
+`yard_project_stats` and execution inspection retain unknown/partial usage.
+`yard_ticket_edit` needs the revision read. It edits title, body, priority,
+workflow and inactive target override; default_target clears the override.
+`yard_ticket_park`, `yard_ticket_unpark`, `yard_ticket_depend`,
+`yard_ticket_done` and `yard_ticket_abandon` handle the remaining ticket
+operations; done requires a reason.
+
+`yard_plan_catalog`, `yard_plan_resolve` and `yard_plan_validate` inspect
+target-bound capabilities and resolve structured plans. `yard_attempt_revise`
+uses plan revision CAS; `yard_attempt_select` binds exact selected inputs.
+Running inputs stay immutable. Standalone `yard_execution_start`, show and
+stop use the same lifecycle and confer no landing authority.
+
+`yard_sync` imports committed history and consumes canonical into the
+checkout. Optional branch selects a local branch; default selects it as
+project default. Divergence names both heads and refuses. `yard_doctor`
+reports pinfold, configuration, image and credentials. `yard_project_list`
+lists the registry; forget retires its named project image.
+
+Service commands remain `yard daemon run|install|uninstall|status|restart`;
+`yard version` reports the executable. Construction stays on its frozen
+installed executable until the operator deliberately switches it. Shipped
+successor skills do not authorize that switch or construction-state access.

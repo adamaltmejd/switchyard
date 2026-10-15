@@ -61,7 +61,7 @@ file paths and "Follow `.agents/skills/test-audit/sweep.md`."
    file, including its module registration and dated disposition where needed.
 
 A kept block that fails on the branch is a product bug. Reproduce it
-through the CLI and ticket it; never delete it.
+through the supported operator MCP/API and ticket it; never delete it.
 
 Before each push, run `cargo fmt --check`, `cargo clippy --all-targets
 --locked -- -D warnings`, and the suite on the host with `cargo test -p

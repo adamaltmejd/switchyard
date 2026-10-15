@@ -105,7 +105,7 @@ fn gates_and_a_seat_judge_the_proof_snapshot_where_their_row_says() {
     let project = Project::new(&machine, "p", &config(gates));
     let base = project.canonical_head();
     let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Add feature"]);
+    project.ok("ticket.new", json!({"title": "Add feature"}));
     // The candidate execution ends before the seat starts; the seat is held.
     hold.wait_held();
     let candidate = git(
@@ -198,9 +198,10 @@ fn gates_and_a_seat_judge_the_proof_snapshot_where_their_row_says() {
 
     let head = approval["data"]["payload"]["head"].as_str().unwrap();
     let proof = approval["data"]["payload"]["proof"].as_str().unwrap();
-    project.json(&[
-        "attempt", "approve", "--target", "main", "Y-1", "--head", head, "--proof", proof,
-    ]);
+    project.ok(
+        "attempt.approve",
+        json!({"target": "main", "head": head, "proof": proof, "ticket": "Y-1"}),
+    );
     watch.event("landing.recorded", &[]);
 
     // The host gate's candidate execution, then the same gate again on the
@@ -278,8 +279,8 @@ fn a_host_landing_gate_runs_on_the_merged_ref_only_when_approved() {
         &config(&gate).replace("review = [\"correctness\"]", "review = \"none\""),
     );
     let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "First"]);
-    project.json(&["ticket", "new", "--title", "Second"]);
+    project.ok("ticket.new", json!({"title": "First"}));
+    project.ok("ticket.new", json!({"title": "Second"}));
     let approval = |watch: &mut Watch, ticket: &str| {
         watch.find(ticket, |event| {
             event["event"] == "attention.raised"
@@ -296,7 +297,7 @@ fn a_host_landing_gate_runs_on_the_merged_ref_only_when_approved() {
     project.write("other.txt", "other\n");
     project.git(&["add", "other.txt"]);
     project.git(&["commit", "--quiet", "-m", "Operator change"]);
-    project.json(&["sync"]);
+    project.ok("sync", json!({}));
     let target = project.canonical_head();
 
     // Only the second landing merges the second head.
@@ -309,13 +310,15 @@ fn a_host_landing_gate_runs_on_the_merged_ref_only_when_approved() {
         ),
     );
 
-    project.json(&[
-        "attempt", "approve", "--target", "main", "Y-1", "--head", &first,
-    ]);
+    project.ok(
+        "attempt.approve",
+        json!({"target": "main", "head": &first, "ticket": "Y-1"}),
+    );
     watch.event("execution.started", &[("name", "held")]);
-    project.json(&[
-        "attempt", "approve", "--target", "main", "Y-2", "--head", &second,
-    ]);
+    project.ok(
+        "attempt.approve",
+        json!({"target": "main", "head": &second, "ticket": "Y-2"}),
+    );
     // One line per landing gate that could run, so a second gate never
     // blocks and the count below is what fails.
     release.write_all(b"go\ngo\n").unwrap();
@@ -323,16 +326,13 @@ fn a_host_landing_gate_runs_on_the_merged_ref_only_when_approved() {
         event["event"] == "landing.recorded" && event["ticket"] == "Y-1"
     });
     assert_eq!(watch.said(&said), "held\n");
-    let revision = project.json(&["ticket", "show", "Y-2"])["revision"].to_string();
-    project.json(&[
-        "ticket",
-        "edit",
-        "Y-2",
-        "--revision",
-        &revision,
-        "--body",
-        "Changed",
-    ]);
+    let revision = project.ok("ticket.show", json!({"ticket": "Y-2"}))["revision"]
+        .as_i64()
+        .unwrap();
+    project.ok(
+        "ticket.edit",
+        json!({"revision": revision, "body": "Changed", "ticket": "Y-2"}),
+    );
     std::fs::write(&resume, "go\n").unwrap();
     // The first Y-2 event that decides the outcome: its landing ends with no
     // gate, or goes ahead on the superseded candidate.
@@ -443,7 +443,7 @@ references = ["reference.txt"]
     project.write("unselected.md", "unselected-guidance\n");
     project.git(&["add", "-A"]);
     project.git(&["commit", "-qm", "Selected fixture inputs"]);
-    project.json(&["sync"]);
+    project.ok("sync", json!({}));
     let identities = || {
         json!([
             {"path": "selected.md", "blob": project.git(&["rev-parse", "HEAD:selected.md"]).trim(), "executable": false},
@@ -452,14 +452,10 @@ references = ["reference.txt"]
     };
     let original = identities();
     let mut watch = project.watch(0);
-    project.json(&[
-        "ticket",
-        "new",
-        "--title",
-        "Use selected guidance",
-        "--workflow",
-        "plan",
-    ]);
+    project.ok(
+        "ticket.new",
+        json!({"title": "Use selected guidance", "workflow": "plan"}),
+    );
     let planner = watch.event("attempt.ended", &[("outcome", "planned")]);
     let cleanup = watch.find("planner cleanup", |event| {
         event["event"] == "execution.ended"
@@ -483,7 +479,8 @@ references = ["reference.txt"]
     let attempt = started["result"]["attempt"].as_i64().unwrap();
     let approval = watch.attention();
     assert_eq!(approval["data"]["kind"], "approval", "{approval}");
-    let admitted = project.json(&["attempt", "show", "Y-1"])["attempt"]["admission"].clone();
+    let admitted =
+        project.ok("attempt.show", json!({"ticket": "Y-1"}))["attempt"]["admission"].clone();
     assert_eq!(
         admitted["inputs"]["selected_agent_sources"]["implementer"],
         original
@@ -495,20 +492,10 @@ references = ["reference.txt"]
     project.write("reference.txt", "adopted-reference\n");
     project.git(&["add", "selected.md", "reference.txt"]);
     project.git(&["commit", "-qm", "Operator changes selected inputs"]);
-    project.json(&["sync"]);
+    project.ok("sync", json!({}));
     let adopted = identities();
     let staging = project.canonical_head();
-    project.json(&[
-        "attempt",
-        "reject",
-        "--target",
-        "main",
-        "Y-1",
-        "--head",
-        approval["data"]["payload"]["head"].as_str().unwrap(),
-        "--text",
-        "Read the inputs again",
-    ]);
+    project.ok("attempt.reject", json!({"target": "main", "head": approval["data"]["payload"]["head"].as_str().unwrap(), "text": "Read the inputs again", "ticket": "Y-1"}));
     hold.wait_held();
     let probe = probes.lock().unwrap().last().unwrap().clone();
     assert!(probe.contains("skill=admitted-skill"), "{probe}");
@@ -532,7 +519,8 @@ references = ["reference.txt"]
     let probe = probes.lock().unwrap().last().unwrap().clone();
     assert!(probe.contains("skill=adopted-skill"), "{probe}");
     assert!(probe.contains("reference=adopted-reference"), "{probe}");
-    let revised_admission = project.json(&["attempt", "show", "Y-1"])["attempt"]["plan"].clone();
+    let revised_admission =
+        project.ok("attempt.show", json!({"ticket": "Y-1"}))["attempt"]["plan"].clone();
     assert_eq!(
         revised_admission["inputs"]["selected_agent_sources"]["implementer"],
         adopted
@@ -678,16 +666,12 @@ export default function () {
     );
     project.git(&["add", "-A"]);
     project.git(&["commit", "-qm", "Trusted handoff inputs"]);
-    project.json(&["sync"]);
+    project.ok("sync", json!({}));
     let mut watch = project.watch(0);
-    project.json(&[
-        "ticket",
-        "new",
-        "--title",
-        "Sequential fixture",
-        "--workflow",
-        "plan",
-    ]);
+    project.ok(
+        "ticket.new",
+        json!({"title": "Sequential fixture", "workflow": "plan"}),
+    );
     let planner = watch.event("attempt.ended", &[("outcome", "planned")]);
     let cleanup = watch.find("planner cleanup", |event| {
         event["event"] == "execution.ended"
@@ -817,15 +801,10 @@ export default function () {
         ancestry.lines().collect::<Vec<_>>(),
         ["Repair", "Cleanup", "Implement"]
     );
-    project.json(&[
-        "attempt",
-        "approve",
-        "--target",
-        "main",
-        "Y-1",
-        "--head",
-        first["head"].as_str().unwrap(),
-    ]);
+    project.ok(
+        "attempt.approve",
+        json!({"target": "main", "head": first["head"].as_str().unwrap(), "ticket": "Y-1"}),
+    );
     watch.event("landing.recorded", &[]);
     assert_eq!(
         git(&project.canonical(), &["show", "refs/heads/main:chain.txt"]),

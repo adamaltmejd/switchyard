@@ -215,18 +215,12 @@ fn only_the_declared_choice_is_checked_and_landed() {
     let project = Project::new(&machine, "p", &configuration);
     let main = project.canonical_head();
     project.git(&["checkout", "--quiet", "-b", "feature/a"]);
-    project.json(&["sync", "feature/a"]);
+    project.ok("sync", json!({"branch": "feature/a"}));
     let mut watch = project.watch(0);
-    project.json(&[
-        "ticket",
-        "new",
-        "--title",
-        "Five candidate choice",
-        "--target",
-        "feature/a",
-        "--workflow",
-        "plan",
-    ]);
+    project.ok(
+        "ticket.new",
+        json!({"title": "Five candidate choice", "target": "feature/a", "workflow": "plan"}),
+    );
     let planner = watch.find("planner finished", |event| {
         event["event"] == "attempt.ended"
     });
@@ -309,7 +303,7 @@ fn only_the_declared_choice_is_checked_and_landed() {
         .find(|row| row["node"] == "selector" && row["outcome"] == "selected")
         .unwrap();
     assert_eq!(picker["inputs"].as_object().unwrap().len(), 10);
-    let inspected = project.json(&["attempt", "show", "Y-1"]);
+    let inspected = project.ok("attempt.show", json!({"ticket": "Y-1"}));
     for n in 0..5 {
         assert_eq!(picker["inputs"][format!("c{n}")]["value"]["head"], heads[n]);
         assert_eq!(

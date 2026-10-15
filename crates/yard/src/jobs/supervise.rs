@@ -1897,7 +1897,7 @@ pub async fn implement(
             return attempts::set_next(tx, attempt.id, Some(&json!({ "reason": "dirty", "detail": listing, "workspace": row.workspace })));
         }
         if touches_yard {
-            let detail = ".yard changes only through the operator's `yard sync`; the candidate touching it is refused. Take the .yard change out of your commits.";
+            let detail = ".yard changes only through the operator's yard_sync; the candidate touching it is refused. Take the .yard change out of your commits.";
             executions::end(tx, execution, executions::End {
                 outcome: "refused",
                 detail: Some(detail),

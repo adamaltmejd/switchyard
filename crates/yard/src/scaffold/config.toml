@@ -1,4 +1,4 @@
-# Switchyard project configuration. Changes land only through `yard sync`.
+# Switchyard project configuration. Changes land only through `yard_sync`.
 max_lanes = 1
 approve = "manual"
 

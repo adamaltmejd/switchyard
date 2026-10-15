@@ -1,6 +1,6 @@
 Read AGENTS.md and docs/ARCHITECTURE.md. Edit nothing. Use `rg` to trace:
 
-1. configuration, CLI and worker-tool behavior to the spec. Report
+1. configuration, operator MCP/API and worker-tool behavior to the spec. Report
    contradictions or unsupported features; the spec need not enumerate
    every implementation detail;
 2. spec-named reasons, attention kinds and audit events to their emitted

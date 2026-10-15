@@ -82,12 +82,13 @@ _Avoid_: alert, notification, blocker
 | mcp | the tool surface workers call | daemon |
 | operator_mcp | trusted stdio tool schemas and forwarding to the unix socket | cli |
 | daemon | one process per machine: the unix-socket API, the MCP listener, the scheduler tick | `yard` |
-| cli | argument parsing, project discovery, RPC dispatch, rendering | the operator |
+| cli | service, version and operator-MCP startup | the operator |
 
 The store knows nothing of processes. `git` and `box` return data and never
-touch the store. The CLI never opens the store. It uses read-only git metadata
-and `project.list` to resolve a linked worktree, then sends the command to
-the daemon; it never mutates a repository itself.
+touch the store. Operator MCP never opens the store. It forwards structured requests with
+explicit absolute project paths to the daemon; it never mutates a repository
+itself. The executable CLI only starts MCP, manages the service or reports
+its version.
 
 Git's bounded output collection future is heap-pinned. The daemon uses the
 runtime's normal worker stack settings.
@@ -107,7 +108,7 @@ credentials, or damages the host.
 | Box is the sandbox | The harness runs fully permissive; access is what the box mounts writable, and Yard's own writes into a writable mount follow no link the box made. A reviewer reads a fresh read-only checkout of the head. A gate box reaches only the project's allowlist: no model, no MCP, no credential. |
 | Worker git is untrusted | A worker's clone shares no objects with canonical and the daemon runs no git command in it; a candidate arrives by a fetch run in canonical, and gates and reviewers read a fresh checkout of it. Every daemon git call disables hooks, `core.fsmonitor`, signing and every transport but validated local paths. |
 | Worker proof is untrusted | The proof directory is worker-written. Yard copies it with no link followed, refuses any entry that is not a regular file or a directory by name, and bounds its size and file count. |
-| No checkout writes | Yard never writes the operator's checkout except inside `yard sync` the operator ran. |
+| No checkout writes | Yard never writes the operator's checkout except inside `yard_sync` the operator ran. |
 | Gates run where the project says | A project chooses per gate whether it runs in a box or on the host. A host gate runs agent-written code with the operator's privileges and no containment: before any review at the candidate stage, after approval at landing. Which gates accept that is the project's decision. |
 | Fail safe | Unknown liveness or outcome never duplicates work, lands, deletes or kills (G5). |
 
@@ -117,7 +118,7 @@ restate. Pinfold's `.git` protection belongs to its interactive layer, not
 to caller-owned boxes; Yard's own mounts are the answer above. Image builds
 are outside pinfold's sandbox: trusted, with unrestricted egress. Yard
 therefore builds only from the admitted canonical image commit: `.yard/Dockerfile`,
-which only the operator's `yard sync` changes, in a build context the daemon
+which only the operator's `yard_sync` changes, in a build context the daemon
 materialises from that commit. The rest of that context is landed code,
 which approval has already passed; the Dockerfile can run it at build time.
 Shared image preparation records its owning execution before touching the
@@ -129,10 +130,10 @@ Waiting executions report `image_preparation` with the owning execution ID.
 
 ## Projects
 
-`yard init` writes `.yard/config.toml`, `.yard/Dockerfile`, a
+`yard_init` writes `.yard/config.toml`, `.yard/Dockerfile`, a
 `.dockerignore` block and the operator skills, and registers the project with
 the machine's daemon. `.yard/` is versioned and the operator's alone: it
-changes only through `yard sync`, and a candidate whose diff touches it is
+changes only through `yard_sync`, and a candidate whose diff touches it is
 refused at the candidate boundary and returned to the implementer with the
 reason. A worker that needs a package or a gate proposes the change.
 `.yard/local/` is ignored through `.yard/.gitignore` and holds the store and live state; losing it
@@ -231,7 +232,7 @@ names its explicitly selected regular files. Neither is candidate launch
 data. `files` declares bounded source or proof reads. No reference is followed
 automatically. A profile, preset or operator graph may select this runner.
 A read-only workflow with no seats may explicitly set `profile = "NAME"`
-to select a packaged profile on ordinary CLI or scheduler admission. This
+to select a packaged profile on ordinary operator or scheduler admission. This
 field is optional and is not inherited from the default workflow.
 Its standalone supported plan is one read-only `implementer` node matching a
 configured read-only workflow's agent, with `result: report` and `complete`.
@@ -760,7 +761,7 @@ in its inputs before invalidating the choice and clearing pending continuation.
 Failure source references stay unchanged; this feedback grants no judgment or
 approval authority. Approval and queue verification
 bind the exact choice execution beside candidate, proof, ticket, plan and target.
-CLI approval and rejection name `--choice` when a choice exists. Selection grants no write,
+Operator approval and rejection name `choice` when a choice exists. Selection grants no write,
 approval or landing authority; the existing queue and CAS remain authoritative.
 
 Trusted MCP `yard_attempt_select` (daemon `attempt.select`) selects directly
@@ -1178,17 +1179,17 @@ refusal.
 
 ## Tickets
 
-`ticket new --target BRANCH` sets an override. Omission resolves the current
-project default at admission. `ticket edit --target BRANCH` changes it;
-`--default-target` clears it. Target edits require the expected revision,
+`ticket.new` with `target` sets an override. Omission resolves the current
+project default at admission. `ticket.edit` with `target` changes it;
+`default_target: true` clears it. Target edits require the expected revision,
 an open ticket, no live attempt and no landing intent. Branch names are
 validated local refs. Admission refuses `missing_target`, naming the branch,
 without creating an attempt; named sync supplies the ref.
 
 A ticket is `open`, `done` or `abandoned`, and may be `parked`. It becomes
 `done` when its candidate lands on the frozen target, even if that branch
-never reaches main, or when the operator closes it with `yard
-ticket done` and a reason, which is recorded like every decision. Closing is
+never reaches main, or when the operator closes it with `yard_ticket_done`
+and a reason, which is recorded like every decision. Closing is
 refused while the ticket has a live attempt or a landing intent; abandon the
 attempt first. A done ticket satisfies its dependents either way. It carries
 `depends_on` edges to other tickets; that is the only scheduling relation.
@@ -1208,12 +1209,12 @@ the current project default to classify its pending proposals; its stored
 target stays unknown. Accepting a planner's child adds the
 `parent depends_on child` edge; accepting
 the edit makes the body the plan. Once the children are done the operator
-either closes the ticket with `yard ticket done` or moves it to an
+either closes the ticket with `yard_ticket_done` or moves it to an
 implementing workflow and starts it. An execution on a read-only workflow
 ends its attempt after a valid report and successful checked teardown. Its
 proposals remain operator decisions. Missing report raises `stopped:failed`
 with `missing_report`; no report result advances. The scheduler starts a ticket on a read-only
-workflow once; after that only `yard attempt start` does.
+workflow once; after that only `yard_attempt_start` does.
 A replan is a ticket edit, which supersedes every check that read the old
 revision.
 
@@ -1228,14 +1229,14 @@ split and stops.
 
 ## The loop
 
-1. **File.** `yard ticket new`, or accept a proposal.
+1. **File.** `yard_ticket_new`, or accept a proposal.
 2. **Plan.** A ticket on a read-only workflow is planned: its worker
    proposes children and the body; the operator decides before paying for
    implementation.
 3. **Start.** The scheduler admits ready tickets in priority order up to
    `max_lanes`. Admission creates the attempt, freezes its effective target branch, workflow and
    implementer, and records the first execution before anything external
-   runs, in one transaction (G4). `yard attempt start` is the same
+   runs, in one transaction (G4). `yard_attempt_start` is the same
    admission for one named ticket, now: refused, naming the reason, when
    the ticket is not ready or no lane is free. On a ticket whose live
    attempt has a `stopped` or `red` item it is that item's `start`.
@@ -1898,7 +1899,7 @@ proves its remaining controller cannot act. Other reserved legacy rows
 retain capacity and `red:ownership`. Start, edit and abandon do not attest
 host quiescence or clear these reservations. The operator stops an
 ambiguous upgrade and resolves old host ownership outside Yard; there is
-no CLI override or guessed release. The final upgrade rehearsal must
+no operator override or guessed release. The final upgrade rehearsal must
 account for this ambiguity. A quiescent old daemon with no ambiguous rows
 can migrate its completed history and candidate approvals.
 
@@ -1940,7 +1941,7 @@ moved raises nothing. An item is resolved in the transaction of the command that
 answers it.
 
 Trusted `yard_attempt_accept` and `yard_attempt_repair` (daemon
-`attempt.accept` and `attempt.repair`, CLI `yard attempt accept|repair`)
+`attempt.accept` and `attempt.repair`)
 name ticket, attention, check, plan revision, target, head, proof when present,
 and nonempty text.
 For `candidate:landing`, they also name original landing, child, selected
@@ -1956,8 +1957,8 @@ ordinary return path with the complete failed evidence in the new execution's
 feedback. The original failed check and result stay unchanged. The repaired
 candidate needs fresh selected verification and approval before landing.
 
-Trusted `yard_attempt_approve` (daemon `attempt.approve`, CLI `yard attempt
-approve`) optionally names `accept_skipped` (`--accept-skipped` per node),
+Trusted `yard_attempt_approve` (daemon `attempt.approve`) optionally names
+the `accept_skipped` array,
 approval attention, base, ticket `revision`, admitted `plan_revision` and nonempty text, alongside
 target, head and proof when present. Only candidate omissions from the admitted
 selection are eligible. A stale candidate, ticket, plan or named selection
@@ -1965,8 +1966,8 @@ returns `stale` with `identity`, `expected` and `current`, and writes no row.
 The authoritative approval and its audit retain the explicit decision through
 landing and restart. The queue revalidates its skipped-selection identity.
 
-Approval may also name `observe_landing_skipped` (`--observe-landing-skipped`
-per node) to request a prepared omission question. The request accepts
+Approval may also name the `observe_landing_skipped` array to request a
+prepared omission question. The request accepts
 nothing. Its later `attempt.accept` names `accept_skipped` and the merged
 bindings; it has no check, child or result identity. Acceptance and nonempty
 text use the existing attention resolution and audit. The complete skipped
@@ -2059,7 +2060,7 @@ The `.yard` refusal and protected paths read `base..head`, so a merge of a
 target that carries an operator's `.yard` change passes, and a head that
 undoes one is refused.
 
-`yard sync [BRANCH]` is the only operator ingress and egress. Omission selects
+`yard_sync` with optional `branch` is the only operator ingress and egress. Omission selects
 the project default. Importing fast-forwards only the selected canonical
 branch from committed checkout history after validating its `.yard/config.toml`
 and trusted Dockerfile. An absent canonical branch is created only from an
@@ -2069,7 +2070,7 @@ of a former default. It fast-forwards only a clean checkout of that same branch 
 a different checked-out branch or dirty checkout is refused by identity.
 Divergence is refused naming both heads. No unrelated branch ref moves.
 
-Named import leaves the default unchanged. `yard sync BRANCH --default`
+Named import leaves the default unchanged. `yard_sync` with `branch` and `default: true`
 explicitly selects an imported existing branch whose committed `target.ref`
 names that branch. If checkout history is ahead, selection imports it first;
 divergent history is refused. If canonical is ahead or the checkout branch
@@ -2335,11 +2336,11 @@ Pi retains the existing
 audit grant and one MCP session; the child receives no bearer, session or
 additional worker grant. No model-elected child-launch tool is offered.
 
-## Daemon and CLI
+## Daemon and operator interface
 
 `yard mcp` serves trusted operator MCP over stdin and stdout, one JSON-RPC
 message per line. It is a client of the existing unix socket, with the same
-build boundary as the CLI. It never opens a store or starts a daemon. Run it
+build boundary as the daemon. It never opens a store or starts a daemon. Run it
 only on the trusted host. Worker HTTP MCP capabilities are separate;
 an execution bearer grants none of the operator tools.
 
@@ -2348,10 +2349,19 @@ and repair. Standalone execution start takes a node definition object.
 
 `initialize`, `notifications/initialized`, `ping`, `tools/list` and
 `tools/call` are served. Operator tools are `yard_` plus the daemon method
-with dots replaced by underscores. They cover `daemon.status`,
-`project.list`, `project.stats`, `project.forget`, `init`, `doctor`, `sync`, `status`,
-`events`, `attention`, all ticket, attempt and proposal operations listed
-below, `attempt.stats`, and `execution.start`, `execution.show`, `execution.stop`. Arguments name absolute registered `project`
+with dots replaced by underscores. The supported daemon methods are:
+
+| Scope | Methods |
+| --- | --- |
+| Service and registry | `daemon.status`, `project.list`, `project.forget`, `init` |
+| Project | `doctor`, `sync`, `status`, `events`, `attention`, `project.stats` |
+| Plan | `plan.catalog`, `plan.resolve`, `plan.validate` |
+| Ticket | `ticket.new`, `ticket.show`, `ticket.list`, `ticket.edit`, `ticket.park`, `ticket.unpark`, `ticket.depend`, `ticket.done`, `ticket.abandon` |
+| Attempt | `attempt.start`, `attempt.stop`, `attempt.select`, `attempt.revise`, `attempt.accept`, `attempt.repair`, `attempt.approve`, `attempt.reject`, `attempt.abandon`, `attempt.show`, `attempt.diff`, `attempt.tail`, `attempt.stats` |
+| Proposal | `proposal.accept`, `proposal.reject` |
+| Standalone execution | `execution.start`, `execution.show`, `execution.stop` |
+
+Arguments name absolute registered `project`
 paths; `init` and `project.forget` instead take an absolute `path`.
 Required identities and argument types are declared by each tool's schema.
 Unknown fields and wrong types are `invalid` before forwarding; daemon
@@ -2364,7 +2374,7 @@ execution/attempt show and attempt/project statistics; missing values remain nul
 
 `events` returns one page of at most 500 audit events after `since`, waiting
 at most 25 seconds if empty. `attention` is one bounded poll of the same
-wake primitive as `status --watch`, with its `seq`, `attention` and `idle`.
+wake primitive used by all operator clients, with its `seq`, `attention` and `idle`.
 Its 25-second bound covers the whole poll, including config and readiness
 Git reads. Expiry returns the caller's `since` as `seq` (zero when absent),
 no attention and `idle: false`. Incomplete inputs never establish an idle
@@ -2401,17 +2411,14 @@ says so where it cannot. `yard daemon uninstall` stops and removes it;
 new daemon answers, with its `pid` and `boundary`.
 
 The daemon owns the project registry, a list of absolute project paths in
-`$XDG_STATE_HOME/yard/projects`. `yard init` registers a project and `yard
-project forget` removes one and retires the project's image name
-(`pinfold image rm`; a box's image stays until the box goes, and running
-`forget` again retries); a registered path that is gone is skipped and
-reported by `doctor`. The CLI resolves its project from the working
-directory upward to the nearest `.yard/config.toml`, or from `--project`;
-a linked git worktree resolves to its main checkout when that is
-registered, and `yard init` refuses a linked worktree, naming the main
-checkout.
-Each project has its own store and its own audit sequence, so `status`,
-`status --watch` and `status --history` are per project.
+`$XDG_STATE_HOME/yard/projects`. `yard_init` registers a project and
+`yard_project_forget` removes one and retires its image name
+(`pinfold image rm`; a box's image stays until the box goes, and repeating
+forget retries). A registered path that is gone is skipped and reported by
+`doctor`. Operator calls name the absolute project path explicitly.
+`init` refuses a linked worktree and names its main checkout.
+Each project has its own store and audit sequence; status, attention and
+history operations are per project.
 
 The API is `POST /rpc` with
 `{method, params}` and one envelope `{boundary, ok, result | error}`.
@@ -2420,36 +2427,42 @@ the instruction to restart the daemon. Every mutation carries the smallest
 expected identity (ticket revision, candidate, attention id) and a mismatch
 is a machine-readable stale result.
 
+The executable entrypoints are:
+
 ```
-yard init | doctor | sync [BRANCH] [--default] | status [--watch [--since SEQ] | --history [--since SEQ]] [--json]
 yard daemon run | install | uninstall | status | restart
-yard project list | forget
-yard ticket new | show | edit | park | unpark | depend | list | done | abandon
-yard attempt start | stop | approve | reject | abandon | show | diff | tail
-yard proposal accept | reject
 yard mcp
 yard version
 ```
 
-`status --watch` returns on either of two conditions, prints the open items
-and the seq it answered at, and exits; it is the wake primitive. One: an
-attention item is open. Two: the board is idle, with no live attempt, running
-or reserved execution, no open item and no ready ticket the scheduler would admit. `--watch --since SEQ`
-returns once an item is open whose `attention.raised` event is after SEQ, or
-the board is idle and an `attempt.ended` or `execution.ended` event is after SEQ, so a watch armed
-on an idle board waits for more work to arrive and drain. It prints every open
-item (none on an idle return); `--json` prints
-`{"seq", "attention"}`, and passing that seq to the next call loses no item.
-`status --history` follows
-the audit stream from a sequence and prints one line per event; MCP `events`
-reads bounded pages of the same stream. `attempt tail` prints the live transcript file as the
-harness wrote it. Approve and reject require `--target BRANCH` as well as `--head SHA`.
-A different target is stale and writes nothing. Status names the frozen
-target of each live attempt and queued candidate. Every
-command runs without a terminal and answers `--json`. `doctor` reports what
-pinfold says of itself, the service, the project image, which connections
-have a credential, and each configured login's pin and, where Yard holds its
-token, whether it is set.
+Service and version output supports `--json`. Task, project, inspection,
+sync and decision operations are supported only through operator MCP/API.
+
+`attention` returns on either of two conditions. One: an attention item is
+open. Two: the board is idle, with no live attempt, running or reserved
+execution, open item or ready ticket the scheduler would admit.
+With `since: SEQ`, it returns once an open item's `attention.raised` event
+is after SEQ, or the board is idle and an `attempt.ended` or
+`execution.ended` event is after SEQ. Thus an idle poll ignores old attempt
+ends and waits for more work to arrive and drain; a poll past an existing
+open item waits for a newer item. An actual wake returns every open item
+and its seq, so passing that seq loses no item. The bounded empty-poll
+contract above still applies.
+
+`events` reads ordered bounded audit pages after a sequence. Clients advance
+only through consumed events; an empty page leaves the cursor unchanged.
+`attempt.tail` reads the live transcript as the harness wrote it. Approve
+and reject require the frozen `target` and exact `head`, plus any named
+proof and selection identity. A different target is stale and writes
+nothing. Status names each live attempt's and queued candidate's target.
+`doctor` reports pinfold, service, project image, credential availability
+and configured login pins without exposing tokens.
+
+Missing committed configuration or Dockerfile input returns `invalid`
+with `data.reason: "missing_committed_input"`, the exact `data.commit`
+used to read that input and `data.path`. The commit is the definition
+commit for configuration and the image commit for the Dockerfile.
+Validation refuses before importing or moving canonical refs (G6).
 
 ## Guarantees
 
@@ -2468,8 +2481,8 @@ combination, lifecycle or historical version.
 | 3 | Landing is compare-and-swap with selected verification and durable exact prepared merged-ref evidence | A held native ref update stays undecided until its outcome is known. Canonical movement before compare-and-swap retires the landing without overwriting newer history. |
 | 4 | Capacity holds | Concurrent starts preserve one live attempt and the lane bound. Two held mixed reader/worker effects have exactly two native project boxes; the join waits for exact results. One-slot landing children exclude a worker and still land. An inherited native owner retains capacity across restart. Identical execution IDs in different projects keep separate grants. |
 | 5 | Intent precedes effect, and a restart loses only the turn; Durable continuation is a new exclusive execution after proved predecessor removal; individually useful work needs no ticket | A real held writable turn survives daemon death as interrupted work and resumes its retained tree. Startup removes a surviving host gate process group before requeue. A legacy owner without trustworthy lock proof remains reserved across upgrade. Matching Durable unsafe intent resumes only after old-box removal; corrupt checkpoint identity refuses before a fresh retry. A completed registered finding picker retains its immutable selection, reservation and exact ownership item across restart while a real runtime descendant holds its inherited effect lock after box removal; checked release reconciles only that item without replay. |
-| 6 | Inspectable presets and targeted profile overrides resolve declared capabilities at the boundary; inputs are validated; new supported workflow admissions retain immutable resolved input evidence, and unrecorded history stays unknown; standalone scope is explicit | Malformed worker MCP input writes no proposal; the valid same-turn control succeeds. Unavailable role overrides refuse with the exact profile reference; the valid named override resolves the complete fixture plan. Unsupported selected admission creates no work, while a supported held execution keeps its frozen inputs across template sync. A real historical store preserves rows, audit and foreign keys and supports current decisions after upgrade. |
-| 7 | Complete shipped presets cover ordinary, reduced, audit, cleanup, classification, joins and independent model trials through existing executions; a ticket lands end to end and leaves only rows; usage is optional measured data with provenance and honest partial aggregates; Codex token totals retain their meaning and unreported monetary cost is unknown | A real ticket goes through commit, gate, review, approval and native landing, then leaves rows while unrelated live work remains. Actual optional Pi frames retain unknown, interrupted partial and resumed explicit-zero measurements across reopen. Trusted statistics sum known execution increments with missing/partial counts after cleanup and restart; the landing drilldown includes positive measured costs. Operator stdio preserves worker authorization and stale mutation identity while canceled waits and stdin EOF leave work running. Standalone command/report execution has no ticket or landing authority. |
+| 6 | Supported operator MCP/API preserves input validation and exact refusal identity; inspectable presets and targeted profile overrides resolve declared capabilities at the boundary; inputs are validated; new supported workflow admissions retain immutable resolved input evidence, and unrecorded history stays unknown; standalone scope is explicit | Malformed worker MCP input writes no proposal; the valid same-turn control succeeds. Unavailable role overrides refuse with the exact profile reference; the valid named override resolves the complete fixture plan. Unsupported selected admission creates no work, while a supported held execution keeps its frozen inputs across template sync. A real historical store preserves rows, audit and foreign keys and supports current decisions after upgrade. Named import with a missing committed Dockerfile refuses by reason, commit and path without moving canonical refs; its restored-input control imports. |
+| 7 | Supported operator MCP/API preserves operator actions, bounded ordered history and attention waits; complete shipped presets cover ordinary, reduced, audit, cleanup, classification, joins and independent model trials through existing executions; a ticket lands end to end and leaves only rows; usage is optional measured data with provenance and honest partial aggregates; Codex token totals retain their meaning and unreported monetary cost is unknown | A real ticket goes through commit, gate, review, approval and native landing, then leaves rows while unrelated live work remains. Actual optional Pi frames retain unknown, interrupted partial and resumed explicit-zero measurements across reopen. Trusted statistics sum known execution increments with missing/partial counts after cleanup and restart; the landing drilldown includes positive measured costs. Operator stdio preserves worker authorization and stale mutation identity while canceled waits and stdin EOF leave work running. Standalone command/report execution has no ticket or landing authority. |
 | 8 | Reviews, audits, classification and read-only candidate and finding selections are explicit bounded publications; classification chooses bounded continuation while failures remain unchanged; an empty selected panel is unreviewed; selected eligible merged failures require exact operator decisions | Silent or unregistered review publication cannot authorize approval; a proven same-project retry can. Report validation and held publication preserve exact frozen identity and eligibility, and successful text alone creates no report. Five-model selection binds own reviews and one replacement to actual landing. A correctly resealed changed packaged controller refuses before model/code effects; its unmodified control publishes through real Pi. The exact multi-model join picker refuses malformed groups and repeated contributors before a valid subset and two-source duplicate publication. Checked ownership release preserves one typed selection and all raw sources. Named original and fixer repairs retain failing verdicts before an explicit operator acceptance; text without publication is infrastructure failure and a fresh execution retries publication. Command classification retries the same failed node once, then raises attention without resetting its bound on a ticket edit. Its repair prompt carries precisely the selected groups, including an advisory contributor; an excluded required block still refuses stale acceptance before exact acceptance permits approval. |
 | 9 | Each implementer execution starts from its frozen target and the right candidate; independent writers retain isolated reusable workspaces, including integration from named candidates; the bounded implementer, cleanup and repair path retains one exclusive clone, including selected Durable cleanup and read-only audits of immutable publications | A held worker receives operator edits and adopted definitions in its next execution. Stop/start delivers the edit while retaining configured model identity. Five independent writer workspaces preserve their own bytes, sessions and frozen read-only review inputs through continuation and restart. Held integration retains partial work across restart; source writes and canonical access fail while its own write succeeds. Conflicts require repair before selection. Boxed Git inodes, fixture bytes and ancestry survive sequential selected roles; a held cleanup refuses a competing workspace retry, and checked release precedes handoff. Durable cleanup resumes a held unsafe source write in a new exclusive execution after checked release, without replay; its boxed commit passes the same clone to ordinary repair and native landing. |
 | 10 | The queue lands one at a time per target and re-judges what does not merge | Two approvals land in order; a red merge returns for repair. A feature ticket uses its frozen target source, definitions and image, repairs a real conflict, and lands only on that branch. |

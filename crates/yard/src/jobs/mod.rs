@@ -457,7 +457,7 @@ pub async fn load_target(
         .await?;
     let head = head.ok_or_else(|| {
         Fail::refused(format!(
-            "canonical has no target {branch}; run `yard sync {branch}`"
+            "canonical has no target {branch}; call yard_sync with branch {branch}"
         ))
         .with(json!({ "reason": "missing_target", "target": branch }))
     })?;
@@ -511,7 +511,12 @@ async fn read_sources(
         .git
         .show(repo, commit, crate::config::CONFIG_PATH)
         .await?
-        .ok_or_else(|| Fail::invalid(format!("{commit} has no .yard/config.toml")))?;
+        .ok_or_else(|| {
+            Fail::invalid("missing committed input").with(json!({
+                "reason": "missing_committed_input", "commit": commit,
+                "path": crate::config::CONFIG_PATH
+            }))
+        })?;
     let config = Config::parse(&text).map_err(|message| {
         Fail::invalid(format!(".yard/config.toml: {message}")).with(json!({ "config": message }))
     })?;
@@ -527,7 +532,12 @@ async fn read_sources(
         .git
         .show(repo, image_commit, crate::config::DOCKERFILE_PATH)
         .await?
-        .ok_or_else(|| Fail::invalid(format!("{image_commit} has no .yard/Dockerfile")))?;
+        .ok_or_else(|| {
+            Fail::invalid("missing committed input").with(json!({
+                "reason": "missing_committed_input", "commit": image_commit,
+                "path": crate::config::DOCKERFILE_PATH
+            }))
+        })?;
     let tree = daemon.git.root_tree(repo, image_commit).await?;
     let mut objects = std::collections::BTreeMap::new();
     for (source, path) in [

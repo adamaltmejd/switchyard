@@ -3,7 +3,7 @@
 //! A test builds the real binary, starts a real daemon on a temporary
 //! machine, registers a real project, and lets real Pi in real pinfold boxes
 //! work against the scripted fake model in `model`. It observes only what a
-//! user can: exit codes, `--json` output, the store file, canonical git
+//! user can: operator MCP responses, the store file, canonical git
 //! state, host files, and boxes through `pinfold`.
 
 pub mod model;
@@ -246,14 +246,22 @@ impl Machine {
             .id()
     }
 
-    /// Run `yard ARGS` in `dir`.
-    pub fn yard(&self, dir: &Path, args: &[&str]) -> Output {
-        self.command()
+    /// Genuine historical setup only; never dispatch successor operations here.
+    pub fn legacy_cli(&self, dir: &Path, args: &[&str]) -> Value {
+        assert!(
+            self.binary.lock().unwrap().is_some(),
+            "select the archived binary explicitly"
+        );
+        let out = self
+            .command()
             .current_dir(dir)
             .args(args)
+            .arg("--json")
             .stdin(Stdio::null())
             .output()
-            .expect("run yard")
+            .expect("run historical yard");
+        assert!(out.status.success(), "historical yard {args:?}: {out:?}");
+        serde_json::from_slice(&out.stdout).expect("historical JSON")
     }
 
     /// A real trusted stdio MCP process, using this machine's isolated socket.
@@ -268,37 +276,67 @@ impl Machine {
         let input = child.stdin.take().unwrap();
         let output = lines(child.stdout.take().unwrap());
         Operator {
-            child,
+            child: Some(child),
             input: Some(input),
             output,
             next: 0,
         }
     }
 
-    /// Run `yard ARGS --json` in `dir`, assert it succeeded and parse it.
-    #[track_caller]
-    pub fn json(&self, dir: &Path, args: &[&str]) -> Value {
-        let out = self.yard(dir, &[args, &["--json"]].concat());
-        assert!(
-            out.status.success(),
-            "yard {args:?} failed: {}{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        serde_json::from_slice(&out.stdout).expect("yard --json prints JSON")
+    /// A structured call through the supported trusted operator boundary.
+    pub fn call(&self, method: &str, params: Value) -> Result<Value, Value> {
+        let mut operator = self.operator();
+        operator.initialize();
+        let value = operator.call(&format!("yard_{}", method.replace('.', "_")), params);
+        if let Some(error) = value.get("error") {
+            Err(error.clone())
+        } else {
+            Ok(value.get("result").expect("operator result").clone())
+        }
     }
 
-    /// Run `yard ARGS --json` and return its error object; assert it failed.
     #[track_caller]
-    pub fn refused(&self, dir: &Path, args: &[&str]) -> Value {
-        let out = self.yard(dir, &[args, &["--json"]].concat());
-        assert!(
-            !out.status.success(),
-            "yard {args:?} succeeded: {}",
-            String::from_utf8_lossy(&out.stdout)
-        );
-        let value: Value = serde_json::from_slice(&out.stdout).expect("yard --json prints JSON");
-        value["error"].clone()
+    pub fn ok(&self, method: &str, params: Value) -> Value {
+        self.call(method, params)
+            .unwrap_or_else(|error| panic!("{method}: {error}"))
+    }
+
+    /// Only archived fixtures may follow an old executable's CLI stream.
+    pub fn legacy_watch(&self, project: &Path, since: i64) -> Watch {
+        assert!(self.binary.lock().unwrap().is_some());
+        let mut child = self
+            .command()
+            .current_dir(project)
+            .args([
+                "status",
+                "--history",
+                "--since",
+                &since.to_string(),
+                "--json",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("historical history");
+        let output = lines(child.stdout.take().unwrap());
+        let (send, heard) = mpsc::channel();
+        let events = send.clone();
+        std::thread::spawn(move || {
+            for line in output {
+                if events.send(Heard::Event(line)).is_err() {
+                    return;
+                }
+            }
+            let _ = events.send(Heard::Closed);
+        });
+        Watch {
+            child,
+            send,
+            heard,
+            seen: Vec::new(),
+            history_closed: false,
+        }
     }
 
     /// `pinfold` with this machine's state.
@@ -422,9 +460,8 @@ instructions = "Review for correctness."
 }
 
 impl<'a> Project<'a> {
-    /// `git init`, one commit, `yard init`, the test's configuration
-    /// committed, and `yard sync`.
-    pub fn new(machine: &'a Machine, name: &str, config: &str) -> Project<'a> {
+    /// A real initial checkout, before registration or configuration.
+    pub fn checkout(machine: &'a Machine, name: &str) -> Project<'a> {
         let path = machine.root.join(name);
         std::fs::create_dir_all(&path).unwrap();
         let project = Project { machine, path };
@@ -433,21 +470,27 @@ impl<'a> Project<'a> {
         project.write("AGENTS.md", "Rule: every file ends with a newline.\n");
         project.git(&["add", "-A"]);
         project.git(&["commit", "--quiet", "-m", "fixture"]);
-        machine.json(&project.path, &["init"]);
+        project
+    }
+
+    /// Register and sync the fixture's committed configuration through MCP.
+    pub fn new(machine: &'a Machine, name: &str, config: &str) -> Project<'a> {
+        let project = Self::checkout(machine, name);
+        machine.ok("init", json!({"path": project.path}));
         project.write(".yard/config.toml", config);
         project.git(&["add", "-A"]);
         project.git(&["commit", "--quiet", "-m", "yard"]);
-        project.json(&["sync"]);
+        project.ok("sync", json!({}));
         project
     }
 
     /// The operator's configuration change: consume canonical, commit
     /// `config` in the checkout, and sync it in.
     pub fn reconfigure(&self, config: &str) {
-        self.json(&["sync"]);
+        self.ok("sync", json!({}));
         self.write(".yard/config.toml", config);
         self.git(&["commit", "--quiet", "-am", "Configure"]);
-        self.json(&["sync"]);
+        self.ok("sync", json!({}));
     }
 
     pub fn write(&self, path: &str, text: &str) {
@@ -473,18 +516,21 @@ impl<'a> Project<'a> {
             .to_string()
     }
 
-    pub fn yard(&self, args: &[&str]) -> Output {
-        self.machine.yard(&self.path, args)
+    pub fn call(&self, method: &str, mut params: Value) -> Result<Value, Value> {
+        params["project"] = json!(self.path);
+        self.machine.call(method, params)
     }
 
     #[track_caller]
-    pub fn json(&self, args: &[&str]) -> Value {
-        self.machine.json(&self.path, args)
+    pub fn ok(&self, method: &str, params: Value) -> Value {
+        self.call(method, params)
+            .unwrap_or_else(|error| panic!("{method}: {error}"))
     }
 
     #[track_caller]
-    pub fn refused(&self, args: &[&str]) -> Value {
-        self.machine.refused(&self.path, args)
+    pub fn refused(&self, method: &str, params: Value) -> Value {
+        self.call(method, params)
+            .expect_err("operator operation must refuse")
     }
 
     /// The store, opened read-only.
@@ -522,31 +568,46 @@ impl<'a> Project<'a> {
         rows.map(Result::unwrap).collect()
     }
 
-    /// Follow the audit stream from `since` with `status --history`.
+    /// Ordered bounded pages through a real operator process. A closed
+    /// transport ends history; it never retries into a restarted daemon.
     pub fn watch(&self, since: i64) -> Watch {
-        let mut child = self
-            .machine
-            .command()
-            .current_dir(&self.path)
-            .args([
-                "status",
-                "--history",
-                "--since",
-                &since.to_string(),
-                "--json",
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .expect("spawn yard status --history");
+        let mut operator = self.machine.operator();
+        operator.initialize();
+        let child = operator.child.take().expect("history operator");
+        let project = self.path.clone();
         let (send, heard) = mpsc::channel();
-        let stdout = child.stdout.take().unwrap();
         let events = send.clone();
         std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                if events.send(Heard::Event(line)).is_err() {
-                    return;
+            let mut cursor = since;
+            'pages: while let Ok(id) = operator.try_send(
+                "tools/call",
+                json!({"name": "yard_events",
+                    "arguments": {"project": project, "since": cursor}}),
+            ) {
+                let Ok(line) = operator.output.recv_timeout(DEADLINE) else {
+                    break;
+                };
+                let Ok(response) = serde_json::from_str::<Value>(&line) else {
+                    break;
+                };
+                let value = &response["result"]["structuredContent"];
+                if response["id"] != id
+                    || response.get("error").is_some()
+                    || value.get("error").is_some()
+                {
+                    break;
+                }
+                let Some(page) = value["result"]["events"].as_array() else {
+                    break;
+                };
+                for event in page {
+                    let Some(seq) = event["seq"].as_i64().filter(|seq| *seq > cursor) else {
+                        break 'pages;
+                    };
+                    if events.send(Heard::Event(event.to_string())).is_err() {
+                        return;
+                    }
+                    cursor = seq;
                 }
             }
             let _ = events.send(Heard::Closed);
@@ -561,7 +622,7 @@ impl<'a> Project<'a> {
     }
 }
 
-/// `yard status --history`: every event since a sequence, in order.
+/// Every event since a sequence, in order, coordinated with fixture FIFOs.
 pub struct Watch {
     child: Child,
     /// A FIFO's text joins the events, so one wait covers both.
@@ -596,7 +657,7 @@ impl Watch {
                         .join("\n")
                 ),
             };
-            let event: Value = serde_json::from_str(&line).expect("watch prints JSON lines");
+            let event: Value = serde_json::from_str(&line).expect("history carries JSON events");
             self.seen.push(event.clone());
             if matches(&event) {
                 return event;
@@ -653,7 +714,7 @@ impl Watch {
                 Ok(Heard::Said(text)) => return text,
                 Ok(Heard::Event(line)) => {
                     let event: Value =
-                        serde_json::from_str(&line).expect("watch prints JSON lines");
+                        serde_json::from_str(&line).expect("history carries JSON events");
                     self.seen.push(event.clone());
                     assert!(
                         !(event["event"] == "execution.ended"
@@ -936,7 +997,7 @@ fn lines(stdout: std::process::ChildStdout) -> mpsc::Receiver<String> {
 
 /// Newline JSON-RPC over the real operator process's pipes.
 pub struct Operator {
-    child: Child,
+    child: Option<Child>,
     input: Option<std::process::ChildStdin>,
     output: mpsc::Receiver<String>,
     next: i64,
@@ -944,10 +1005,18 @@ pub struct Operator {
 
 impl Operator {
     pub fn send(&mut self, method: &str, params: Value) -> i64 {
+        self.try_send(method, params).expect("operator request")
+    }
+
+    fn try_send(&mut self, method: &str, params: Value) -> std::io::Result<i64> {
+        use std::io::Write;
         self.next += 1;
-        self.notify_value(json!({"jsonrpc": "2.0", "id": self.next,
-                                 "method": method, "params": params}));
-        self.next
+        let value = json!({"jsonrpc": "2.0", "id": self.next,
+                           "method": method, "params": params});
+        let input = self.input.as_mut().expect("operator input open");
+        writeln!(input, "{value}")?;
+        input.flush()?;
+        Ok(self.next)
     }
 
     pub fn notify(&mut self, method: &str, params: Value) {
@@ -1006,14 +1075,20 @@ impl Operator {
                 }
             }
         }
-        self.child.wait().expect("wait for operator")
+        self.child
+            .as_mut()
+            .expect("operator child")
+            .wait()
+            .expect("wait for operator")
     }
 }
 
 impl Drop for Operator {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }
 

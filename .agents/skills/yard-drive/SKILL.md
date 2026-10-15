@@ -1,112 +1,91 @@
 ---
 name: yard-drive
-description: Answer a Yard board. Keep the watch loop running, answer attention with the exits it names, read a candidate before approving it, handle findings below the blocking level, and retire a ticket in the right order. Load this before answering a `yard status` attention item or when asked to operate or watch a Yard project.
+description: Answer a Yard board through operator MCP. Keep the watch loop running, use named exits, read before approving, handle findings and retire tickets in order.
 ---
 
 # yard-drive
 
-Yard runs the work. You take the decisions between its steps. For commands,
-see `yard-operator`; for filing work, see `yard-file`.
+Yard runs the work. You take decisions between its steps. For tool schemas
+and operations see yard-operator; for filing see yard-file.
 
 ## The loop
 
-`yard status --watch --json` returns as soon as an attention item is open,
-or the board is idle, and prints `{"seq", "attention"}`; an empty `attention`
-means the board drained: sync and push. To wait past items you are
-deliberately leaving open, pass the seq it printed: `--watch --since SEQ`
-returns only once an item raised after SEQ is open, or the board is idle after
-an attempt ended since SEQ, and prints every open item.
-After every decision you make, your next command
-is the watch again; sync when woken. The open attention items in `yard
-status --json` are decisions you still owe. `yard status --history --since
-SEQ --json` follows the audit stream from `SEQ` when you need history; it is
-the only history view. If nothing is running and nothing is open, the
-next step is yours: file, unpark or start work, or report that the board is
-idle and give its `seq`.
+Call `yard_attention` with the absolute project path. Its result has seq,
+attention and idle. Empty attention means drained only when idle is true.
+An empty bounded poll with idle false requires another poll at the same
+cursor. To wait past deliberately open items, pass the seq returned after
+a wake as since. It waits for a newer open item or an idle board after a
+newer attempt/execution end, then returns every open item.
+
+After every decision return to that loop; sync when woken. `yard_status`
+shows decisions still owed. `yard_events` reads bounded ordered audit pages:
+advance since only through consumed events. Closing or cancelling observation
+leaves work running. If idle and nothing is open, file, unpark, start work,
+or report the idle board and its seq.
 
 ## Attention
 
-Answer each item with one of its `exits`. Nothing else.
+Answer each item with one of its exits. Nothing else.
 
-- `start` retries from where the item stopped. It is never a fresh attempt.
-- A `candidate` item's `accept` records a reason on the exact failed evidence
-  and runs the remaining selected checks before approval. Read that evidence
-  first. Its `repair` exit takes the admitted bounded repair route.
-- `edit` (`yard ticket edit`) resolves a `stopped` item and runs the
-  implementer next. On `timeout` it renews the clock; on `limit` it allows
-  one more review round. On `limit`, `yard attempt approve Y-n --target BRANCH --head SHA`
-  lands the candidate over the blocking findings at the round limit; read
-  them first.
-- If no exit seems to fit, read the item's `reason`, `yard attempt show`,
-  and the exit's `--help`. If still unsure, leave the item open and ask. An
-  open item costs nothing; an abandoned attempt costs its whole run.
+- Start continues the named stopped/red work through the existing lifecycle.
+- Candidate accept records exact failed evidence and runs remaining selected
+  checks. Read the evidence first. Repair takes its bounded repair route.
+- Edit uses `yard_ticket_edit` and the read revision. On timeout it renews
+  the clock; on limit it permits another review round. Exact limit approval
+  can land over findings; read them first.
+- If no exit fits, read the reason, `yard_attempt_show` and `tools/list`.
+  Leave unresolved items open and ask. Unknown outcomes need investigation.
 
-Touch Yard's state only through commands. Never edit `.yard/local`, never
-remove a clone or box by hand, never kill a process. When an outcome is
-unknown, do not act on a guess.
+Touch Yard state only through supported operator tools. Never edit
+`.yard/local`, remove a clone or box by hand, or kill a process.
 
 ## Approval
 
-1. `yard attempt show Y-n`: the checks and the review's findings.
-2. `yard attempt diff Y-n`: read the change against the ticket body. It
-   should do what the ticket asks and nothing more.
-3. `yard attempt approve Y-n --target BRANCH --head SHA` (add `--proof DIGEST` when the
-   item names it): use the head and proof you read.
+1. Read `yard_attempt_show`: selected checks, raw findings and decisions.
+2. Read `yard_attempt_diff` against the ticket body and current spec.
+3. Call `yard_attempt_approve` with the exact frozen target, head, proof
+   when named and choice when selected. Copy all other required bindings
+   from the attention evidence; explicitly name any accepted omissions.
 
-What the worker says about its own work is not evidence. Neither are its
-notes or commit messages. A passing review and green gates inform the
-decision; they do not make it. A `protected` item touches guidance that
-every future worker reads, so read those hunks with care.
+Worker summaries and commit messages are not approval evidence. Green
+gates and review inform the decision. Read protected guidance hunks with
+care because future workers consume them. Reject with `yard_attempt_reject`
+using the same exact identities and text describing the repair.
 
-If the change is not right, run
-`yard attempt reject Y-n --target BRANCH --head SHA --text "what to change"` (again add
-`--proof DIGEST` when the item names it). The text becomes the repair's
-prompt.
+Landing is complete at `landing.recorded`, not at approval. Call
+`yard_sync` to consume it into the checkout.
 
-The landing is done at the `landing.recorded` event, not when you approve.
-Then run `yard sync` to bring it into your checkout.
+## Findings and retirement
 
-## Findings below `blocking`
+Land over findings below blocking by default. Reject only for integrity:
+a guard, identity binding, fail-safe path or irreplaceable data. File work
+only when it passes yard-file's admission rule.
 
-- Land over them: this is the default.
-- Reject naming the finding, but only for integrity: a guard, an identity
-  binding, a fail-safe path, or data that cannot be rebuilt.
-- File a ticket for what clears the admission rule (`yard-file`).
+Edit the ticket with its read revision. A running implementer finishes
+first; stop followed by the stopped item's start delivers it sooner. Gates
+and review stop immediately and approval is superseded.
 
-## Edit, retire
+Retire in order: `yard_ticket_park`, then `yard_attempt_abandon` with a
+reason, then `yard_ticket_abandon` or `yard_ticket_done` with a reason.
+Abandoning without parking can make the ticket ready again immediately.
 
-- The ticket body is the one text the implementer and reviewer read. To
-  change what is asked mid-attempt, run `yard ticket edit Y-n --revision R`.
-  A running implementer finishes first; `stop`, then the `stopped` item's `start`, delivers it
-  sooner. Gates and review stop now, and an approval is superseded.
-- If the premise has moved so far that the built work is wrong, file a
-  fresh ticket instead of editing.
-- To retire a ticket: `yard ticket park`, then `yard attempt abandon
-  --reason`, then `yard ticket abandon` or `yard ticket done --reason`. An
-  abandon without the park makes the ticket ready again, and the scheduler
-  starts a new attempt at once.
+## Sync and upgrades
 
-## Syncing and upgrades
+Use `yard_sync` for committed operator changes between landings. Changed
+target, prepared ref or selected evidence retires pre-intent continuation.
+Unchanged exact evidence can retain eligible passing or explicitly accepted
+failed results after ownership release and current identity/policy checks.
+Interrupted and infrastructure-error children rerun.
 
-Import your own commits with `yard sync` between landings. A changed target
-or invalid prepared ref or selected evidence retires a pre-intent landing
-continuation. Fresh preparation and verification follow. An unchanged exact
-prepared input can retain eligible completed passing or explicitly accepted
-failed children after checked predecessor ownership and current identity and
-policy revalidation. Infrastructure-error and interrupted children rerun.
+Template sync affects future admissions. Active work keeps admitted inputs
+until explicit plan revision. Approval and protected-path policy remain live;
+containment, capacity and credentials remain operational constraints.
+Unrecorded historical identity stays unknown.
 
-Template changes under `.yard/` after `yard sync` apply to future admissions.
-Active attempts keep their admitted inputs through sync, repair and restart.
-Approval and protected-path policy remain live. Revoked containment narrows
-egress at box launch; capacity and credentials also remain live. Historical
-admission and preparation evidence that was not recorded stays unknown.
+A deliberately installed new binary requires `yard daemon restart`.
+Interrupted work returns stopped; answer its named exits. Construction's
+frozen executable is never switched merely because source skills changed.
 
-A new binary needs `yard daemon restart`. Each running execution comes back
-as `stopped: interrupted`; answer it with `start`.
-
-## When to ask
-
-Ask when a refusal names something you cannot fix, when no exit fits, when
-an outcome is unknown, when you do not understand a diff, or when a decision
-would change a guarantee, the threat model or the scope. Then go back to the
-watch.
+Ask when a refusal cannot be resolved, an exit does not fit, an outcome is
+unknown, a diff is unclear, or a decision changes a guarantee, threat model
+or scope. Then return to the watch loop.

@@ -48,7 +48,7 @@ fn a_daemon_killed_mid_execution_interrupts_it_and_start_continues() {
         "p",
         &config("").replace("review = [\"correctness\"]", "review = \"none\""),
     );
-    project.json(&["ticket", "new", "--title", "Add feature"]);
+    project.ok("ticket.new", json!({"title": "Add feature"}));
     hold.wait_held();
     let clone = project.path.join(".yard/local/attempts/1/clone");
     // The project's label, as pinfold reports it on the held worker's box.
@@ -87,7 +87,7 @@ fn a_daemon_killed_mid_execution_interrupts_it_and_start_continues() {
     );
 
     let mut watch = project.watch(0);
-    project.json(&["attempt", "start", "Y-1"]);
+    project.ok("attempt.start", json!({"ticket": "Y-1"}));
     let candidate = watch.event("attempt.candidate", &[]);
     let head = candidate["data"]["head"].as_str().unwrap();
     assert_eq!(
@@ -146,7 +146,7 @@ fn a_daemon_killed_during_a_host_landing_gate_leaves_no_group() {
             .replace("approve = \"manual\"", "approve = \"auto\""),
     );
     let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Add feature"]);
+    project.ok("ticket.new", json!({"title": "Add feature"}));
     let group = watch.said(&said).trim().to_string();
     drop(watch);
     machine.kill();
@@ -171,7 +171,7 @@ fn a_daemon_killed_during_a_host_landing_gate_leaves_no_group() {
         project.rows("SELECT outcome FROM execution WHERE kind = 'landing' ORDER BY id")[0],
         json!({ "outcome": "interrupted" })
     );
-    let status = project.json(&["status"]);
+    let status = project.ok("status", json!({}));
     assert_eq!(status["attention"], json!([]), "{status}");
 
     let mut watch = project.watch(0);

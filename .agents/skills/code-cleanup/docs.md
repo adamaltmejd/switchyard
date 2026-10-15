@@ -2,7 +2,7 @@ Edit nothing. Run `cargo build --locked`, then read README.md (if it
 exists), `target/debug/yard --help`, and `--help` for every verb and
 subverb. Read them as a user who wants to use the tool: every sentence
 should say how to use it, as briefly as possible. Compare them with
-`## Daemon and CLI` in docs/ARCHITECTURE.md.
+`## Daemon and operator interface` in docs/ARCHITECTURE.md.
 
 One line per finding:
 

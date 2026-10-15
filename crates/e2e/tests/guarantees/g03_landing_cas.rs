@@ -22,21 +22,17 @@ fn worker() -> impl Fn(&ModelRequest) -> Reply + Send + Sync + 'static {
 /// A candidate awaiting approval, with canonical moved past its base by the
 /// operator, so its landing is a real merge. Returns the candidate head.
 fn candidate_behind_target(project: &Project, watch: &mut Watch) -> String {
-    project.json(&[
-        "ticket",
-        "new",
-        "--title",
-        "Add feature",
-        "--target",
-        "feature/a",
-    ]);
+    project.ok(
+        "ticket.new",
+        json!({"title": "Add feature", "target": "feature/a"}),
+    );
     let raised = watch.until("approval raised", |event| {
         event["event"] == "attention.raised" && event["data"]["kind"] == "approval"
     });
     project.write("other.txt", "other\n");
     project.git(&["add", "other.txt"]);
     project.git(&["commit", "--quiet", "-m", "Operator change"]);
-    project.json(&["sync", "feature/a"]);
+    project.ok("sync", json!({"branch": "feature/a"}));
     raised["data"]["payload"]["head"]
         .as_str()
         .unwrap()
@@ -83,7 +79,7 @@ fn a_landing_whose_update_ref_is_held_stays_undecided_until_released() {
     let project = Project::new(&machine, "p", &unreviewed());
     let main = project.canonical_head();
     project.git(&["checkout", "--quiet", "-b", "feature/a"]);
-    project.json(&["sync", "feature/a"]);
+    project.ok("sync", json!({"branch": "feature/a"}));
     let mut watch = project.watch(0);
     let head = candidate_behind_target(&project, &mut watch);
     let target = git(&project.canonical(), &["rev-parse", "refs/heads/feature/a"])
@@ -91,15 +87,10 @@ fn a_landing_whose_update_ref_is_held_stays_undecided_until_released() {
         .to_string();
 
     std::fs::write(&armed, "").unwrap();
-    project.json(&[
-        "attempt",
-        "approve",
-        "--target",
-        "feature/a",
-        "Y-1",
-        "--head",
-        &head,
-    ]);
+    project.ok(
+        "attempt.approve",
+        json!({"target": "feature/a", "head": &head, "ticket": "Y-1"}),
+    );
     machine.wait_dead();
     std::fs::remove_file(&armed).unwrap();
 
@@ -117,7 +108,7 @@ fn a_landing_whose_update_ref_is_held_stays_undecided_until_released() {
     let merged = intent["intent_merged"].as_str().unwrap().to_string();
 
     machine.start();
-    let status = project.json(&["status"]);
+    let status = project.ok("status", json!({}));
     let red: Vec<_> = status["attention"]
         .as_array()
         .unwrap()
@@ -137,8 +128,11 @@ fn a_landing_whose_update_ref_is_held_stays_undecided_until_released() {
         merged
     );
     assert_eq!(project.canonical_head(), main);
-    project.json(&["attempt", "start", "Y-1"]);
-    assert_eq!(project.json(&["ticket", "show", "Y-1"])["state"], "done");
+    project.ok("attempt.start", json!({"ticket": "Y-1"}));
+    assert_eq!(
+        project.ok("ticket.show", json!({"ticket": "Y-1"}))["state"],
+        "done"
+    );
     assert_eq!(
         project
             .rows("SELECT seq FROM audit WHERE event = 'landing.recorded'")
@@ -231,7 +225,7 @@ fn a_landing_retires_when_canonical_moves_before_update_ref() {
             .replace("review = [\"correctness\"]", "review = \"none\""),
     );
     let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Add feature"]);
+    project.ok("ticket.new", json!({"title": "Add feature"}));
     watch.attention();
     // The admitted candidate accepts source and instructions selection
     // outside the intent boundary. Its agent and grants stay frozen.
@@ -255,11 +249,11 @@ fn a_landing_retires_when_canonical_moves_before_update_ref() {
     project.write(".yard/config.toml", &selected_definition);
     project.git(&["add", "-A"]);
     project.git(&["commit", "--quiet", "-m", "Future landing requirement"]);
-    project.json(&["sync"]);
+    project.ok("sync", json!({}));
     let definition_commit = project.git(&["rev-parse", "HEAD"]).trim().to_string();
     let mut operator = machine.operator();
     operator.initialize();
-    let current = project.json(&["attempt", "show", "Y-1"]);
+    let current = project.ok("attempt.show", json!({"ticket": "Y-1"}));
     let expected = current["attempt"]["plan_revision"].as_i64().unwrap();
     let adjusted = operator.call(
         "yard_attempt_revise",
@@ -297,26 +291,21 @@ fn a_landing_retires_when_canonical_moves_before_update_ref() {
         "-am",
         "Later candidate and landing definition",
     ]);
-    project.json(&["sync"]);
+    project.ok("sync", json!({}));
     let later_definition = project.git(&["rev-parse", "HEAD"]).trim().to_string();
 
-    project.json(&["ticket", "new", "--title", "Other", "--parked"]);
+    project.ok("ticket.new", json!({"title": "Other", "parked": true}));
 
     std::fs::write(&armed, "").unwrap();
     std::fs::write(&fail_once, "").unwrap();
     let plan_revision =
-        project.json(&["attempt", "show", "Y-1"])["attempt"]["plan_revision"].to_string();
-    project.json(&[
-        "attempt",
-        "approve",
-        "--target",
-        "main",
-        "Y-1",
-        "--head",
-        &head,
-        "--plan-revision",
-        &plan_revision,
-    ]);
+        project.ok("attempt.show", json!({"ticket": "Y-1"}))["attempt"]["plan_revision"]
+            .as_i64()
+            .unwrap();
+    project.ok(
+        "attempt.approve",
+        json!({"target": "main", "head": &head, "plan_revision": plan_revision, "ticket": "Y-1"}),
+    );
     let failure = watch.attention();
     assert_eq!(failure["data"]["kind"], "candidate");
     assert_eq!(failure["data"]["reason"], "landing");
@@ -407,7 +396,7 @@ fn a_landing_retires_when_canonical_moves_before_update_ref() {
     // observations. The FIFO holds real Git after the mutation intent;
     // store snapshots supply the outside oracle.
     let refuse_adjustment = |operator: &mut Operator, mut request: serde_json::Value| {
-        let plan = project.json(&["attempt", "show", "Y-1"]);
+        let plan = project.ok("attempt.show", json!({"ticket": "Y-1"}));
         let revisions = project.rows("SELECT * FROM plan_revision ORDER BY attempt, revision");
         let approvals = project.rows("SELECT * FROM approval ORDER BY id");
         let attention = project.rows("SELECT * FROM attention ORDER BY id");
@@ -416,7 +405,7 @@ fn a_landing_retires_when_canonical_moves_before_update_ref() {
         let refused = operator.call("yard_attempt_revise", request);
         assert_eq!(refused["error"]["code"], "refused", "{refused}");
         assert_eq!(refused["error"]["data"]["intent"], intent[0]["id"]);
-        let unchanged = project.json(&["attempt", "show", "Y-1"]);
+        let unchanged = project.ok("attempt.show", json!({"ticket": "Y-1"}));
         assert_eq!(
             unchanged["attempt"]["plan_revision"],
             plan["attempt"]["plan_revision"]
@@ -445,53 +434,44 @@ fn a_landing_retires_when_canonical_moves_before_update_ref() {
     );
     // An edit on the intent is refused; the other ticket can be edited.
     // Sabotage: drop admit::edit's refuse_during_intent guard.
-    let revision = project.json(&["ticket", "show", "Y-1"])["revision"].to_string();
-    let refused = project.refused(&[
-        "ticket",
-        "edit",
-        "Y-1",
-        "--revision",
-        &revision,
-        "--body",
-        "Changed",
-    ]);
+    let revision = project.ok("ticket.show", json!({"ticket": "Y-1"}))["revision"]
+        .as_i64()
+        .unwrap();
+    let refused = project.refused(
+        "ticket.edit",
+        json!({"revision": revision, "body": "Changed", "ticket": "Y-1"}),
+    );
     assert_eq!(refused["code"], "refused", "{refused}");
     assert_eq!(refused["data"]["intent"], intent[0]["id"]);
-    assert_eq!(project.json(&["ticket", "show", "Y-1"])["body"], "");
+    assert_eq!(
+        project.ok("ticket.show", json!({"ticket": "Y-1"}))["body"],
+        ""
+    );
     // G9: target edits also refuse the intent before waiting on canonical.
     // Sabotage: take canonical before the target guard; this call cannot
     // answer while the fixture holds update-ref. Y-2 supplies the control.
-    let target_edit = project.refused(&[
-        "ticket",
-        "edit",
-        "Y-1",
-        "--revision",
-        &revision,
-        "--target",
-        "main",
-    ]);
+    let target_edit = project.refused(
+        "ticket.edit",
+        json!({"revision": revision, "target": "main", "ticket": "Y-1"}),
+    );
     assert_eq!(target_edit["code"], "refused");
     assert_eq!(target_edit["data"]["intent"], intent[0]["id"]);
-    project.json(&[
-        "ticket",
-        "edit",
-        "Y-2",
-        "--revision",
-        "1",
-        "--body",
-        "Changed",
-    ]);
-    assert_eq!(project.json(&["ticket", "show", "Y-2"])["body"], "Changed");
-    project.json(&[
-        "ticket",
-        "edit",
-        "Y-2",
-        "--revision",
-        "2",
-        "--target",
-        "main",
-    ]);
-    assert_eq!(project.json(&["ticket", "show", "Y-2"])["target"], "main");
+    project.ok(
+        "ticket.edit",
+        json!({"revision": 1, "body": "Changed", "ticket": "Y-2"}),
+    );
+    assert_eq!(
+        project.ok("ticket.show", json!({"ticket": "Y-2"}))["body"],
+        "Changed"
+    );
+    project.ok(
+        "ticket.edit",
+        json!({"revision": 2, "target": "main", "ticket": "Y-2"}),
+    );
+    assert_eq!(
+        project.ok("ticket.show", json!({"ticket": "Y-2"}))["target"],
+        "main"
+    );
 
     // The operator moves canonical by hand while the landing is held.
     let canonical = project.canonical();
@@ -531,7 +511,7 @@ fn a_landing_retires_when_canonical_moves_before_update_ref() {
         vec![json!({"state": "live", "next": null})]
     );
     assert_eq!(
-        project.json(&["attempt", "show", "Y-1"])["attempt"]["head"],
+        project.ok("attempt.show", json!({"ticket": "Y-1"}))["attempt"]["head"],
         head
     );
     assert!(

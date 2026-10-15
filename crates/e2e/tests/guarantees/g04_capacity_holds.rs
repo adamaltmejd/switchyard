@@ -4,22 +4,14 @@ use e2e::*;
 use serde_json::{Value, json};
 use std::io::Write;
 
-/// Run `yard attempt start` for each ticket at once; each one's JSON result
+/// Start each ticket through real operator MCP at once; each JSON result
 /// or error.
 fn race(project: &Project, tickets: &[&str]) -> Vec<Result<Value, Value>> {
     std::thread::scope(|scope| {
         let handles: Vec<_> = tickets
             .iter()
             .map(|ticket| {
-                scope.spawn(move || {
-                    let out = project.yard(&["attempt", "start", ticket, "--json"]);
-                    let value: Value = serde_json::from_slice(&out.stdout).unwrap();
-                    if out.status.success() {
-                        Ok(value)
-                    } else {
-                        Err(value["error"].clone())
-                    }
-                })
+                scope.spawn(move || project.call("attempt.start", json!({"ticket": ticket})))
             })
             .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
@@ -81,7 +73,7 @@ fn racing_starts_admit_one_attempt() {
     let project = Project::new(&machine, "p", &config(""));
     let mut watch = project.watch(0);
     for title in ["Plan A", "Plan B", "Plan C"] {
-        project.json(&["ticket", "new", "--title", title, "--workflow", "plan"]);
+        project.ok("ticket.new", json!({"title": title, "workflow": "plan"}));
     }
     for ticket in ["Y-1", "Y-2", "Y-3"] {
         watch.find(ticket, |event| {
@@ -128,9 +120,9 @@ fn an_execution_ending_revokes_only_its_own_project_grant() {
     let mut first_watch = first.watch(0);
     let mut second_watch = second.watch(0);
 
-    first.json(&["ticket", "new", "--title", "First"]);
+    first.ok("ticket.new", json!({"title": "First"}));
     first_hold.wait_held();
-    second.json(&["ticket", "new", "--title", "Second"]);
+    second.ok("ticket.new", json!({"title": "Second"}));
     second_hold.wait_held();
     let ids = |project: &Project| project.rows("SELECT id FROM execution");
     assert_eq!(ids(&first), ids(&second));
@@ -466,7 +458,7 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
         .replace("[workflows.default]", "[workflows.default]\ninstructions = \"Implement fixture.\"");
     let project = Project::new(&machine, "p", &fixture);
     project.git(&["checkout", "-qb", "feature/a"]);
-    project.json(&["sync", "feature/a"]);
+    project.ok("sync", json!({"branch": "feature/a"}));
     project.git(&["checkout", "-q", "main"]);
 
     let candidate = json!({"node": "implementer", "output": "result", "kind": "candidate"});
@@ -524,16 +516,10 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
         ("Y-1", "Graph", "main"),
         ("Y-2", "Independent", "feature/a"),
     ] {
-        project.json(&[
-            "ticket",
-            "new",
-            "--title",
-            title,
-            "--target",
-            target,
-            "--workflow",
-            "plan",
-        ]);
+        project.ok(
+            "ticket.new",
+            json!({"title": title, "target": target, "workflow": "plan"}),
+        );
         let planner = watch.find("planner ended", |event| {
             event["event"] == "attempt.ended"
                 && event["ticket"] == ticket
@@ -579,7 +565,7 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
     assert!(started.get("error").is_none(), "{started}");
     implementation.wait_held();
     let original_admission =
-        project.json(&["attempt", "show", "Y-1"])["attempt"]["admission"].clone();
+        project.ok("attempt.show", json!({"ticket": "Y-1"}))["attempt"]["admission"].clone();
     assert_eq!(original_admission["plan"], graph);
     let mut racing_operator = machine.operator();
     racing_operator.initialize();
@@ -1054,19 +1040,16 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
     }
     let mut revised_graph = graph.clone();
     revised_graph["nodes"]["review-1"]["runner"]["instructions"] = json!("Revised right reader.");
-    let shown = project.json(&["attempt", "show", "Y-1"]);
+    let shown = project.ok("attempt.show", json!({"ticket": "Y-1"}));
     assert_eq!(shown["attempt"]["admission"], original_admission);
     assert_eq!(shown["attempt"]["plan"]["plan"], revised_graph);
-    let revision = project.json(&["ticket", "show", "Y-1"])["revision"].to_string();
-    project.json(&[
-        "ticket",
-        "edit",
-        "Y-1",
-        "--revision",
-        &revision,
-        "--body",
-        "Changed candidate fixture.",
-    ]);
+    let revision = project.ok("ticket.show", json!({"ticket": "Y-1"}))["revision"]
+        .as_i64()
+        .unwrap();
+    project.ok(
+        "ticket.edit",
+        json!({"revision": revision, "body": "Changed candidate fixture.", "ticket": "Y-1"}),
+    );
     let failure = watch.until("excluded required finding still blocks", |event| {
         event["event"] == "attention.raised"
             && event["ticket"] == "Y-1"
@@ -1229,29 +1212,17 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
             selected_inputs[name]["source"]["execution"]
         );
     }
-    project.json(&[
-        "attempt",
-        "approve",
-        "--target",
-        "main",
-        "Y-1",
-        "--head",
-        &new_head,
-        "--plan-revision",
-        "2",
-    ]);
+    project.ok(
+        "attempt.approve",
+        json!({"target": "main", "head": &new_head, "plan_revision": 2, "ticket": "Y-1"}),
+    );
     watch.find("graph lands", |event| {
         event["event"] == "landing.recorded" && event["ticket"] == "Y-1"
     });
-    project.json(&[
-        "attempt",
-        "approve",
-        "--target",
-        "feature/a",
-        "Y-2",
-        "--head",
-        &independent_head,
-    ]);
+    project.ok(
+        "attempt.approve",
+        json!({"target": "feature/a", "head": &independent_head, "ticket": "Y-2"}),
+    );
     watch.find("independent lands", |event| {
         event["event"] == "landing.recorded" && event["ticket"] == "Y-2"
     });
@@ -1477,14 +1448,10 @@ fn five_writer_candidates_survive_continuation_and_restart() {
         );
     let project = Project::new(&machine, "p", &fixture);
     let mut watch = project.watch(0);
-    project.json(&[
-        "ticket",
-        "new",
-        "--title",
-        "Five writer trial",
-        "--workflow",
-        "plan",
-    ]);
+    project.ok(
+        "ticket.new",
+        json!({"title": "Five writer trial", "workflow": "plan"}),
+    );
     let planned = watch.find("trial planner ended", |e| e["event"] == "attempt.ended");
     let cleanup = watch.find("trial planner cleanup", |e| {
         e["event"] == "execution.ended"
@@ -1866,7 +1833,7 @@ fn five_writer_candidates_survive_continuation_and_restart() {
         e["event"] == "execution.ended" && e["execution"] == successor["id"]
     });
     assert_eq!(ended["data"]["outcome"], "interrupted");
-    let attention = project.json(&["attempt", "show", "Y-1"]);
+    let attention = project.ok("attempt.show", json!({"ticket": "Y-1"}));
     assert!(
         !attention["attention"]
             .as_array()
@@ -1903,7 +1870,7 @@ fn five_writer_candidates_survive_continuation_and_restart() {
     );
     continued.release();
     other_continued.release();
-    let attention = project.json(&["attempt", "show", "Y-1"]);
+    let attention = project.ok("attempt.show", json!({"ticket": "Y-1"}));
     for predecessor in [&other_writer, &successor] {
         let item = attention["attention"]
             .as_array()
@@ -2015,7 +1982,7 @@ fn five_writer_candidates_survive_continuation_and_restart() {
         vec![json!({"outcome": "pass", "exit_code": 0})]
     );
     assert_eq!(
-        project.json(&["attempt", "show", "Y-1"])["candidates"]
+        project.ok("attempt.show", json!({"ticket": "Y-1"}))["candidates"]
             .as_array()
             .unwrap()
             .len(),
@@ -2058,7 +2025,7 @@ fn five_writer_candidates_survive_continuation_and_restart() {
     let untouched = project.path.join(".yard/local/attempts/987/sentinel");
     std::fs::create_dir_all(untouched.parent().unwrap()).unwrap();
     std::fs::write(&untouched, "other workspace\n").unwrap();
-    project.json(&["attempt", "abandon", "Y-1"]);
+    project.ok("attempt.abandon", json!({"ticket": "Y-1"}));
     let cleanup = watch.find("all writer cleanup", |e| {
         e["event"] == "execution.ended" && e["data"]["kind"] == "cleanup" && e["attempt"] == 2
     });
@@ -2140,13 +2107,14 @@ fn one_slot_lands_with_child_gates_and_excludes_a_worker() {
         &config(&gates).replace("max_lanes = 2", "max_lanes = 2\nmax_executions = 1"),
     );
     let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "First"]);
+    project.ok("ticket.new", json!({"title": "First"}));
     let head = approval_of(&mut watch, "Y-1");
-    project.json(&[
-        "attempt", "approve", "--target", "main", "Y-1", "--head", &head,
-    ]);
+    project.ok(
+        "attempt.approve",
+        json!({"target": "main", "head": &head, "ticket": "Y-1"}),
+    );
     assert_eq!(watch.said(&said), "held\n");
-    project.json(&["ticket", "new", "--title", "Second"]);
+    project.ok("ticket.new", json!({"title": "Second"}));
     let waiting = watch.event("execution.waiting", &[]);
     assert_eq!(waiting["ticket"], "Y-2");
     let owner = project.rows("SELECT kind, parent, name FROM execution WHERE reserved = 1");
@@ -2205,7 +2173,7 @@ fn an_old_host_child_retains_capacity_across_restart() {
     );
     std::fs::write(&armed, "").unwrap();
     let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "First"]);
+    project.ok("ticket.new", json!({"title": "First"}));
     let pid = watch.said(&said_path).trim().to_string();
     drop(watch);
     machine.kill();
@@ -2228,7 +2196,7 @@ fn an_old_host_child_retains_capacity_across_restart() {
     assert_eq!(attention["execution"], 1);
     assert_eq!(attention["data"]["kind"], "red");
     assert_eq!(attention["data"]["reason"], "ownership");
-    project.json(&["ticket", "new", "--title", "Second"]);
+    project.ok("ticket.new", json!({"title": "Second"}));
     let waiting = watch.event("execution.waiting", &[]);
     assert_eq!(waiting["ticket"], "Y-2");
     assert!(machine.model.requests().is_empty());

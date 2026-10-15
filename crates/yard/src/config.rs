@@ -472,7 +472,7 @@ pub fn valid_env_name(name: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// The scaffold `yard init` writes.
+/// The scaffold operator `init` writes.
 pub const SCAFFOLD_CONFIG: &str = include_str!("scaffold/config.toml");
 
 pub const SCAFFOLD_DOCKERFILE: &str = "FROM pinfold/profile-default:latest\n";

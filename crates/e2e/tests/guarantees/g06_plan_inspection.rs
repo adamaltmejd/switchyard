@@ -167,7 +167,7 @@ model = "fake-model"
     );
     project.git(&["add", ".yard/config.toml"]);
     project.git(&["commit", "-qm", "New report template"]);
-    project.json(&["sync"]);
+    project.ok("sync", json!({}));
     let inspection = call(
         &mut operator,
         &project,

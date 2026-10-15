@@ -38,9 +38,9 @@ fn an_audit_publication_is_validated_bound_and_held_until_teardown() {
     let project = Project::new(&machine, "p", &config(""));
     let head = project.canonical_head();
     let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Audit", "--workflow", "plan"]);
+    project.ok("ticket.new", json!({"title": "Audit", "workflow": "plan"}));
     hold.wait_held();
-    let show = project.json(&["attempt", "show", "Y-1"]);
+    let show = project.ok("attempt.show", json!({"ticket": "Y-1"}));
     let rows = project.rows("SELECT id, node, plan_revision, ticket_revision, inputs, base, head, proof, report, result, status FROM execution WHERE kind = 'implementation'");
     let row = &rows[0];
     let report: Value = serde_json::from_str(row["report"].as_str().unwrap()).unwrap();
@@ -99,7 +99,7 @@ fn an_audit_publication_is_validated_bound_and_held_until_teardown() {
     watch.until("audit reservation released", |event| {
         event["event"] == "execution.released" && event["execution"] == row["id"]
     });
-    let show = project.json(&["attempt", "show", "Y-1"]);
+    let show = project.ok("attempt.show", json!({"ticket": "Y-1"}));
     let execution = &show["executions"][0];
     assert_eq!(
         execution["result"]["outputs"]["result"],
@@ -130,35 +130,27 @@ fn a_successful_exit_without_an_audit_report_is_an_infrastructure_error() {
     machine.start();
     let project = Project::new(&machine, "p", &config(""));
     let mut watch = project.watch(0);
-    project.json(&[
-        "ticket",
-        "new",
-        "--title",
-        "Missing audit",
-        "--workflow",
-        "plan",
-    ]);
+    project.ok(
+        "ticket.new",
+        json!({"title": "Missing audit", "workflow": "plan"}),
+    );
     let attention = watch.attention();
     assert_eq!(attention["data"]["payload"]["detail"], "missing_report");
-    let execution = project.json(&["attempt", "show", "Y-1"])["executions"][0].clone();
+    let execution = project.ok("attempt.show", json!({"ticket": "Y-1"}))["executions"][0].clone();
     assert!(execution["report"].is_null());
     assert_eq!(execution["result"]["outputs"], json!({}));
     assert!(execution["result"]["outcome"].is_null());
     assert_eq!(execution["result"]["infrastructure"]["outcome"], "failed");
     assert_eq!(execution["result_eligible"], false);
-    project.json(&["ticket", "park", "Y-1"]);
-    project.json(&["attempt", "abandon", "Y-1"]);
-    project.json(&[
-        "ticket",
-        "new",
-        "--title",
-        "Published audit",
-        "--workflow",
-        "plan",
-    ]);
+    project.ok("ticket.park", json!({"ticket": "Y-1"}));
+    project.ok("attempt.abandon", json!({"ticket": "Y-1"}));
+    project.ok(
+        "ticket.new",
+        json!({"title": "Published audit", "workflow": "plan"}),
+    );
     watch.event("attempt.ended", &[("outcome", "planned")]);
     assert_eq!(
-        project.json(&["attempt", "show", "Y-2"])["executions"][0]["report"]["report"],
+        project.ok("attempt.show", json!({"ticket": "Y-2"}))["executions"][0]["report"]["report"],
         json!({"summary": "Fixture audit", "findings": []})
     );
 }

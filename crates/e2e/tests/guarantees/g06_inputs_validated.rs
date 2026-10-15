@@ -32,7 +32,7 @@ fn inputs_are_refused_by_name_and_write_nothing() {
     machine.start();
     let project = Project::new(&machine, "p", &claude_config(""));
     let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Too large"]);
+    project.ok("ticket.new", json!({"title": "Too large"}));
     watch.until("the worker stopped", |event| {
         event["event"] == "attention.raised" && event["data"]["kind"] == "stopped"
     });

@@ -136,7 +136,7 @@ pub(super) fn fixture<'a>(machine: &'a Machine) -> Project<'a> {
         "-qm",
         "Trusted packaged audit fixture and hostile candidate",
     ]);
-    project.json(&["sync"]);
+    project.ok("sync", json!({}));
     project
 }
 
@@ -156,7 +156,7 @@ pub(super) fn image(project: &Project<'_>, sabotage: &str) {
     );
     project.git(&["add", ".yard/Dockerfile", "image-input"]);
     project.git(&["commit", "-qm", "Configure isolated packaged image"]);
-    project.json(&["sync"]);
+    project.ok("sync", json!({}));
 }
 
 fn launch(project: &Project<'_>, attempt: i64, prompt: &str) {
@@ -236,7 +236,7 @@ fn selected_start(project: &Project<'_>, title: &str) {
     );
     assert!(selected["error"].is_null(), "{selected}");
     assert_eq!(selected["result"]["shape"], "packaged-audit");
-    project.json(&["ticket", "new", "--title", title, "--workflow", "plan"]);
+    project.ok("ticket.new", json!({"title": title, "workflow": "plan"}));
 }
 
 fn controller_request_path(machine: &Machine) -> std::path::PathBuf {
@@ -308,7 +308,7 @@ fn held_controller_request(watch: &mut Watch, ticket: &str, path: &Path) -> i64 
 }
 
 fn ended(project: &Project<'_>, ticket: &str, prompt: &str) -> Value {
-    let seq = project.json(&["status"])["seq"].as_i64().unwrap();
+    let seq = project.ok("status", json!({}))["seq"].as_i64().unwrap();
     let mut watch = project.watch(seq);
     selected_start(project, prompt);
     // Successful planners raise no attention. Bind the terminal observation to
@@ -331,7 +331,7 @@ fn ended(project: &Project<'_>, ticket: &str, prompt: &str) -> Value {
             && event["attempt"] == started["attempt"]
             && event["execution"] == started["execution"]
     });
-    let shown = project.json(&["attempt", "show", ticket]);
+    let shown = project.ok("attempt.show", json!({"ticket": ticket}));
     let execution = shown["executions"]
         .as_array()
         .unwrap()
@@ -476,8 +476,8 @@ fn a_packaged_audit_refuses_changed_assets_then_publishes_in_a_corrected_box() {
         terminal["detail"],
         "runner_unavailable:/opt/yard/durable-audit/runner.mjs"
     );
-    project.json(&["ticket", "park", "Y-1"]);
-    project.json(&["attempt", "abandon", "Y-1"]);
+    project.ok("ticket.park", json!({"ticket": "Y-1"}));
+    project.ok("attempt.abandon", json!({"ticket": "Y-1"}));
 
     image(&project, "");
     // G8: omitted effort still publishes through the real controller with
@@ -486,7 +486,7 @@ fn a_packaged_audit_refuses_changed_assets_then_publishes_in_a_corrected_box() {
     launch(&project, 2, "Unchanged sealed controller control");
     let omitted_hold = Latch::new();
     *request_hold.lock().unwrap() = Some((request_path.clone(), omitted_hold.clone()));
-    let mut watch = project.watch(project.json(&["status"])["seq"].as_i64().unwrap());
+    let mut watch = project.watch(project.ok("status", json!({}))["seq"].as_i64().unwrap());
     selected_start(&project, "Unchanged sealed controller control");
     let omitted_execution = held_controller_request(&mut watch, "Y-2", &request_path);
     omitted_hold.wait_held();
@@ -497,7 +497,7 @@ fn a_packaged_audit_refuses_changed_assets_then_publishes_in_a_corrected_box() {
     watch.until("omitted-effort controller released", |event| {
         event["event"] == "execution.released" && event["execution"] == omitted_execution
     });
-    let corrected = project.json(&["attempt", "show", "Y-2"])["executions"][0].clone();
+    let corrected = project.ok("attempt.show", json!({"ticket": "Y-2"}))["executions"][0].clone();
     assert_eq!(
         std::fs::read_to_string(machine.root.join("asset-2")).unwrap(),
         original
@@ -695,7 +695,7 @@ fn durable_checkpoint_scenario(name: &str, corrupt: bool) {
         "-qm",
         "Enable the real Node debugger in the fixture image",
     ]);
-    project.json(&["sync"]);
+    project.ok("sync", json!({}));
     image(&project, "");
     for path in ["debug-armed", "debug-held"] {
         assert!(
@@ -714,7 +714,7 @@ fn durable_checkpoint_scenario(name: &str, corrupt: bool) {
         *initial.lock().unwrap() = Some(latch.clone());
         let marker = machine.root.join(format!("resumed-{number}"));
         *resumed_marker.lock().unwrap() = Some(marker.clone());
-        let mut watch = project.watch(project.json(&["status"])["seq"].as_i64().unwrap());
+        let mut watch = project.watch(project.ok("status", json!({}))["seq"].as_i64().unwrap());
         selected_start(&project, "Checkpoint continuation");
         latch.wait_held();
         let old = project.rows(&format!(
@@ -760,7 +760,7 @@ fn durable_checkpoint_scenario(name: &str, corrupt: bool) {
             "/yard/state/audit-checkpoints/session.sqlite",
         ]);
         assert!(inode.status.success());
-        let refused = project.refused(&["attempt", "start", &ticket]);
+        let refused = project.refused("attempt.start", json!({"ticket": &ticket}));
         assert_eq!(refused["data"]["reason"], "checkpoint_owned");
         assert_eq!(refused["data"]["execution"], id);
         assert_eq!(refused["data"]["checkpoint"], id);
@@ -810,12 +810,12 @@ fn durable_checkpoint_scenario(name: &str, corrupt: bool) {
         assert_eq!(old["teardown"], 1);
         assert_eq!(old["tokens_in"], PROMPT_TOKENS);
         assert_eq!(old["tokens_out"], COMPLETION_TOKENS);
-        let mut watch = project.watch(project.json(&["status"])["seq"].as_i64().unwrap());
+        let mut watch = project.watch(project.ok("status", json!({}))["seq"].as_i64().unwrap());
         let resumed = Latch::new();
         if !corrupt {
             *continuation.lock().unwrap() = Some(resumed.clone());
         }
-        project.json(&["attempt", "start", &ticket]);
+        project.ok("attempt.start", json!({"ticket": &ticket}));
         if !corrupt {
             resumed.wait_held();
             let replacement = project.rows(&format!("SELECT handle FROM execution WHERE attempt = {number} AND status = 'running' AND kind = 'implementation'"));
@@ -856,7 +856,7 @@ fn durable_checkpoint_scenario(name: &str, corrupt: bool) {
             });
             // A failed checkpoint is an explicit error, and supported retry
             // starts fresh instead of falling back to a second live writer.
-            project.json(&["attempt", "start", &ticket]);
+            project.ok("attempt.start", json!({"ticket": &ticket}));
         }
         watch.until("continued audit completed", |event| {
             event["event"] == "attempt.ended" && event["ticket"] == ticket
@@ -1043,7 +1043,7 @@ test "$(cat chain.txt)" = cleaned && test "$(cat /yard/input/trusted/repair.md)"
     );
     project.git(&["add", "-A"]);
     project.git(&["commit", "-qm", "Selected cleanup fixture"]);
-    project.json(&["sync"]);
+    project.ok("sync", json!({}));
     machine.wrapper(
         "pinfold",
         &format!(
@@ -1114,14 +1114,10 @@ files = [{{root = "source", path = "chain.txt"}}]
         assert_eq!(event["data"]["outcome"], "candidate", "{event}");
     };
     let mut watch = project.watch(0);
-    project.json(&[
-        "ticket",
-        "new",
-        "--title",
-        "Selected cleanup",
-        "--workflow",
-        "plan",
-    ]);
+    project.ok(
+        "ticket.new",
+        json!({"title": "Selected cleanup", "workflow": "plan"}),
+    );
     let planned = watch.event("attempt.ended", &[("outcome", "planned")]);
     watch.find("audit cleanup released", |event| {
         event["event"] == "execution.released"
@@ -1143,7 +1139,7 @@ files = [{{root = "source", path = "chain.txt"}}]
     // Keep the hostile extension in the audit's history, then retire it.
     project.git(&["rm", ".pi/extensions/unselected.js"]);
     project.git(&["commit", "-qm", "Retire audit-only hostile extension"]);
-    project.json(&["sync"]);
+    project.ok("sync", json!({}));
     for path in [
         "debug-armed",
         "debug-held",
@@ -1239,7 +1235,7 @@ if printf 'changed\n' > /yard/proof/intrusion; then echo proof=written; else ech
         refused["error"]["data"],
         json!({"reason": "workspace_owned", "workspace": "implementer", "execution": id})
     );
-    let refused = project.refused(&["attempt", "start", "Y-1"]);
+    let refused = project.refused("attempt.start", json!({"ticket": "Y-1"}));
     assert_eq!(refused["data"]["reason"], "checkpoint_owned");
     assert_eq!(refused["data"]["execution"], id);
     assert_eq!(refused["data"]["checkpoint"], id);
@@ -1271,8 +1267,8 @@ if printf 'changed\n' > /yard/proof/intrusion; then echo proof=written; else ech
     // An outside marker makes replay observable even though replacement is
     // idempotent. The predecessor has been proved gone before this edit.
     std::fs::write(clone.join("chain.txt"), "after-release\n").unwrap();
-    let mut watch = project.watch(project.json(&["status"])["seq"].as_i64().unwrap());
-    project.json(&["attempt", "start", "Y-1"]);
+    let mut watch = project.watch(project.ok("status", json!({}))["seq"].as_i64().unwrap());
+    project.ok("attempt.start", json!({"ticket": "Y-1"}));
     let replacement_started = watch.until("replacement cleanup started", |event| {
         event["event"] == "execution.started"
             && event["attempt"] == attempt
@@ -1365,9 +1361,10 @@ git -C /workspace -c safe.directory=/workspace -c core.hooksPath=/dev/null -c co
             .collect::<Vec<_>>(),
         ["Repair", "Cleanup", "Implement"]
     );
-    project.json(&[
-        "attempt", "approve", "Y-1", "--target", "main", "--head", head,
-    ]);
+    project.ok(
+        "attempt.approve",
+        json!({"target": "main", "head": head, "ticket": "Y-1"}),
+    );
     watch.event("attempt.ended", &[("outcome", "landed")]);
     assert_eq!(
         git(&project.canonical(), &["show", "refs/heads/main:chain.txt"]),

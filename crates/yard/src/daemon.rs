@@ -67,7 +67,7 @@ pub struct Project {
     /// Default configuration publication and project admission serialise here.
     pub canonical: tokio::sync::Mutex<()>,
     targets: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
-    /// Wakes `status --history` and `status --watch` readers after a write.
+    /// Wakes event and attention readers after a write.
     pub events: Notify,
     /// The configuration at the target head it was read from.
     pub loaded: Mutex<crate::jobs::Configurations>,
@@ -385,7 +385,7 @@ pub fn project(daemon: &Daemon, params: &Value) -> Result<Arc<Project>, Fail> {
         .cloned()
         .ok_or_else(|| {
             Fail::not_found(format!(
-                "{root} is not a registered project; run `yard init` there"
+                "{root} is not a registered project; call yard_init with that path"
             ))
         })
 }
@@ -554,7 +554,7 @@ async fn init(daemon: &Arc<Daemon>, params: &Value) -> Result<Value, Fail> {
     }
     if let Some(main) = daemon.git.main_checkout(&root).await {
         return Err(Fail::refused(format!(
-            "{} is a linked worktree; run `yard init` in the main checkout {}",
+            "{} is a linked worktree; call yard_init with the main checkout {}",
             root.display(),
             main.display()
         )));
