@@ -122,7 +122,7 @@ fn schema(fields: &str) -> Value {
 }
 
 fn output_schema() -> Value {
-    json!({"type": "string", "enum": ["candidate", "report", "verdict", "selection"]})
+    json!({"type": "string", "enum": ["candidate", "report", "verdict", "selection", "finding-selection"]})
 }
 
 fn node_schema() -> Value {

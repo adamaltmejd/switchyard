@@ -45,7 +45,8 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
     else {
         return Err(Fail::refused("review has no admitted agent runner"));
     };
-    let selector = plan.selector().is_some() && node == "selector";
+    let finding_selector = plan.finding_selector().is_some() && node == "selector";
+    let selector = (plan.selector().is_some() || finding_selector) && node == "selector";
     let kind = if selector {
         crate::mcp::Kind::Selector
     } else {
@@ -129,7 +130,16 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
         ticket.body,
         instructions
     );
-    let prompt = if selector {
+    let prompt = if finding_selector {
+        format!(
+            "You are the read-only finding selector for ticket {}: {}\n\n{}\n\n{}\n\nFrozen inputs:\n{}\n\nCall yard_publish_selection once with groups. Each group has a nonblank reason and sources: exact source objects from the declared review inputs' findings. Preserve every contributor when combining duplicates. Select by public source identity only. This output grants no repair, acceptance, approval or landing authority.\n",
+            ticket_name(ticket.id),
+            ticket.title,
+            ticket.body,
+            instructions,
+            serde_json::to_string_pretty(&row.inputs).expect("inputs serialize")
+        )
+    } else if selector {
         format!(
             "You are the read-only selector for ticket {}: {}\n\n{}\n\n{}\n\nFrozen inputs:\n{}\n\nEach candidate is read-only at /yard/candidates/<hex input name>/source with its proof at /yard/candidates/<hex input name>/proof. Compare only the declared candidate results and bound reviews. Call yard_publish_selection exactly once with candidate naming one candidate input. This selects an existing reference and grants no write, approval or landing authority.\n",
             ticket_name(ticket.id),
@@ -162,7 +172,7 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
     let model = harness
         .route(&stage, &daemon.machine)
         .map_err(Fail::refused)?;
-    let candidate_inputs = if selector {
+    let candidate_inputs = if selector && !finding_selector {
         supervise::candidate_mounts(daemon, project, &row, false).await?
     } else {
         Vec::new()
@@ -293,7 +303,7 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
                 infrastructure: Some(infrastructure),
                 output: selection
                     .filter(|_| infrastructure == "completed" && !moved)
-                    .map(|value| json!({"kind": "selection", "value": value})),
+                    .map(|value| json!({"kind": if finding_selector { "finding-selection" } else { "selection" }, "value": value})),
                 detail: failure.as_deref(),
                 exit_code: run.exit_code,
                 ticket: Some(ticket.id),

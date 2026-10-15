@@ -43,6 +43,8 @@ pub enum Output {
     Report,
     Verdict,
     Selection,
+    #[serde(rename = "finding-selection")]
+    FindingSelection,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -508,6 +510,7 @@ impl Config {
                         plan.ordinary_selection(&ordinary, self.review.max_rounds, &self.profiles)
                             .is_some()
                             || plan.read_only_selection(&ordinary, self)
+                            || plan.finding_selection(&ordinary, self)
                             || plan.writer_selection(self, name)
                             || plan.handoff_selection(&ordinary, self)
                     }
@@ -770,6 +773,117 @@ impl Plan {
         self.nodes
             .get("selector")
             .filter(|node| node.outputs.get("result") == Some(&Output::Selection))
+    }
+
+    pub fn finding_selector(&self) -> Option<&Node> {
+        self.nodes
+            .get("selector")
+            .filter(|node| node.outputs.get("result") == Some(&Output::FindingSelection))
+    }
+
+    fn finding_selection(&self, ordinary: &Self, config: &Config) -> bool {
+        let Some(picker) = self.finding_selector() else {
+            return false;
+        };
+        if picker.access != Access::ReadOnly
+            || picker.operator_failure
+            || picker.outputs != BTreeMap::from([("result".into(), Output::FindingSelection)])
+            || picker.outcomes != ["complete"]
+            || !picker.routes.is_empty()
+            || !matches!(picker.runner, Runner::Agent { .. })
+            || !config.profiles.values().any(|profile| {
+                profile.runner == picker.runner
+                    && profile.access == picker.access
+                    && profile.outputs == picker.outputs
+                    && profile.outcomes == picker.outcomes
+            })
+            || picker.requires.len() != picker.inputs.len()
+            || picker
+                .inputs
+                .keys()
+                .any(|name| !picker.requires.contains(name))
+            || picker.inputs.get("candidate")
+                != ordinary
+                    .nodes
+                    .get("review-0")
+                    .and_then(|node| node.inputs.get("candidate"))
+        {
+            return false;
+        }
+        let incoming: Vec<_> = self
+            .nodes
+            .iter()
+            .filter(|(_, node)| {
+                node.routes.get("complete").is_some_and(|routes| {
+                    routes
+                        .iter()
+                        .any(|route| route.to == "selector" && route.repeat.is_none())
+                })
+            })
+            .map(|(name, _)| name.as_str())
+            .collect();
+        let [join] = incoming.as_slice() else {
+            return false;
+        };
+        if !join.starts_with("review-")
+            || self.nodes[*join]
+                .inputs
+                .values()
+                .filter(|input| {
+                    input.kind == Output::Verdict
+                        && input.node.as_ref().is_some_and(|name| {
+                            matches!(self.nodes[name].runner, Runner::Agent { .. })
+                        })
+                })
+                .count()
+                < 2
+        {
+            return false;
+        }
+        let mut ancestors = BTreeSet::from([*join]);
+        let Some(order) = self.complete_order() else {
+            return false;
+        };
+        for name in order.iter().rev() {
+            if self.nodes[*name]
+                .routes
+                .get("complete")
+                .is_some_and(|routes| {
+                    routes
+                        .iter()
+                        .any(|route| ancestors.contains(route.to.as_str()))
+                })
+            {
+                ancestors.insert(*name);
+            }
+        }
+        let mut sources = BTreeSet::new();
+        if !picker
+            .inputs
+            .values()
+            .any(|input| input.node.as_deref() == Some(*join))
+            || picker.inputs.iter().any(|(name, input)| {
+                name != "candidate"
+                    && (input.kind != Output::Verdict
+                        || input.output != "result"
+                        || input.node.as_deref().is_none_or(|source| {
+                            !ancestors.contains(source)
+                                || !source.starts_with("review-")
+                                || !sources.insert(source)
+                        }))
+            })
+        {
+            return false;
+        }
+        let mut base = self.clone();
+        base.nodes.remove("selector");
+        for node in base.nodes.values_mut() {
+            if let Some(routes) = node.routes.get_mut("complete") {
+                routes.retain(|r| r.to != "selector");
+            }
+            node.routes.retain(|_, routes| !routes.is_empty());
+        }
+        base.read_only_selection(ordinary, config)
     }
 
     pub fn integration(&self) -> Option<(&str, &Node)> {

@@ -158,6 +158,15 @@ fn an_execution_ending_revokes_only_its_own_project_grant() {
 /// Sabotage: count attempts, reserve after launch, replay finished branches,
 /// consume any publication or a pre-revision result, rewrite original admission,
 /// or mount a reader writable or an ordinary command read-only.
+/// G2/G8/G13: the post-join picker refuses foreign and historical sources
+/// before publishing a subset and a duplicate with both exact contributors.
+/// Sabotage: select by prose/index/latest result, drop a contributor, erase raw
+/// findings, or reuse the prior selection after revision. Fixture prose and
+/// model profiles supply values; public store finding identities supply sources.
+/// G5/G8: real successful picker teardown leaves an inherited host owner held.
+/// Sabotage: clear ownership before lock freedom, or recognize only pass/fail
+/// at checked release. The delegated runtime, PID, box list and same-inode lock
+/// prove ownership; the original result and exact attention supply identities.
 #[test]
 fn concurrent_readers_share_capacity_and_join_exact_results_across_restart() {
     use std::sync::Arc;
@@ -179,12 +188,98 @@ fn concurrent_readers_share_capacity_and_join_exact_results_across_restart() {
     ];
     let right_runs = Arc::new(AtomicUsize::new(0));
     let runs = right_runs.clone();
+    let picked = Latch::new();
+    let picker_hold = picked.clone();
+    let historical = Arc::new(std::sync::Mutex::new(None::<Value>));
+    let picker_history = historical.clone();
+    let foreign_source = Arc::new(std::sync::Mutex::new(None::<Value>));
+    let picker_foreign = foreign_source.clone();
     let (reader_opened, reader_openings) = std::sync::mpsc::channel();
     let machine = Machine::new("g4-graph-join", move |request| {
         if request.has_tool("yard_publish_report") {
             return planned(request);
         }
         let prompt = request.prompt();
+        if request.has_tool("yard_publish_selection") {
+            let frozen = prompt
+                .split("Frozen inputs:\n")
+                .nth(1)
+                .unwrap()
+                .split("\n\nCall yard_publish_selection")
+                .next()
+                .unwrap();
+            let inputs: Value = serde_json::from_str(frozen).unwrap();
+            let findings = |name: &str| {
+                inputs[name]["value"]["review"]["findings"]
+                    .as_array()
+                    .unwrap()
+            };
+            let source = |name: &str, body: &str| {
+                findings(name)
+                    .iter()
+                    .find(|finding| finding["body"] == body)
+                    .unwrap()["source"]
+                    .clone()
+            };
+            let useful = source("left", "useful");
+            let left_shared = source("left", "shared");
+            let right_shared = source("right", "shared");
+            let foreign = picker_foreign.lock().unwrap().clone().unwrap();
+            let old = picker_history.lock().unwrap().clone();
+            let refusals = if old.is_some() { 4 } else { 3 };
+            let count = request.tool_results().len();
+            let response = || {
+                let text = request.last_tool_result().unwrap().1;
+                serde_json::from_str::<Value>(
+                    &text[text.find('{').unwrap()..=text.rfind('}').unwrap()],
+                )
+                .unwrap()
+            };
+            let rejected = |step: usize| match step {
+                0 => json!({"groups": [{"reason": "foreign", "sources": [foreign.clone()]}]}),
+                1 => json!({"groups": [{"reason": "   ", "sources": [useful.clone()]}]}),
+                2 => {
+                    json!({"groups": [{"reason": "repeated", "sources": [useful.clone(), useful.clone()]}]})
+                }
+                _ => {
+                    json!({"groups": [{"reason": "historical", "sources": [old.clone().unwrap()]}]})
+                }
+            };
+            if count > 0 && count <= refusals {
+                let response = response();
+                assert_eq!(response["code"], "refused", "{response}");
+                assert_eq!(response["data"]["reason"], "selection_input");
+                assert_eq!(
+                    response["data"]["identity"],
+                    if count == 2 { "group" } else { "source" }
+                );
+                let expected = if count == 2 {
+                    rejected(1)["groups"][0].clone()
+                } else {
+                    rejected(count - 1)["groups"][0]["sources"][0].clone()
+                };
+                assert_eq!(response["data"]["expected"], expected);
+            }
+            if count < refusals {
+                return Reply::Tools(vec![tool("yard_publish_selection", rejected(count))]);
+            }
+            if count == refusals {
+                return Reply::Tools(vec![tool(
+                    "yard_publish_selection",
+                    json!({"groups": [
+                        {"reason": "useful subset", "sources": [useful.clone()]},
+                        {"reason": "shared duplicate", "sources": [left_shared, right_shared]}
+                    ]}),
+                )]);
+            }
+            let response = response();
+            assert!(response["published"].is_i64(), "{response}");
+            if old.is_none() {
+                *picker_history.lock().unwrap() = Some(useful);
+                return Reply::Hold(picker_hold.clone(), Box::new(Reply::Text("done".into())));
+            }
+            return Reply::Text("done".into());
+        }
         if request.has_tool("yard_publish_review") {
             if prompt.contains("Graph") && request.opens() {
                 let latch = if prompt.contains("Left reader.") {
@@ -203,13 +298,34 @@ fn concurrent_readers_share_capacity_and_join_exact_results_across_restart() {
                     None
                 };
                 if let Some(latch) = latch {
+                    let model = if prompt.contains("Left reader.") {
+                        "left-model"
+                    } else {
+                        "right-model"
+                    };
+                    assert_eq!(request.body["model"], model);
+                    let findings = if model == "left-model" {
+                        json!([{"priority": "P3", "body": "unselected"},
+                            {"priority": "P3", "body": "shared"}, {"priority": "P3", "body": "useful"}])
+                    } else {
+                        json!([{"priority": "P3", "body": "shared"}])
+                    };
                     return Reply::Hold(
                         latch.clone(),
-                        Box::new(Reply::Tools(vec![publish(json!([]))])),
+                        Box::new(Reply::Tools(vec![publish(findings)])),
                     );
                 }
             }
-            return act(request, vec![publish(json!([]))]);
+            return act(
+                request,
+                vec![publish(
+                    if !prompt.contains("Graph") && prompt.contains("Left reader.") {
+                        json!([{"priority": "P3", "body": "shared"}])
+                    } else {
+                        json!([])
+                    },
+                )],
+            );
         }
         let graph = prompt.contains("Graph");
         let reply = act(
@@ -220,7 +336,12 @@ fn concurrent_readers_share_capacity_and_join_exact_results_across_restart() {
                 } else {
                     "independent.txt"
                 },
-                "fixture\n",
+                // A resumed session keeps the original prompt; edits arrive in the current brief.
+                if request.last_user().contains("Changed candidate fixture.") {
+                    "fixture changed\n"
+                } else {
+                    "fixture\n"
+                },
                 "Fixture",
             )],
         );
@@ -233,22 +354,61 @@ fn concurrent_readers_share_capacity_and_join_exact_results_across_restart() {
             reply
         }
     });
+    let picker_owner = machine.root.join("picker-owner");
+    let picker_owner_said = machine.root.join("picker-owner-said");
+    let picker_owner_release = machine.root.join("picker-owner-release");
+    let picker_owner_ready = machine.root.join("picker-owner-ready");
+    fifo(&picker_owner_said);
+    fifo(&picker_owner_release);
+    fifo(&picker_owner_ready);
+    let mut release_picker_owner = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&picker_owner_release)
+        .unwrap();
+    // Successful teardown closes live up's stdin, without a box down call.
+    // Delegate real exec, then retain its inherited lock in a child. Its FIFO
+    // acknowledgment precedes exec completion; only child stdio is redirected.
+    machine.wrapper("pinfold", &format!(
+        "if [ \"$1 $2\" = 'box exec' ]; then\n\
+         \"$REAL\" \"$@\"; result=$?\n\
+         if [ -f '{}' ]; then\n\
+         {{ read -r picker_box; read -r picker_lock; }} < '{}'\n\
+         if [ \"$3\" = \"$picker_box\" ]; then\n\
+         sh -c 'holder=missing; for fd in /dev/fd/*; do if [ \"$fd\" -ef \"$5\" ]; then holder=${{fd##*/}}; fi; done; echo \"$$ $1 $2 $holder\" > \"$3\"; read line < \"$4\"' sh \"$3\" \"$result\" '{}' '{}' \"$picker_lock\" </dev/null >/dev/null 2>&1 &\n\
+         read line < '{}'; fi; fi\n\
+         exit \"$result\"; fi",
+        picker_owner.display(), picker_owner.display(), picker_owner_said.display(), picker_owner_release.display(), picker_owner_ready.display()
+    ));
     machine.start();
     let fixture = config(r#"
 [review.seats.left]
-agent = "worker"
+agent = "left"
 instructions = "Left reader."
 [review.seats.right]
-agent = "worker"
+agent = "right"
 instructions = "Right reader."
 [review.seats.join]
 agent = "worker"
 instructions = "Exact join."
 [profiles.revised]
-runner = {kind = "agent", agent = "worker", instructions = "Revised right reader."}
+runner = {kind = "agent", agent = "right", instructions = "Revised right reader."}
 access = "read-only"
 outputs = {result = "verdict"}
 outcomes = ["complete", "blocked"]
+[agents.left]
+harness = "pi"
+provider = "openrouter"
+model = "left-model"
+[agents.right]
+harness = "pi"
+provider = "openrouter"
+model = "right-model"
+[profiles.picker]
+runner = {kind = "agent", agent = "worker", instructions = "Pick exact findings."}
+access = "read-only"
+outputs = {result = "finding-selection"}
+outcomes = ["complete"]
 [gates.read]
 stage = "candidate"
 command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 97; fi; else test -f independent.txt && touch forbidden && test -f forbidden; fi"
@@ -272,11 +432,11 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
             "requires": ["candidate"], "routes": {
                 "complete": [{"to": "review-2", "repeat": null}],
                 "failed": [{"to": "implementer", "repeat": 1}]}},
-        "review-0": {"runner": {"kind": "agent", "agent": "worker", "instructions": "Left reader."}, "access": "read-only",
+        "review-0": {"runner": {"kind": "agent", "agent": "left", "instructions": "Left reader."}, "access": "read-only",
             "inputs": {"candidate": candidate}, "outputs": {"result": "verdict"}, "outcomes": ["complete", "blocked"],
             "requires": ["candidate"], "routes": {"complete": [{"to": "review-2", "repeat": null}],
                 "blocked": [{"to": "implementer", "repeat": 3}]}},
-        "review-1": {"runner": {"kind": "agent", "agent": "worker", "instructions": "Right reader."}, "access": "read-only",
+        "review-1": {"runner": {"kind": "agent", "agent": "right", "instructions": "Right reader."}, "access": "read-only",
             "inputs": {"candidate": candidate}, "outputs": {"result": "verdict"}, "outcomes": ["complete", "blocked"],
             "requires": ["candidate"], "routes": {"complete": [{"to": "review-2", "repeat": null}],
                 "blocked": [{"to": "implementer", "repeat": 3}]}},
@@ -286,7 +446,15 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
                 "left": {"node": "review-0", "output": "result", "kind": "verdict"},
                 "right": {"node": "review-1", "output": "result", "kind": "verdict"}},
             "outputs": {"result": "verdict"}, "outcomes": ["complete", "blocked"],
-            "requires": ["candidate", "command", "left", "right"], "routes": {"blocked": [{"to": "implementer", "repeat": 3}]}}
+            "requires": ["candidate", "command", "left", "right"], "routes": {
+                "complete": [{"to": "selector", "repeat": null}], "blocked": [{"to": "implementer", "repeat": 3}]}},
+        "selector": {"runner": {"kind": "agent", "agent": "worker", "instructions": "Pick exact findings."},
+            "access": "read-only", "outputs": {"result": "finding-selection"}, "outcomes": ["complete"], "routes": {},
+            "inputs": {"candidate": candidate,
+            "left": {"node": "review-0", "output": "result", "kind": "verdict"},
+            "right": {"node": "review-1", "output": "result", "kind": "verdict"},
+            "join": {"node": "review-2", "output": "result", "kind": "verdict"}},
+            "requires": ["candidate", "left", "right", "join"]}
     }});
     let mut operator = machine.operator();
     operator.initialize();
@@ -420,21 +588,24 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
     for reader in &readers {
         assert!(boxes.iter().any(|row| row["name"] == reader["handle"]));
     }
-    let opens = |instructions: &str| {
+    let reviewer_opens = |instructions: &str| {
+        // Picker context includes source instructions; count actual reviewer
+        // turns, not occurrences of those instructions in frozen evidence.
         machine
             .model
             .requests()
             .iter()
             .filter(|request| {
                 request.opens()
+                    && request.has_tool("yard_publish_review")
                     && request.prompt().contains("Graph")
                     && request.prompt().contains(instructions)
             })
             .count()
     };
-    assert_eq!(opens("Left reader."), 1);
-    assert_eq!(opens("Right reader."), 1);
-    assert_eq!(opens("Exact join."), 0);
+    assert_eq!(reviewer_opens("Left reader."), 1);
+    assert_eq!(reviewer_opens("Right reader."), 1);
+    assert_eq!(reviewer_opens("Exact join."), 0);
     let head = git(
         &project.path.join(".yard/local/attempts/3/clone"),
         &["rev-parse", "HEAD"],
@@ -456,6 +627,9 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
     // Settle the independent allowed control before the crash so no unrelated
     // implementation is interrupted while Right holds its reader slot.
     let independent_head = approval_of(&mut watch, "Y-2");
+    let sources = project.rows("SELECT f.id AS finding, f.\"check\" AS \"check\", e.id AS execution, e.attempt, 'Y-' || a.ticket AS ticket, e.base, e.head, e.proof, e.ticket_revision, e.plan_revision, e.digest FROM finding f JOIN \"check\" c ON c.id = f.\"check\" JOIN execution e ON e.id = c.execution JOIN attempt a ON a.id = e.attempt WHERE e.attempt = 4 ORDER BY f.id");
+    assert_eq!(sources.len(), 1);
+    *foreign_source.lock().unwrap() = Some(sources[0].clone());
     assert_eq!(project.rows("SELECT exit_code, outcome FROM execution WHERE attempt = 4 AND node = 'candidate-gate-read'"),
         vec![json!({"exit_code": 0, "outcome": "pass"})]);
     let command =
@@ -482,6 +656,7 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
         ),
         vec![json!({"status": "running", "reserved": 1, "result": null})]
     );
+    drop(watch);
     machine.kill();
     machine.start();
     restarted.wait_held();
@@ -497,8 +672,8 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
         project.rows("SELECT * FROM execution WHERE attempt = 3 AND node = 'review-0'"),
         published
     );
-    assert_eq!(opens("Left reader."), 1);
-    assert_eq!(opens("Right reader."), 2);
+    assert_eq!(reviewer_opens("Left reader."), 1);
+    assert_eq!(reviewer_opens("Right reader."), 2);
     assert_eq!(
         project
             .rows("SELECT id FROM execution WHERE attempt = 3 AND node = 'candidate-gate-read'")
@@ -512,6 +687,144 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
     );
     right.release();
     restarted.release();
+    picked.wait_held();
+    let pending_picker = project.rows("SELECT id, handle, report, result, reserved, teardown, head, proof FROM execution WHERE attempt = 3 AND node = 'selector'");
+    assert_eq!(pending_picker.len(), 1);
+    assert!(pending_picker[0]["report"].is_string());
+    assert_eq!(pending_picker[0]["result"], Value::Null);
+    assert_eq!(pending_picker[0]["reserved"], 1);
+    assert_eq!(pending_picker[0]["head"], head);
+    assert!(
+        project
+            .rows("SELECT id FROM approval WHERE attempt = 3")
+            .is_empty()
+    );
+    let source_rows = project.rows("SELECT * FROM execution WHERE attempt = 3 AND kind = 'review' AND node != 'selector' AND status = 'ended' AND plan_revision = 1 ORDER BY id");
+    let picker_id = pending_picker[0]["id"].as_i64().unwrap();
+    let picker_box = pending_picker[0]["handle"].as_str().unwrap();
+    let picker_lock_path = project
+        .path
+        .join(format!(".yard/local/attempts/3/effects/{picker_id}/lock"));
+    let picker_lock = std::fs::File::open(&picker_lock_path).unwrap();
+    std::fs::write(
+        &picker_owner,
+        format!("{picker_box}\n{}\n", picker_lock_path.display()),
+    )
+    .unwrap();
+    // Start at the currently held publication, excluding pre-restart history.
+    let since = project.rows("SELECT COALESCE(MAX(seq), 0) AS seq FROM audit")[0]["seq"]
+        .as_i64()
+        .unwrap();
+    let mut watch = project.watch(since);
+    picked.release();
+    let owner = watch.said_before_end(&picker_owner_said, Some(picker_id));
+    let owner_fields: Vec<_> = owner.split_whitespace().collect();
+    assert_eq!(owner_fields.len(), 4);
+    assert_eq!(&owner_fields[1..3], &[picker_box, "0"]);
+    // The child compares its inherited descriptor to the actual effect inode.
+    assert!(owner_fields[3].parse::<u32>().unwrap() > 2);
+    assert!(
+        std::process::Command::new("kill")
+            .args(["-0", owner_fields[0]])
+            .status()
+            .unwrap()
+            .success()
+    );
+    // Acknowledge only after the observer has received and checked the holder.
+    std::fs::write(&picker_owner_ready, "held\n").unwrap();
+    let ownership = watch.find("selected picker retains owner", |event| {
+        event["event"] == "attention.raised"
+            && event["execution"] == picker_id
+            && event["data"]["kind"] == "red"
+            && event["data"]["reason"] == "ownership"
+    });
+    assert_eq!(ownership["attempt"], 3);
+    let held_selection = project.rows(&format!("SELECT report, result, outcome, reserved, teardown, lock_contract, mcp FROM execution WHERE id = {picker_id}"));
+    assert_eq!(held_selection[0]["outcome"], "selected");
+    assert_eq!(held_selection[0]["reserved"], 1);
+    assert_eq!(held_selection[0]["teardown"], 0);
+    assert_eq!(held_selection[0]["lock_contract"], 1);
+    assert_eq!(held_selection[0]["mcp"], "registered");
+    let committed: Value =
+        serde_json::from_str(held_selection[0]["result"].as_str().unwrap()).unwrap();
+    assert_eq!(committed["infrastructure"]["outcome"], "completed");
+    assert_eq!(committed["outputs"]["result"]["kind"], "finding-selection");
+    assert!(
+        !machine
+            .boxes("dev.yard.project")
+            .iter()
+            .any(|row| row["name"] == picker_box)
+    );
+    assert!(matches!(
+        picker_lock.try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ));
+    assert!(project.rows("SELECT id FROM attention WHERE attempt = 3 AND kind = 'approval' AND state = 'open'").is_empty());
+    // Reconcile the ended publication while its real inherited owner is held.
+    // The same result and exact ownership item must remain ineligible.
+    drop(watch);
+    machine.kill();
+    machine.start();
+    let mut watch = project.watch(0);
+    assert_eq!(project.rows(&format!("SELECT report, result, outcome, reserved, teardown, lock_contract, mcp FROM execution WHERE id = {picker_id}")), held_selection);
+    assert!(
+        std::process::Command::new("kill")
+            .args(["-0", owner_fields[0]])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT state FROM attention WHERE id = {}",
+            ownership["attention"]
+        )),
+        vec![json!({"state": "open"})]
+    );
+    assert!(matches!(
+        picker_lock.try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ));
+    assert!(project.rows("SELECT id FROM attention WHERE attempt = 3 AND kind = 'approval' AND state = 'open'").is_empty());
+    std::fs::remove_file(&picker_owner).unwrap();
+    writeln!(release_picker_owner, "release").unwrap();
+    watch.find("selected picker checked release", |event| {
+        event["event"] == "execution.released" && event["execution"] == picker_id
+    });
+    let resolved = watch.find("selected picker ownership reconciled", |event| {
+        event["event"] == "attention.resolved" && event["attention"] == ownership["attention"]
+    });
+    assert_eq!(resolved["execution"], picker_id);
+    assert_eq!(resolved["data"]["resolution"], "reconciled");
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT state FROM attention WHERE id = {}",
+            ownership["attention"]
+        )),
+        vec![json!({"state": "resolved"})]
+    );
+    let released_selection = project.rows(&format!(
+        "SELECT report, result, outcome, reserved, teardown FROM execution WHERE id = {picker_id}"
+    ));
+    assert_eq!(released_selection[0]["report"], held_selection[0]["report"]);
+    assert_eq!(released_selection[0]["result"], held_selection[0]["result"]);
+    assert_eq!(released_selection[0]["outcome"], "selected");
+    assert_eq!(released_selection[0]["reserved"], 0);
+    assert_eq!(released_selection[0]["teardown"], 1);
+    use std::os::unix::fs::MetadataExt;
+    let inherited = picker_lock.metadata().unwrap();
+    let current = std::fs::metadata(
+        project
+            .path
+            .join(format!(".yard/local/attempts/3/effects/{picker_id}/lock")),
+    )
+    .unwrap();
+    assert_eq!(
+        (current.dev(), current.ino()),
+        (inherited.dev(), inherited.ino())
+    );
+    picker_lock.try_lock().unwrap();
+    picker_lock.unlock().unwrap();
     drop(watch);
     let mut watch = project.watch(0);
     assert_eq!(approval_of(&mut watch, "Y-1"), head);
@@ -539,7 +852,64 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
     );
     assert_eq!(first_inputs["left"]["source"]["plan_revision"], 1);
     assert_eq!(first_inputs["right"]["source"]["plan_revision"], 1);
-    assert_eq!(opens("Exact join."), 1);
+    assert_eq!(reviewer_opens("Exact join."), 1);
+    let raw_findings = project.rows("SELECT f.*, e.id AS execution, e.model FROM finding f JOIN \"check\" c ON c.id = f.\"check\" JOIN execution e ON e.id = c.execution WHERE e.attempt = 3 AND e.plan_revision = 1 ORDER BY f.id");
+    assert_eq!(raw_findings.len(), 4);
+    let assert_selection = |row: &Value, revision: i64, expected_head: &str| {
+        let result: Value = serde_json::from_str(row["result"].as_str().unwrap()).unwrap();
+        assert_eq!(result["outputs"]["result"]["kind"], "finding-selection");
+        assert_eq!(result["judgment"], Value::Null);
+        let value = &result["outputs"]["result"]["value"];
+        assert_eq!(value["picker"]["execution"], row["id"]);
+        assert_eq!(value["inputs"]["candidate"]["value"]["head"], expected_head);
+        let groups = value["groups"].as_array().unwrap();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0]["reason"], "useful subset");
+        assert_eq!(groups[1]["reason"], "shared duplicate");
+        let selected = project.rows(&format!("SELECT f.id, f.body, e.id AS execution, e.model FROM finding f JOIN \"check\" c ON c.id = f.\"check\" JOIN execution e ON e.id = c.execution WHERE e.attempt = 3 AND e.plan_revision = {revision} AND e.head = '{expected_head}' AND f.body != 'unselected' ORDER BY e.node, f.body"));
+        let sources: Vec<_> = groups
+            .iter()
+            .flat_map(|group| group["sources"].as_array().unwrap())
+            .collect();
+        assert_eq!(sources.len(), 3);
+        for finding in &selected {
+            let group = if finding["body"] == "useful" { 0 } else { 1 };
+            let source = groups[group]["sources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|source| source["finding"] == finding["id"])
+                .unwrap();
+            assert_eq!(source["execution"], finding["execution"]);
+            assert_eq!(source["plan_revision"], revision);
+            assert_eq!(source["head"], expected_head);
+            assert_eq!(source["ticket_revision"], row["ticket_revision"]);
+            assert_eq!(source["proof"], row["proof"]);
+            assert_eq!(source["ticket"], "Y-1");
+        }
+        assert_eq!(groups[0]["sources"].as_array().unwrap().len(), 1);
+        assert_eq!(groups[1]["sources"].as_array().unwrap().len(), 2);
+        assert_eq!(row["reserved"], 0);
+        assert_eq!(row["teardown"], 1);
+        assert_eq!(
+            serde_json::from_str::<Value>(row["report"].as_str().unwrap()).unwrap(),
+            *value
+        );
+    };
+    let first_selection =
+        project.rows("SELECT * FROM execution WHERE attempt = 3 AND node = 'selector'");
+    assert_eq!(first_selection.len(), 1);
+    assert_selection(&first_selection[0], 1, &head);
+    assert_eq!(
+        project.rows("SELECT choice FROM attempt WHERE id = 3"),
+        vec![json!({"choice": null})]
+    );
+    // Reopen an already committed selection. A supported revision below gives
+    // a scheduler observation without polling or waiting out a clock.
+    drop(watch);
+    machine.kill();
+    machine.start();
+    let mut watch = project.watch(0);
 
     // An explicit revision invalidates branch consumers, never old evidence.
     let changed = operator.call(
@@ -549,6 +919,13 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
     );
     assert_eq!(changed["result"]["plan_revision"], 2, "{changed}");
     revised.wait_held();
+    assert_eq!(
+        project.rows("SELECT * FROM execution WHERE attempt = 3 AND node = 'selector'"),
+        first_selection
+    );
+    // Sabotage: erase or rewrite old findings on revision. New reviewers may
+    // already publish, so compare the complete original revision only.
+    assert_eq!(project.rows("SELECT f.*, e.id AS execution, e.model FROM finding f JOIN \"check\" c ON c.id = f.\"check\" JOIN execution e ON e.id = c.execution WHERE e.attempt = 3 AND e.plan_revision = 1 ORDER BY f.id"), raw_findings);
     assert_eq!(
         project.rows(
             "SELECT * FROM execution WHERE attempt = 3 AND node = 'review-2' AND plan_revision = 1"
@@ -561,7 +938,7 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
         is_approval(event, "Y-1") && event["data"]["payload"]["plan_revision"] == 2
     });
     assert_eq!(approved["data"]["payload"]["head"], head);
-    let suppliers = project.rows("SELECT id, node FROM execution WHERE attempt = 3 AND plan_revision = 2 AND kind = 'review' ORDER BY node");
+    let suppliers = project.rows("SELECT id, node FROM execution WHERE attempt = 3 AND plan_revision = 2 AND kind = 'review' AND node != 'selector' ORDER BY node");
     assert_eq!(suppliers.len(), 3, "{suppliers:?}");
     let joined = project.rows("SELECT inputs FROM execution WHERE attempt = 3 AND node = 'review-2' AND plan_revision = 2");
     let inputs: Value = serde_json::from_str(joined[0]["inputs"].as_str().unwrap()).unwrap();
@@ -583,14 +960,61 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
             first_inputs[name]["source"]["execution"]
         );
     }
-    assert_eq!(opens("Left reader."), 2);
-    assert_eq!(opens("Revised right reader."), 1);
-    assert_eq!(opens("Exact join."), 2);
+    assert_eq!(reviewer_opens("Left reader."), 2);
+    assert_eq!(reviewer_opens("Revised right reader."), 1);
+    assert_eq!(reviewer_opens("Exact join."), 2);
+    let selections =
+        project.rows("SELECT * FROM execution WHERE attempt = 3 AND node = 'selector' ORDER BY id");
+    assert_eq!(selections.len(), 2);
+    assert_eq!(selections[0], first_selection[0]);
+    assert_selection(&selections[1], 2, &head);
+    let selected_inputs: Value =
+        serde_json::from_str(selections[1]["inputs"].as_str().unwrap()).unwrap();
+    for (name, index) in [("left", 0), ("right", 1), ("join", 2)] {
+        assert_eq!(
+            selected_inputs[name]["source"]["execution"],
+            suppliers[index]["id"]
+        );
+    }
     let mut revised_graph = graph.clone();
     revised_graph["nodes"]["review-1"]["runner"]["instructions"] = json!("Revised right reader.");
     let shown = project.json(&["attempt", "show", "Y-1"]);
     assert_eq!(shown["attempt"]["admission"], original_admission);
     assert_eq!(shown["attempt"]["plan"]["plan"], revised_graph);
+    let revision = project.json(&["ticket", "show", "Y-1"])["revision"].to_string();
+    project.json(&[
+        "ticket",
+        "edit",
+        "Y-1",
+        "--revision",
+        &revision,
+        "--body",
+        "Changed candidate fixture.",
+    ]);
+    let fresh = watch.until("changed candidate gets fresh selection", |event| {
+        is_approval(event, "Y-1") && event["data"]["payload"]["head"] != head
+    });
+    let new_head = git(
+        &project.path.join(".yard/local/attempts/3/clone"),
+        &["rev-parse", "HEAD"],
+    )
+    .trim()
+    .to_string();
+    assert_ne!(new_head, head);
+    assert_eq!(fresh["data"]["payload"]["head"], new_head);
+    let fresh_selections =
+        project.rows("SELECT * FROM execution WHERE attempt = 3 AND node = 'selector' ORDER BY id");
+    assert_eq!(fresh_selections.len(), 3);
+    assert_eq!(&fresh_selections[..2], selections.as_slice());
+    assert_selection(&fresh_selections[2], 2, &new_head);
+    let fresh_inputs: Value =
+        serde_json::from_str(fresh_selections[2]["inputs"].as_str().unwrap()).unwrap();
+    for name in ["left", "right", "join"] {
+        assert_ne!(
+            fresh_inputs[name]["source"]["execution"],
+            selected_inputs[name]["source"]["execution"]
+        );
+    }
     project.json(&[
         "attempt",
         "approve",
@@ -598,7 +1022,7 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
         "main",
         "Y-1",
         "--head",
-        &head,
+        &new_head,
         "--plan-revision",
         "2",
     ]);
@@ -629,12 +1053,24 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
     }
     assert_eq!(
         git(&project.canonical(), &["show", "main:graph.txt"]),
-        "fixture\n"
+        "fixture changed\n"
     );
+    assert_eq!(
+        project.rows("SELECT * FROM execution WHERE attempt = 3 AND node = 'selector' ORDER BY id"),
+        fresh_selections
+    );
+    let retained = project.rows("SELECT f.*, e.id AS execution, e.model FROM finding f JOIN \"check\" c ON c.id = f.\"check\" JOIN execution e ON e.id = c.execution WHERE e.attempt = 3 ORDER BY f.id");
+    for finding in &raw_findings {
+        assert_eq!(
+            retained.iter().find(|row| row["id"] == finding["id"]),
+            Some(finding)
+        );
+    }
     assert_eq!(
         git(&project.canonical(), &["show", "feature/a:independent.txt"]),
         "fixture\n"
     );
+    assert_eq!(project.rows("SELECT * FROM execution WHERE attempt = 3 AND kind = 'review' AND node != 'selector' AND status = 'ended' AND plan_revision = 1 ORDER BY id"), source_rows);
     five_writer_candidates_survive_continuation_and_restart();
 }
 

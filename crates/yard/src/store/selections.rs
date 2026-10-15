@@ -5,6 +5,13 @@ use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 
 pub fn inputs(conn: &Connection, attempt: &attempts::Attempt) -> Result<Option<Value>, Fail> {
+    let findings = attempt
+        .admission
+        .as_ref()
+        .map(crate::plan::Plan::admitted)
+        .transpose()
+        .map_err(|error| Fail::refused(error.to_string()))?
+        .is_some_and(|plan| plan.finding_selector().is_some());
     executions::binding(
         conn,
         attempt,
@@ -12,10 +19,102 @@ pub fn inputs(conn: &Connection, attempt: &attempts::Attempt) -> Result<Option<V
             kind: "review",
             node: Some("selector"),
             ticket_revision: Some(tickets::get(conn, attempt.ticket)?.revision),
+            base: findings.then_some(attempt.base.as_str()),
+            head: findings
+                .then(|| attempt.candidate().map(|(_, head)| head))
+                .flatten(),
+            proof: findings.then_some(attempt.proof.as_deref().unwrap_or_default()),
             ..Default::default()
         },
     )
     .map(|binding| binding.map(|(_, inputs)| inputs))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FindingChoice {
+    groups: Vec<FindingGroup>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct FindingGroup {
+    reason: String,
+    sources: Vec<Value>,
+}
+
+pub fn finding_publication(row: &executions::Execution, arguments: &Value) -> Result<Value, Fail> {
+    let eligible: Vec<_> = row
+        .inputs
+        .as_ref()
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|inputs| inputs.values())
+        .filter(|input| input["kind"] == "verdict")
+        .flat_map(|input| {
+            input["value"]["review"]["findings"]
+                .as_array()
+                .into_iter()
+                .flatten()
+        })
+        .map(|finding| &finding["source"])
+        .collect();
+    let refused = |identity: &str, expected: Value| {
+        Fail::refused("selection_input")
+            .with(json!({"reason": "selection_input", "identity": identity,
+            "expected": expected, "current": eligible}))
+    };
+    let choice: FindingChoice = serde_json::from_value(arguments.clone())
+        .map_err(|_| refused("groups", arguments.clone()))?;
+    if choice.groups.len() > 200 {
+        return Err(refused("groups", arguments.clone()));
+    }
+    let mut seen = Vec::new();
+    for group in &choice.groups {
+        if group.reason.trim().is_empty() || group.reason.len() > 32768 || group.sources.is_empty()
+        {
+            return Err(refused("group", json!(group)));
+        }
+        for source in &group.sources {
+            if !eligible.contains(&source) || seen.contains(&source) {
+                return Err(refused("source", source.clone()));
+            }
+            seen.push(source);
+        }
+    }
+    Ok(json!({"groups": choice.groups, "inputs": row.inputs,
+        "picker": {"execution": row.id, "node": row.node, "settings": row.settings, "source": "worker"}}))
+}
+
+pub fn finding_current(
+    conn: &Connection,
+    attempt: &attempts::Attempt,
+    row: &executions::Execution,
+) -> Result<bool, Fail> {
+    if row.attempt != Some(attempt.id)
+        || row.node.as_deref() != Some("selector")
+        || row.plan_revision != attempt.plan_revision()
+        || row.ticket_revision != Some(tickets::get(conn, attempt.ticket)?.revision)
+        || !row.result_eligible
+        || row.inputs != inputs(conn, attempt)?
+        || conn.query_row(
+            "SELECT COALESCE(mcp, '') FROM execution WHERE id = ?1",
+            [row.id],
+            |r| r.get::<_, String>(0),
+        )? != "registered"
+    {
+        return Ok(false);
+    }
+    let Some(result) = &row.result else {
+        return Ok(false);
+    };
+    let output = &result["outputs"]["result"];
+    Ok(result["infrastructure"]["outcome"] == "completed"
+        && output["kind"] == "finding-selection"
+        && finding_publication(row, &json!({"groups": output["value"]["groups"]}))
+            .ok()
+            .as_ref()
+            == Some(&output["value"]))
 }
 
 pub fn publication(row: &executions::Execution, candidate: &str) -> Result<Value, Fail> {
