@@ -587,7 +587,7 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
     for reader in &readers {
         assert!(boxes.iter().any(|row| row["name"] == reader["handle"]));
     }
-    let opens = |instructions: &str| {
+    let reviewer_opens = |instructions: &str| {
         // Picker context includes source instructions; count actual reviewer
         // turns, not occurrences of those instructions in frozen evidence.
         machine
@@ -602,9 +602,9 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
             })
             .count()
     };
-    assert_eq!(opens("Left reader."), 1);
-    assert_eq!(opens("Right reader."), 1);
-    assert_eq!(opens("Exact join."), 0);
+    assert_eq!(reviewer_opens("Left reader."), 1);
+    assert_eq!(reviewer_opens("Right reader."), 1);
+    assert_eq!(reviewer_opens("Exact join."), 0);
     let head = git(
         &project.path.join(".yard/local/attempts/3/clone"),
         &["rev-parse", "HEAD"],
@@ -670,8 +670,8 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
         project.rows("SELECT * FROM execution WHERE attempt = 3 AND node = 'review-0'"),
         published
     );
-    assert_eq!(opens("Left reader."), 1);
-    assert_eq!(opens("Right reader."), 2);
+    assert_eq!(reviewer_opens("Left reader."), 1);
+    assert_eq!(reviewer_opens("Right reader."), 2);
     assert_eq!(
         project
             .rows("SELECT id FROM execution WHERE attempt = 3 AND node = 'candidate-gate-read'")
@@ -851,7 +851,7 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
     );
     assert_eq!(first_inputs["left"]["source"]["plan_revision"], 1);
     assert_eq!(first_inputs["right"]["source"]["plan_revision"], 1);
-    assert_eq!(opens("Exact join."), 1);
+    assert_eq!(reviewer_opens("Exact join."), 1);
     let raw_findings = project.rows("SELECT f.*, e.id AS execution, e.model FROM finding f JOIN \"check\" c ON c.id = f.\"check\" JOIN execution e ON e.id = c.execution WHERE e.attempt = 3 ORDER BY f.id");
     assert_eq!(raw_findings.len(), 4);
     let assert_selection = |row: &Value, revision: i64, expected_head: &str| {
@@ -955,9 +955,9 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
             first_inputs[name]["source"]["execution"]
         );
     }
-    assert_eq!(opens("Left reader."), 2);
-    assert_eq!(opens("Revised right reader."), 1);
-    assert_eq!(opens("Exact join."), 2);
+    assert_eq!(reviewer_opens("Left reader."), 2);
+    assert_eq!(reviewer_opens("Revised right reader."), 1);
+    assert_eq!(reviewer_opens("Exact join."), 2);
     let selections =
         project.rows("SELECT * FROM execution WHERE attempt = 3 AND node = 'selector' ORDER BY id");
     assert_eq!(selections.len(), 2);
