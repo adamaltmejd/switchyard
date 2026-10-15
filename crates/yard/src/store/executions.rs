@@ -270,6 +270,26 @@ pub fn session(
     {
         return Ok(None);
     }
+    let definition = |execution: &Execution| -> Result<Option<Value>, Fail> {
+        let Some(revision) = execution.plan_revision else {
+            return Ok(None);
+        };
+        let Some(node) = execution.node.as_deref() else {
+            return Ok(None);
+        };
+        let Some(admission) = super::attempts::revision(conn, attempt, revision)? else {
+            return Ok(None);
+        };
+        let plan = crate::plan::Plan::admitted(&admission)
+            .map_err(|error| Fail::refused(error.to_string()))?;
+        Ok(plan
+            .nodes
+            .get(node)
+            .and_then(|policy| consumed_definition(&admission, &policy.runner, node, false)))
+    };
+    if definition(&owner)? != definition(&active)? {
+        return Ok(None);
+    }
     let mut count = 0;
     let mut next = Some(owner.id);
     while let Some(id) = next {
@@ -509,6 +529,7 @@ pub fn start(tx: &Connection, start: Start) -> Result<i64, Fail> {
 pub fn consumed_definition(
     admission: &Value,
     runner: &crate::plan::Runner,
+    node: &str,
     reviewer: bool,
 ) -> Option<Value> {
     let inputs = &admission["inputs"];
@@ -544,6 +565,14 @@ pub fn consumed_definition(
                     packaged || crate::agent_env::consumed_path(harness, path)
                 })
                 .collect();
+            if let crate::plan::Runner::Agent {
+                skills, references, ..
+            } = runner
+                && (!skills.is_empty() || !references.is_empty())
+            {
+                definition["selected_agent_sources"] =
+                    inputs.get("selected_agent_sources")?.get(node)?.clone();
+            }
             definition["agent"] = settings.clone();
             definition["trusted_staged_sources"] = json!(sources);
             if reviewer {
@@ -578,6 +607,7 @@ pub fn check_digest(
     };
     let plan =
         crate::plan::Plan::admitted(admission).map_err(|error| Fail::refused(error.to_string()))?;
+    let mut node_name = String::new();
     let runner = if kind == "gate" {
         crate::plan::Runner::Command { gate: name.into() }
     } else {
@@ -585,12 +615,14 @@ pub fn check_digest(
             .as_array()
             .and_then(|seats| seats.iter().position(|seat| seat.as_str() == Some(name)))
             .ok_or_else(|| Fail::refused("seat absent from admitted panel"))?;
-        let Some(node) = plan.nodes.get(&format!("review-{index}")) else {
+        node_name = format!("review-{index}");
+        let Some(node) = plan.nodes.get(&node_name) else {
             return Ok(baseline.into());
         };
         node.runner.clone()
     };
-    let Some(definition) = consumed_definition(admission, &runner, kind == "review") else {
+    let Some(definition) = consumed_definition(admission, &runner, &node_name, kind == "review")
+    else {
         // Unrecorded source proof stays unknown; its historical digest stays intact.
         if kind != "review" {
             return Ok(baseline.into());
@@ -598,6 +630,7 @@ pub fn check_digest(
         let crate::plan::Runner::Agent {
             agent,
             instructions,
+            ..
         } = &runner
         else {
             return Err(Fail::refused("review has no admitted agent runner"));
@@ -988,8 +1021,8 @@ pub fn qualifies(
         return Ok(false);
     }
     let reviewer = execution.kind == "review";
-    let old_definition = consumed_definition(&original_evidence, &old.runner, reviewer);
-    let new_definition = consumed_definition(current_evidence, &new.runner, reviewer);
+    let old_definition = consumed_definition(&original_evidence, &old.runner, node, reviewer);
+    let new_definition = consumed_definition(current_evidence, &new.runner, node, reviewer);
     if old_definition != new_definition
         || (old_definition.is_none() && execution.plan_revision != attempt.plan_revision())
     {

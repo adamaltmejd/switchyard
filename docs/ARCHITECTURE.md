@@ -169,7 +169,8 @@ keyed by existing node name. With no selection they translate workflow
 its branch and exact `config_head`, the resolved graph and configuration
 bindings. They create no tickets, attempts, executions or audit rows.
 
-A node's `runner` is `{kind = "agent", agent = "NAME", instructions = "TEXT"}`
+A node's `runner` is `{kind = "agent", agent = "NAME", instructions = "TEXT",
+skills = ["PATH"], references = ["PATH"]}`
 or `{kind = "command", gate = "NAME"}`. Names refer to existing agents and
 gates; plans introduce no command text or tool grants. `access` is
 `read-only` or `write-allowed`. `outputs` maps names to `candidate`, `report`,
@@ -177,6 +178,19 @@ gates; plans introduce no command text or tool grants. `access` is
 select a `profile` and replace fields. Overrides replace only supplied
 fields; a profile override replaces runner, access, outputs and outcomes,
 preserving the node's topology. Maps and lists replace whole fields.
+
+In attempts, ordinary agents may select skills and references explicitly; both lists default
+to empty. Skills are Markdown paths. All selected paths are distinct plain
+relative paths to canonical regular Git files: at most 512 per node, 32 KiB
+per skill, 1 MiB per reference and 8 MiB total per node. Admission freezes
+path, blob and executable identities per node from its staging commit.
+Every attempt agent launch stages those blobs under the existing read-only
+`/yard/input/trusted` mount and names the selected paths in its prompt.
+This mount is separate from writable candidate content. Later canonical or
+candidate edits cannot change admitted bytes. Unselected guidance is not
+exposed there; references are never followed automatically. Selected inputs
+enter the consumer definition. Explicit revision rebinds changed selections
+from the recorded staging commit, or an explicitly adopted staging commit.
 
 The optional packaged runner is `{kind = "packaged", package = "durable-audit",
 agent = "NAME", instructions = "TEXT", skill = "PATH", references = ["PATH"],
@@ -407,8 +421,9 @@ that workspace, including a predecessor whose workspace is historically
 unknown. Independent workspaces remain separate. Stop and restart preserve
 partial trees. A successor reuses its declared workspace only after checked
 predecessor release. Sessions resume only within that workspace with identical
-recorded agent settings and a compatible harness version, within the existing
-session execution bound. Historical unknown settings start a fresh session.
+recorded agent settings, consumed definitions and a compatible harness
+version, within the existing session execution bound. Historical unknown
+settings start a fresh session.
 Ordinary repair and settings changes keep their retained clone behavior;
 incompatible recorded settings start a fresh session.
 Workspace identity cannot transfer between graph nodes.
@@ -625,8 +640,9 @@ open stopped and exact ownership items. Adoption preserves both items and
 does not launch work. Reviewer nodes may select a declared
 read-only agent profile with verdict outputs and ordinary complete/blocked
 outcomes. Implementers, including selected read-only implementers, may select
-admitted profile instructions with the same agent, access, outputs and
-outcomes. Worker grants and target stay frozen. Template sync alone keeps active
+admitted profile instructions and selected skill/reference paths with the
+same agent, access, outputs and outcomes. Worker grants and target stay frozen.
+Template sync alone keeps active
 workflow, gate, reviewer, tool, skill and image inputs unchanged. Explicit source
 selection adopts committed changes. Implementation agent
 model and effort may be adopted explicitly. Its harness, connection and egress
@@ -772,7 +788,7 @@ It binds its runner, its gate definition or agent settings and harness pin,
 the Yard executable identity, and, for boxed consumers, the recorded Dockerfile
 blob and whole build-context tree. Agent consumers also bind the regular
 committed paths, blobs and executable bits staged for their harness, plus
-root guidance.
+root guidance and their node's explicitly selected skill/reference inputs.
 Reviewers bind review policy; packaged consumers bind their selected staged
 sources and package identity. Source commit labels alone do not qualify a result.
 Changed consumed inputs invalidate affected consumers. An unchanged seat
@@ -1045,7 +1061,7 @@ split and stops.
    `stopped`, except that an edit-started execution ending clean on the attempt's
    current head sends that candidate to judgment at the current revision. A writable implementer's next execution resumes its workspace's session where the
    harness offers one, after checked predecessor release and only with identical
-   recorded settings and a compatible harness version. Context is the harness's business: Yard stages each
+   recorded settings, consumed definitions and a compatible harness version. Context is the harness's business: Yard stages each
    harness's own automatic-compaction threshold with the launch and never
    compacts a session itself. After `max_session_executions` executions on
    one session the next starts a fresh session from a brief of ticket,
@@ -1130,8 +1146,13 @@ boxed gate command or ordinary agent. It has no inputs, required suppliers,
 routes or operator failure handling; its sole output is `result` (verdict
 for commands, report for agents), and its sole declared outcome is `complete`.
 Commands permit read-only or write-allowed source access, no host environment
-imports and no network. Reports require read-only source access. Packaged
-runners, candidate outputs and workflow authority are refused as
+imports and no network. Reports require read-only source access.
+Standalone agent reports require empty `skills` and `references` lists.
+Nonempty selection refuses before execution creation or launch as
+`standalone_selected_inputs`, naming `node.runner.skills` or
+`node.runner.references` and the selected paths, even if those files do not
+exist. Selected input staging is supported only for attempt agents.
+Packaged runners, candidate outputs and workflow authority are refused as
 `standalone_authority`; host commands or imported environment names are
 `standalone_box`. This operation creates no ticket or attempt.
 
@@ -2151,7 +2172,7 @@ combination, lifecycle or historical version.
 | # | Guarantee | Shown by |
 |---|---|---|
 | 1 | Only the queue lands | A real worker fails to push to canonical, reach its host path/socket, or use sessionless RPC. Explicit operator approval then lands that same candidate through the queue. |
-| 2 | Judgments bind candidate, choice, ticket and admitted plan identity; integration publishes its own candidate bound to named inputs; Durable continuation binds frozen checkpoint inputs; prepared continuation binds exact merged input; operator policy stays live | A declared closed gate reuses unchanged evidence but changed tree/proof or unknown inputs rerun. New head, ticket revision and proof invalidate judgments. Protected-path policy changes withdraw automatic approval; manual approval remains explicit. Stale candidate acceptance names the changed identity and writes nothing. Five distinct implementers receive their own frozen reviews; exact picker and replacement bindings select the only checked and landed candidate. Named-input integration publishes C containing both fixture changes; stale A approval writes nothing and only C is approved and landed. Finding selections reject foreign and stale exact source identities, retain all duplicate contributors and historical inputs, and require fresh inputs after revision or candidate change. |
+| 2 | Judgments bind candidate, choice, ticket and admitted plan identity; integration publishes its own candidate bound to named inputs; Durable continuation binds frozen checkpoint inputs; prepared continuation binds exact merged input; operator policy stays live | A declared closed gate reuses unchanged evidence but changed tree/proof or unknown inputs rerun. New head, ticket revision and proof invalidate judgments. Protected-path policy changes withdraw automatic approval; manual approval remains explicit. Stale candidate acceptance names the changed identity and writes nothing. Five distinct implementers receive their own frozen reviews; exact picker and replacement bindings select the only checked and landed candidate. Named-input integration publishes C containing both fixture changes; stale A approval writes nothing and only C is approved and landed. Ordinary writable agents retain selected admitted blobs across source edits; staging adoption binds new input identities and starts a fresh session. Finding selections reject foreign and stale exact source identities, retain all duplicate contributors and historical inputs, and require fresh inputs after revision or candidate change. |
 | 3 | Landing is compare-and-swap with selected verification and durable exact prepared merged-ref evidence | A held native ref update stays undecided until its outcome is known. Canonical movement before compare-and-swap retires the landing without overwriting newer history. |
 | 4 | Capacity holds | Concurrent starts preserve one live attempt and the lane bound. Two held mixed reader/worker effects have exactly two native project boxes; the join waits for exact results. One-slot landing children exclude a worker and still land. An inherited native owner retains capacity across restart. Identical execution IDs in different projects keep separate grants. |
 | 5 | Intent precedes effect, and a restart loses only the turn; Durable continuation is a new exclusive execution after proved predecessor removal; individually useful work needs no ticket | A real held writable turn survives daemon death as interrupted work and resumes its retained tree. Startup removes a surviving host gate process group before requeue. A legacy owner without trustworthy lock proof remains reserved across upgrade. Matching Durable unsafe intent resumes only after old-box removal; corrupt checkpoint identity refuses before a fresh retry. A completed registered finding picker retains its immutable selection, reservation and exact ownership item across restart while a real runtime descendant holds its inherited effect lock after box removal; checked release reconciles only that item without replay. |
@@ -2162,7 +2183,7 @@ combination, lifecycle or historical version.
 | 10 | The queue lands one at a time per target and re-judges what does not merge | Two approvals land in order; a red merge returns for repair. A feature ticket uses its frozen target source, definitions and image, repairs a real conflict, and lands only on that branch. |
 | 11 | Only the operator's sync changes `.yard` and canonical from outside | A worker configuration commit is refused before gates; operator sync makes the same configuration available to future admission. Named-branch import, divergence refusal and consume preserve main and another imported branch, with dirty/other-checkout refusals and allowed controls. |
 | 12 | Boxes hold nothing secret | Real Pi, Claude login/direct API and Codex routes keep upstream credentials on the host. Candidate extensions, hooks, config and guidance cannot alter their own review; trusted base inputs remain usable. A real packaged controller has no upstream key in environment, mounts, transcript or stored content. |
-| 13 | Every gate, seat and read-only audit runs where its row says; standalone source access is contained | Boxed gates and reviews read the approved proof snapshot through read-only mounts and restricted routes. Host gates receive only named environment and the correct candidate/merged base. A superseded approval starts no host landing gate. Distinct declared reviewer models and the post-join finding picker bind exact immutable review inputs and read-only candidate/proof mounts. |
+| 13 | Every gate, seat and read-only audit runs where its row says; selected ordinary inputs and standalone source access are contained | Boxed gates and reviews read the approved proof snapshot through read-only mounts and restricted routes. Host gates receive only named environment and the correct candidate/merged base. A superseded approval starts no host landing gate. An ordinary writable worker reads admitted skill/reference bytes after canonical and candidate edits, refuses trusted-input writes while source writes succeed, and excludes unselected guidance. Distinct declared reviewer models and the post-join finding picker bind exact immutable review inputs and read-only candidate/proof mounts. |
 | 14 | Worker git is untrusted, and Yard stays local | A worker plants Git hooks, fsmonitor, filter, remote and a harness-state link and corrupts an object. Host markers stay absent, canonical fsck stays clean, refusal names the corrupt identity, and a legitimate recovery succeeds. |
 | 15 | Plans and proposals resolve | A read-only planner proposes bounded children and a body edit; stale edits preserve identity and rows. Accepted dependencies block the parent, and a writable dependent retains its ordinary workspace authority. Closing a live waiting attempt refuses. Actual legacy proposals and limit overrides remain usable after migration. |
 

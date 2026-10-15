@@ -83,11 +83,12 @@ fn assert_operator_diff(prompt: &str, removed: &[&str], added: &[&str]) {
 }
 
 /// Two projects on one machine. In `p` an edit mid-execution lets the
-/// execution end on its own and reaches the next prompt as a diff of the
-/// body: the held worker commits only once released, so its execution ends
+/// execution end on its own and reaches the next prompt as the full body
+/// after changed definitions start a fresh session. The held worker commits
+/// only once released, so its execution ends
 /// as a candidate where a stop would end it unchanged. No gate runs on that
-/// candidate before the next execution, which opens with the edit's diff
-/// and is labelled as the operator's. In `q`, `stop` delivers an edit
+/// candidate before the next execution, which opens with the whole body
+/// and a labelled operator plan diff. In `q`, `stop` delivers an edit
 /// sooner: the worker is still held when the execution ends, `stop` still
 /// raises `stopped` and starts nothing, and that item's `start` runs the
 /// implementer with the edit's diff.
@@ -99,7 +100,8 @@ fn assert_operator_diff(prompt: &str, removed: &[&str], added: &[&str]) {
 /// instructions. It commits; its source-only successor has the identical plan,
 /// opens with adopted values and an operator diff, and is held before a real
 /// second commit. Only then are its instruction profile and ticket revised.
-/// A third execution carrying `Rename` commits again before any gate runs.
+/// A fresh third execution carrying the whole `Rename` body commits again
+/// before any gate runs.
 ///
 /// Sabotage: make `admit::steer` notify the stop signal of a running
 /// implementer; the held execution ends unchanged. Load the execution from
@@ -127,6 +129,8 @@ fn assert_operator_diff(prompt: &str, removed: &[&str], added: &[&str]) {
 /// map from plan_handoff; or return no handoff when the actual predecessor and
 /// successor plan objects are equal. Host model/system observations and Git
 /// blobs catch each independently; instruction diffs alone cannot prove these bindings.
+/// Omit the ticket body from a fresh session, or send only its resumed diff;
+/// p's whole-body line assertion fails after the instruction definition changes.
 #[test]
 fn an_edit_reaches_the_next_prompt_and_stop_delivers_it_sooner() {
     let (edit_hold, stop_hold) = (Latch::new(), Latch::new());
@@ -372,8 +376,7 @@ fn an_edit_reaches_the_next_prompt_and_stop_delivers_it_sooner() {
     );
     // The latest opening is p's third: q opens nothing more until its start.
     let third = openings(&machine).last().unwrap().last_user();
-    // Changed definitions may start fresh; either session must receive the edit.
-    assert!(third.contains("Rename it too"), "{third}");
+    assert!(third.lines().any(|line| line == "Rename it too"), "{third}");
     assert_operator_diff(
         &third,
         &["Original implementation."],
