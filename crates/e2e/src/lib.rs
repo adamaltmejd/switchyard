@@ -6,6 +6,7 @@
 //! user can: exit codes, `--json` output, the store file, canonical git
 //! state, host files, and boxes through `pinfold`.
 
+mod locks;
 pub mod model;
 
 pub use model::*;
@@ -203,7 +204,22 @@ impl Machine {
             .stderr(Stdio::inherit())
             .spawn()
             .expect("spawn yard daemon run");
-        let lines = lines(child.stdout.take().unwrap());
+        let stdout = child.stdout.take().unwrap();
+        let state = self.state.clone();
+        let pid = child.id();
+        let (send, lines) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut spoke = false;
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                spoke = true;
+                if send.send(line).is_err() {
+                    return;
+                }
+            }
+            if !spoke {
+                locks::report(&state, "startup-eof", pid);
+            }
+        });
         *self.daemon.lock().unwrap() = Some(child);
         lines
     }
@@ -222,7 +238,16 @@ impl Machine {
     pub fn kill(&self) {
         if let Some(mut child) = self.daemon.lock().unwrap().take() {
             let _ = child.kill();
-            let _ = child.wait();
+            match child.wait() {
+                Ok(status) => {
+                    eprintln!("Y-147 reaped daemon: pid={} status={status}", child.id());
+                }
+                Err(error) => eprintln!(
+                    "Y-147 daemon wait failed: pid={} errno={:?}",
+                    child.id(),
+                    error.raw_os_error()
+                ),
+            }
         }
     }
 
