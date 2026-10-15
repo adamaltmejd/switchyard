@@ -705,15 +705,20 @@ fn only_the_declared_choice_is_checked_and_landed() {
         "graph": {"inputs": {"merged": "candidate"}, "nodes": nodes}}),
     );
     assert!(started.get("error").is_none(), "{started}");
+    let attempt = started["result"]["attempt"].as_i64().unwrap();
     for hold in &holds {
         hold.wait_held();
     }
+    // The completed planner also has a workspace. Count every writer in the
+    // admitted graph attempt, without filtering to expected producer names.
+    // Sabotage: schedule a sixth implementation workspace in this attempt.
     let writers = rows(
         &project,
-        "SELECT * FROM execution WHERE kind = 'implementation' AND workspace IS NOT NULL ORDER BY id",
+        &format!(
+            "SELECT * FROM execution WHERE attempt = {attempt} AND kind = 'implementation' AND workspace IS NOT NULL ORDER BY id"
+        ),
     );
     assert_eq!(writers.len(), 5);
-    let attempt = writers[0]["attempt"].as_i64().unwrap();
     let mut heads = Vec::new();
     for n in 0..5 {
         let node = match n {
