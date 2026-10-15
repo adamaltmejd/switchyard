@@ -352,9 +352,10 @@ pub(super) async fn work(
             };
             let mut spec = spec;
             if classification {
-                let evidence = dir.join("classification.json");
+                let input = dir.join("classification-input");
+                std::fs::create_dir_all(&input).map_err(|error| error.to_string())?;
                 std::fs::write(
-                    &evidence,
+                    input.join("classification.json"),
                     row.inputs
                         .as_ref()
                         .expect("bound classifier inputs")
@@ -362,8 +363,8 @@ pub(super) async fn work(
                 )
                 .map_err(|error| error.to_string())?;
                 spec.mounts.push(Mount {
-                    host: evidence,
-                    guest: "/yard/classification.json".into(),
+                    host: input,
+                    guest: "/yard/classification".into(),
                     readonly: true,
                 });
                 if let Some(proof) = &proof {

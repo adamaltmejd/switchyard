@@ -516,10 +516,6 @@ pub async fn landing(
                     && row.inputs.as_ref() == Some(&inputs)
             });
         if let Some(previous) = previous {
-            if !previous.result_eligible {
-                return Err(Fail::refused("missing_or_invalid_classification")
-                    .with(json!({"classification": previous.id})));
-            }
             return Ok((previous.id, false));
         }
         launch(tx, loaded, &now, source, name, policy, &inputs).map(|id| (id, true))
@@ -544,6 +540,21 @@ pub async fn landing(
             Ok(())
         })?;
         return Err(fail.with(json!({"classification": id})));
+    }
+    // A parentless operator retry can already own this exact publication.
+    // Wait for its normal end and checked release without reserving capacity.
+    loop {
+        let changed = project.events.notified();
+        tokio::pin!(changed);
+        changed.as_mut().enable();
+        let row = project.read(|conn| executions::get(conn, id))?;
+        if !project.read(|conn| current(conn, &row))? {
+            return Err(stale(inputs["identity"].clone(), json!(row.inputs)));
+        }
+        if row.status != "running" && !row.reserved {
+            break;
+        }
+        changed.await;
     }
     project.read(|conn| {
         let row = executions::get(conn, id)?;

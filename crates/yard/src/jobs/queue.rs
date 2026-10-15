@@ -21,7 +21,8 @@ pub async fn next(daemon: &Arc<Daemon>, project: &Arc<Project>) -> Result<(), Fa
         let mut targets = std::collections::HashSet::new();
         for row in executions::query(
             conn,
-            "((kind = 'landing' OR parent IN (SELECT id FROM execution WHERE kind = 'landing'))
+            "((kind = 'landing' OR parent IN (SELECT id FROM execution WHERE kind = 'landing')
+               OR (reason = 'classification' AND json_extract(inputs, '$.identity.failure.landing.execution') IS NOT NULL))
              AND (status = 'running' OR reserved = 1)) OR intent_state = 'open'",
             [],
         )? {
@@ -62,6 +63,14 @@ pub async fn next(daemon: &Arc<Daemon>, project: &Arc<Project>) -> Result<(), Fa
         }
         let execution = project.tx(|tx| {
             if checks::approval(tx, approval.id)?.state != "active"
+                || tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM execution WHERE attempt = ?1
+                     AND reason = 'classification'
+                     AND json_extract(inputs, '$.identity.failure.landing.execution') IS NOT NULL
+                     AND (status = 'running' OR reserved = 1))",
+                    [attempt.id],
+                    |row| row.get::<_, bool>(0),
+                )?
                 || attempts::superseded_by_edit(
                     tx,
                     attempt.id,

@@ -332,9 +332,7 @@ async fn answer(daemon: &Arc<Daemon>, request: Request<Incoming>) -> Response<Fu
                         tool["description"] = json!(
                             "Publish one declared classification with its exact frozen identity."
                         );
-                        tool["inputSchema"]["properties"]["outcome"] = json!({"type": "string",
-                            "enum": row.inputs.as_ref().and_then(|inputs| inputs["identity"]["policy"]["outcomes"].as_object())
-                                .map(|outcomes| outcomes.keys().collect::<Vec<_>>()).unwrap_or_default()});
+                        tool["inputSchema"]["properties"]["outcome"] = json!({"type": "string"});
                         tool["inputSchema"]["properties"]["identity"] = json!({"type": "object"});
                         tool["inputSchema"]["required"] = json!(["outcome", "identity", "report"]);
                     }

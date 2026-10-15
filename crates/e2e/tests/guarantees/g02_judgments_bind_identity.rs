@@ -386,7 +386,7 @@ fi"#,
 [gates.classifier]
 stage = "landing"
 runs_in = "box"
-command = '''node -e 'const fs = require("fs"); const input = JSON.parse(fs.readFileSync("/yard/classification.json", "utf8")); console.log(JSON.stringify({outcome: "retry", identity: input.identity, report: {summary: "Retry the same exact check", findings: []}}));' '''
+command = '''node -e 'const fs = require("fs"); const input = JSON.parse(fs.readFileSync("/yard/classification/classification.json", "utf8")); console.log(JSON.stringify({outcome: "retry", identity: input.identity, report: {summary: "Retry the same exact check", findings: []}}));' '''
 "#);
     project.reconfigure(&failed_definition);
     let source = project.git(&["rev-parse", "HEAD"]).trim().to_string();

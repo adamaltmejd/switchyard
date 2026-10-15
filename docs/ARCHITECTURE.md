@@ -295,14 +295,21 @@ Landing classifiers require the source's `operator_failure = true` contract.
 A classifier is an existing review execution with reason `classification`
 and node `classifier:SOURCE`; this prefix is reserved. Its source checkout
 and proof snapshot are read-only. Command classifiers select a boxed gate
-with no host environment grants. They read `/yard/classification.json` and
-publish one JSON object on stdout. Read-only agent classifiers grant only
-context, progress and `yard_publish_report`. Both publish
+with no host environment grants. A dedicated read-only `/yard/classification`
+directory contains only the frozen `classification.json` input. Commands read
+that file and publish one JSON object on stdout. Read-only agent classifiers
+grant only context, progress and `yard_publish_report`. Both publish
 `{"outcome":"NAME","identity":IDENTITY,"report":{"summary":"TEXT","findings":[]}}`
-through the same typed validator. Names match exactly; Yard evaluates no
-expressions. Missing, invalid or unsuccessful publication is infrastructure
-failure with no eligible continuation. An operator start creates a fresh
+through the same typed validator. The agent tool schema accepts a string outcome;
+the frozen prompt names the declared choices and the shared daemon validator
+enforces exact matching for both runners. Yard evaluates no expressions.
+Missing, invalid or unsuccessful publication is infrastructure failure with no
+eligible continuation. An operator start creates a fresh
 classifier execution from the same still-current inputs after checked release.
+An active native landing classifier, including a parentless operator retry,
+keeps its target busy until it ends and releases ownership. A landing that
+already selected that exact execution waits on execution events for its end and
+checked release before deciding whether its publication is eligible.
 
 Frozen inputs contain the attempt, target, candidate base/head/proof, choice,
 ticket and plan revisions, classifier policy and exact source check, execution,
@@ -2076,7 +2083,7 @@ box spec names mounts, env, the harness, egress and memory.
 | standalone report | fresh exact-input checkout, read-only; no candidate proof mount | its own, writable; trusted environment from frozen target | model route, MCP route, frozen `isolation.egress` | harness env, git identity, execution bearer |
 | standalone command | fresh exact-input checkout; resolved read-only or write-allowed access; no proof mount | none | none | `HOME`, `PATH`, `YARD_BASE` equal to input |
 | agent classifier | fresh exact-source checkout and frozen proof, read-only | its own, writable; trusted environment from frozen target | model route, MCP route | harness env, git identity, execution bearer |
-| command classifier | fresh exact-source checkout, frozen proof and `/yard/classification.json`, read-only | none | none | `HOME`, `PATH`, `YARD_BASE` equal to source base |
+| command classifier | fresh exact-source checkout, frozen proof and dedicated `/yard/classification` input directory, read-only | none | none | `HOME`, `PATH`, `YARD_BASE` equal to source base |
 | reviewer | a fresh checkout of the head, read-only; `/yard/proof` is the candidate's snapshot, read-only | its own, writable | model route, MCP route | the harness's env, git identity, `YARD_MCP_BEARER` (from) |
 | gate | a private disposable checkout of the exact commit, writable; `/yard/proof` is the candidate's snapshot, read-only | none | `isolation.egress` only | `HOME`, `PATH`, `YARD_BASE` |
 
