@@ -102,7 +102,7 @@ pub fn plain_path(path: &str) -> bool {
             .all(|part| !part.is_empty() && part != "." && part != "..")
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Profile {
     pub runner: Runner,
@@ -234,9 +234,46 @@ impl NodeSpec {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum Continuation {
+    Original,
+    Fixer {
+        profile: String,
+    },
+    Retry,
+    Operator,
+    Accept {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        authorization: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Classifier {
+    pub runner: Runner,
+    pub outcomes: BTreeMap<String, Continuation>,
+    pub repeat: u32,
+}
+
+impl Classifier {
+    pub fn node(&self) -> Node {
+        Profile {
+            runner: self.runner.clone(),
+            access: Access::ReadOnly,
+            outputs: BTreeMap::from([("result".into(), Output::Report)]),
+            outcomes: self.outcomes.keys().cloned().collect(),
+        }
+        .node()
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Graph {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub classifiers: BTreeMap<String, Classifier>,
     #[serde(default)]
     pub inputs: BTreeMap<String, Output>,
     pub nodes: BTreeMap<String, NodeSpec>,
@@ -244,6 +281,8 @@ pub struct Graph {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Plan {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub classifiers: BTreeMap<String, Classifier>,
     pub inputs: BTreeMap<String, Output>,
     pub nodes: BTreeMap<String, Node>,
 }
@@ -335,6 +374,7 @@ impl Config {
             );
         }
         let mut plan = Plan {
+            classifiers: graph.classifiers.clone(),
             inputs: graph.inputs.clone(),
             nodes,
         };
@@ -355,6 +395,7 @@ impl Config {
                 })?
                 .node();
             return Ok(Plan {
+                classifiers: BTreeMap::new(),
                 inputs: BTreeMap::new(),
                 nodes: BTreeMap::from([("implementer".into(), node)]),
             });
@@ -489,6 +530,7 @@ impl Config {
                 .insert("complete".into(), vec![Route { to, repeat: None }]);
         }
         let mut plan = Plan {
+            classifiers: BTreeMap::new(),
             inputs: if !workflow.read_only && !self.gates.is_empty() {
                 BTreeMap::from([("merged".into(), Output::Candidate)])
             } else {
@@ -1756,9 +1798,77 @@ impl Plan {
         if self.inputs.keys().any(String::is_empty) {
             return Err(Invalid::new("inputs", "empty_name"));
         }
+        for (name, classifier) in &self.classifiers {
+            let path = format!("classifiers.{name}");
+            let source = self
+                .nodes
+                .get(name)
+                .ok_or_else(|| Invalid::new(&path, "unresolved_reference"))?;
+            if source.outputs.get("result") != Some(&Output::Verdict)
+                || source.advisory
+                || classifier.repeat == 0
+                || (name.starts_with("landing-") && !source.operator_failure)
+                || (self.selector().is_some() && !matches!(source.runner, Runner::Command { .. }))
+                || !(name.starts_with("candidate-gate-")
+                    || name.starts_with("landing-gate-")
+                    || name
+                        .strip_prefix("review-")
+                        .is_some_and(|index| index.parse::<usize>().is_ok()))
+                || classifier.outcomes.is_empty()
+                || classifier
+                    .outcomes
+                    .keys()
+                    .any(|name| name.trim().is_empty())
+            {
+                return Err(Invalid::new(&path, "invalid_input"));
+            }
+            classifier.node().validate_runner(config, &path)?;
+            match &classifier.runner {
+                Runner::Command { gate } => {
+                    let gate = config
+                        .gates
+                        .iter()
+                        .find(|entry| entry.name == *gate)
+                        .expect("validated gate");
+                    if gate.runs_in != crate::config::RunsIn::Box || !gate.env.is_empty() {
+                        return Err(Invalid::new(&path, "invalid_input"));
+                    }
+                }
+                Runner::Agent {
+                    skills, references, ..
+                } if skills.is_empty() && references.is_empty() => {}
+                _ => return Err(Invalid::new(&path, "invalid_input")),
+            }
+            for action in classifier.outcomes.values() {
+                if let Continuation::Accept {
+                    authorization: Some(text),
+                } = action
+                    && (text.trim().is_empty() || text.len() > 8000)
+                {
+                    return Err(Invalid::new(&path, "invalid_input"));
+                }
+                if let Continuation::Fixer { profile } = action {
+                    let profile = config
+                        .profiles
+                        .get(profile)
+                        .ok_or_else(|| Invalid::new(&path, "unresolved_reference"))?;
+                    if profile.access != Access::WriteAllowed
+                        || profile.outputs != BTreeMap::from([("result".into(), Output::Candidate)])
+                        || profile.outcomes != ["complete"]
+                        || !matches!(&profile.runner, Runner::Agent { skills, references, .. }
+                            if skills.is_empty() && references.is_empty())
+                    {
+                        return Err(Invalid::new(&path, "invalid_input"));
+                    }
+                }
+            }
+        }
         for (name, node) in &self.nodes {
             if name.is_empty() {
                 return Err(Invalid::new("nodes", "empty_name"));
+            }
+            if name.starts_with("classifier:") {
+                return Err(Invalid::new(format!("nodes.{name}"), "invalid_input"));
             }
             node.validate_runner(config, &format!("nodes.{name}"))?;
             if node.outputs.is_empty() || node.outputs.keys().any(String::is_empty) {

@@ -21,6 +21,13 @@ struct Report {
 }
 
 pub fn publish(grant: &Grant, arguments: &Value) -> Result<Value, Fail> {
+    if grant.project.read(|conn| {
+        Ok(executions::get(conn, grant.execution)?.reason.as_deref() == Some("classification"))
+    })? {
+        return grant
+            .project
+            .tx(|tx| super::classify::publish(tx, grant.execution, arguments));
+    }
     let publication: Publication =
         serde_json::from_value(arguments.clone()).map_err(|_| Fail::invalid("invalid_report"))?;
     let text_valid = |text: &str| !text.trim().is_empty() && text.len() <= 8000;

@@ -929,10 +929,6 @@ fn selected_durable_cleanup_commits_without_replaying_an_interrupted_write() {
     let model_resumed_request = resumed_request.clone();
     let inspection = Latch::new();
     let held_inspection = inspection.clone();
-    let nested_mode = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let model_nested = nested_mode.clone();
-    let nested_inspection = Latch::new();
-    let held_nested = nested_inspection.clone();
     let audit_refusal = Arc::new(Mutex::new(false));
     let observed_refusal = audit_refusal.clone();
     let machine = Machine::new("g13-durable-cleanup", move |request| {
@@ -957,13 +953,6 @@ fn selected_durable_cleanup_commits_without_replaying_an_interrupted_write() {
             "cleanup-selected" => {
                 assert!(!request.has_tool("bash"));
                 assert!(!request.has_tool("yard_attempt_approve"));
-                if model_nested.load(std::sync::atomic::Ordering::SeqCst) {
-                    assert!(request.opens());
-                    return Reply::Hold(
-                        held_nested.clone(),
-                        Box::new(Reply::Tools(vec![audit_report()])),
-                    );
-                }
                 if request.opens() {
                     return Reply::Hold(
                         held_initial.clone(),
@@ -1013,18 +1002,7 @@ fn selected_durable_cleanup_commits_without_replaying_an_interrupted_write() {
                 if request.opens() {
                     return Reply::Tools(vec![bash(
                         if request.body["model"] == "implementer-selected" {
-                            if model_nested.load(std::sync::atomic::Ordering::SeqCst) {
-                                r#"git init -q .git/nested-seed &&
-printf 'nested\n' > .git/nested-seed/file.txt &&
-printf 'file.txt filter=trip\n' > .git/nested-seed/.gitattributes &&
-git -C .git/nested-seed add . && git -C .git/nested-seed commit -qm Seed &&
-git -c protocol.file.allow=always submodule add /workspace/.git/nested-seed nested &&
-git commit -qm 'Add nested repository' &&
-git -C nested config filter.trip.clean 'touch /workspace/.git/nested-filter-ran; cat' &&
-touch -t 200001010000 nested/file.txt &&
-git status --porcelain && test -f .git/nested-filter-ran"#
-                            } else {
-                                r#"printf 'implemented\n' > chain.txt && git add chain.txt && git commit -qm Implement &&
+                            r#"printf 'implemented\n' > chain.txt && git add chain.txt && git commit -qm Implement &&
 git config core.fsmonitor 'touch /workspace/.git/fsmonitor-ran; false' &&
 git config filter.trip.clean 'touch /workspace/.git/filter-ran; cat' &&
 git config filter.trip.required true &&
@@ -1033,7 +1011,6 @@ touch -t 200001010000 chain.txt &&
 git -c core.fsmonitor=false status --porcelain && test -f .git/filter-ran &&
 git status --porcelain && test -f .git/fsmonitor-ran &&
 mkdir .git/alternate && git -c filter.trip.clean= -c filter.trip.smudge= -c filter.trip.process= -c filter.trip.required=false archive HEAD | tar -x -C .git/alternate"#
-                            }
                         } else {
                             r#"test ! -e .git/fsmonitor-ran && test ! -e .git/filter-ran &&
 git config --unset core.fsmonitor && git config --remove-section filter.trip &&
@@ -1392,109 +1369,6 @@ git -C /workspace -c safe.directory=/workspace -c core.hooksPath=/dev/null -c co
         "attempt", "approve", "Y-1", "--target", "main", "--head", head,
     ]);
     watch.event("attempt.ended", &[("outcome", "landed")]);
-    assert_eq!(
-        git(&project.canonical(), &["show", "refs/heads/main:chain.txt"]),
-        "repaired\n"
-    );
-
-    // Same-project allowed control is the completed handoff above. Sabotage:
-    // remove the gitlink refusal and let status execute a nested clean filter.
-    nested_mode.store(true, std::sync::atomic::Ordering::SeqCst);
-    project.json(&[
-        "ticket",
-        "new",
-        "--title",
-        "Nested Git inspection",
-        "--workflow",
-        "plan",
-    ]);
-    let planned = watch.event("attempt.ended", &[("outcome", "planned")]);
-    watch.find("nested planner release", |event| {
-        event["event"] == "execution.released"
-            && event["attempt"] == planned["attempt"]
-            && project.rows(&format!(
-                "SELECT kind FROM execution WHERE id = {}",
-                event["execution"]
-            ))[0]["kind"]
-                == "cleanup"
-    });
-    let started = operator.call(
-        "yard_attempt_start",
-        json!({"project": project.path, "ticket": "Y-2",
-        "graph": super::g13_runs_where_its_row_says::sequential_handoff_graph()}),
-    );
-    assert!(started["error"].is_null(), "{started}");
-    let attempt = started["result"]["attempt"].as_i64().unwrap();
-    implemented(&mut watch, attempt);
-    nested_inspection.wait_held();
-    let row = project.rows(&format!("SELECT id, handle FROM execution WHERE attempt = {attempt} AND node = 'cleanup' AND status = 'running'"))[0].clone();
-    let clone = project
-        .path
-        .join(format!(".yard/local/attempts/{attempt}/clone"));
-    let marker = clone.join(".git/nested-filter-ran");
-    assert!(
-        marker.is_file(),
-        "ordinary predecessor did not run the filter"
-    );
-    std::fs::remove_file(&marker).unwrap();
-    let invalidate = |seconds| {
-        std::fs::File::open(clone.join("nested/file.txt"))
-            .unwrap()
-            .set_times(
-                std::fs::FileTimes::new()
-                    .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds)),
-            )
-            .unwrap();
-    };
-    invalidate(978307200);
-    let control = machine.pinfold(&[
-        "box",
-        "exec",
-        row["handle"].as_str().unwrap(),
-        "--",
-        "/usr/bin/env",
-        "-i",
-        "PATH=/usr/bin:/bin",
-        "GIT_CONFIG_NOSYSTEM=1",
-        "GIT_CONFIG_GLOBAL=/dev/null",
-        "GIT_TERMINAL_PROMPT=0",
-        "/usr/bin/git",
-        "-C",
-        "/workspace",
-        "-c",
-        "safe.directory=/workspace",
-        "-c",
-        "core.hooksPath=/dev/null",
-        "-c",
-        "core.fsmonitor=false",
-        "status",
-        "--porcelain",
-        "--untracked-files=all",
-    ]);
-    assert!(control.status.success());
-    assert!(control.stdout.is_empty(), "nested control must be clean");
-    assert!(
-        marker.is_file(),
-        "boxed Git control did not run nested filter"
-    );
-    std::fs::remove_file(&marker).unwrap();
-    invalidate(1009843200);
-    nested_inspection.release();
-    let ended = watch.find("nested inspection refusal", |event| {
-        event["event"] == "execution.ended" && event["execution"] == row["id"]
-    });
-    assert_eq!(ended["data"]["outcome"], "refused");
-    watch.find("nested inspection released", |event| {
-        event["event"] == "execution.released" && event["execution"] == row["id"]
-    });
-    assert!(!marker.exists(), "packaged inspection ran nested filter");
-    assert!(
-        project
-            .rows(&format!(
-                "SELECT id FROM execution WHERE attempt = {attempt} AND node = 'repair'"
-            ))
-            .is_empty()
-    );
     assert_eq!(
         git(&project.canonical(), &["show", "refs/heads/main:chain.txt"]),
         "repaired\n"

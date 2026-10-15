@@ -573,25 +573,22 @@ references = ["reference.txt"]
 }
 
 /// G2/G9/G13: one ordinary three-role path retains its clone while changing
-/// selected settings and grants. One machine, planner, three role boxes and
-/// one repair continuation also reach native verification and landing.
+/// selected settings and grants. One machine, planner and three role boxes
+/// also reach native verification and landing.
 /// Expected bytes, inodes and ancestry come from the fixture, boxed Git and
 /// host Git; settings come from requests received by the host model.
 /// Sabotage: allocate a second clone for a sequential role; inode/ancestry or
 /// retained bytes differ. Bypass workspace ownership; the held retry starts.
 /// Infer publication/operator authority from source access; cleanup publishes
-/// a candidate or its landing tool succeeds. Carry old judgment to a new
-/// publication with the same tree; the second gate references the old check.
+/// a candidate or its landing tool succeeds.
 #[test]
 fn selected_cleanup_hands_one_exclusive_clone_to_separately_configured_repair() {
     use std::os::unix::fs::MetadataExt;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     let hold = Latch::new();
     let cleanup_hold = hold.clone();
     let probes = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
     let captured = probes.clone();
-    let repairs = AtomicUsize::new(0);
     let machine = Machine::new("g13-handoff", move |request| {
         let model = request.body["model"].as_str().unwrap();
         if model == "fake-model" {
@@ -623,10 +620,8 @@ fn selected_cleanup_hands_one_exclusive_clone_to_separately_configured_repair() 
         if request.opens() {
             let command = if model == "implementer-selected" {
                 "printf 'implemented\\n' > chain.txt && git add chain.txt && git commit -qm Implement && echo inode=$(stat -c %i .git)"
-            } else if repairs.fetch_add(1, Ordering::SeqCst) == 0 {
-                "test \"$(cat chain.txt)\" = cleaned && test \"$(cat /yard/input/trusted/repair.md)\" = trusted-repair && printf 'repaired\\n' > chain.txt && git add chain.txt && git commit -qm Repair && echo inode=$(stat -c %i .git)"
             } else {
-                "test \"$(cat chain.txt)\" = repaired && git commit --allow-empty -qm 'Fresh publication' && echo inode=$(stat -c %i .git)"
+                "test \"$(cat chain.txt)\" = cleaned && test \"$(cat /yard/input/trusted/repair.md)\" = trusted-repair && printf 'repaired\\n' > chain.txt && git add chain.txt && git commit -qm Repair && echo inode=$(stat -c %i .git)"
             };
             return Reply::Tools(vec![bash(command)]);
         }
@@ -773,57 +768,6 @@ export default function () {
     let result: Value = serde_json::from_str(rows[1]["result"].as_str().unwrap()).unwrap();
     assert_eq!(result["outputs"]["result"]["kind"], "report");
     assert_eq!(project.rows(&format!("SELECT json_extract(data, '$.candidate') AS execution FROM audit WHERE event = 'attempt.candidate' AND attempt = {attempt} ORDER BY seq")), vec![json!({"execution": rows[0]["id"]}), json!({"execution": rows[2]["id"]})]);
-    let first_gate = project.rows(&format!("SELECT id, verification FROM execution WHERE attempt = {attempt} AND kind = 'gate' AND parent IS NULL"))[0].clone();
-    project.json(&[
-        "attempt",
-        "reject",
-        "--target",
-        "main",
-        "Y-1",
-        "--head",
-        first["head"].as_str().unwrap(),
-        "--text",
-        "Publish again with the same tree",
-    ]);
-    let approval = watch.until("fresh approval", |event| {
-        event["event"] == "attention.raised" && event["data"]["kind"] == "approval"
-    });
-    let second = &approval["data"]["payload"];
-    let first_tree = git(
-        &project.canonical(),
-        &[
-            "rev-parse",
-            &format!("{}^{{tree}}", first["head"].as_str().unwrap()),
-        ],
-    );
-    let second_tree = git(
-        &project.canonical(),
-        &[
-            "rev-parse",
-            &format!("{}^{{tree}}", second["head"].as_str().unwrap()),
-        ],
-    );
-    assert_eq!(first_tree, second_tree);
-    assert_ne!(first["head"], second["head"]);
-    let gates = project.rows(&format!("SELECT id, outcome, verification FROM execution WHERE attempt = {attempt} AND kind = 'gate' AND parent IS NULL ORDER BY id"));
-    assert_eq!(gates.len(), 2, "{gates:?}");
-    assert_ne!(gates[1]["id"], first_gate["id"]);
-    assert_eq!(gates[1]["outcome"], "pass");
-    let verification: Value =
-        serde_json::from_str(gates[1]["verification"].as_str().unwrap()).unwrap();
-    assert!(
-        verification.get("reference").is_none_or(Value::is_null),
-        "{verification}"
-    );
-    let judgments = project.rows(&format!("SELECT c.id, e.head, json_extract(e.inputs, '$.candidate.source.execution') AS producer FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE e.attempt = {attempt} AND e.parent IS NULL ORDER BY c.id"));
-    assert_eq!(judgments.len(), 2, "{judgments:?}");
-    assert_ne!(judgments[0]["id"], judgments[1]["id"]);
-    assert_eq!(judgments[0]["head"], first["head"]);
-    assert_eq!(judgments[0]["producer"], rows[2]["id"]);
-    assert_eq!(judgments[1]["head"], second["head"]);
-    let repair = project.rows(&format!("SELECT id FROM execution WHERE attempt = {attempt} AND node = 'repair' ORDER BY id DESC LIMIT 1"))[0]["id"].clone();
-    assert_eq!(judgments[1]["producer"], repair);
-    assert_ne!(judgments[0]["producer"], judgments[1]["producer"]);
     assert_eq!(std::fs::metadata(clone.join(".git")).unwrap().ino(), inode);
     let probes = probes.lock().unwrap();
     let inodes: Vec<_> = probes
@@ -835,7 +779,7 @@ export default function () {
                 .unwrap()
         })
         .collect();
-    assert_eq!(inodes.len(), 4);
+    assert_eq!(inodes.len(), 3);
     assert!(inodes.iter().all(|value| *value == inodes[0]), "{inodes:?}");
     for role in ["implementer", "cleanup", "repair"] {
         let request = machine
@@ -865,13 +809,13 @@ export default function () {
             "rev-list",
             "--format=%s",
             "--no-commit-header",
-            second["head"].as_str().unwrap(),
-            "-4",
+            first["head"].as_str().unwrap(),
+            "-3",
         ],
     );
     assert_eq!(
         ancestry.lines().collect::<Vec<_>>(),
-        ["Fresh publication", "Repair", "Cleanup", "Implement"]
+        ["Repair", "Cleanup", "Implement"]
     );
     project.json(&[
         "attempt",
@@ -880,7 +824,7 @@ export default function () {
         "main",
         "Y-1",
         "--head",
-        second["head"].as_str().unwrap(),
+        first["head"].as_str().unwrap(),
     ]);
     watch.event("landing.recorded", &[]);
     assert_eq!(

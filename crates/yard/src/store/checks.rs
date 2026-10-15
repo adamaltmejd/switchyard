@@ -4,7 +4,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::{Value, json};
 
 /// A judgment binds candidate, ticket revision, plan revision and selected inputs.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Input {
     pub attempt: i64,
     pub base: String,

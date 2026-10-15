@@ -21,7 +21,8 @@ pub async fn next(daemon: &Arc<Daemon>, project: &Arc<Project>) -> Result<(), Fa
         let mut targets = std::collections::HashSet::new();
         for row in executions::query(
             conn,
-            "((kind = 'landing' OR parent IN (SELECT id FROM execution WHERE kind = 'landing'))
+            "((kind = 'landing' OR parent IN (SELECT id FROM execution WHERE kind = 'landing')
+               OR (reason = 'classification' AND json_extract(inputs, '$.identity.failure.landing.execution') IS NOT NULL))
              AND (status = 'running' OR reserved = 1)) OR intent_state = 'open'",
             [],
         )? {
@@ -62,6 +63,14 @@ pub async fn next(daemon: &Arc<Daemon>, project: &Arc<Project>) -> Result<(), Fa
         }
         let execution = project.tx(|tx| {
             if checks::approval(tx, approval.id)?.state != "active"
+                || tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM execution WHERE attempt = ?1
+                     AND reason = 'classification'
+                     AND json_extract(inputs, '$.identity.failure.landing.execution') IS NOT NULL
+                     AND (status = 'running' OR reserved = 1))",
+                    [attempt.id],
+                    |row| row.get::<_, bool>(0),
+                )?
                 || attempts::superseded_by_edit(
                     tx,
                     attempt.id,
@@ -390,6 +399,78 @@ async fn reference_input(
             && evidence["candidate"]["provenance"]["base"] == target
             && evidence["candidate"]["provenance"]["head"] == merged
     }))
+}
+
+async fn run_child(daemon: &Arc<Daemon>, project: &Arc<Project>, child: i64) -> Result<(), Fail> {
+    // Pin both boundaries: capacity moves its work through task-local wrappers (Y-73).
+    let result = Box::pin(super::capacity::effect(
+        daemon,
+        project,
+        child,
+        Box::pin(super::supervise::gate(daemon, project, child)),
+    ))
+    .await;
+    if let Err(fail) = &result {
+        project.tx(|tx| {
+            let row = executions::get(tx, child)?;
+            if row.status == "running" {
+                let attempt = attempts::get(tx, row.required_attempt()?)?;
+                executions::end(
+                    tx,
+                    child,
+                    executions::End {
+                        outcome: if attempt.state == "live" {
+                            "error"
+                        } else {
+                            "abandoned"
+                        },
+                        detail: Some(&fail.message),
+                        ticket: Some(attempt.ticket),
+                        ..Default::default()
+                    },
+                )?;
+            }
+            Ok(())
+        })?;
+    }
+    result
+}
+
+// Callers hold the target lock through their admitted continuation effect.
+async fn classification_input(
+    daemon: &Daemon,
+    project: &Project,
+    execution: i64,
+    child: &executions::Execution,
+    original: &executions::Execution,
+    target: &str,
+    merged: &str,
+) -> Result<(), Fail> {
+    let attempt = project.read(|conn| attempts::get(conn, original.required_attempt()?))?;
+    let target_ref = crate::git::target_ref(attempt.target_branch()?);
+    let actual_target = daemon
+        .git
+        .rev_parse(&project.canonical_dir(), &target_ref)
+        .await?;
+    let actual_merged = daemon
+        .git
+        .rev_parse(
+            &project.canonical_dir(),
+            &format!("refs/yard/landings/{}", original.id),
+        )
+        .await?;
+    if actual_target.as_deref() != Some(target)
+        || actual_merged.as_deref() != Some(merged)
+        || !reference_input(daemon, project, child, target, merged).await?
+    {
+        project.tx(|tx| retire_preparation(tx, execution, "prepared_input_changed"))?;
+        return Err(Fail::stale(
+            "classification_input",
+            json!({"old": target, "merged": merged}),
+            json!({"old": actual_target, "merged": actual_merged}),
+        ));
+    }
+    Ok(())
 }
 
 /// Why an approval no longer holds. A superseded one's checks count for
@@ -830,7 +911,7 @@ pub async fn land(
         .await;
     }
     let mut selected = Vec::new();
-    for current in plan
+    'gates: for current in plan
         .complete_order()
         .ok_or_else(|| Fail::refused("unsupported admitted complete routes"))?
         .into_iter()
@@ -852,6 +933,7 @@ pub async fn land(
             .iter()
             .find(|gate| &gate.name == name)
             .ok_or_else(|| Fail::refused("admitted landing gate absent"))?;
+        let mut retained_failure = None;
         if let Some(child) = retained.iter().rev().find(|child| {
             child.name.as_deref() == Some(&gate.name)
                 && matches!(child.outcome.as_deref(), Some("pass" | "fail" | "reused"))
@@ -884,6 +966,15 @@ pub async fn land(
                 }
                 admit(daemon, project, &held, approval.id, execution, |tx, _| {
                     let current = executions::get(tx, child.id)?;
+                    if plan
+                        .classifiers
+                        .contains_key(current.node.as_deref().unwrap_or_default())
+                        && current.outcome.as_deref() == Some("fail")
+                        && let Some(evidence) = failed_evidence(tx, &current, &original)?
+                        && checks::decision(tx, row.required_attempt()?, &evidence)?.is_none()
+                    {
+                        return Ok(true);
+                    }
                     if node.operator_failure
                         && current.outcome.as_deref() == Some("fail")
                         && let Some(evidence) = failed_evidence(tx, &current, &original)?
@@ -948,106 +1039,316 @@ pub async fn land(
                 )
                 .await;
             }
-            selected.push(child.id);
-            continue;
+            if child.outcome.as_deref() == Some("fail")
+                && plan.classifiers.contains_key(current)
+                && project
+                    .read(|conn| {
+                        let evidence = failed_evidence(conn, child, &original)?.unwrap_or_default();
+                        checks::decision(conn, row.required_attempt()?, &evidence)
+                    })?
+                    .is_none()
+            {
+                retained_failure = Some(child.id);
+            } else {
+                selected.push(child.id);
+                continue;
+            }
         }
-        let mut pending_child = None;
-        let admitted = super::capacity::effect(daemon, project, execution, async {
-            let held = target_lock.lock().await;
-            let admitted = admit(daemon, project, &held, approval.id, execution, |tx, now| {
-                executions::start(
-                    tx,
-                    executions::Start {
-                        attempt: Some(attempt.id),
-                        parent: Some(execution),
-                        kind: "gate",
-                        reason: Some("landing"),
-                        base: Some(&target),
-                        head: Some(&merged),
-                        proof: Some(&now.approval.proof),
-                        ticket_revision: Some(now.ticket.revision),
-                        digest: Some(&now.loaded.gate_digest),
-                        name: Some(&gate.name),
-                        ticket: Some(ticket.id),
-                        ..Default::default()
-                    },
-                )
-            })
-            .await?;
-            if let Ok(child) = &admitted {
-                pending_child = Some(*child);
-            }
-            Ok(admitted)
-        })
-        .await;
-        let admitted = match admitted {
-            Ok(admitted) => admitted,
-            Err(fail) => {
-                // Admission committed, but the parent's checked release can
-                // refuse before the child controller is ever started.
-                if let Some(child) = pending_child {
-                    project.tx(|tx| {
-                        if executions::get(tx, child)?.status == "running" {
-                            executions::end(
-                                tx,
-                                child,
-                                executions::End {
-                                    outcome: "interrupted",
-                                    detail: Some(&fail.message),
-                                    ticket: Some(ticket.id),
-                                    ..Default::default()
-                                },
-                            )?;
-                        }
-                        Ok(())
-                    })?;
-                }
-                return Err(fail);
-            }
-        };
-        let child = match admitted {
-            Ok(child) => child,
-            Err((now, lapse)) => {
-                return withdraw(
-                    project,
-                    &now.loaded,
-                    execution,
-                    &now.approval,
-                    &now.attempt,
-                    &lapse,
-                );
-            }
-        };
-        let child_result = super::capacity::effect(
-            daemon,
-            project,
-            child,
-            super::supervise::gate(daemon, project, child),
-        )
-        .await;
-        if let Err(fail) = child_result {
-            project.tx(|tx| {
-                if executions::get(tx, child)?.status == "running" {
-                    executions::end(
+        let mut child = if let Some(child) = retained_failure {
+            child
+        } else {
+            let mut pending_child = None;
+            let admitted = super::capacity::effect(daemon, project, execution, async {
+                let held = target_lock.lock().await;
+                let admitted = admit(daemon, project, &held, approval.id, execution, |tx, now| {
+                    executions::start(
                         tx,
-                        child,
-                        executions::End {
-                            outcome: if attempts::get(tx, attempt.id)?.state == "live" {
-                                "error"
-                            } else {
-                                "abandoned"
-                            },
-                            detail: Some(&fail.message),
+                        executions::Start {
+                            attempt: Some(attempt.id),
+                            parent: Some(execution),
+                            kind: "gate",
+                            reason: Some("landing"),
+                            base: Some(&target),
+                            head: Some(&merged),
+                            proof: Some(&now.approval.proof),
+                            ticket_revision: Some(now.ticket.revision),
+                            digest: Some(&now.loaded.gate_digest),
+                            name: Some(&gate.name),
                             ticket: Some(ticket.id),
                             ..Default::default()
+                        },
+                    )
+                })
+                .await?;
+                if let Ok(child) = &admitted {
+                    pending_child = Some(*child);
+                }
+                Ok(admitted)
+            })
+            .await;
+            let admitted = match admitted {
+                Ok(admitted) => admitted,
+                Err(fail) => {
+                    // Admission committed, but the parent's checked release can
+                    // refuse before the child controller is ever started.
+                    if let Some(child) = pending_child {
+                        project.tx(|tx| {
+                            if executions::get(tx, child)?.status == "running" {
+                                executions::end(
+                                    tx,
+                                    child,
+                                    executions::End {
+                                        outcome: "interrupted",
+                                        detail: Some(&fail.message),
+                                        ticket: Some(ticket.id),
+                                        ..Default::default()
+                                    },
+                                )?;
+                            }
+                            Ok(())
+                        })?;
+                    }
+                    return Err(fail);
+                }
+            };
+            let child = match admitted {
+                Ok(child) => child,
+                Err((now, lapse)) => {
+                    return withdraw(
+                        project,
+                        &now.loaded,
+                        execution,
+                        &now.approval,
+                        &now.attempt,
+                        &lapse,
+                    );
+                }
+            };
+            run_child(daemon, project, child).await?;
+            child
+        };
+        let mut result = project.read(|conn| executions::get(conn, child))?;
+        while result.outcome.as_deref() == Some("fail") && plan.classifiers.contains_key(current) {
+            project.tx(|tx| {
+                if checks::for_execution(tx, child)?.is_none() {
+                    checks::record(
+                        tx,
+                        checks::Record {
+                            execution: child,
+                            kind: "gate",
+                            verdict: "fail",
+                            ticket: ticket.id,
                         },
                     )?;
                 }
                 Ok(())
             })?;
-            return Err(fail);
+            let classified = match super::classify::landing(
+                daemon, project, &loaded, &result, &original,
+            )
+            .await
+            {
+                Ok(classified) => classified,
+                Err(fail) if fail.data["classification"].as_i64().is_some() => {
+                    return project.tx(|tx| {
+                        let classifier = fail.data["classification"]
+                            .as_i64()
+                            .expect("classified failure");
+                        attempts::raise(
+                            tx,
+                            attempts::Raise {
+                                kind: "red",
+                                reason: "classification",
+                                ticket: Some(ticket.id),
+                                attempt: Some(attempt.id),
+                                execution: Some(classifier),
+                                payload: json!({"detail": fail.message}),
+                                text: None,
+                            },
+                        )?;
+                        executions::end(
+                            tx,
+                            execution,
+                            executions::End {
+                                outcome: "error",
+                                detail: Some(&fail.message),
+                                ticket: Some(ticket.id),
+                                ..Default::default()
+                            },
+                        )
+                    });
+                }
+                Err(fail) => return Err(fail),
+            };
+            let Some((action, classifier)) = classified else {
+                break;
+            };
+            match action {
+                crate::plan::Continuation::Operator => break,
+                crate::plan::Continuation::Accept { .. } => {
+                    let accepted = super::capacity::effect(daemon, project, execution, async {
+                        let held = target_lock.lock().await;
+                        classification_input(
+                            daemon, project, execution, &result, &original, &target, &merged,
+                        )
+                        .await?;
+                        admit(daemon, project, &held, approval.id, execution, |tx, _| {
+                            super::classify::accept(tx, &loaded, classifier)
+                        })
+                        .await
+                    })
+                    .await?;
+                    match accepted {
+                        Ok(true) => {
+                            selected.push(child);
+                            continue 'gates;
+                        }
+                        Ok(false) => break,
+                        Err((now, lapse)) => {
+                            return withdraw(
+                                project,
+                                &now.loaded,
+                                execution,
+                                &now.approval,
+                                &now.attempt,
+                                &lapse,
+                            );
+                        }
+                    }
+                }
+                crate::plan::Continuation::Original | crate::plan::Continuation::Fixer { .. } => {
+                    let mut evidence = project
+                        .read(|conn| failed_evidence(conn, &result, &original))?
+                        .ok_or_else(|| Fail::refused("failed landing evidence is ineligible"))?;
+                    evidence["classification"] = json!({"execution": classifier});
+                    if let crate::plan::Continuation::Fixer { profile } = action {
+                        evidence["classification"]["fixer"] = json!(profile);
+                    }
+                    let detail = format!(
+                        "The gate {} failed on the merged ref {merged}:\n{}",
+                        gate.name,
+                        result.detail.as_deref().unwrap_or_default()
+                    );
+                    return super::capacity::effect(daemon, project, execution, async {
+                        let held = target_lock.lock().await;
+                        classification_input(
+                            daemon, project, execution, &result, &original, &target, &merged,
+                        )
+                        .await?;
+                        match admit(daemon, project, &held, approval.id, execution, |tx, _| {
+                            if !super::classify::current(tx, &executions::get(tx, classifier)?)? {
+                                return Err(Fail::refused("classification_input"));
+                            }
+                            Ok(())
+                        })
+                        .await?
+                        {
+                            Ok(()) => {
+                                returned(
+                                    daemon,
+                                    project,
+                                    execution,
+                                    &target,
+                                    "red",
+                                    &detail,
+                                    Some(&evidence),
+                                )
+                                .await
+                            }
+                            Err((now, lapse)) => withdraw(
+                                project,
+                                &now.loaded,
+                                execution,
+                                &now.approval,
+                                &now.attempt,
+                                &lapse,
+                            ),
+                        }
+                    })
+                    .await;
+                }
+                crate::plan::Continuation::Retry => {
+                    let mut pending_child = None;
+                    let retry = super::capacity::effect(daemon, project, execution, async {
+                        let held = target_lock.lock().await;
+                        classification_input(
+                            daemon, project, execution, &result, &original, &target, &merged,
+                        )
+                        .await?;
+                        let admitted =
+                            admit(daemon, project, &held, approval.id, execution, |tx, now| {
+                                if !super::classify::current(tx, &executions::get(tx, classifier)?)?
+                                {
+                                    return Err(Fail::refused("classification_input"));
+                                }
+                                let id = executions::start(
+                                    tx,
+                                    executions::Start {
+                                        attempt: Some(attempt.id),
+                                        parent: Some(execution),
+                                        kind: "gate",
+                                        reason: Some("landing"),
+                                        base: Some(&target),
+                                        head: Some(&merged),
+                                        proof: Some(&now.approval.proof),
+                                        ticket_revision: Some(now.ticket.revision),
+                                        digest: Some(&now.loaded.gate_digest),
+                                        name: Some(&gate.name),
+                                        ticket: Some(ticket.id),
+                                        ..Default::default()
+                                    },
+                                )?;
+                                super::classify::routed(tx, classifier, id)?;
+                                Ok(id)
+                            })
+                            .await?;
+                        if let Ok(child) = &admitted {
+                            pending_child = Some(*child);
+                        }
+                        Ok(admitted)
+                    })
+                    .await;
+                    let retry = match retry {
+                        Ok(retry) => retry,
+                        Err(fail) => {
+                            if let Some(child) = pending_child {
+                                project.tx(|tx| {
+                                    if executions::get(tx, child)?.status == "running" {
+                                        executions::end(
+                                            tx,
+                                            child,
+                                            executions::End {
+                                                outcome: "interrupted",
+                                                detail: Some(&fail.message),
+                                                ticket: Some(ticket.id),
+                                                ..Default::default()
+                                            },
+                                        )?;
+                                    }
+                                    Ok(())
+                                })?;
+                            }
+                            return Err(fail);
+                        }
+                    };
+                    child = match retry {
+                        Ok(id) => id,
+                        Err((now, lapse)) => {
+                            return withdraw(
+                                project,
+                                &now.loaded,
+                                execution,
+                                &now.approval,
+                                &now.attempt,
+                                &lapse,
+                            );
+                        }
+                    };
+                    run_child(daemon, project, child).await?;
+                    result = project.read(|conn| executions::get(conn, child))?;
+                }
+            }
         }
-        let result = project.read(|conn| executions::get(conn, child))?;
         match result.outcome.as_deref() {
             Some("reused")
                 if project.read(|conn| {
@@ -1094,10 +1395,15 @@ pub async fn land(
                 {
                     return super::capacity::effect(daemon, project, execution, async {
                         let held = target_lock.lock().await;
+                        if plan.classifiers.contains_key(current) {
+                            classification_input(daemon, project, execution, &result, &original, &target, &merged).await?;
+                        }
                         let admitted = admit(daemon, project, &held, approval.id, execution, |tx, now| {
-                            checks::record(tx, checks::Record {
-                                execution: child, kind: "gate", verdict: "fail", ticket: ticket.id,
-                            })?;
+                            if checks::for_execution(tx, child)?.is_none() {
+                                checks::record(tx, checks::Record {
+                                    execution: child, kind: "gate", verdict: "fail", ticket: ticket.id,
+                                })?;
+                            }
                             let evidence = failed_evidence(tx, &executions::get(tx, child)?, &original)?
                                 .ok_or_else(|| Fail::refused("failed landing evidence is ineligible"))?;
                             attempts::raise(tx, attempts::Raise {
@@ -1108,7 +1414,7 @@ pub async fn land(
                                     "revision": ticket.revision, "plan_revision": attempt.plan_revision(),
                                     "gate_digest": now.loaded.gate_digest,
                                     "review_digest": now.loaded.review_digest(&attempt.workflow)?,
-                                    "evidence": evidence}), text: None,
+                                    "evidence": evidence, "classification": super::classify::attention(tx, &now.attempt, &evidence)?}), text: None,
                             })?;
                             executions::end(tx, execution, executions::End {
                                 outcome: "fail", detail: Some(&detail), ticket: Some(ticket.id), ..Default::default()
@@ -1516,7 +1822,8 @@ async fn returned(
             "UPDATE attempt SET target = ?2, landing_reds = ?3 WHERE id = ?1",
             rusqlite::params![attempt.id, target, reds],
         )?;
-        if reds >= 2 {
+        let classification = evidence.and_then(|evidence| evidence.get("classification"));
+        if reds >= 2 && classification.is_none() {
             attempts::raise(
                 tx,
                 attempts::Raise {
@@ -1541,6 +1848,16 @@ async fn returned(
                 "node": evidence["node"], "output": "result"},
                 "value": {"verdict": "fail", "detail": detail, "target": target,
                     "branch": attempt.target_branch()?, "evidence": evidence}});
+        }
+        if let Some(classification) = classification {
+            next["feedback"]["classification"] = classification.clone();
+            super::classify::routed(
+                tx,
+                classification["execution"]
+                    .as_i64()
+                    .ok_or_else(|| Fail::refused("unbound_classification"))?,
+                execution,
+            )?;
         }
         attempts::set_next(tx, attempt.id, Some(&next))
     })

@@ -236,11 +236,6 @@ pub fn start_writer(
         .and_then(|row| row.base)
         .unwrap_or_else(|| attempt.base.clone())
     };
-    let name = implementer["name"].as_str().unwrap_or("default");
-    let harness_version = implementer["harness"]
-        .as_str()
-        .and_then(crate::harness::get)
-        .map(|harness| harness.version());
     // Choice invalidation clears next. Freeze its instructions in this execution.
     let audited_cleanup = node == "cleanup"
         && plan.as_ref().is_some_and(|plan| {
@@ -259,10 +254,11 @@ pub fn start_writer(
                 || json!({"kind": "verdict", "source": {"external": "feedback"}, "value": next}),
             )
         });
-    let inherited_feedback = if plan
+    let audited_handoff = plan
         .as_ref()
-        .is_some_and(|plan| plan.cleanup_audits().next().is_some())
-        && ((node == "repair" && reason == "first") || matches!(reason, "retry" | "restart"))
+        .is_some_and(|plan| plan.cleanup_audits().next().is_some());
+    let inherited_feedback = if (audited_handoff && node == "repair" && reason == "first")
+        || matches!(reason, "retry" | "restart")
     {
         let predecessor = if node == "repair" && reason == "first" {
             "cleanup"
@@ -282,6 +278,13 @@ pub fn start_writer(
         )?
         .pop()
         .filter(|row| predecessor == node || row.result_eligible)
+        .filter(|row| {
+            audited_handoff
+                || row
+                    .prepared
+                    .as_ref()
+                    .is_some_and(|prepared| prepared.get("fixer").is_some())
+        })
         .and_then(|row| row.inputs?.get("feedback").cloned())
     } else {
         None
@@ -290,6 +293,38 @@ pub fn start_writer(
         .or_else(|| attempt.next.as_ref().and_then(|next| next.get("feedback")))
         .or(inherited_feedback.as_ref())
         .or(pending_feedback.as_ref());
+    let fixer = if plan
+        .as_ref()
+        .and_then(|plan| plan.nodes.get(node))
+        .is_some_and(|node| node.outputs.get("result") == Some(&crate::plan::Output::Candidate))
+    {
+        feedback
+            .map(|feedback| super::classify::fixer(tx, &attempt, feedback))
+            .transpose()?
+            .flatten()
+    } else {
+        None
+    };
+    let implementer = if let Some(fixer) = &fixer {
+        let crate::plan::Runner::Agent { agent, .. } = &fixer.runner else {
+            return Err(Fail::refused("unbound_fixer"));
+        };
+        let mut settings =
+            attempt.admission.as_ref().expect("admitted fixer")["agents"][agent]["settings"]
+                .clone();
+        if !settings.is_object() {
+            return Err(Fail::refused("unbound_fixer"));
+        }
+        settings["name"] = json!(agent);
+        settings
+    } else {
+        implementer
+    };
+    let name = implementer["name"].as_str().unwrap_or("default");
+    let harness_version = implementer["harness"]
+        .as_str()
+        .and_then(crate::harness::get)
+        .map(|harness| harness.version());
     let reason = if node == "repair" && reason == "first" && feedback.is_some() {
         "repair"
     } else {
@@ -345,6 +380,12 @@ pub fn start_writer(
     if attempt.choice.is_some() {
         crate::store::selections::invalidate(tx, &attempt)?;
         crate::store::attempts::set_next(tx, attempt.id, None)?;
+    }
+    if let Some(fixer) = fixer {
+        tx.execute(
+            "UPDATE execution SET prepared = ?2 WHERE id = ?1",
+            rusqlite::params![id, json!({"fixer": fixer, "fixer_profile": feedback.map(|feedback| &feedback["classification"]["fixer"])}).to_string()],
+        )?;
     }
     tx.execute(
         "UPDATE execution SET body = ?2 WHERE id = ?1",
@@ -1083,7 +1124,7 @@ pub async fn implement(
             .map_err(|error| Fail::refused(error.to_string()))?,
         None => loaded.config.workflow_plan(&attempt.workflow)?,
     };
-    let declared = &plan.nodes[row.node.as_deref().unwrap_or("implementer")];
+    let declared = super::classify::effective_node(&plan, &row)?;
     let cleanup_audit = plan
         .cleanup_audits()
         .any(|(name, _)| row.node.as_ref() == Some(name));
@@ -1294,7 +1335,7 @@ pub async fn implement(
         return Ok(());
     }
     let node_name = row.node.as_deref().unwrap_or("implementer");
-    let runner = &plan.nodes[node_name].runner;
+    let runner = &declared.runner;
     if preparation_result(
         daemon,
         project,
@@ -1935,11 +1976,16 @@ pub async fn implement(
         )?; }
         let mut candidate = json!({"base": base, "head": new_head, "proof": digest});
         if plan.writers() || plan.handoff() {
+            let mut profile = attempt.admission.as_ref().map(|a| a["writer_profiles"][row.node.as_deref().unwrap_or("implementer")].clone()).unwrap_or(Value::Null);
+            if let Some(name) = row.prepared.as_ref().and_then(|prepared| prepared["fixer_profile"].as_str()) {
+                profile = attempt.admission.as_ref().expect("frozen fixer")["classifier_profiles"][name].clone();
+                profile["name"] = json!(name);
+            }
             candidate["candidate"] = json!(execution);
             candidate["workspace"] = json!(row.workspace);
             candidate["producer"] = json!({
                 "execution": execution, "node": row.node, "settings": row.settings,
-                "profile": attempt.admission.as_ref().map(|a| &a["writer_profiles"][row.node.as_deref().unwrap_or("implementer")])
+                "profile": profile
             });
         }
         executions::end(tx, execution, executions::End {
@@ -2037,7 +2083,7 @@ async fn stop_preparation(
 
 // An edit that landed before this execution's stop handle existed found nothing
 // to notify; the revision the execution started on tells.
-fn notify_if_edited(project: &Project, execution: i64, stop: &tokio::sync::Notify) {
+pub(super) fn notify_if_edited(project: &Project, execution: i64, stop: &tokio::sync::Notify) {
     let moved = project
         .read(|conn| {
             let row = executions::get(conn, execution)?;
@@ -2080,13 +2126,15 @@ async fn implementer_prompt(
         .map(crate::plan::Plan::admitted)
         .transpose()
         .map_err(|error| Fail::refused(error.to_string()))?;
-    let instructions = plan
+    let effective = plan
         .as_ref()
-        .and_then(|plan| {
-            match &plan.nodes[execution.node.as_deref().unwrap_or("implementer")].runner {
-                crate::plan::Runner::Agent { instructions, .. } => Some(instructions.as_str()),
-                _ => None,
-            }
+        .map(|plan| super::classify::effective_node(plan, execution))
+        .transpose()?;
+    let instructions = effective
+        .as_ref()
+        .and_then(|node| match &node.runner {
+            crate::plan::Runner::Agent { instructions, .. } => Some(instructions.as_str()),
+            _ => None,
         })
         .unwrap_or(&workflow.instructions);
     let writer_graph = plan.as_ref().is_some_and(|plan| plan.writers());
@@ -2873,6 +2921,9 @@ pub async fn birth(pid: u32) -> Option<String> {
 pub async fn context(daemon: &Arc<Daemon>, grant: &crate::mcp::Grant) -> Result<Value, Fail> {
     let project = &grant.project;
     let row = project.read(|conn| executions::get(conn, grant.execution))?;
+    if row.reason.as_deref() == Some("classification") {
+        return Ok(json!({"execution": row.id, "inputs": row.inputs}));
+    }
     if let Some(scope) = &row.scope {
         return Ok(json!({"execution": row.id, "attempt": row.attempt, "scope": scope}));
     }

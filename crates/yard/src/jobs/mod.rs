@@ -5,6 +5,7 @@
 
 pub mod admit;
 pub mod capacity;
+pub mod classify;
 pub mod cleanup;
 pub mod proof;
 pub mod queue;
@@ -62,7 +63,7 @@ pub async fn verification(
     };
     let policy = attempt.admission.as_ref().and_then(|admission| {
         let plan = crate::plan::Plan::admitted(admission).ok()?;
-        let node = plan.nodes.get(row.node.as_deref()?)?;
+        let node = classify::effective_node(&plan, &row).ok()?;
         Some(
             json!({"node": node, "config_blob": admission["inputs"]["config_blob"],
             "definition": executions::consumed_definition(
@@ -788,13 +789,21 @@ pub fn spawn(daemon: &Arc<Daemon>, project: &Arc<Project>, kind: &str, execution
         let result = if matches!(kind.as_str(), "command" | "report") {
             scoped::execute(&daemon, &project, execution).await
         } else if kind == "landing" {
-            queue::land(&daemon, &project, execution).await
+            // Keep native landing storage out of this large dispatch frame (Y-73).
+            Box::pin(queue::land(&daemon, &project, execution)).await
         } else {
             capacity::effect(&daemon, &project, execution, async {
                 match kind.as_str() {
                     "implementation" => supervise::implement(&daemon, &project, execution).await,
                     "gate" => supervise::gate(&daemon, &project, execution).await,
-                    "review" => review::run(&daemon, &project, execution).await,
+                    "review" => {
+                        let row = project.read(|conn| executions::get(conn, execution))?;
+                        if row.reason.as_deref() == Some("classification") {
+                            classify::run(&daemon, &project, execution).await
+                        } else {
+                            review::run(&daemon, &project, execution).await
+                        }
+                    }
                     "cleanup" => cleanup::run(&daemon, &project, execution).await,
                     _ => unreachable!("five kinds"),
                 }
@@ -1448,6 +1457,12 @@ async fn advance(
             completed.insert(current);
             continue;
         }
+        if failed
+            && decision.is_none()
+            && classify::route(daemon, project, loaded, attempt, &check, &input, &blocked)?
+        {
+            return Ok(());
+        }
         if failed && node.operator_failure && decision.is_none() {
             raise_candidate_failure(project, loaded, attempt, &check, &input, &evidence)?;
             return Ok(());
@@ -1530,6 +1545,49 @@ async fn advance(
     }
     if unfinished || active {
         return Ok(());
+    }
+    if !chosen_blocked.is_empty() && plan.finding_selector().is_some() {
+        for name in plan.complete_order().unwrap_or_default().into_iter().rev() {
+            if !plan.classifiers.contains_key(name) {
+                continue;
+            }
+            let Some(index) = name
+                .strip_prefix("review-")
+                .and_then(|index| index.parse::<usize>().ok())
+            else {
+                continue;
+            };
+            let input = checks::Input {
+                digest: review_digest.clone(),
+                ..gate_input.clone()
+            };
+            if let Some(check) = project
+                .read(|conn| checks::current(conn, "review", &workflow.review[index], &input))?
+                && project.read(|conn| {
+                    let result = executions::get(conn, check.execution)?;
+                    let carried = result.result.as_ref().and_then(|result| {
+                        result["outputs"]["result"]["value"]["blocked"].as_array()
+                    });
+                    Ok(chosen_blocked.iter().any(|blocked| blocked.id == check.id)
+                        || carried.is_some_and(|ids| {
+                            chosen_blocked
+                                .iter()
+                                .any(|blocked| ids.contains(&json!(blocked.id)))
+                        }))
+                })?
+                && classify::route(
+                    daemon,
+                    project,
+                    loaded,
+                    attempt,
+                    &check,
+                    &input,
+                    &chosen_blocked,
+                )?
+            {
+                return Ok(());
+            }
+        }
     }
     if let Some((check, evidence)) = chosen_failures.first() {
         let input = checks::Input {
@@ -1702,13 +1760,17 @@ fn raise_candidate_failure(
     project.tx(|tx| {
         let now = attempts::get(tx, attempt.id)?;
         let ticket = tickets::get(tx, attempt.ticket)?;
-        let payload = json!({
+        let mut payload = json!({
             "actor": "operator", "target": attempt.target_branch, "choice": attempt.choice,
             "base": input.base, "head": input.head, "proof": input.proof,
             "revision": input.ticket_revision, "plan_revision": attempt.plan_revision(),
             "gate_digest": loaded.gate_digest, "review_digest": loaded.review_digest(&attempt.workflow)?,
             "evidence": evidence,
         });
+        let classification = classify::attention(tx, &now, evidence)?;
+        if !classification.is_null() {
+            payload["classification"] = classification;
+        }
         if now.state != "live"
             || stale_part(&payload, &now, &ticket, loaded)?.is_some()
             || checks::current(tx, &check.kind, &check.name, input)?.map(|check| check.id)

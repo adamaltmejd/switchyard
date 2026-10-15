@@ -57,6 +57,7 @@ pub async fn start(
     let plan = loaded
         .config
         .resolve_graph(&Graph {
+            classifiers: BTreeMap::new(),
             inputs: BTreeMap::new(),
             nodes: BTreeMap::from([("standalone".into(), request.node)]),
         })
@@ -235,7 +236,7 @@ pub async fn execute(daemon: &Arc<Daemon>, project: &Arc<Project>, id: i64) -> R
                     biased;
                     _ = stop.notified() => Err(Fail::new("stopped", "operator stopped execution")),
                     _ = tokio::time::sleep_until(deadline) => Err(Fail::new("timeout", "original execution lifetime expired")),
-                    result = work(daemon, project, &row, deadline) => result,
+                    result = work(daemon, project, &row, scope, deadline) => result,
                 };
                 if result.is_err() {
                     daemon.grants.revoke(project, id);
@@ -283,13 +284,13 @@ pub async fn execute(daemon: &Arc<Daemon>, project: &Arc<Project>, id: i64) -> R
     Ok(())
 }
 
-async fn work(
+pub(super) async fn work(
     daemon: &Arc<Daemon>,
     project: &Arc<Project>,
     row: &executions::Execution,
+    scope: &Value,
     deadline: tokio::time::Instant,
 ) -> Result<(), Fail> {
-    let scope = row.scope.as_ref().expect("standalone scope");
     let policy = &scope["policy"];
     let node: crate::plan::Node = serde_json::from_value(policy["node"].clone())
         .map_err(|error| Fail::refused(error.to_string()))?;
@@ -315,6 +316,14 @@ async fn work(
         )
         .await?;
     let image = supervise::image(daemon, project, &loaded, row.id).await?;
+    let proof = row
+        .proof
+        .as_deref()
+        .filter(|digest| !digest.is_empty())
+        .map(|digest| {
+            super::proof::snapshot_path(project, row.attempt.expect("proof attempt"), digest)
+        });
+    let classification = row.reason.as_deref() == Some("classification");
     let (outcome, infrastructure, code, oom_kills, detail, output) = match &node.runner {
         Runner::Command { .. } => {
             let spec = BoxSpec {
@@ -341,6 +350,31 @@ async fn work(
                 egress: None,
                 memory: daemon.machine.box_memory.clone(),
             };
+            let mut spec = spec;
+            if classification {
+                let input = dir.join("classification-input");
+                std::fs::create_dir_all(&input).map_err(|error| error.to_string())?;
+                std::fs::write(
+                    input.join("classification.json"),
+                    row.inputs
+                        .as_ref()
+                        .expect("bound classifier inputs")
+                        .to_string(),
+                )
+                .map_err(|error| error.to_string())?;
+                spec.mounts.push(Mount {
+                    host: input,
+                    guest: "/yard/classification".into(),
+                    readonly: true,
+                });
+                if let Some(proof) = &proof {
+                    spec.mounts.push(Mount {
+                        host: proof.clone(),
+                        guest: "/yard/proof".into(),
+                        readonly: true,
+                    });
+                }
+            }
             let live = supervise::up_worker(daemon, project, row.id, &spec, &[]).await?;
             let argv = [
                 "sh".into(),
@@ -359,6 +393,15 @@ async fn work(
             let oom_kills = daemon.pinfold.oom_kills(&live.name).await;
             live.down(supervise::DOWN_TIMEOUT).await?;
             let result = result.map_err(|error| Fail::new("command", error.to_string()))?;
+            if classification {
+                if result.code != 0 {
+                    return Err(Fail::refused("classification_command_failed"));
+                }
+                let publication: Value = serde_json::from_str(&result.stdout)
+                    .map_err(|_| Fail::invalid("invalid_classification"))?;
+                project.tx(|tx| super::classify::publish(tx, row.id, &publication))?;
+                return finish_classification(project, row, Some(result.code), oom_kills);
+            }
             let outcome = if result.code == 0 {
                 "complete"
             } else {
@@ -422,16 +465,24 @@ async fn work(
                     image: &image,
                     workspace: &checkout,
                     read_only: true,
-                    proof: None,
+                    proof: proof.as_deref(),
                     harness,
                     stage,
                     model: &model,
-                    egress: &egress,
+                    egress: if classification { &[] } else { &egress },
                 },
             );
-            let prompt = format!(
-                "{instructions}\nPublish a read-only report with yard_publish_report. Frozen scope: {scope}"
-            );
+            let prompt = if classification {
+                format!(
+                    "{instructions}\nClassify these frozen failed-check inputs: {}\nPublish exactly once with yard_publish_report: outcome must be an exact declared name from {}; identity must equal the frozen identity object; report has a nonblank summary and findings list. A route is not a passing judgment or landing authorization.",
+                    row.inputs.as_ref().expect("inputs"),
+                    serde_json::to_string(&node.outcomes).expect("outcomes")
+                )
+            } else {
+                format!(
+                    "{instructions}\nPublish a read-only report with yard_publish_report. Frozen scope: {scope}"
+                )
+            };
             let argv = harness
                 .argv(&Launch {
                     provider: agent.provider.as_deref(),
@@ -515,6 +566,31 @@ async fn work(
                 infrastructure: Some(infrastructure),
                 oom_kills,
                 output,
+                ..Default::default()
+            },
+        )
+    })
+}
+
+fn finish_classification(
+    project: &Project,
+    row: &executions::Execution,
+    code: Option<i32>,
+    oom: Option<u64>,
+) -> Result<(), Fail> {
+    project.tx(|tx| {
+        let report = executions::get(tx, row.id)?
+            .report
+            .ok_or_else(|| Fail::refused("missing_classification"))?;
+        executions::end(
+            tx,
+            row.id,
+            executions::End {
+                outcome: "complete",
+                infrastructure: Some("completed"),
+                exit_code: code,
+                oom_kills: oom,
+                output: Some(json!({"kind": "report", "value": report})),
                 ..Default::default()
             },
         )
