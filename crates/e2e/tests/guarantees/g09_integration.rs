@@ -319,6 +319,8 @@ fn integration_retains_partial_work_and_approves_only_its_output() {
 /// G2/G9: real conflicting commits leave no candidate, choice or landing.
 /// Ordinary dirty-tree tests have no integration inputs or selectable sources.
 /// The same retained workspace resolves the conflict as the positive control.
+/// Dirty attention precedes checked owner release; continue only after the
+/// exact dirty execution has released and ended.
 /// Sabotage: select an input when integration fails, publish a dirty merge,
 /// or discard the conflict tree before repair. Git supplies conflict state.
 #[test]
@@ -361,7 +363,7 @@ fn integration_conflicts_require_repair_before_selection() {
     let mut watch = project.watch(0);
     settle_planner(&project, &mut watch);
     let attempt = start(&project);
-    watch.until("integration conflict attention", |event| {
+    let dirty = watch.until("integration conflict attention", |event| {
         event["event"] == "attention.raised" && event["data"]["reason"] == "dirty"
     });
     let clone = project.path.join(format!(
@@ -375,6 +377,11 @@ fn integration_conflicts_require_repair_before_selection() {
             .rows("SELECT id FROM execution WHERE node = 'selector'")
             .is_empty()
     );
+    for event in ["execution.released", "execution.ended"] {
+        watch.find("dirty integrator released", |entry| {
+            entry["event"] == event && entry["execution"] == dirty["execution"]
+        });
+    }
     continue_integration(&project);
     let bound = approval(&mut watch);
     assert_eq!(
