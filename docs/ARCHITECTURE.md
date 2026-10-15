@@ -932,6 +932,10 @@ untracked service, inherited-environment or credential-dependent behavior
 cannot use this declaration. This is conditional evidence reuse, not a claim
 that agents or models are generally deterministic.
 
+Selected judgment references are limited to bounded cleanup audit reports and
+native linear reviewer verdicts with no typed downstream consumer. Independent
+writer reviews, concurrent readers and other typed graph suppliers run fresh
+and publish concrete outputs; their schedulers and bindings require them.
 Eligible selected reports and reviewer verdicts require one known immutable
 candidate input, read-only access, no extra egress, observed image and supported
 runtime identity. Their identity binds the actual checkout tree, exact base

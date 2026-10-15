@@ -93,7 +93,8 @@ pub async fn verification(
     let definition = &evidence["policy"]["definition"];
     let selected = definition["agent"]["settings"]["judgment_inputs"].clone();
     let read_only = evidence["policy"]["node"]["access"] == "read-only";
-    if read_only
+    if checks::supports_judgment_reference(&attempt, &row)
+        && read_only
         && selected["configuration"]
             .as_str()
             .is_some_and(|s| !s.trim().is_empty())

@@ -334,6 +334,38 @@ fn judgment_identity(
     Ok(Some(identity))
 }
 
+/// Typed graph suppliers require concrete outputs. Only these readers resolve
+/// an original result through the current-check or bounded-audit reading.
+pub fn supports_judgment_reference(
+    attempt: &super::attempts::Attempt,
+    execution: &super::executions::Execution,
+) -> bool {
+    let Some(plan) = attempt
+        .admission
+        .as_ref()
+        .and_then(|admission| crate::plan::Plan::admitted(admission).ok())
+    else {
+        return false;
+    };
+    let Some(name) = execution.node.as_ref() else {
+        return false;
+    };
+    match execution.kind.as_str() {
+        "implementation" => plan.cleanup_audits().any(|(audit, _)| audit == name),
+        "review" => {
+            !plan.writers()
+                && !plan.concurrent()
+                && name.starts_with("review-")
+                && !plan.nodes.values().any(|node| {
+                    node.inputs
+                        .values()
+                        .any(|input| input.node.as_ref() == Some(name))
+                })
+        }
+        _ => false,
+    }
+}
+
 fn reusable_judgment(
     conn: &Connection,
     execution: &super::executions::Execution,
@@ -388,6 +420,9 @@ pub fn reusable(
 ) -> Result<Option<Value>, Fail> {
     let attempt = super::attempts::get(conn, execution.required_attempt()?)?;
     if execution.kind != "gate" {
+        if !supports_judgment_reference(&attempt, execution) {
+            return Ok(None);
+        }
         return reusable_judgment(conn, execution, evidence);
     }
     if execution.parent.is_none()

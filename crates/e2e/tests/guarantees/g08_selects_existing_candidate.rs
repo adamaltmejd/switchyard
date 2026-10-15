@@ -31,6 +31,9 @@ fn approval(watch: &mut Watch) -> Value {
 /// Git and fixture bytes supply heads/content; durable FKs bind findings.
 /// Sabotage: choose newest, copy losing reviews, grant picker writer/approval
 /// authority, omit choice identity or mutate historical evidence.
+/// Admit reference reuse for a writer-graph review despite its typed output
+/// consumers; the recorded eligibility assertion fails before a no-op retry
+/// could loop on reference-only reviews.
 #[test]
 fn only_the_declared_choice_is_checked_and_landed() {
     let holds: Vec<_> = (0..5).map(|_| Latch::new()).collect();
@@ -141,7 +144,8 @@ fn only_the_declared_choice_is_checked_and_landed() {
     });
     machine.start();
     let mut extra = String::from(
-        "\n[profiles.picker]\nrunner = {kind = 'agent', agent = 'worker', instructions = 'Compare frozen inputs.'}\naccess = 'read-only'\noutputs = {result = 'selection'}\noutcomes = ['complete']\n\
+        "\n[agents.worker.judgment_inputs]\nconfiguration = 'fixture-pinfold-v1'\nmodel = 'scripted-fixture-v1'\n\
+         [profiles.picker]\nrunner = {kind = 'agent', agent = 'worker', instructions = 'Compare frozen inputs.'}\naccess = 'read-only'\noutputs = {result = 'selection'}\noutcomes = ['complete']\n\
          [profiles.reader]\nrunner = {kind = 'agent', agent = 'worker', instructions = 'Same frozen reviewer.'}\naccess = 'read-only'\noutputs = {result = 'verdict'}\noutcomes = ['complete', 'blocked']\n\
          [gates.check]\ncommand = 'case \"$(cat same.txt)\" in writer-1-*) test \"$(cat same.txt)\" = \"$(cat /yard/proof/evidence.txt)\" || exit 91;; *) exit 91;; esac'\nstage = 'candidate'\n",
     );
@@ -464,6 +468,10 @@ fn only_the_declared_choice_is_checked_and_landed() {
         ),
     );
     assert_eq!(fresh_reviews.len(), 1);
+    let verification: Value =
+        serde_json::from_str(fresh_reviews[0]["verification"].as_str().unwrap()).unwrap();
+    assert_eq!(verification["reuse"], "disabled");
+    assert_eq!(fresh_reviews[0]["result"]["reference"], Value::Null);
     assert_eq!(fresh_reviews[0]["settings"]["model"], "fake-model");
     assert_eq!(
         fresh_reviews[0]["inputs"]["candidate"]["value"]["head"],
