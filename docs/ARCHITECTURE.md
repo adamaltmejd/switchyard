@@ -182,7 +182,10 @@ New project scaffolds include `ordinary`, `small`, `test-audit`, `cleanup`,
 `review-model-trial` presets. The ordinary preset includes candidate check,
 review and merged landing check. Small retains implementation alone.
 The skill audit is read-only. Cleanup uses the exclusive implementer,
-writable cleanup and repair path. Classification selects bounded original
+writable cleanup and repair path. Its original implementer has no inputs;
+cleanup requires that implementer's candidate, and repair requires cleanup's
+report and accepts optional external feedback. Checks consume repair's
+candidate and route failures back to repair. Classification selects bounded original
 repair, retry or operator handling. The join runs check and reviews
 concurrently before its exact result join. Independent writers use a
 candidate selector, optionally after named-input integration.

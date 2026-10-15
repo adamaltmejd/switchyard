@@ -207,7 +207,7 @@ inputs = {  }
 [presets.cleanup]
 inputs = { "feedback" = "verdict", "merged" = "candidate" }
 [presets.cleanup.nodes]
-"implementer" = { "profile" = "implementer", "inputs" = { "feedback" = { "output" = "feedback", "kind" = "verdict" } }, "routes" = { "complete" = [{ "to" = "cleanup" }] }, "workspace" = "implementer" }
+"implementer" = { "profile" = "implementer", "routes" = { "complete" = [{ "to" = "cleanup" }] }, "workspace" = "implementer" }
 "candidate-gate-check" = { "runner" = { "kind" = "command", "gate" = "check" }, "access" = "write-allowed", "outputs" = { "result" = "verdict" }, "outcomes" = ["complete", "failed"], "inputs" = { "candidate" = { "node" = "repair", "output" = "result", "kind" = "candidate" } }, "requires" = ["candidate"], "routes" = { "complete" = [{ "to" = "review-0" }], "failed" = [{ "to" = "repair", "repeat" = 1 }] } }
 "review-0" = { "profile" = "reviewer", "inputs" = { "candidate" = { "node" = "repair", "output" = "result", "kind" = "candidate" } }, "requires" = ["candidate"], "routes" = { "complete" = [{ "to" = "landing-gate-check" }], "blocked" = [{ "to" = "repair", "repeat" = 3 }] } }
 "landing-gate-check" = { "runner" = { "kind" = "command", "gate" = "check" }, "access" = "write-allowed", "outputs" = { "result" = "verdict" }, "outcomes" = ["complete"], "inputs" = { "merged" = { "output" = "merged", "kind" = "candidate" } }, "requires" = ["merged"], "routes" = {  } }
