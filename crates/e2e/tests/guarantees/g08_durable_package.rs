@@ -1024,6 +1024,7 @@ git -C nested config filter.trip.clean 'touch /workspace/.git/nested-filter-ran;
 touch -t 200001010000 nested/file.txt &&
 git status --porcelain && test -f .git/nested-filter-ran"#
                             } else {
+                                // Relative to .git in both host publication and the box.
                                 r#"printf 'implemented\n' > chain.txt && git add chain.txt && git commit -qm Implement &&
 git config core.fsmonitor 'touch /workspace/.git/fsmonitor-ran; false' &&
 git config filter.trip.clean 'touch /workspace/.git/filter-ran; cat' &&
@@ -1033,7 +1034,7 @@ touch -t 200001010000 chain.txt &&
 git -c core.fsmonitor=false status --porcelain && test -f .git/filter-ran &&
 git status --porcelain && test -f .git/fsmonitor-ran &&
 mkdir .git/alternate && git archive HEAD | tar -x -C .git/alternate &&
-git config core.worktree /workspace/.git/alternate"#
+git config core.worktree alternate"#
                             }
                         } else {
                             r#"test ! -e .git/fsmonitor-ran && test ! -e .git/filter-ran &&
