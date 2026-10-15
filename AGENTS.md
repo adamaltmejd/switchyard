@@ -62,6 +62,10 @@ rules for changing the repository.
   demand for exhaustive automated proof. A unique case does not earn a test
   by itself. Secondary options, configuration combinations, lifecycle
   permutations and historical versions may remain untested.
+- **Adapt before adding.** Change or replace an existing representative test
+  by default. Secondary behavior may stay untested. New permanent fixtures are
+  exceptional. Remove obsolete assertions and paths; judge the whole suite's
+  machines, historical builds, boxes and model turns, including added phases.
 - **Representative hard cases.** Prefer one difficult case over several easy
   variants of the same mechanism. Count actual fixture machines, builds, box
   launches and model turns; combining tests does not reduce that work.

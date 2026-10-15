@@ -15,6 +15,12 @@ representative end-to-end use. A unique mechanism or existing Shown by clause
 does not by itself justify its runtime and maintenance cost. Product controls
 remain exact; automated coverage is deliberately selective.
 
+For feature work, adapt or replace an existing representative test by default.
+Leave secondary behavior untested when appropriate. New permanent fixtures are
+exceptional. Remove obsolete assertions and paths instead of preserving them
+because they existed. Judge whole-suite cost, including resources hidden in
+added phases of an existing test. There is no scenario-count quota.
+
 ## Gate: a change touches a test
 
 For a new or changed assertion block, answer:
