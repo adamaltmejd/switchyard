@@ -1173,10 +1173,15 @@ fn manual_policy_withdraws_auto_approval_without_rejudgment() {
 /// G8: named original/fixer repairs precede an acceptance request. Sabotage:
 /// record continuation as pass, ignore the frozen fixer, accept an undeclared
 /// or stale publication, or let the classifier authorize landing itself.
+/// The edited original-profile worker starts fresh after the different fixer.
+/// Sabotage: resume the fixer's session or omit the new brief; the held request
+/// and its execution row expose the wrong inputs before the stale decision.
 #[test]
 fn delayed_candidate_acceptance_names_the_changed_identity_and_writes_nothing() {
     let hold = Latch::new();
     let held = hold.clone();
+    let edit_request = std::sync::Arc::new(std::sync::Mutex::new(None::<std::path::PathBuf>));
+    let model_edit_request = edit_request.clone();
     let classifications = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let counted = classifications.clone();
     let repairs = std::sync::atomic::AtomicUsize::new(0);
@@ -1238,7 +1243,12 @@ fn delayed_candidate_acceptance_names_the_changed_identity_and_writes_nothing() 
         if request.has_tool("yard_publish_review") {
             return act(request, vec![publish(json!([]))]);
         }
-        if request.opens() && request.last_user().contains("The operator edited") {
+        if request.opens()
+            && let Some(path) = model_edit_request.lock().unwrap().take()
+        {
+            assert_eq!(request.body["model"], "fake-model");
+            assert!(request.last_user().contains("New brief"));
+            std::fs::write(path, "edit-held\n").unwrap();
             return Reply::Hold(
                 held.clone(),
                 Box::new(Reply::Tools(vec![bash(
@@ -1259,6 +1269,14 @@ fn delayed_candidate_acceptance_names_the_changed_identity_and_writes_nothing() 
         };
         act(request, vec![bash(command)])
     });
+    let request_held = machine.root.join("edit-held");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&request_held)
+            .status()
+            .unwrap()
+            .success()
+    );
     machine.start();
     let project = Project::new(
         &machine,
@@ -1351,6 +1369,9 @@ runner = {kind = "agent", agent = "fixer", instructions = "Repair the frozen fai
     let accepted = operator.call("yard_attempt_accept", delayed.clone());
     assert!(accepted.get("error").is_none(), "{accepted}");
     assert_eq!(watch.attention()["data"]["kind"], "approval");
+    // Arm exactly one worker opening; a fresh session carries the full brief,
+    // while resumed-session delta prose is not a fixture synchronization point.
+    *edit_request.lock().unwrap() = Some(request_held.clone());
     project.json(&[
         "ticket",
         "edit",
@@ -1360,7 +1381,25 @@ runner = {kind = "agent", agent = "fixer", instructions = "Repair the frozen fai
         "--body",
         "New brief",
     ]);
+    let edited = watch.until("edited worker started", |event| {
+        assert_ne!(event["event"], "attention.raised", "{event}");
+        event["event"] == "execution.started"
+            && event["attempt"] == first["attempt"]
+            && event["data"]["kind"] == "implementation"
+            && event["data"]["reason"] == "edit"
+    });
+    let edit_execution = edited["execution"].as_i64().unwrap();
+    assert_eq!(
+        watch.said_before_end(&request_held, Some(edit_execution)),
+        "edit-held\n"
+    );
     hold.wait_held();
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT reason, model, resumed FROM execution WHERE id = {edit_execution}"
+        )),
+        vec![json!({"reason": "edit", "model": "fake-model", "resumed": null})]
+    );
     let before = project.rows("SELECT * FROM audit ORDER BY seq");
     let refused = operator.call("yard_attempt_accept", delayed.clone());
     assert_eq!(refused["error"]["code"], "stale");
