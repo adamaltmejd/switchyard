@@ -392,6 +392,9 @@ fn ordinary_writers_read_frozen_selected_inputs_and_adoption_starts_fresh() {
     let captured = probes.clone();
     let round = Mutex::new(0);
     let machine = Machine::new("g13-selected-ordinary", move |request| {
+        if request.has_tool("yard_publish_report") {
+            return planned(request);
+        }
         let mut round = round.lock().unwrap();
         if request.opens() {
             *round += 1;
@@ -454,18 +457,30 @@ references = ["reference.txt"]
         "new",
         "--title",
         "Use selected guidance",
-        "--parked",
+        "--workflow",
+        "plan",
     ]);
+    let planner = watch.event("attempt.ended", &[("outcome", "planned")]);
+    let cleanup = watch.find("planner cleanup", |event| {
+        event["event"] == "execution.ended"
+            && event["data"]["kind"] == "cleanup"
+            && event["attempt"] == planner["attempt"]
+    });
+    watch.find("planner released", |event| {
+        event["event"] == "execution.released" && event["execution"] == cleanup["execution"]
+    });
     let mut operator = machine.operator();
     operator.initialize();
     let started = operator.call(
         "yard_attempt_start",
         json!({
             "project": project.path, "ticket": "Y-1",
+            "workflow": "default",
             "overrides": {"implementer": {"profile": "selected"}}
         }),
     );
     assert!(started.get("error").is_none(), "{started}");
+    let attempt = started["result"]["attempt"].as_i64().unwrap();
     let approval = watch.attention();
     assert_eq!(approval["data"]["kind"], "approval", "{approval}");
     let admitted = project.json(&["attempt", "show", "Y-1"])["attempt"]["admission"].clone();
@@ -501,8 +516,7 @@ references = ["reference.txt"]
     assert!(probe.contains("source_write=0"), "{probe}");
     assert!(write_failed(&probe), "{probe}");
     assert!(probe.contains("unselected=1"), "{probe}");
-    let sessions =
-        project.rows("SELECT id, resumed FROM execution WHERE kind = 'implementation' ORDER BY id");
+    let sessions = project.rows(&format!("SELECT id, resumed FROM execution WHERE kind = 'implementation' AND attempt = {attempt} ORDER BY id"));
     assert_eq!(sessions[1]["resumed"], sessions[0]["id"], "{sessions:?}");
     let revised = operator.call(
         "yard_attempt_revise",
@@ -523,13 +537,13 @@ references = ["reference.txt"]
         revised_admission["inputs"]["selected_agent_sources"]["implementer"],
         adopted
     );
-    assert_eq!(project.rows("SELECT plan_revision, resumed FROM execution WHERE kind = 'implementation' ORDER BY id").last().unwrap(),
+    assert_eq!(project.rows(&format!("SELECT plan_revision, resumed FROM execution WHERE kind = 'implementation' AND attempt = {attempt} ORDER BY id")).last().unwrap(),
         &json!({"plan_revision": 2, "resumed": null}));
     let requests: Vec<_> = machine
         .model
         .requests()
         .into_iter()
-        .filter(ModelRequest::opens)
+        .filter(|request| request.opens() && !request.has_tool("yard_publish_report"))
         .collect();
     let fresh = requests.last().unwrap();
     assert_eq!(
@@ -556,8 +570,7 @@ references = ["reference.txt"]
             .last_user()
             .contains("/yard/input/trusted/unselected.md")
     );
-    let verification = project
-        .rows("SELECT verification FROM execution WHERE kind = 'implementation' ORDER BY id");
+    let verification = project.rows(&format!("SELECT verification FROM execution WHERE kind = 'implementation' AND attempt = {attempt} ORDER BY id"));
     let definition: Value = serde_json::from_str(
         verification.last().unwrap()["verification"]
             .as_str()

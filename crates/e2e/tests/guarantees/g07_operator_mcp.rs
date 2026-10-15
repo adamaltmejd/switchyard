@@ -230,6 +230,9 @@ runs_in = "box"
 /// Oracles are the empty fixture, host Git, real pinfold exec and model tokens.
 /// Sabotage: manufacture an attempt; discard scope; forward worker creation;
 /// mount report source writable; publish a check/approval or release early.
+/// Accept standalone selected skills/references without staging them; the
+/// selected-input refusal fails. Existing command/report starts are the
+/// same-project controls; fixture paths and unchanged store are the oracles.
 /// Attempt-backed reports cannot expose the absent association or authority.
 #[test]
 fn standalone_command_and_report_need_no_ticket_and_grant_no_landing_authority() {
@@ -354,6 +357,32 @@ export default function () {
     );
     assert_eq!(refused["error"]["code"], "refused");
     assert_eq!(refused["error"]["message"], "standalone_authority");
+    let before = project.rows("SELECT * FROM execution");
+    let audit = project.rows("SELECT * FROM audit");
+    for (field, path) in [("skills", "README.md"), ("references", "missing.txt")] {
+        let mut selected = scoped_node(true);
+        selected["runner"][field] = json!([path]);
+        let refused = operator.call(
+            "yard_execution_start",
+            args(
+                &project,
+                json!({"target": "main", "input": input, "node": selected, "timeout_seconds": 300}),
+            ),
+        );
+        assert_eq!(refused["error"]["code"], "refused", "{refused}");
+        assert_eq!(
+            refused["error"]["data"]["reason"], "standalone_selected_inputs",
+            "{refused}"
+        );
+        assert_eq!(
+            refused["error"]["data"]["input"],
+            format!("node.runner.{field}")
+        );
+        assert_eq!(refused["error"]["data"]["selected"], json!([path]));
+    }
+    assert_eq!(project.rows("SELECT * FROM execution"), before);
+    assert_eq!(project.rows("SELECT * FROM audit"), audit);
+    assert!(machine.model.requests().is_empty());
     let command = scoped_start(&mut operator, &project, &input, false);
     assert_eq!(
         history.said_before_end(&command_held, Some(command)),

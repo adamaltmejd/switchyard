@@ -70,6 +70,19 @@ pub async fn start(
     {
         return Err(Fail::refused("standalone_authority"));
     }
+    if let Runner::Agent {
+        skills, references, ..
+    } = &node.runner
+    {
+        for (field, paths) in [("skills", skills), ("references", references)] {
+            if !paths.is_empty() {
+                return Err(Fail::refused("standalone_selected_inputs").with(json!({
+                    "reason": "standalone_selected_inputs",
+                    "input": format!("node.runner.{field}"), "selected": paths
+                })));
+            }
+        }
+    }
     let (kind, gate, agent, version) = match &node.runner {
         Runner::Command { gate }
             if node.outputs == BTreeMap::from([("result".into(), Output::Verdict)]) =>
