@@ -66,6 +66,31 @@ jobs:
         env:
           YARD_E2E_DURABLE_INPUTS: ${{ runner.temp }}/yard-durable-inputs
         run: sh runners/durable-audit/fetch-build-inputs.sh "$YARD_E2E_DURABLE_INPUTS"
-      - run: cargo test -p e2e --locked
+      - name: Observe stopped audit ownership without changing runtime results
+        run: |
+          mkdir -p /tmp/yard-ci-owner-observations/bin
+          chmod 0755 .ci/observe-owner.py
+          ln -s "$GITHUB_WORKSPACE/.ci/observe-owner.py" /tmp/yard-ci-owner-observations/bin/pinfold
+          echo /tmp/yard-ci-owner-observations/bin >> "$GITHUB_PATH"
+      - name: Real e2e with bounded failure evidence
+        run: |
+          python3 .ci/observe-owner.py >/tmp/yard-ci-owner-observations/observer.stderr 2>&1 &
+          observer_pid=$!
+          set +e
+          cargo test -p e2e --locked
+          result=$?
+          set -e
+          touch /tmp/yard-ci-owner-observations/done
+          if wait "$observer_pid"; then observer_result=0; else observer_result=$?; fi
+          echo "observer_exit=$observer_result"
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('/tmp/yard-ci-owner-observations/observations.jsonl')
+          if p.exists():
+              data = p.read_bytes()
+              print(data[:2000000].decode(errors='replace'))
+              print('observer_bytes', len(data), 'truncated', len(data) > 2000000)
+          PY
+          exit "$result"
         env:
           YARD_E2E_DURABLE_INPUTS: ${{ runner.temp }}/yard-durable-inputs
