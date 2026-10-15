@@ -66,6 +66,132 @@ jobs:
         env:
           YARD_E2E_DURABLE_INPUTS: ${{ runner.temp }}/yard-durable-inputs
         run: sh runners/durable-audit/fetch-build-inputs.sh "$YARD_E2E_DURABLE_INPUTS"
-      - run: cargo test -p e2e --locked
+      - run: cargo test -p e2e --locked -- --show-output
         env:
           YARD_E2E_DURABLE_INPUTS: ${{ runner.temp }}/yard-durable-inputs
+
+  version:
+    runs-on: ubuntu-26.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Record Cargo.toml version
+        id: version
+        run: |
+          version="$(awk '
+            /^\[workspace\.package\]/ { f = 1; next }
+            /^\[/ { f = 0 }
+            f && $1 == "version" { gsub(/"/, "", $3); print $3; exit }
+          ' Cargo.toml)"
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-26.04
+            target: x86_64-unknown-linux-musl
+          - runner: ubuntu-26.04-arm
+            target: aarch64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Musl toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          rustup target add "${{ matrix.target }}"
+          cc="CC_${{ matrix.target }}"
+          echo "${cc//-/_}=musl-gcc" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: cargo build -p yard --release --locked --target "${{ matrix.target }}"
+
+      - name: Stage
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/yard" \
+            "dist/yard-${{ needs.version.outputs.version }}-${{ matrix.target }}"
+
+      - name: Record artifact identity
+        shell: bash
+        env:
+          YARD_ASSET_TARGET: ${{ matrix.target }}
+          YARD_ASSET_VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          asset="dist/yard-${YARD_ASSET_VERSION}-${YARD_ASSET_TARGET}"
+          "$asset" version --json > dist/version.json
+          (cd dist && shasum -a 256 "${asset#dist/}" > SHA256SUMS)
+          python3 - <<'PYCODE'
+          import hashlib, json, os, pathlib, subprocess
+          target = os.environ['YARD_ASSET_TARGET']
+          version = os.environ['YARD_ASSET_VERSION']
+          asset = pathlib.Path(f'dist/yard-{version}-{target}')
+          reported = json.loads(pathlib.Path('dist/version.json').read_text())
+          if reported.get('version') != version:
+              raise SystemExit(f'version mismatch: {reported!r}')
+          record = {'source': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+                    'target': target, 'version': version, 'asset': asset.name,
+                    'sha256': hashlib.sha256(asset.read_bytes()).hexdigest(),
+                    'reported_version': reported,
+                    'rustc': subprocess.check_output(['rustc', '--version'], text=True).strip()}
+          pathlib.Path('dist/manifest.json').write_text(json.dumps(record, indent=2) + '\n')
+          PYCODE
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: yard-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  macos:
+    needs: version
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build
+        run: cargo build -p yard --release --locked --target aarch64-apple-darwin
+
+      - name: Stage
+        run: |
+          mkdir -p dist
+          cp "target/aarch64-apple-darwin/release/yard" \
+            "dist/yard-${{ needs.version.outputs.version }}-aarch64-apple-darwin"
+
+      - name: Record artifact identity
+        shell: bash
+        env:
+          YARD_ASSET_TARGET: aarch64-apple-darwin
+          YARD_ASSET_VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          asset="dist/yard-${YARD_ASSET_VERSION}-${YARD_ASSET_TARGET}"
+          "$asset" version --json > dist/version.json
+          (cd dist && shasum -a 256 "${asset#dist/}" > SHA256SUMS)
+          python3 - <<'PYCODE'
+          import hashlib, json, os, pathlib, subprocess
+          target = os.environ['YARD_ASSET_TARGET']
+          version = os.environ['YARD_ASSET_VERSION']
+          asset = pathlib.Path(f'dist/yard-{version}-{target}')
+          reported = json.loads(pathlib.Path('dist/version.json').read_text())
+          if reported.get('version') != version:
+              raise SystemExit(f'version mismatch: {reported!r}')
+          record = {'source': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+                    'target': target, 'version': version, 'asset': asset.name,
+                    'sha256': hashlib.sha256(asset.read_bytes()).hexdigest(),
+                    'reported_version': reported,
+                    'rustc': subprocess.check_output(['rustc', '--version'], text=True).strip()}
+          pathlib.Path('dist/manifest.json').write_text(json.dumps(record, indent=2) + '\n')
+          PYCODE
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: yard-aarch64-apple-darwin
+          path: dist/*
+          if-no-files-found: error
