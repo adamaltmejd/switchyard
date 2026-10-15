@@ -336,7 +336,8 @@ fn concurrent_readers_share_capacity_and_join_exact_results_across_restart() {
                 } else {
                     "independent.txt"
                 },
-                if prompt.contains("Changed candidate fixture.") {
+                // A resumed session keeps the original prompt; edits arrive in the current brief.
+                if request.last_user().contains("Changed candidate fixture.") {
                     "fixture changed\n"
                 } else {
                     "fixture\n"
