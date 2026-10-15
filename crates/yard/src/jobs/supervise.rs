@@ -63,7 +63,20 @@ pub fn start_implementation(
 ) -> Result<i64, Fail> {
     let attempt = attempts::get(tx, attempt.id)?;
     let node = implementation_node(tx, &attempt)?;
-    start_writer(tx, &attempt, &node, reason, feedback)
+    let selection = if reason == "repair"
+        && attempt
+            .admission
+            .as_ref()
+            .map(crate::plan::Plan::admitted)
+            .transpose()
+            .map_err(|error| Fail::refused(error.to_string()))?
+            .is_some_and(|plan| plan.finding_selector().is_some())
+    {
+        Some(crate::store::selections::remediation(tx, &attempt)?)
+    } else {
+        None
+    };
+    start_writer(tx, &attempt, &node, reason, selection.as_ref().or(feedback))
 }
 
 pub fn start_writer(
@@ -1916,6 +1929,11 @@ async fn implementer_prompt(
             if let Some(gate) = next["gate"].as_str() {
                 prompt.push_str(&format!(
                     "The gate {gate} failed on your candidate:\n{detail}\n"
+                ));
+            } else if let Some(groups) = next.get("groups") {
+                prompt.push_str(&format!(
+                    "Repair these selected finding groups with their original contributors:\n{}\n",
+                    serde_json::to_string_pretty(groups).expect("groups serialize")
                 ));
             } else if let Some(findings) = next.get("findings") {
                 prompt.push_str(&format!(

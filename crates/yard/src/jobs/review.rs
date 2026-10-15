@@ -434,12 +434,34 @@ pub fn blocked(
     project.tx(|tx| {
         // Write only what the read saw: an edit since then owns the next step.
         let current = attempts::get(tx, attempt.id)?;
-        if attempts::superseded_by_edit(tx, attempt.id, ticket.id, ticket.revision)?
+        if current.state != "live"
+            || attempts::superseded_by_edit(tx, attempt.id, ticket.id, ticket.revision)?
             || current.plan_revision() != attempt.plan_revision()
             || current.rounds != attempt.rounds
             || current.choice != attempt.choice
+            || current.candidate() != attempt.candidate()
+            || current.proof != attempt.proof
         {
             return Ok(None);
+        }
+        let (base, head) = current.candidate().unwrap_or_default();
+        let input = checks::Input {
+            attempt: current.id,
+            base: base.to_owned(), head: head.to_owned(),
+            proof: current.proof.clone().unwrap_or_default(),
+            ticket_revision: ticket.revision, plan_revision: current.plan_revision(),
+            digest: loaded.review_digest(&current.workflow)?,
+        };
+        for check in blocked {
+            if checks::current(tx, "review", &check.name, &input)?.map(|row| row.id) != Some(check.id)
+                || checks::decision(tx, current.id, &checks::evidence(tx, check, &input)?)?.as_deref() == Some("accept") {
+                return Ok(None);
+            }
+        }
+        if current.admission.as_ref().map(crate::plan::Plan::admitted).transpose()
+            .map_err(|error| Fail::refused(error.to_string()))?
+            .is_some_and(|plan| plan.finding_selector().is_some()) {
+            crate::store::selections::remediation(tx, &current)?;
         }
         tx.execute(
             "UPDATE attempt SET rounds = ?2 WHERE id = ?1",

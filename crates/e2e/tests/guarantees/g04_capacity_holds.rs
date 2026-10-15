@@ -161,7 +161,8 @@ fn an_execution_ending_revokes_only_its_own_project_grant() {
 /// G2/G8/G13: the post-join picker refuses foreign and historical sources
 /// before publishing a subset and a duplicate with both exact contributors.
 /// Sabotage: select by prose/index/latest result, drop a contributor, erase raw
-/// findings, or reuse the prior selection after revision. Fixture prose and
+/// findings, forward all findings to repair, or let picker exclusion pass a
+/// required block. Fixture prose and
 /// model profiles supply values; public store finding identities supply sources.
 /// G5/G8: real successful picker teardown leaves an inherited host owner held.
 /// Sabotage: clear ownership before lock freedom, or recognize only pass/fail
@@ -195,6 +196,7 @@ fn concurrent_readers_share_capacity_and_join_exact_results_across_restart() {
     let foreign_source = Arc::new(std::sync::Mutex::new(None::<Value>));
     let picker_foreign = foreign_source.clone();
     let (reader_opened, reader_openings) = std::sync::mpsc::channel();
+    let (repair_sent, repair_received) = std::sync::mpsc::channel();
     let machine = Machine::new("g4-graph-join", move |request| {
         if request.has_tool("yard_publish_report") {
             return planned(request);
@@ -305,10 +307,10 @@ fn concurrent_readers_share_capacity_and_join_exact_results_across_restart() {
                     };
                     assert_eq!(request.body["model"], model);
                     let findings = if model == "left-model" {
-                        json!([{"priority": "P3", "body": "unselected"},
+                        json!([{"priority": if prompt.contains("Changed candidate fixture.") { "P1" } else { "P3" }, "body": "unselected"},
                             {"priority": "P3", "body": "shared"}, {"priority": "P3", "body": "useful"}])
                     } else {
-                        json!([{"priority": "P3", "body": "shared"}])
+                        json!([{"priority": if prompt.contains("Changed candidate fixture.") { "P1" } else { "P3" }, "body": "shared"}])
                     };
                     return Reply::Hold(
                         latch.clone(),
@@ -328,10 +330,25 @@ fn concurrent_readers_share_capacity_and_join_exact_results_across_restart() {
             );
         }
         let graph = prompt.contains("Graph");
+        let repairing = request
+            .last_user()
+            .contains("Repair these selected finding groups");
+        if repairing && request.opens() {
+            let brief = request.last_user();
+            assert!(!brief.contains("unselected"));
+            let groups = brief
+                .split("Repair these selected finding groups with their original contributors:\n")
+                .nth(1)
+                .unwrap();
+            let mut values = serde_json::Deserializer::from_str(groups).into_iter::<Value>();
+            repair_sent.send(values.next().unwrap().unwrap()).unwrap();
+        }
         let reply = act(
             request,
             vec![commit_file(
-                if graph {
+                if repairing {
+                    "repair.txt"
+                } else if graph {
                     "graph.txt"
                 } else {
                     "independent.txt"
@@ -432,11 +449,11 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
             "requires": ["candidate"], "routes": {
                 "complete": [{"to": "review-2", "repeat": null}],
                 "failed": [{"to": "implementer", "repeat": 1}]}},
-        "review-0": {"runner": {"kind": "agent", "agent": "left", "instructions": "Left reader."}, "access": "read-only",
+        "review-0": {"runner": {"kind": "agent", "agent": "left", "instructions": "Left reader."}, "access": "read-only", "operator_failure": true,
             "inputs": {"candidate": candidate}, "outputs": {"result": "verdict"}, "outcomes": ["complete", "blocked"],
             "requires": ["candidate"], "routes": {"complete": [{"to": "review-2", "repeat": null}],
                 "blocked": [{"to": "implementer", "repeat": 3}]}},
-        "review-1": {"runner": {"kind": "agent", "agent": "right", "instructions": "Right reader."}, "access": "read-only",
+        "review-1": {"runner": {"kind": "agent", "agent": "right", "instructions": "Right reader."}, "access": "read-only", "advisory": true,
             "inputs": {"candidate": candidate}, "outputs": {"result": "verdict"}, "outcomes": ["complete", "blocked"],
             "requires": ["candidate"], "routes": {"complete": [{"to": "review-2", "repeat": null}],
                 "blocked": [{"to": "implementer", "repeat": 3}]}},
@@ -991,8 +1008,95 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
         "--body",
         "Changed candidate fixture.",
     ]);
-    let fresh = watch.until("changed candidate gets fresh selection", |event| {
-        is_approval(event, "Y-1") && event["data"]["payload"]["head"] != head
+    let failure = watch.until("excluded required finding still blocks", |event| {
+        event["event"] == "attention.raised"
+            && event["ticket"] == "Y-1"
+            && event["data"]["kind"] == "candidate"
+    });
+    let decision = |item: &Value| {
+        json!({"project": project.path, "ticket": "Y-1",
+        "attention": item["attention"], "check": item["data"]["payload"]["evidence"]["check"]["check"],
+        "plan_revision": 2, "target": "main", "head": item["data"]["payload"]["head"],
+        "proof": item["data"]["payload"]["proof"], "text": "Exact required failure decision"})
+    };
+    assert_eq!(
+        failure["data"]["payload"]["evidence"]["check"]["verdict"],
+        "fail"
+    );
+    let before_repair = project.rows("SELECT * FROM finding ORDER BY id");
+    let reviews_before_repair = project.rows("SELECT e.*, c.id AS check_id, c.verdict AS check_verdict FROM execution e JOIN \"check\" c ON c.execution = e.id WHERE e.attempt = 3 ORDER BY e.id");
+    let selected = project.rows("SELECT result FROM execution WHERE attempt = 3 AND node = 'selector' ORDER BY id DESC LIMIT 1");
+    let selected: Value = serde_json::from_str(selected[0]["result"].as_str().unwrap()).unwrap();
+    let repair = operator.call("yard_attempt_repair", decision(&failure));
+    assert_eq!(repair["result"]["accepted"], false, "{repair}");
+    // The host observes the real resumed Pi request. Forwarding all findings
+    // or losing either shared contributor fails this exact group comparison.
+    let received = repair_received.recv_timeout(e2e::DEADLINE).unwrap();
+    let groups = &selected["outputs"]["result"]["value"]["groups"];
+    let mut routed = received.clone();
+    for group in routed.as_array_mut().unwrap() {
+        group.as_object_mut().unwrap().remove("contributors");
+    }
+    assert_eq!(&routed, groups);
+    for group in received.as_array().unwrap() {
+        let contributors = group["contributors"].as_array().unwrap();
+        assert_eq!(
+            contributors.len(),
+            group["sources"].as_array().unwrap().len()
+        );
+        for (contributor, source) in contributors
+            .iter()
+            .zip(group["sources"].as_array().unwrap())
+        {
+            assert_eq!(&contributor["finding"]["source"], source);
+            let review = selected["outputs"]["result"]["value"]["inputs"]
+                .as_object()
+                .unwrap()
+                .values()
+                .find(|input| {
+                    input["value"]["review"]["findings"]
+                        .as_array()
+                        .is_some_and(|findings| {
+                            findings.iter().any(|finding| finding["source"] == *source)
+                        })
+                })
+                .unwrap();
+            for field in ["check", "node", "settings", "inputs"] {
+                assert_eq!(contributor[field], review["value"]["review"][field]);
+            }
+            assert_ne!(contributor["finding"]["body"], "unselected");
+            assert_eq!(
+                contributor["finding"]["body"],
+                if group["reason"] == "useful subset" {
+                    "useful"
+                } else {
+                    "shared"
+                }
+            );
+        }
+    }
+    let failure = watch.until("repair retains required verdict control", |event| {
+        event["event"] == "attention.raised"
+            && event["ticket"] == "Y-1"
+            && event["data"]["kind"] == "candidate"
+            && event["attention"] != failure["attention"]
+    });
+    let mut unauthorized = decision(&failure);
+    unauthorized["head"] = json!(head);
+    let refused = operator.call("yard_attempt_accept", unauthorized);
+    assert_eq!(refused["error"]["code"], "stale", "{refused}");
+    assert_eq!(refused["error"]["data"]["identity"], "head");
+    assert_eq!(refused["error"]["data"]["expected"], head);
+    assert_eq!(
+        refused["error"]["data"]["current"],
+        failure["data"]["payload"]["head"]
+    );
+    assert!(project.rows("SELECT id FROM attention WHERE attempt = 3 AND kind = 'approval' AND state = 'open'").is_empty());
+    let accepted = operator.call("yard_attempt_accept", decision(&failure));
+    assert_eq!(accepted["result"]["accepted"], true, "{accepted}");
+    let fresh = watch.until("exact acceptance permits approval", |event| {
+        is_approval(event, "Y-1")
+            && event["data"]["payload"]["head"] == failure["data"]["payload"]["head"]
     });
     let new_head = git(
         &project.path.join(".yard/local/attempts/3/clone"),
@@ -1004,11 +1108,42 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
     assert_eq!(fresh["data"]["payload"]["head"], new_head);
     let fresh_selections =
         project.rows("SELECT * FROM execution WHERE attempt = 3 AND node = 'selector' ORDER BY id");
-    assert_eq!(fresh_selections.len(), 3);
+    assert_eq!(fresh_selections.len(), 4);
     assert_eq!(&fresh_selections[..2], selections.as_slice());
-    assert_selection(&fresh_selections[2], 2, &new_head);
+    assert_selection(
+        &fresh_selections[2],
+        2,
+        selected["outputs"]["result"]["value"]["inputs"]["candidate"]["value"]["head"]
+            .as_str()
+            .unwrap(),
+    );
+    assert_selection(&fresh_selections[3], 2, &new_head);
+    let retained = project.rows("SELECT * FROM finding ORDER BY id");
+    for finding in before_repair {
+        assert_eq!(
+            retained.iter().find(|row| row["id"] == finding["id"]),
+            Some(&finding)
+        );
+    }
+    let reviews_after_repair = project.rows("SELECT e.*, c.id AS check_id, c.verdict AS check_verdict FROM execution e JOIN \"check\" c ON c.execution = e.id WHERE e.attempt = 3 ORDER BY e.id");
+    for review in reviews_before_repair {
+        assert_eq!(
+            reviews_after_repair
+                .iter()
+                .find(|row| row["id"] == review["id"]),
+            Some(&review)
+        );
+    }
+    let repairs = project.rows("SELECT inputs FROM execution WHERE attempt = 3 AND reason = 'repair' AND kind = 'implementation'");
+    assert_eq!(repairs.len(), 1);
+    let feedback: Value = serde_json::from_str(repairs[0]["inputs"].as_str().unwrap()).unwrap();
+    assert_eq!(feedback["feedback"]["value"]["groups"], received);
+    assert_eq!(
+        feedback["feedback"]["source"]["execution"],
+        selected["outputs"]["result"]["value"]["picker"]["execution"]
+    );
     let fresh_inputs: Value =
-        serde_json::from_str(fresh_selections[2]["inputs"].as_str().unwrap()).unwrap();
+        serde_json::from_str(fresh_selections[3]["inputs"].as_str().unwrap()).unwrap();
     for name in ["left", "right", "join"] {
         assert_ne!(
             fresh_inputs[name]["source"]["execution"],

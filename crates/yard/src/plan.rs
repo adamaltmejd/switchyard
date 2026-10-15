@@ -115,6 +115,7 @@ impl Profile {
     pub fn node(&self) -> Node {
         Node {
             operator_failure: false,
+            advisory: false,
             runner: self.runner.clone(),
             access: self.access.clone(),
             outputs: self.outputs.clone(),
@@ -148,6 +149,8 @@ pub struct Route {
 pub struct Node {
     #[serde(default, skip_serializing_if = "is_false")]
     pub operator_failure: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub advisory: bool,
     pub runner: Runner,
     pub access: Access,
     #[serde(default)]
@@ -166,6 +169,8 @@ pub struct Node {
 pub struct NodeSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operator_failure: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advisory: Option<bool>,
     pub profile: Option<String>,
     pub runner: Option<Runner>,
     pub access: Option<Access>,
@@ -189,6 +194,10 @@ impl NodeSpec {
             };
         }
         Ok(Node {
+            advisory: self
+                .advisory
+                .or_else(|| base.map(|n| n.advisory))
+                .unwrap_or(false),
             operator_failure: self
                 .operator_failure
                 .or_else(|| base.map(|n| n.operator_failure))
@@ -345,6 +354,7 @@ impl Config {
             "implementer".to_string(),
             Node {
                 operator_failure: false,
+                advisory: false,
                 runner: Runner::Agent {
                     agent: workflow.implementer.clone(),
                     instructions: workflow.instructions.clone(),
@@ -381,6 +391,7 @@ impl Config {
                             format!("review-{index}"),
                             Node {
                                 operator_failure: false,
+                                advisory: false,
                                 runner: Runner::Agent {
                                     agent: seat.agent.clone(),
                                     instructions: seat.instructions.clone(),
@@ -414,6 +425,7 @@ impl Config {
                         ),
                         Node {
                             operator_failure: false,
+                            advisory: false,
                             runner: Runner::Command {
                                 gate: gate.name.clone(),
                             },
@@ -727,6 +739,18 @@ impl Plan {
         }
         let mut base = self.clone();
         base.nodes.remove("selector");
+        for (name, node) in &mut base.nodes {
+            if node.advisory {
+                if !name.starts_with("review-")
+                    || node.operator_failure
+                    || !matches!(node.runner, Runner::Agent { .. })
+                    || node.outputs.get("result") != Some(&Output::Verdict)
+                {
+                    return false;
+                }
+                node.advisory = false;
+            }
+        }
         for node in base.nodes.values_mut() {
             if let Some(routes) = node.routes.get_mut("complete") {
                 routes.retain(|r| r.to != "selector");

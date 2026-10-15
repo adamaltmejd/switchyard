@@ -1142,6 +1142,23 @@ async fn advance(
         let evidence = project.read(|conn| checks::evidence(conn, &check, &input))?;
         let decision = project.read(|conn| checks::decision(conn, attempt.id, &evidence))?;
         let failed = check.verdict != "pass" || (outcome == "blocked" && !blocked.is_empty());
+        if plan.finding_selector().is_some() && kind == "review" {
+            // Selection directs repair after the exact join. Required verdicts
+            // and their operator decisions remain independent.
+            if !node.advisory {
+                selected.push(check.id);
+                if decision.as_deref() == Some("accept") {
+                    accepted.push(evidence);
+                } else if check.verdict != "pass" {
+                    chosen_blocked.push(check.clone());
+                    if node.operator_failure && decision.is_none() {
+                        chosen_failures.push((check.clone(), evidence));
+                    }
+                }
+            }
+            completed.insert(current);
+            continue;
+        }
         if failed && node.operator_failure && decision.is_none() {
             raise_candidate_failure(project, loaded, attempt, &check, &input, &evidence)?;
             return Ok(());
@@ -1441,6 +1458,7 @@ fn candidate_reviewed(
     Ok(plan.nodes.values().any(|node| {
         matches!(node.runner, crate::plan::Runner::Agent { .. })
             && node.outputs.get("result") == Some(&crate::plan::Output::Verdict)
+            && !node.advisory
             && (plan.selector().is_none()
                 || producer.is_some_and(|producer| {
                     node.inputs
