@@ -485,6 +485,8 @@ Ticket edits retire superseded pending instructions before scheduling fresh
 producers. Steering validates the live choice, never a prior choice snapshot.
 Pending dispatch revalidates its observed ticket, plan, choice, candidate, proof
 and instructions inside the lane-reservation and writer-start transaction.
+It also requires the observed unread-edit status. A deliberate restart consumes
+already observed edits or plan handoffs; a later change supersedes dispatch.
 An obsolete dispatch has no lane, clock, writer, choice or approval effect.
 Dispatch resolves the producer from that validated choice inside its transaction.
 The new producer execution

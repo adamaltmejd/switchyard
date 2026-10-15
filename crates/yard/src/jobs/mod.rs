@@ -775,7 +775,9 @@ async fn advance(
                     || now.proof != attempt.proof
                     || now.lane != attempt.lane
                     || now.next.as_ref() != Some(next)
-                    || attempts::superseded_by_edit(tx, now.id, ticket.id, ticket.revision)?
+                    // A deliberate restart consumes observed edits and handoffs.
+                    || tickets::get(tx, ticket.id)?.revision != ticket.revision
+                    || attempts::edit_pending(tx, now.id)? != edited
                     || (now.choice.is_some()
                         && crate::store::selections::current(tx, &now)?.is_none())
                     || runnable(tx, loaded, &now)?.is_none()
