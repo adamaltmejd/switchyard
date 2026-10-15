@@ -128,7 +128,9 @@ fn output_schema() -> Value {
 fn node_schema() -> Value {
     json!({"type": "object", "additionalProperties": false, "properties": {
         "profile": {"type": "string"},
+        "workspace": {"type": "string"},
         "operator_failure": {"type": "boolean"},
+        "advisory": {"type": "boolean"},
         "runner": {"oneOf": [
             {"type": "object", "properties": {"kind": {"const": "agent"},
                 "agent": {"type": "string"}, "instructions": {"type": "string"},
