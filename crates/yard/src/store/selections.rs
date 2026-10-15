@@ -117,6 +117,52 @@ pub fn finding_current(
             == Some(&output["value"]))
 }
 
+/// Resolve only a committed exact selection, never current review prose.
+pub fn remediation(conn: &Connection, attempt: &attempts::Attempt) -> Result<Value, Fail> {
+    let row = executions::query(
+        conn,
+        "attempt = ?1 AND node = 'selector' ORDER BY id DESC LIMIT 1",
+        [attempt.id],
+    )?
+    .pop()
+    .ok_or_else(|| Fail::refused("selection_input"))?;
+    if !finding_current(conn, attempt, &row)? {
+        return Err(Fail::refused("selection_input"));
+    }
+    let value = &row.result.as_ref().expect("eligible selection")["outputs"]["result"]["value"];
+    let mut groups = value["groups"]
+        .as_array()
+        .expect("validated groups")
+        .clone();
+    for group in &mut groups {
+        let mut contributors = Vec::new();
+        for source in group["sources"].as_array().expect("validated sources") {
+            let (review, finding) = row
+                .inputs
+                .as_ref()
+                .and_then(Value::as_object)
+                .into_iter()
+                .flat_map(|inputs| inputs.values())
+                .filter(|input| input["kind"] == "verdict")
+                .find_map(|input| {
+                    let review = &input["value"]["review"];
+                    review["findings"]
+                        .as_array()?
+                        .iter()
+                        .find(|finding| &finding["source"] == source)
+                        .map(|finding| (review, finding))
+                })
+                .expect("validated contributor");
+            contributors.push(json!({"finding": finding, "check": review["check"],
+                "node": review["node"], "settings": review["settings"], "inputs": review["inputs"]}));
+        }
+        group["contributors"] = json!(contributors);
+    }
+    Ok(json!({"kind": "verdict", "source": {"external": "feedback",
+        "execution": row.id, "node": row.node, "output": "result"},
+        "value": {"verdict": "fail", "groups": groups}}))
+}
+
 pub fn publication(row: &executions::Execution, candidate: &str) -> Result<Value, Fail> {
     let input = row.inputs.as_ref().and_then(|inputs| inputs.get(candidate))
         .filter(|input| input["kind"] == "candidate")

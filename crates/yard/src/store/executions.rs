@@ -1273,6 +1273,7 @@ pub fn end(tx: &Connection, id: i64, end: End) -> Result<(), Fail> {
                 blocked.dedup();
                 if let Some(check) = &publication
                     && check.verdict == "fail"
+                    && !node.advisory
                 {
                     blocked.push(json!(check.id));
                 }

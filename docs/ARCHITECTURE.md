@@ -369,6 +369,14 @@ each exactly once. The candidate, reviewers and join retain the controls
 above. Each bound review input exposes its immutable result, raw public
 findings, check, frozen node, settings and inputs.
 
+Only this graph may explicitly mark an agent review `advisory: true`.
+Shared plan validation rejects advisory declarations outside this complete
+family, including advisory selectors.
+Reviews default to required. Advisory reviews cannot declare
+`operator_failure`; their findings remain eligible picker inputs, but their
+own failed checks do not contribute required blocks or replace required
+checks. Required blocks carried through a join remain required.
+
 The existing Selector grant and `yard_publish_selection` accept exactly
 `{groups: [{reason: "TEXT", sources: [SOURCE, ...]}, ...]}` for this node.
 There are at most 200 groups; an empty selection is allowed. Each group has
@@ -392,8 +400,25 @@ a changed candidate or revision requires fresh inputs and selection. Raw
 source findings, verdicts, results and usage remain unchanged and inspectable.
 An interrupted or superseded picker follows the existing checked review
 recovery; infrastructure failure retains the report without an eligible
-selection. This output changes no candidate choice, check, repair, acceptance,
-approval or landing authority. Candidate selection below is unchanged.
+selection. After the join and checked picker release, required failed reviews
+still take their exact operator decision or existing bounded repair/limit
+path. Excluding a required finding never accepts its check or passes its
+verdict. A required join's operator handling applies to unresolved required
+blocks carried by its immutable result, even when its own check passes.
+Exact join acceptance settles only the blocks that result carries; earlier
+accepted blocks do not trigger new attention or repair.
+A review-finding repair freezes precisely the committed groups into
+the existing implementer execution's feedback. Each group carries its reason,
+exact source references and every original contributor's finding, check, frozen node,
+settings and inputs. The repair prompt exposes those groups. Missing or stale
+selection refuses before review-finding repair starts; no partial or
+prior-candidate action set is used. Advisory findings may contribute to this
+repair action set.
+Gate, landing and pre-publication repairs retain their own failure feedback
+and do not require a finding selection. Selection adds no lifecycle or grant
+and changes no candidate choice, acceptance, protected approval, ownership
+or landing authority. Candidate
+selection below is unchanged.
 
 A selected `writer-graph` declares independent writable agent roots,
 including `implementer`, on the same attempt, frozen ticket and target.
@@ -2210,7 +2235,7 @@ combination, lifecycle or historical version.
 | 5 | Intent precedes effect, and a restart loses only the turn; Durable continuation is a new exclusive execution after proved predecessor removal; individually useful work needs no ticket | A real held writable turn survives daemon death as interrupted work and resumes its retained tree. Startup removes a surviving host gate process group before requeue. A legacy owner without trustworthy lock proof remains reserved across upgrade. Matching Durable unsafe intent resumes only after old-box removal; corrupt checkpoint identity refuses before a fresh retry. A completed registered finding picker retains its immutable selection, reservation and exact ownership item across restart while a real runtime descendant holds its inherited effect lock after box removal; checked release reconciles only that item without replay. |
 | 6 | Inputs are validated at the boundary; new supported workflow admissions retain immutable resolved input evidence, and unrecorded history stays unknown; standalone scope is explicit | Malformed worker MCP input writes no proposal; the valid same-turn control succeeds. Unsupported selected admission creates no work, while a supported held execution keeps its frozen inputs across template sync. A real historical store preserves rows, audit and foreign keys and supports current decisions after upgrade. |
 | 7 | A ticket lands end to end and leaves only rows; usage is optional measured data with provenance; Codex token totals retain their meaning and unreported monetary cost is unknown | A real ticket goes through commit, gate, review, approval and native landing, then leaves rows while unrelated live work remains. Actual optional Pi frames retain unknown, interrupted partial and resumed explicit-zero measurements across reopen. Operator stdio preserves worker authorization and stale mutation identity while canceled waits and stdin EOF leave work running. Standalone command/report execution has no ticket or landing authority. |
-| 8 | Reviews, audits and read-only candidate and finding selections are explicit bounded publications; an empty selected panel is unreviewed; selected eligible merged failures require exact operator decisions | Silent or unregistered review publication cannot authorize approval; a proven same-project retry can. Report validation and held publication preserve exact frozen identity and eligibility, and successful text alone creates no report. Five-model selection binds own reviews and one replacement to actual landing. A correctly resealed changed packaged controller refuses before model/code effects; its unmodified control publishes through real Pi. The exact multi-model join picker refuses malformed groups and repeated contributors before a valid subset and two-source duplicate publication; checked ownership release makes one typed finding selection inspectable, preserves raw sources and grants no verdict, choice or landing authority. |
+| 8 | Reviews, audits and read-only candidate and finding selections are explicit bounded publications; an empty selected panel is unreviewed; selected eligible merged failures require exact operator decisions | Silent or unregistered review publication cannot authorize approval; a proven same-project retry can. Report validation and held publication preserve exact frozen identity and eligibility, and successful text alone creates no report. Five-model selection binds own reviews and one replacement to actual landing. A correctly resealed changed packaged controller refuses before model/code effects; its unmodified control publishes through real Pi. The exact multi-model join picker refuses malformed groups and repeated contributors before a valid subset and two-source duplicate publication. Checked ownership release preserves one typed selection and all raw sources. Its repair prompt carries precisely the selected groups, including an advisory contributor; an excluded required block still refuses stale acceptance before exact acceptance permits approval. |
 | 9 | Each implementer execution starts from its frozen target and the right candidate; independent writers retain isolated reusable workspaces, including integration from named candidates; the bounded implementer, cleanup and repair path retains one exclusive clone | A held worker receives operator edits and adopted definitions in its next execution. Stop/start delivers the edit while retaining configured model identity. Five independent writer workspaces preserve their own bytes, sessions and frozen read-only review inputs through continuation and restart. Held integration retains partial work across restart; source writes and canonical access fail while its own write succeeds. Conflicts require repair before selection. Boxed Git inodes, fixture bytes and ancestry survive sequential selected roles; a held cleanup refuses a competing workspace retry, and checked release precedes handoff. |
 | 10 | The queue lands one at a time per target and re-judges what does not merge | Two approvals land in order; a red merge returns for repair. A feature ticket uses its frozen target source, definitions and image, repairs a real conflict, and lands only on that branch. |
 | 11 | Only the operator's sync changes `.yard` and canonical from outside | A worker configuration commit is refused before gates; operator sync makes the same configuration available to future admission. Named-branch import, divergence refusal and consume preserve main and another imported branch, with dirty/other-checkout refusals and allowed controls. |
