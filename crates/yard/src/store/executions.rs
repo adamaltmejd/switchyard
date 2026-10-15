@@ -929,14 +929,6 @@ pub fn binding(
     Ok(Some((node, Value::Object(inputs))))
 }
 
-pub fn inputs_ready(
-    conn: &Connection,
-    attempt: &super::attempts::Attempt,
-    start: &Start,
-) -> Result<bool, Fail> {
-    Ok(binding(conn, attempt, start)?.is_some())
-}
-
 /// Reuse an actual producer, never relabel its revision. Complete routing
 /// selects successors; every other node policy and its typed inputs bind evidence.
 pub fn qualifies(

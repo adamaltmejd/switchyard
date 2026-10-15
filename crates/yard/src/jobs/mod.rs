@@ -946,23 +946,6 @@ async fn advance(
                 unfinished = true;
                 continue;
             }
-            if attempt.admission.is_some()
-                && !project.read(|conn| {
-                    executions::inputs_ready(
-                        conn,
-                        attempt,
-                        &executions::Start {
-                            kind,
-                            name: Some(name),
-                            digest: Some(digest),
-                            ..shared
-                        },
-                    )
-                })?
-            {
-                unfinished = true;
-                continue;
-            }
             let agent = match &node.runner {
                 crate::plan::Runner::Agent { agent, .. } => Some(agent.as_str()),
                 _ => None,
@@ -974,24 +957,44 @@ async fn advance(
                 .and_then(|agent| crate::harness::get(&loaded.config.agents[agent].harness))
                 .map(|harness| harness.version());
             let execution = project.tx(|tx| {
-                attempts::require_plan(tx, attempt.id, attempt.plan_revision())?;
-                if attempts::superseded_by_edit(tx, attempt.id, ticket.id, ticket.revision)? {
+                let now = attempts::get(tx, attempt.id)?;
+                if now.state != "live"
+                    || now.plan_revision() != attempt.plan_revision()
+                    || now.choice != attempt.choice
+                    || now.candidate() != attempt.candidate()
+                    || now.proof != attempt.proof
+                    || now.next.is_some()
+                    || attempts::superseded_by_edit(tx, attempt.id, ticket.id, ticket.revision)?
+                    || (now.choice.is_some()
+                        && crate::store::selections::current(tx, &now)?.is_none())
+                {
                     return Ok(None);
                 }
-                executions::start(
-                    tx,
-                    executions::Start {
-                        kind,
-                        name: Some(name),
-                        digest: Some(digest),
-                        reason: Some(if kind == "gate" { "candidate" } else { "first" }),
-                        round: (kind == "review").then_some(attempt.rounds + 1),
-                        agent: agent.zip(settings.as_ref()),
-                        harness_version,
-                        ..shared
-                    },
-                )
-                .map(Some)
+                let start = executions::Start {
+                    kind,
+                    name: Some(name),
+                    digest: Some(digest),
+                    reason: Some(if kind == "gate" { "candidate" } else { "first" }),
+                    round: (kind == "review").then_some(attempt.rounds + 1),
+                    agent: agent.zip(settings.as_ref()),
+                    harness_version,
+                    ..shared
+                };
+                if now.admission.is_some() {
+                    let Some((_, inputs)) = executions::binding(tx, &now, &start)? else {
+                        return Ok(None);
+                    };
+                    // The gate's checkout and columns must name the same candidate
+                    // as its immutable selection input, before any row is created.
+                    if plan.selector().is_some()
+                        && inputs["candidate"]["value"]
+                            != json!({"base": start.base, "head": start.head,
+                                "proof": start.proof.unwrap_or_default()})
+                    {
+                        return Ok(None);
+                    }
+                }
+                executions::start(tx, start).map(Some)
             })?;
             if let Some(execution) = execution {
                 spawn(daemon, project, kind, execution);

@@ -438,6 +438,10 @@ Candidate gates require its `selection` result and consume the chosen candidate;
 landing gates consume the ordinary external `merged` input. Only the chosen
 candidate's own declared reviews count toward approval. Blocking reviews retain
 the ordinary repair bound and exact failure acceptance after candidate gates.
+Candidate-gate admission revalidates the observed choice, candidate and proof
+and current declared input eligibility inside the execution-start transaction.
+Its base, head and proof must match the immutable selected candidate input;
+superseded admission creates no execution.
 Trusted operator failure policy may select those reviewers and native candidate
 or landing gates. Chosen eligible failures raise the ordinary exact candidate
 accept/repair item; landing failures bind the prepared input and original child.
