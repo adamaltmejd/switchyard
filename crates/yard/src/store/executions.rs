@@ -1,4 +1,4 @@
-use super::{Target, audit, now};
+use super::{Target, audit, json_column, now};
 use crate::api::Fail;
 use crate::harness::{Usage, UsageFields};
 use rusqlite::{Connection, OptionalExtension, Row, params};
@@ -56,20 +56,6 @@ const COLUMNS: &str = "id, attempt, parent, kind, reason, status, outcome, detai
 
 pub const RESULT_ELIGIBLE: &str = "status = 'ended' AND reserved = 0 AND teardown = 1
     AND json_extract(result, '$.outputs.result') IS NOT NULL";
-
-fn json_column(row: &Row, index: usize) -> rusqlite::Result<Option<Value>> {
-    row.get::<_, Option<String>>(index)?
-        .map(|text| {
-            serde_json::from_str(&text).map_err(|error| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    index,
-                    rusqlite::types::Type::Text,
-                    Box::new(error),
-                )
-            })
-        })
-        .transpose()
-}
 
 fn row(row: &Row) -> rusqlite::Result<Execution> {
     Ok(Execution {
@@ -1292,6 +1278,7 @@ pub fn end(tx: &Connection, id: i64, end: End) -> Result<(), Fail> {
                 blocked.dedup();
                 if let Some(check) = &publication
                     && check.verdict == "fail"
+                    && !node.advisory
                 {
                     blocked.push(json!(check.id));
                 }

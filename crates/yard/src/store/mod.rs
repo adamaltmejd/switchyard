@@ -31,6 +31,20 @@ pub struct Target {
     pub attention: Option<i64>,
 }
 
+fn json_column(row: &Row, index: usize) -> rusqlite::Result<Option<Value>> {
+    row.get::<_, Option<String>>(index)?
+        .map(|text| {
+            serde_json::from_str(&text).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    index,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })
+        })
+        .transpose()
+}
+
 impl Store {
     pub fn open(dir: &Path) -> Result<Store, String> {
         std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;

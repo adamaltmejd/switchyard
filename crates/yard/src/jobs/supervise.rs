@@ -2083,6 +2083,11 @@ async fn implementer_prompt(
                 prompt.push_str(&format!(
                     "The gate {gate} failed on your candidate:\n{detail}\n"
                 ));
+            } else if let Some(groups) = next.get("groups") {
+                prompt.push_str(&format!(
+                    "Repair these selected finding groups with their original contributors:\n{}\n",
+                    serde_json::to_string_pretty(groups).expect("groups serialize")
+                ));
             } else if let Some(findings) = next.get("findings") {
                 prompt.push_str(&format!(
                     "Review blocked your candidate. Findings:\n{}\n",

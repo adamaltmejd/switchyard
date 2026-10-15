@@ -116,6 +116,7 @@ impl Profile {
         Node {
             workspace: None,
             operator_failure: false,
+            advisory: false,
             runner: self.runner.clone(),
             access: self.access.clone(),
             outputs: self.outputs.clone(),
@@ -151,6 +152,8 @@ pub struct Node {
     pub workspace: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub operator_failure: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub advisory: bool,
     pub runner: Runner,
     pub access: Access,
     #[serde(default)]
@@ -171,6 +174,8 @@ pub struct NodeSpec {
     pub workspace: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operator_failure: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advisory: Option<bool>,
     pub profile: Option<String>,
     pub runner: Option<Runner>,
     pub access: Option<Access>,
@@ -194,6 +199,10 @@ impl NodeSpec {
             };
         }
         Ok(Node {
+            advisory: self
+                .advisory
+                .or_else(|| base.map(|n| n.advisory))
+                .unwrap_or(false),
             workspace: self
                 .workspace
                 .clone()
@@ -355,6 +364,7 @@ impl Config {
             Node {
                 workspace: None,
                 operator_failure: false,
+                advisory: false,
                 runner: Runner::Agent {
                     agent: workflow.implementer.clone(),
                     instructions: workflow.instructions.clone(),
@@ -392,6 +402,7 @@ impl Config {
                             Node {
                                 workspace: None,
                                 operator_failure: false,
+                                advisory: false,
                                 runner: Runner::Agent {
                                     agent: seat.agent.clone(),
                                     instructions: seat.instructions.clone(),
@@ -426,6 +437,7 @@ impl Config {
                         Node {
                             workspace: None,
                             operator_failure: false,
+                            advisory: false,
                             runner: Runner::Command {
                                 gate: gate.name.clone(),
                             },
@@ -795,6 +807,7 @@ impl Plan {
         };
         if picker.access != Access::ReadOnly
             || picker.operator_failure
+            || picker.advisory
             || picker.outputs != BTreeMap::from([("result".into(), Output::FindingSelection)])
             || picker.outcomes != ["complete"]
             || !picker.routes.is_empty()
@@ -885,6 +898,18 @@ impl Plan {
         }
         let mut base = self.clone();
         base.nodes.remove("selector");
+        for (name, node) in &mut base.nodes {
+            if node.advisory {
+                if !name.starts_with("review-")
+                    || node.operator_failure
+                    || !matches!(node.runner, Runner::Agent { .. })
+                    || node.outputs.get("result") != Some(&Output::Verdict)
+                {
+                    return false;
+                }
+                node.advisory = false;
+            }
+        }
         for node in base.nodes.values_mut() {
             if let Some(routes) = node.routes.get_mut("complete") {
                 routes.retain(|r| r.to != "selector");
@@ -1782,6 +1807,20 @@ impl Plan {
             for end in ends {
                 pending.remove(&end);
             }
+        }
+        if let Some((name, _)) = self.nodes.iter().find(|(_, node)| node.advisory)
+            && !std::iter::once("default")
+                .chain(config.workflows.keys().map(String::as_str))
+                .any(|workflow| {
+                    config
+                        .workflow_plan(workflow)
+                        .is_ok_and(|ordinary| self.finding_selection(&ordinary, config))
+                })
+        {
+            return Err(Invalid::new(
+                format!("nodes.{name}.advisory"),
+                "invalid_input",
+            ));
         }
         Ok(())
     }

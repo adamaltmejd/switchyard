@@ -10,7 +10,7 @@ pub mod model;
 
 pub use model::*;
 use serde_json::{Value, json};
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::OnceLock;
@@ -380,17 +380,6 @@ pub struct Project<'a> {
     pub path: PathBuf,
 }
 
-/// Distinct real merge commits expose regeneration without relying on the clock.
-pub fn distinct_merge_dates(machine: &Machine) -> String {
-    format!(
-        "case \" $* \" in *' commit-tree '*)\n\
-         merge_date='2000-01-01T00:00:00Z'; if [ -e '{}' ]; then merge_date='2000-01-02T00:00:00Z'; fi\n\
-         touch '{}'; export GIT_AUTHOR_DATE=\"$merge_date\" GIT_COMMITTER_DATE=\"$merge_date\";; esac\n",
-        machine.root.join("merged-once").display(),
-        machine.root.join("merged-once").display()
-    )
-}
-
 /// A configuration naming one Pi agent on the fake model.
 pub fn config(extra: &str) -> String {
     agent_config(
@@ -692,54 +681,6 @@ enum Heard {
     Said(String),
 }
 
-/// Spawn `yard status --watch --json`, with `--since` when given. It exits
-/// once an item is open.
-pub fn watch_attention(project: &Project<'_>, since: Option<i64>) -> Child {
-    let mut command = project.machine.command();
-    command
-        .current_dir(&project.path)
-        .args(["status", "--watch", "--json"]);
-    if let Some(since) = since {
-        command.arg("--since").arg(since.to_string());
-    }
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .expect("spawn yard status --watch")
-}
-
-/// Wait for a `status --watch` child to exit and parse what it printed:
-/// `{"seq", "attention"}`.
-#[track_caller]
-pub fn watch_answer(mut child: Child) -> Value {
-    let stdout = child.stdout.take().expect("piped stdout");
-    let (send, heard) = mpsc::channel();
-    std::thread::spawn(move || {
-        let mut text = String::new();
-        let _ = BufReader::new(stdout).read_to_string(&mut text);
-        let _ = send.send(text);
-    });
-    let text = heard.recv_timeout(DEADLINE).unwrap_or_else(|_| {
-        let _ = child.kill();
-        let _ = child.wait();
-        panic!("yard status --watch did not exit within {DEADLINE:?}");
-    });
-    let status = child.wait().expect("wait for yard status --watch");
-    assert!(status.success(), "yard status --watch failed");
-    serde_json::from_str(&text).expect("status --watch prints JSON")
-}
-
-/// The open items a `status --watch` child printed.
-#[track_caller]
-pub fn attention_items(child: Child) -> Vec<Value> {
-    watch_answer(child)["attention"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-}
-
 /// `Watch::said` where no daemon serves a watch.
 #[track_caller]
 pub fn said(path: &Path) -> String {
@@ -868,11 +809,6 @@ pub fn codex_shell(command: &str) -> ToolCall {
 /// Write `files` and commit them in one Codex shell call.
 pub fn codex_files(files: &[(&str, &str)], message: &str) -> ToolCall {
     codex_shell(&files_command(files, message))
-}
-
-/// One file, one commit, through Codex's shell tool.
-pub fn codex_commit_file(path: &str, text: &str, message: &str) -> ToolCall {
-    codex_files(&[(path, text)], message)
 }
 
 /// Yard's publish tool as Codex's Responses request advertises it: a tool
@@ -1060,16 +996,6 @@ impl Operator {
             }
         }
         self.child.wait().expect("wait for operator")
-    }
-
-    /// A malformed transport frame, through the same real input pipe.
-    pub fn oversized_frame(&mut self) {
-        use std::io::Write;
-        self.input
-            .as_mut()
-            .expect("operator input open")
-            .write_all(&vec![b'x'; 1024 * 1024 + 1])
-            .unwrap();
     }
 }
 
