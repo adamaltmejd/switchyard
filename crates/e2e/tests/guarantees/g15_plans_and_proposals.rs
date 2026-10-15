@@ -409,6 +409,13 @@ fn an_upgrade_preserves_ended_planner_proposals_and_limit_overrides() {
     assert_eq!(owner["data"]["kind"], "red");
     assert_eq!(owner["data"]["payload"]["lock_contract"], false);
     assert_eq!(restored_project.canonical_head(), old_head);
+    assert_eq!(
+        restored_project.rows(&format!(
+            "SELECT reserved, intent_state FROM execution WHERE id = {}",
+            intent["id"]
+        )),
+        vec![json!({"reserved": 1, "intent_state": "open"})]
+    );
     std::fs::write(&release, "go\n").unwrap();
     assert_eq!(restore_watch.said(&done), "done\n");
     assert_eq!(
@@ -416,22 +423,33 @@ fn an_upgrade_preserves_ended_planner_proposals_and_limit_overrides() {
         intent["intent_merged"].as_str().unwrap()
     );
     drop(restore_watch);
-    restored.kill();
-    restored.start();
-    // Canonical agreement alone is not ownership proof for this old intent.
-    // Sabotage: release the legacy reservation or replay its landing on reopen.
-    assert_eq!(
-        restored_project.rows(&format!(
-            "SELECT reserved, intent_state, intent_ref FROM execution WHERE id = {}",
-            intent["id"]
-        )),
-        vec![json!({"reserved": 1, "intent_state": "open", "intent_ref": "refs/heads/main"})]
-    );
-    assert!(
-        restored_project
-            .rows("SELECT seq FROM audit WHERE event = 'landing.recorded'")
-            .is_empty()
-    );
+    // The old landing lock and absent box support release after the child
+    // exits. Canonical then matches the held intent's exact merged head.
+    // Sabotage: refuse the supported legacy landing lock, lose the recovered
+    // intent identity, or record the same landing again on reopen.
+    for phase in ["after child release", "after recovered landing reopen"] {
+        restored.kill();
+        restored.start();
+        assert_eq!(
+            restored_project.rows(&format!(
+                "SELECT status, outcome, lock_contract, reserved, intent_state, intent_ref FROM execution WHERE id = {}",
+                intent["id"]
+            )),
+            vec![json!({"status": "ended", "outcome": "landed", "lock_contract": 0,
+                "reserved": 0, "intent_state": "resolved", "intent_ref": "refs/heads/main"})],
+            "{phase}"
+        );
+        assert_eq!(
+            restored_project.rows("SELECT execution FROM audit WHERE event = 'landing.recorded'"),
+            vec![json!({"execution": intent["id"]})],
+            "{phase}"
+        );
+        assert_eq!(
+            restored_project.canonical_head(),
+            intent["intent_merged"].as_str().unwrap(),
+            "{phase}"
+        );
+    }
     assert_eq!(
         restored_project.rows("SELECT overrode FROM approval"),
         vec![json!({"overrode": 1})]
