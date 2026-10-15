@@ -441,6 +441,8 @@ fn selected_failures_keep_exact_operator_accept_and_repair() {
 /// With B's repair pending, a real scheduler Git read holds lane reacquisition.
 /// Choosing A refuses without a write; choosing the same exact B still repairs B.
 /// Sabotage: activate A while retaining B's pending target-fetch instructions.
+/// Explicit starts of A or B must leave automatic repair alone.
+/// Sabotage: let an operator writer start consume or relabel pending repair.
 #[test]
 fn only_the_declared_choice_is_checked_and_landed() {
     let holds: Vec<_> = (0..5).map(|_| Latch::new()).collect();
@@ -1251,6 +1253,49 @@ fn only_the_declared_choice_is_checked_and_landed() {
         reselected[0]["result"]["outputs"]["result"]["value"]["candidate"],
         choice[0]["inputs"]["c1"]
     );
+    let before_attempts = project.rows("SELECT * FROM attempt ORDER BY id");
+    let before_executions = project.rows("SELECT * FROM execution ORDER BY id");
+    let before_approvals = project.rows("SELECT * FROM approval ORDER BY id");
+    let before_attention = project.rows("SELECT * FROM attention ORDER BY id");
+    let before_audit = project.rows("SELECT * FROM audit ORDER BY seq");
+    for workspace in ["implementer", "writer-1"] {
+        let refused = operator.call(
+            "yard_attempt_start",
+            json!({
+                "project": project.path, "ticket": "Y-1", "workspace": workspace
+            }),
+        );
+        assert_eq!(refused["error"]["code"], "refused", "{refused}");
+        assert_eq!(refused["error"]["data"]["reason"], "pending_continuation");
+        assert_eq!(refused["error"]["data"]["identity"], "pending_continuation");
+        assert_eq!(refused["error"]["data"]["attempt"], attempt);
+        assert_eq!(
+            refused["error"]["data"]["choice"],
+            selected["result"]["choice"]
+        );
+        assert_eq!(refused["error"]["data"]["current"], next);
+        assert_eq!(
+            project.rows("SELECT * FROM attempt ORDER BY id"),
+            before_attempts
+        );
+        assert_eq!(
+            project.rows("SELECT * FROM execution ORDER BY id"),
+            before_executions
+        );
+        assert_eq!(
+            project.rows("SELECT * FROM approval ORDER BY id"),
+            before_approvals
+        );
+        assert_eq!(
+            project.rows("SELECT * FROM attention ORDER BY id"),
+            before_attention
+        );
+        assert_eq!(
+            project.rows("SELECT * FROM audit ORDER BY seq"),
+            before_audit
+        );
+        assert_eq!(std::fs::read(&bundle).unwrap(), bundle_bytes);
+    }
     std::fs::remove_file(&pending_armed).unwrap();
     std::fs::remove_file(&pending_ready).unwrap();
     std::fs::write(&pending_release, "go\n").unwrap();

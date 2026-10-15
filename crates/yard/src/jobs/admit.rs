@@ -100,6 +100,22 @@ fn take_lane_in(tx: &rusqlite::Connection, loaded: &Loaded, attempt: i64) -> Res
     Ok(true)
 }
 
+fn refuse_pending_continuation(conn: &rusqlite::Connection, attempt: i64) -> Result<(), Fail> {
+    let attempt = attempts::get(conn, attempt)?;
+    if attempt
+        .admission
+        .as_ref()
+        .is_some_and(|admission| admission["runtime"] == "writer-graph")
+        && let Some(next) = attempt.next
+    {
+        return Err(Fail::refused("pending_continuation").with(json!({
+            "reason": "pending_continuation", "identity": "pending_continuation",
+            "attempt": attempt.id, "choice": attempt.choice, "current": next
+        })));
+    }
+    Ok(())
+}
+
 /// Whether the scheduler would admit a ready ticket given a free lane: its
 /// workflow exists, and a read-only workflow runs once, then only by
 /// `yard attempt start`.
@@ -1623,6 +1639,13 @@ pub async fn attempt_start(
         .iter()
         .any(|key| params.get(*key).is_some());
     let id = ticket_param(params)?;
+    // A pending writer dispatch needs no configuration read to refuse a rival start.
+    project.read(|conn| {
+        if let Some(attempt) = attempts::live_for(conn, id)? {
+            refuse_pending_continuation(conn, attempt.id)?;
+        }
+        Ok(())
+    })?;
     let canonical = project.canonical.lock().await;
     let items = project.read(|conn| {
         let mut items = attempts::open_attention(conn)?;
@@ -1704,6 +1727,7 @@ pub async fn attempt_start(
             let _admission = daemon.admission.lock().expect("admission lock");
             project.tx(|tx| {
                 attempts::require_plan(tx, attempt.id, attempt.plan_revision())?;
+                refuse_pending_continuation(tx, attempt.id)?;
                 let open = attempts::open_for_attempt(tx, attempt.id)?;
                 if let Some(item) = open.iter().find(|item| {
                     (item.kind == "stopped" && item.reason == "timeout")
@@ -1917,6 +1941,7 @@ async fn answer_start(
                     let _admission = daemon.admission.lock().expect("admission lock");
                     project.tx(|tx| {
                         attempts::require_plan(tx, attempt.id, attempt.plan_revision())?;
+                        refuse_pending_continuation(tx, attempt.id)?;
                         if let Some(blocker) = attempts::open_for_attempt(tx, attempt.id)?
                             .iter()
                             .find(|open| {
