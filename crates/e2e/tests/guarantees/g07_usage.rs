@@ -204,9 +204,24 @@ fi"#,
     }
     let project_stats = operator.call("yard_project_stats", json!({"project": project.path}));
     assert_eq!(project_stats["result"]["aggregate"], stats["aggregate"]);
+    // Retire this fixture's work before abandonment makes the ticket ready
+    // again. Project totals must still include every execution it admits.
+    let parked = operator.call(
+        "yard_ticket_park",
+        json!({"project": project.path, "ticket": "Y-1"}),
+    );
+    assert_eq!(parked["result"]["parked"], true);
     project.json(&["attempt", "abandon", "Y-1"]);
-    history.until("cleanup", |event| {
-        event["event"] == "execution.ended" && event["data"]["kind"] == "cleanup"
+    let cleanup = history.until("old attempt cleanup", |event| {
+        event["event"] == "execution.ended"
+            && event["data"]["kind"] == "cleanup"
+            && event["attempt"] == stats["attempt"]
+    });
+    assert_eq!(cleanup["data"]["outcome"], "removed");
+    // An ended cleanup can still own its reservation. Reopen only after the
+    // exact execution's checked release, rather than racing reconciliation.
+    history.find("old attempt cleanup released", |event| {
+        event["event"] == "execution.released" && event["execution"] == cleanup["execution"]
     });
     assert!(!project.path.join(".yard/local/attempts/1").exists());
     drop(operator);
