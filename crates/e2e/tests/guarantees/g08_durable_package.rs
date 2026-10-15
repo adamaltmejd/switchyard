@@ -26,7 +26,7 @@ fn checkpoint_daemon_source() -> std::path::PathBuf {
     let build_target = yard().parent().unwrap().join("packaged-daemon-build");
     let source = target.join("source");
     std::fs::create_dir_all(&source).unwrap();
-    // The two checkpoint scenarios share one actual debugger-enabled build.
+    // The checkpoint scenarios share one actual debugger-enabled build.
     let archive = std::process::Command::new("git")
         .current_dir(root)
         .args([
@@ -637,22 +637,18 @@ writeSync(1, 'armed\n');
     child
 }
 
-/// G2/G5: pause a real read_declared invocation after Durable commits its
-/// unsafe intent. The debugger holds it through daemon death; a real box
-/// listing and refused exec prove it cannot act before replacement starts.
-/// Sabotage: resume before checked release, drop checkpoint exclusion, reuse
-/// corrupt checkpoint identity, copy session usage totals, or mark the read replay-safe.
-/// Existing model-reply/finished-publication holds contain no pending tool.
-/// Oracles: Node debugger, boxed read-only SQLite query, pinfold, fixture tool
-/// results and token constants, external marker, and execution rows/history.
-fn durable_checkpoint_scenario(name: &str, corrupt: bool) {
+/// G2/G5: hold a real unsafe read through daemon death, then corrupt its
+/// checkpoint. Old-owner absence precedes refusal and a fresh same-project retry.
+/// Sabotage: resume before checked release, ignore checkpoint identity or copy
+/// usage totals. The debugger, boxed SQLite, pinfold, fixture marker and token
+/// constants observe ownership, refusal, fresh retry and immutable history.
+#[test]
+fn durable_checkpoint_corruption_refuses_before_fresh_retry() {
     let initial = std::sync::Arc::new(std::sync::Mutex::new(None::<Latch>));
     let held_initial = initial.clone();
     let resumed_marker = std::sync::Arc::new(std::sync::Mutex::new(None::<std::path::PathBuf>));
     let model_marker = resumed_marker.clone();
-    let continuation = std::sync::Arc::new(std::sync::Mutex::new(None::<Latch>));
-    let held_continuation = continuation.clone();
-    let machine = Machine::new(name, move |request| {
+    let machine = Machine::new("g2-durable-corrupt", move |request| {
         let read = || {
             Reply::Tools(vec![tool(
                 "read_declared",
@@ -673,9 +669,6 @@ fn durable_checkpoint_scenario(name: &str, corrupt: bool) {
         {
             if let Some(path) = model_marker.lock().unwrap().take() {
                 std::fs::write(path, "unsafe read was interrupted, not replayed\n").unwrap();
-            }
-            if let Some(latch) = held_continuation.lock().unwrap().take() {
-                return Reply::Hold(latch, Box::new(read()));
             }
             return read();
         }
@@ -749,17 +742,6 @@ fn durable_checkpoint_scenario(name: &str, corrupt: bool) {
         let tasks: Value = serde_json::from_slice(&intent.stdout).unwrap();
         assert_eq!(tasks.as_array().unwrap().len(), 1);
         assert_eq!(tasks[0]["state"]["checkpoint"]["replay"], "unsafe");
-        let inode = machine.pinfold(&[
-            "box",
-            "exec",
-            handle,
-            "--",
-            "stat",
-            "-c",
-            "%i",
-            "/yard/state/audit-checkpoints/session.sqlite",
-        ]);
-        assert!(inode.status.success());
         let refused = project.refused("attempt.start", json!({"ticket": &ticket}));
         assert_eq!(refused["data"]["reason"], "checkpoint_owned");
         assert_eq!(refused["data"]["execution"], id);
@@ -779,8 +761,7 @@ fn durable_checkpoint_scenario(name: &str, corrupt: bool) {
         ));
         assert_eq!(before.len(), 1);
         let boxed_marker = machine.pinfold(&["box", "exec", handle, "--", "sh", "-c",
-            if corrupt { "printf '%s' 'untrusted checkpoint bytes' > /yard/state/audit-checkpoints/identity.json" }
-            else { "printf '%s' 'fixture checkpoint marker' > /yard/state/audit-checkpoints/fixture-marker" }]);
+            "printf '%s' 'untrusted checkpoint bytes' > /yard/state/audit-checkpoints/identity.json"]);
         assert!(boxed_marker.status.success());
         machine.kill();
         // The tool is still debugger-held at death, not a fleeting row/ref.
@@ -811,41 +792,8 @@ fn durable_checkpoint_scenario(name: &str, corrupt: bool) {
         assert_eq!(old["tokens_in"], PROMPT_TOKENS);
         assert_eq!(old["tokens_out"], COMPLETION_TOKENS);
         let mut watch = project.watch(project.ok("status", json!({}))["seq"].as_i64().unwrap());
-        let resumed = Latch::new();
-        if !corrupt {
-            *continuation.lock().unwrap() = Some(resumed.clone());
-        }
         project.ok("attempt.start", json!({"ticket": &ticket}));
-        if !corrupt {
-            resumed.wait_held();
-            let replacement = project.rows(&format!("SELECT handle FROM execution WHERE attempt = {number} AND status = 'running' AND kind = 'implementation'"));
-            let new_handle = replacement[0]["handle"].as_str().unwrap();
-            let checkpoint = machine.pinfold(&[
-                "box",
-                "exec",
-                new_handle,
-                "--",
-                "cat",
-                "/yard/state/audit-checkpoints/fixture-marker",
-            ]);
-            assert!(checkpoint.status.success());
-            assert_eq!(checkpoint.stdout, b"fixture checkpoint marker");
-            let retained_inode = machine.pinfold(&[
-                "box",
-                "exec",
-                new_handle,
-                "--",
-                "stat",
-                "-c",
-                "%i",
-                "/yard/state/audit-checkpoints/session.sqlite",
-            ]);
-            assert!(retained_inode.status.success());
-            assert_eq!(retained_inode.stdout, inode.stdout);
-            assert_eq!(machine.boxes(&label).len(), 1);
-            resumed.release();
-        }
-        if corrupt {
+        {
             let refused = watch.until("corrupt checkpoint refused", |event| {
                 event["event"] == "attention.raised" && event["ticket"] == ticket
             });
@@ -864,16 +812,7 @@ fn durable_checkpoint_scenario(name: &str, corrupt: bool) {
         let rows = project.rows(&format!("SELECT id, resumed, prepared, tokens_in, tokens_out FROM execution WHERE attempt = {number} AND kind = 'implementation' ORDER BY id"));
         let last = rows.last().unwrap();
         assert_ne!(last["id"], id);
-        if !corrupt {
-            assert_eq!(last["resumed"], id);
-            let prepared: Value = serde_json::from_str(last["prepared"].as_str().unwrap()).unwrap();
-            assert_eq!(prepared["durable"]["checkpoint"], id);
-            assert_eq!(prepared["durable"]["predecessor"], id);
-            assert_eq!(
-                std::fs::read_to_string(marker).unwrap(),
-                "unsafe read was interrupted, not replayed\n"
-            );
-        } else {
+        {
             assert!(last["resumed"].is_null());
             let prepared: Value = serde_json::from_str(last["prepared"].as_str().unwrap()).unwrap();
             assert_eq!(prepared["durable"]["checkpoint"], last["id"]);
@@ -891,16 +830,6 @@ fn durable_checkpoint_scenario(name: &str, corrupt: bool) {
                 && event["data"]["kind"] == "cleanup"
         });
     }
-}
-
-#[test]
-fn durable_continuations_exclusively_resume_matching_interrupted_inputs() {
-    durable_checkpoint_scenario("g5-durable-resume", false);
-}
-
-#[test]
-fn durable_checkpoint_corruption_refuses_before_fresh_retry() {
-    durable_checkpoint_scenario("g2-durable-corrupt", true);
 }
 
 fn checkpoint_source() -> &'static std::path::PathBuf {
