@@ -1768,7 +1768,10 @@ pub async fn implement(
             _ => None,
         };
         let report = executions::get(tx, execution)?.report;
-        let edited = if plan.writers() { ticket.revision != tickets::get(tx, attempt.ticket)?.revision
+        let edited = if cleanup_audit {
+            row.ticket_revision != Some(tickets::get(tx, attempt.ticket)?.revision)
+                || executions::plan_superseded(tx, &current, &row)?
+        } else if plan.writers() { ticket.revision != tickets::get(tx, attempt.ticket)?.revision
             || executions::plan_superseded(tx, &current, &row)? } else { attempts::edit_pending(tx, attempt.id)? };
         let failure = failure.or_else(|| {
             (report_only && !run.stopped && !edited && report.is_none())
@@ -1883,6 +1886,9 @@ pub async fn implement(
                 ticket: Some(ticket.id),
                 ..Default::default()
             })?;
+            if cleanup_audit && run.stopped && !edited {
+                return stop(tx, "unchanged", "the operator stopped the audit");
+            }
             return Ok(());
         }
         let previous = if plan.writers() { row.head.clone().unwrap_or_else(|| row.base.clone().unwrap_or_else(|| current.base.clone())) }

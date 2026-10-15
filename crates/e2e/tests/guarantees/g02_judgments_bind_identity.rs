@@ -1304,6 +1304,8 @@ fn delayed_candidate_acceptance_names_the_changed_identity_and_writes_nothing() 
 /// the rejected head and instructions in the repair input and host model prompt.
 /// Dropping selected packaged effort loses the requested medium reasoning level
 /// at the host model, even if the audit still passes.
+/// Omit the stopped decision for an operator-stopped audit, retry before checked
+/// release, or reuse its interrupted result: exact attention/retry checks fail.
 /// One machine uses the existing package image fixture without a debugger build.
 /// Git and fixture bytes supply identities; host model counts expose replay.
 #[test]
@@ -1315,6 +1317,10 @@ fn selected_cleanup_reuses_only_unchanged_actual_judgment_inputs() {
     let observed = counts.clone();
     let repair_prompts = Arc::new(Mutex::new(Vec::new()));
     let captured_prompts = repair_prompts.clone();
+    let hold = Latch::new();
+    let held = hold.clone();
+    let request_signal = Arc::new(Mutex::new(None::<std::path::PathBuf>));
+    let model_signal = request_signal.clone();
     let machine = Machine::new("g2-cleanup-inputs", move |request| {
         let model = request.body["model"].as_str().unwrap();
         if request.opens() {
@@ -1381,9 +1387,19 @@ fn selected_cleanup_reuses_only_unchanged_actual_judgment_inputs() {
             }
             "audit-current" | "audit-unknown" => {
                 if request.opens() {
-                    Reply::Tools(vec![bash(
+                    let reply = Reply::Tools(vec![bash(
                         "test \"$(cat chain.txt)\" = \"$(cat /yard/proof/chain.txt)\" && printf 'audit-ok\n'",
-                    )])
+                    )]);
+                    if model == "audit-current" && observed.lock().unwrap()[model] == 1 {
+                        std::fs::write(
+                            model_signal.lock().unwrap().take().unwrap(),
+                            "audit-held\n",
+                        )
+                        .unwrap();
+                        Reply::Hold(held.clone(), Box::new(reply))
+                    } else {
+                        reply
+                    }
                 } else {
                     assert!(request.last_tool_result().unwrap().1.contains("audit-ok"));
                     Reply::Tools(vec![report()])
@@ -1406,6 +1422,15 @@ fn selected_cleanup_reuses_only_unchanged_actual_judgment_inputs() {
             other => panic!("unexpected model {other}"),
         }
     });
+    let request_held = machine.root.join("audit-held");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&request_held)
+            .status()
+            .unwrap()
+            .success()
+    );
+    *request_signal.lock().unwrap() = Some(request_held.clone());
     machine.start();
     let project = super::g08_durable_package::fixture(&machine);
     // Ordinary Pi loads trusted extensions. Retire this audit-only hostile
@@ -1571,10 +1596,109 @@ instructions = "Judge only the declared fixture input."
     );
     assert!(started.get("error").is_none(), "{started}");
     let attempt = started["result"]["attempt"].as_i64().unwrap();
+    let audit = watch.until("first read-only audit started", |event| {
+        assert_ne!(event["event"], "attention.raised", "{event}");
+        if event["event"] == "execution.ended" && event["data"]["kind"] == "implementation" {
+            assert_eq!(event["data"]["outcome"], "candidate", "{event}");
+        }
+        event["event"] == "execution.started"
+            && event["attempt"] == attempt
+            && event["data"]["name"] == "cleanup-audit-current"
+    });
+    let interrupted = audit["execution"].as_i64().unwrap();
+    assert_eq!(
+        watch.said_before_end(&request_held, Some(interrupted)),
+        "audit-held\n"
+    );
+    hold.wait_held();
+    let stopped = operator.call(
+        "yard_attempt_stop",
+        json!({"project": project.path,
+        "ticket": "Y-1", "execution": interrupted}),
+    );
+    assert_eq!(stopped["result"]["stopping"], interrupted, "{stopped}");
+    let ended = watch.until("held audit ended", |event| {
+        assert_ne!(event["event"], "attention.raised", "{event}");
+        event["event"] == "execution.ended" && event["execution"] == interrupted
+    });
+    assert_eq!(ended["data"]["outcome"], "interrupted", "{ended}");
+    // Ending and raising stopped share a transaction. A missing decision
+    // fails at this terminal observation, rather than waiting for attention.
+    let item = project.json(&["attempt", "show", "Y-1"])["attention"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["execution"] == interrupted && item["kind"] == "stopped")
+        .expect("the ended audit has no stopped decision")
+        .clone();
+    let stopped = watch.attention();
+    assert_eq!(stopped["data"]["kind"], "stopped", "{stopped}");
+    assert_eq!(stopped["data"]["reason"], "unchanged", "{stopped}");
+    assert_eq!(stopped["execution"], interrupted, "{stopped}");
+    let attention = stopped["attention"].as_i64().unwrap();
+    assert_eq!(item["attention"], attention);
+    assert!(
+        item["exits"].as_array().unwrap().contains(&json!("start")),
+        "{item}"
+    );
+    watch.until("held audit checked release", |event| {
+        assert_ne!(
+            event["event"], "attention.raised",
+            "unexpected attention before release: {event}"
+        );
+        event["event"] == "execution.released" && event["execution"] == interrupted
+    });
+    assert!(hold.is_held(), "the stopped model request was answered");
+    let old = project.rows(&format!("SELECT * FROM execution WHERE id = {interrupted}"))[0].clone();
+    assert_eq!(old["status"], "ended");
+    assert_eq!(old["reserved"], 0);
+    assert_eq!(old["teardown"], 1);
+    assert_eq!(old["report"], Value::Null);
+    let result: Value = serde_json::from_str(old["result"].as_str().unwrap()).unwrap();
+    assert_eq!(result["outputs"], json!({}));
+    assert_eq!(result["reference"], Value::Null);
+    assert_eq!(
+        project
+            .rows("SELECT id FROM execution WHERE node = 'cleanup-audit-current'")
+            .len(),
+        1
+    );
+    let retried = operator.call(
+        "yard_attempt_start",
+        json!({"project": project.path,
+        "ticket": "Y-1", "attention": attention}),
+    );
+    assert_eq!(retried["result"]["started"], attention, "{retried}");
     let first = approval(&mut watch);
+    assert!(hold.is_held());
+    hold.release();
     let rows =
         project.rows("SELECT * FROM execution WHERE node LIKE 'cleanup-audit-%' ORDER BY id");
-    let original = |node: &str| rows.iter().find(|row| row["node"] == node).unwrap();
+    assert_eq!(
+        rows.iter().find(|row| row["id"] == interrupted).unwrap(),
+        &old
+    );
+    let original = |node: &str| {
+        rows.iter()
+            .find(|row| row["node"] == node && row["outcome"] == "complete")
+            .unwrap()
+    };
+    let fresh = original("cleanup-audit-current");
+    assert_ne!(fresh["id"], interrupted);
+    let show = project.json(&["attempt", "show", "Y-1"]);
+    let shown = |id: &Value| {
+        show["executions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["execution"] == *id)
+            .unwrap()
+    };
+    assert_eq!(shown(&old["id"])["result_eligible"], false);
+    assert_eq!(shown(&fresh["id"])["result_eligible"], true);
+    let result: Value = serde_json::from_str(fresh["result"].as_str().unwrap()).unwrap();
+    assert_eq!(result["reference"], Value::Null);
+    assert_eq!(result["outputs"]["result"]["kind"], "report");
     let before_head = original("cleanup-audit-current")["head"]
         .as_str()
         .unwrap()
@@ -1748,7 +1872,7 @@ instructions = "Judge only the declared fixture input."
             ("implementer-selected".into(), 1),
             ("cleanup-selected".into(), 2),
             ("repair-selected".into(), 2),
-            ("audit-current".into(), 2),
+            ("audit-current".into(), 3),
             ("audit-original".into(), 1),
             ("audit-unknown".into(), 3)
         ])
