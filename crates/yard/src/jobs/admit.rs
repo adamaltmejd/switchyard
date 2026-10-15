@@ -1387,16 +1387,25 @@ pub async fn attempt_revise(
     let mut old_implementer = old.nodes["implementer"].clone();
     implementer.routes.remove("complete");
     old_implementer.routes.remove("complete");
-    // Instructions may change; access, agent and publication grants remain frozen.
+    // Guidance may change; access, agent and publication grants remain frozen.
     if let (
-        crate::plan::Runner::Agent { instructions, .. },
+        crate::plan::Runner::Agent {
+            instructions,
+            skills,
+            references,
+            ..
+        },
         crate::plan::Runner::Agent {
             instructions: previous,
+            skills: old_skills,
+            references: old_references,
             ..
         },
     ) = (&mut implementer.runner, &old_implementer.runner)
     {
         *instructions = previous.clone();
+        *skills = old_skills.clone();
+        *references = old_references.clone();
     }
     if let (
         crate::plan::Runner::Packaged { instructions, .. },
@@ -1420,13 +1429,23 @@ pub async fn attempt_revise(
                     node.routes.clear();
                     previous.routes.clear();
                     if let (
-                        crate::plan::Runner::Agent { instructions, .. },
                         crate::plan::Runner::Agent {
-                            instructions: old, ..
+                            instructions,
+                            skills,
+                            references,
+                            ..
+                        },
+                        crate::plan::Runner::Agent {
+                            instructions: old,
+                            skills: old_skills,
+                            references: old_references,
+                            ..
                         },
                     ) = (&mut node.runner, &previous.runner)
                     {
                         *instructions = old.clone();
+                        *skills = old_skills.clone();
+                        *references = old_references.clone();
                     }
                     node != previous
                 })
@@ -1508,6 +1527,11 @@ pub async fn attempt_revise(
         }
         evidence["config_head"] = json!(loaded.head);
     }
+    if !adopting && !packaged {
+        evidence["inputs"] = loaded
+            .inputs(&daemon.git, &project.canonical_dir(), &plan)
+            .await?;
+    }
     let ordinary = loaded.config.workflow_plan(&attempt.workflow)?;
     let skipped = skipped_nodes(&plan, &ordinary);
     evidence["revision"] = json!(
@@ -1588,7 +1612,7 @@ pub async fn attempt_revise(
                 && node.inputs.values().any(|input| input.node.is_none() && input.output == "merged"))
                 .map(|(name, node)| {
                     json!({"name": name, "node": node,
-                        "definition": executions::consumed_definition(evidence, &node.runner, false)})
+                        "definition": executions::consumed_definition(evidence, &node.runner, name, false)})
                 }).collect::<Vec<_>>()
         };
         if landing_requirements(&plan, &evidence)

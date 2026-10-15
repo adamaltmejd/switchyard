@@ -374,3 +374,198 @@ fn a_host_landing_gate_runs_on_the_merged_ref_only_when_approved() {
         vec![json!({ "state": "withdrawn" })]
     );
 }
+
+/// G13/G2: A writable ordinary worker's second launch reads admitted blobs
+/// after both source and canonical edits. Explicit staging adoption changes
+/// its consumed definition and starts a fresh session on the same attempt.
+/// Sabotage: stage selected inputs from the live candidate or canonical head;
+/// the second probe reads changed bytes. Mount /yard/input writable; the
+/// trusted write succeeds while the same-project source write controls it.
+/// Omit selected blobs from consumed_definition/session comparison; adoption
+/// resumes the old session. Stage all guidance as selected input; the
+/// unselected file appears in the trusted mount.
+#[test]
+fn ordinary_writers_read_frozen_selected_inputs_and_adoption_starts_fresh() {
+    let hold = Latch::new();
+    let second_hold = hold.clone();
+    let probes = Arc::new(Mutex::new(Vec::<String>::new()));
+    let captured = probes.clone();
+    let round = Mutex::new(0);
+    let machine = Machine::new("g13-selected-ordinary", move |request| {
+        let mut round = round.lock().unwrap();
+        if request.opens() {
+            *round += 1;
+            return Reply::Tools(vec![bash(&format!(
+                "cd /workspace; \
+                 printf 'candidate-skill\\n' > selected.md; echo source_write=$?; \
+                 printf 'candidate-reference\\n' > reference.txt; \
+                 echo skill=$(cat /yard/input/trusted/selected.md); \
+                 echo reference=$(cat /yard/input/trusted/reference.txt); \
+                 echo blocked > /yard/input/trusted/selected.md 2>/dev/null; echo write=$?; \
+                 test -e /yard/input/trusted/unselected.md; echo unselected=$?; \
+                 printf '{round}\\n' > feature.txt; \
+                 git add selected.md reference.txt feature.txt && git commit -q -m 'Candidate edit'"
+            ))]);
+        }
+        captured
+            .lock()
+            .unwrap()
+            .push(request.last_tool_result().unwrap().1);
+        if *round == 2 {
+            Reply::Hold(second_hold.clone(), Box::new(Reply::Text("done".into())))
+        } else {
+            Reply::Text("done".into())
+        }
+    });
+    machine.start();
+    let configuration = config(
+        r#"
+[profiles.selected]
+access = "write-allowed"
+outcomes = ["complete"]
+[profiles.selected.outputs]
+result = "candidate"
+[profiles.selected.runner]
+kind = "agent"
+agent = "worker"
+instructions = "Use the selected skill and reference."
+skills = ["selected.md"]
+references = ["reference.txt"]
+"#,
+    )
+    .replace("review = [\"correctness\"]", "review = \"none\"");
+    let project = Project::new(&machine, "p", &configuration);
+    project.write("selected.md", "admitted-skill\n");
+    project.write("reference.txt", "admitted-reference\n");
+    project.write("unselected.md", "unselected-guidance\n");
+    project.git(&["add", "-A"]);
+    project.git(&["commit", "-qm", "Selected fixture inputs"]);
+    project.json(&["sync"]);
+    let identities = || {
+        json!([
+            {"path": "selected.md", "blob": project.git(&["rev-parse", "HEAD:selected.md"]).trim(), "executable": false},
+            {"path": "reference.txt", "blob": project.git(&["rev-parse", "HEAD:reference.txt"]).trim(), "executable": false}
+        ])
+    };
+    let original = identities();
+    let mut watch = project.watch(0);
+    project.json(&[
+        "ticket",
+        "new",
+        "--title",
+        "Use selected guidance",
+        "--parked",
+    ]);
+    let mut operator = machine.operator();
+    operator.initialize();
+    let started = operator.call(
+        "yard_attempt_start",
+        json!({
+            "project": project.path, "ticket": "Y-1",
+            "overrides": {"implementer": {"profile": "selected"}}
+        }),
+    );
+    assert!(started.get("error").is_none(), "{started}");
+    let approval = watch.attention();
+    assert_eq!(approval["data"]["kind"], "approval", "{approval}");
+    let admitted = project.json(&["attempt", "show", "Y-1"])["attempt"]["admission"].clone();
+    assert_eq!(
+        admitted["inputs"]["selected_agent_sources"]["implementer"],
+        original
+    );
+
+    // The candidate has already committed conflicting selected bytes. Sync
+    // changes canonical too, before the repair's staging boundary.
+    project.write("selected.md", "adopted-skill\n");
+    project.write("reference.txt", "adopted-reference\n");
+    project.git(&["add", "selected.md", "reference.txt"]);
+    project.git(&["commit", "-qm", "Operator changes selected inputs"]);
+    project.json(&["sync"]);
+    let adopted = identities();
+    let staging = project.canonical_head();
+    project.json(&[
+        "attempt",
+        "reject",
+        "--target",
+        "main",
+        "Y-1",
+        "--head",
+        approval["data"]["payload"]["head"].as_str().unwrap(),
+        "--text",
+        "Read the inputs again",
+    ]);
+    hold.wait_held();
+    let probe = probes.lock().unwrap().last().unwrap().clone();
+    assert!(probe.contains("skill=admitted-skill"), "{probe}");
+    assert!(probe.contains("reference=admitted-reference"), "{probe}");
+    assert!(probe.contains("source_write=0"), "{probe}");
+    assert!(write_failed(&probe), "{probe}");
+    assert!(probe.contains("unselected=1"), "{probe}");
+    let sessions =
+        project.rows("SELECT id, resumed FROM execution WHERE kind = 'implementation' ORDER BY id");
+    assert_eq!(sessions[1]["resumed"], sessions[0]["id"], "{sessions:?}");
+    let revised = operator.call(
+        "yard_attempt_revise",
+        json!({
+            "project": project.path, "ticket": "Y-1", "plan_revision": 1,
+            "staging_commit": staging
+        }),
+    );
+    assert_eq!(revised["result"]["plan_revision"], 2, "{revised}");
+    hold.release();
+    let approval = watch.attention();
+    assert_eq!(approval["data"]["kind"], "approval", "{approval}");
+    let probe = probes.lock().unwrap().last().unwrap().clone();
+    assert!(probe.contains("skill=adopted-skill"), "{probe}");
+    assert!(probe.contains("reference=adopted-reference"), "{probe}");
+    let revised_admission = project.json(&["attempt", "show", "Y-1"])["attempt"]["plan"].clone();
+    assert_eq!(
+        revised_admission["inputs"]["selected_agent_sources"]["implementer"],
+        adopted
+    );
+    assert_eq!(project.rows("SELECT plan_revision, resumed FROM execution WHERE kind = 'implementation' ORDER BY id").last().unwrap(),
+        &json!({"plan_revision": 2, "resumed": null}));
+    let requests: Vec<_> = machine
+        .model
+        .requests()
+        .into_iter()
+        .filter(ModelRequest::opens)
+        .collect();
+    let fresh = requests.last().unwrap();
+    assert_eq!(
+        fresh.body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["role"] == "user")
+            .count(),
+        1
+    );
+    assert!(
+        fresh
+            .last_user()
+            .contains("/yard/input/trusted/selected.md")
+    );
+    assert!(
+        fresh
+            .last_user()
+            .contains("/yard/input/trusted/reference.txt")
+    );
+    assert!(
+        !fresh
+            .last_user()
+            .contains("/yard/input/trusted/unselected.md")
+    );
+    let verification = project
+        .rows("SELECT verification FROM execution WHERE kind = 'implementation' ORDER BY id");
+    let definition: Value = serde_json::from_str(
+        verification.last().unwrap()["verification"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        definition["policy"]["definition"]["selected_agent_sources"],
+        adopted
+    );
+}

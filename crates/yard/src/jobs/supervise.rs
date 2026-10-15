@@ -706,6 +706,75 @@ fn complete(
     }
 }
 
+pub(super) fn selected_prompt(runner: &crate::plan::Runner) -> String {
+    let mut prompt = String::new();
+    if let Some((skills, references)) = runner.selected_paths()
+        && (!skills.is_empty() || !references.is_empty())
+    {
+        prompt.push_str("Read the admitted selected inputs at these read-only paths:\n");
+        for path in skills {
+            prompt.push_str(&format!("Skill: /yard/input/trusted/{path}\n"));
+        }
+        for path in references {
+            prompt.push_str(&format!("Reference: /yard/input/trusted/{path}\n"));
+        }
+        prompt.push('\n');
+    }
+    prompt
+}
+
+pub(super) async fn stage_selected(
+    daemon: &Daemon,
+    project: &Project,
+    attempt: &attempts::Attempt,
+    node_name: &str,
+    runner: &crate::plan::Runner,
+    input: &std::path::Path,
+) -> Result<(), Fail> {
+    if let Some((skills, references)) = runner.selected_paths()
+        && (!skills.is_empty() || !references.is_empty())
+    {
+        let trusted = input.join("trusted");
+        if trusted.exists() {
+            std::fs::remove_dir_all(&trusted).map_err(|error| error.to_string())?;
+        }
+        std::fs::create_dir(&trusted).map_err(|error| error.to_string())?;
+        let admitted = attempt.admission.as_ref().expect("admitted plan");
+        let sources = if matches!(runner, crate::plan::Runner::Packaged { .. }) {
+            &admitted["inputs"]["trusted_staged_sources"]
+        } else {
+            &admitted["inputs"]["selected_agent_sources"][node_name]
+        };
+        for source in sources
+            .as_array()
+            .ok_or_else(|| Fail::refused("missing selected inputs"))?
+        {
+            let path = source["path"]
+                .as_str()
+                .ok_or_else(|| Fail::refused("invalid selected path"))?;
+            let blob = source["blob"]
+                .as_str()
+                .ok_or_else(|| Fail::refused("invalid selected blob"))?;
+            let bytes = daemon.git.blob(&project.canonical_dir(), blob).await?;
+            if !crate::plan::plain_path(path) {
+                return Err(Fail::refused("invalid selected path"));
+            }
+            if skills.iter().any(|skill| skill == path) && std::str::from_utf8(&bytes).is_err() {
+                return Err(Fail::refused(
+                    "invalid_input: selected Markdown is not UTF-8",
+                ));
+            }
+            let dest = trusted.join(path);
+            std::fs::create_dir_all(dest.parent().expect("selected parent"))
+                .map_err(|error| error.to_string())?;
+            std::fs::write(dest, bytes).map_err(|error| error.to_string())?;
+        }
+    } else if input.join("trusted").exists() {
+        std::fs::remove_dir_all(input.join("trusted")).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 pub async fn implement(
     daemon: &Arc<Daemon>,
     project: &Arc<Project>,
@@ -860,7 +929,7 @@ pub async fn implement(
         let identity = json!({"node": row.node, "inputs": row.inputs,
             "base": row.base, "head": row.head, "proof": row.proof,
             "ticket_revision": row.ticket_revision, "plan_revision": row.plan_revision,
-            "definition": executions::consumed_definition(admission, packaged, false),
+            "definition": executions::consumed_definition(admission, packaged, row.node.as_deref().unwrap_or_default(), false),
             "policy": {"plan": admission["plan"], "egress": current_egress,
                 "inactivity": workflow.inactivity_timeout_minutes,
                 "total": workflow.total_work_timeout_minutes}});
@@ -930,6 +999,19 @@ pub async fn implement(
     {
         return Ok(());
     }
+    let node_name = row.node.as_deref().unwrap_or("implementer");
+    let runner = &plan.nodes[node_name].runner;
+    if preparation_result(
+        daemon,
+        project,
+        execution,
+        stage_selected(daemon, project, &attempt, node_name, runner, &input).await,
+    )
+    .await?
+    .is_none()
+    {
+        return Ok(());
+    }
     if let Some(crate::plan::Runner::Packaged {
         skill,
         references,
@@ -939,30 +1021,7 @@ pub async fn implement(
     }) = packaged
     {
         let staged = async {
-            let trusted = input.join("trusted");
-            std::fs::create_dir(&trusted).map_err(|error| error.to_string())?;
             let admitted = attempt.admission.as_ref().expect("admitted plan");
-            for source in admitted["inputs"]["trusted_staged_sources"]
-                .as_array()
-                .ok_or_else(|| Fail::refused("missing selected inputs"))?
-            {
-                let path = source["path"]
-                    .as_str()
-                    .ok_or_else(|| Fail::refused("invalid selected path"))?;
-                let blob = source["blob"]
-                    .as_str()
-                    .ok_or_else(|| Fail::refused("invalid selected blob"))?;
-                let bytes = daemon.git.blob(&project.canonical_dir(), blob).await?;
-                if path == skill && std::str::from_utf8(&bytes).is_err() {
-                    return Err(Fail::refused(
-                        "invalid_input: selected Markdown is not UTF-8",
-                    ));
-                }
-                let dest = trusted.join(path);
-                std::fs::create_dir_all(dest.parent().expect("selected parent"))
-                    .map_err(|error| error.to_string())?;
-                std::fs::write(dest, bytes).map_err(|error| error.to_string())?;
-            }
             let mut declared = files.clone();
             declared.extend(std::iter::once(skill).chain(references).map(|path| {
                 crate::plan::AuditFile {
@@ -1668,6 +1727,12 @@ async fn implementer_prompt(
         attempt.candidate()
     };
     let mut prompt = String::new();
+    if let Some(node) = plan.as_ref().and_then(|plan| {
+        plan.nodes
+            .get(execution.node.as_deref().unwrap_or("implementer"))
+    }) {
+        prompt.push_str(&selected_prompt(&node.runner));
+    }
     // The resumed session's owner launched its harness with this body.
     let body_read: Option<String> = match resumed {
         Some(owner) => project.read(|conn| {
@@ -1812,6 +1877,7 @@ async fn plan_handoff(
                         executions::consumed_definition(
                             admission,
                             &node.runner,
+                            name,
                             matches!(node.runner, crate::plan::Runner::Agent { .. })
                                 && node.outputs.get("result")
                                     == Some(&crate::plan::Output::Verdict),

@@ -406,10 +406,11 @@ pub fn evidence(conn: &Connection, check: &Check, input: &Input) -> Result<Value
             .map(|admission| {
                 let plan = crate::plan::Plan::admitted(&admission)
                     .map_err(|error| Fail::refused(error.to_string()))?;
-                Ok::<_, Fail>(plan.nodes.get(node).and_then(|node| {
+                Ok::<_, Fail>(plan.nodes.get(node).and_then(|policy| {
                     super::executions::consumed_definition(
                         &admission,
-                        &node.runner,
+                        &policy.runner,
+                        node,
                         check.kind == "review",
                     )
                 }))

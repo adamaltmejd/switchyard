@@ -66,7 +66,7 @@ pub async fn verification(
         Some(
             json!({"node": node, "config_blob": admission["inputs"]["config_blob"],
             "definition": executions::consumed_definition(
-            admission, &node.runner, row.kind == "review")
+            admission, &node.runner, row.node.as_deref().unwrap_or_default(), row.kind == "review")
             .unwrap_or_else(|| json!({"status": "unknown"}))}),
         )
     });
@@ -198,20 +198,24 @@ impl Loaded {
         plan: &crate::plan::Plan,
     ) -> Result<Value, Fail> {
         let mut inputs = self.admission_inputs.clone();
-        if let Some(crate::plan::Runner::Packaged {
-            skill, references, ..
-        }) = plan.packaged()
-        {
+        for (name, node) in &plan.nodes {
+            let Some((skills, references)) = node.runner.selected_paths() else {
+                continue;
+            };
+            if skills.is_empty() && references.is_empty() {
+                continue;
+            }
             let mut sources = Vec::new();
             let mut total = 0;
-            let paths: Vec<_> = std::iter::once(skill)
+            let paths: Vec<_> = skills
+                .iter()
                 .chain(references)
                 .map(String::as_str)
                 .collect();
             let entries = git
                 .ls_tree(canonical, &self.staging_commit, &paths, false)
                 .await?;
-            for path in std::iter::once(skill).chain(references) {
+            for path in skills.iter().chain(references) {
                 let entry = entries
                     .iter()
                     .find(|entry| entry.path == *path && entry.regular)
@@ -220,7 +224,12 @@ impl Loaded {
                             .with(json!({"path": path, "reason": "selected_regular_file"}))
                     })?;
                 total += entry.size;
-                if entry.size > if path == skill { 32768 } else { 1024 * 1024 }
+                if entry.size
+                    > if skills.contains(path) {
+                        32768
+                    } else {
+                        1024 * 1024
+                    }
                     || total > 8 * 1024 * 1024
                 {
                     return Err(Fail::refused("invalid_input")
@@ -229,7 +238,14 @@ impl Loaded {
                 sources
                     .push(json!({"path": entry.path, "blob": entry.oid, "executable": entry.exec}));
             }
-            inputs["trusted_staged_sources"] = json!(sources);
+            if matches!(node.runner, crate::plan::Runner::Packaged { .. }) {
+                inputs["trusted_staged_sources"] = json!(sources);
+            } else {
+                if inputs.get("selected_agent_sources").is_none() {
+                    inputs["selected_agent_sources"] = json!({});
+                }
+                inputs["selected_agent_sources"][name] = json!(sources);
+            }
         }
         Ok(inputs)
     }
@@ -1625,11 +1641,17 @@ async fn inspect_plan(
         return Err(Fail::refused("plan shape has no runtime support")
             .with(json!({"shape": shape, "structurally_valid": true, "runnable": false})));
     }
-    let selected_inputs = if plan.packaged().is_some() {
+    let selected_inputs = if plan.nodes.values().any(|node| {
+        node.runner
+            .selected_paths()
+            .is_some_and(|(skills, references)| !skills.is_empty() || !references.is_empty())
+    }) {
         let mut inputs = loaded
             .inputs(&daemon.git, &project.canonical_dir(), &plan)
             .await?;
-        inputs["package"] = crate::pi::package_identity();
+        if plan.packaged().is_some() {
+            inputs["package"] = crate::pi::package_identity();
+        }
         Some(inputs)
     } else {
         None

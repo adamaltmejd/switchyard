@@ -51,6 +51,10 @@ pub enum Runner {
     Agent {
         agent: String,
         instructions: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        skills: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        references: Vec<String>,
     },
     Command {
         gate: String,
@@ -64,6 +68,20 @@ pub enum Runner {
         references: Vec<String>,
         files: Vec<AuditFile>,
     },
+}
+
+impl Runner {
+    pub fn selected_paths(&self) -> Option<(&[String], &[String])> {
+        match self {
+            Self::Agent {
+                skills, references, ..
+            } => Some((skills, references)),
+            Self::Packaged {
+                skill, references, ..
+            } => Some((std::slice::from_ref(skill), references)),
+            Self::Command { .. } => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -328,6 +346,8 @@ impl Config {
                 runner: Runner::Agent {
                     agent: workflow.implementer.clone(),
                     instructions: workflow.instructions.clone(),
+                    skills: Vec::new(),
+                    references: Vec::new(),
                 },
                 access: if workflow.read_only {
                     Access::ReadOnly
@@ -362,6 +382,8 @@ impl Config {
                                 runner: Runner::Agent {
                                     agent: seat.agent.clone(),
                                     instructions: seat.instructions.clone(),
+                                    skills: Vec::new(),
+                                    references: Vec::new(),
                                 },
                                 access: Access::ReadOnly,
                                 inputs: BTreeMap::new(),
@@ -1451,10 +1473,28 @@ impl Node {
                 }
                 Ok(())
             }
-            Runner::Agent { agent, .. } if !config.agents.contains_key(agent) => Err(Invalid::new(
-                format!("{path}.runner.agent"),
-                "unresolved_reference",
-            )),
+            Runner::Agent {
+                agent,
+                skills,
+                references,
+                ..
+            } => {
+                if !config.agents.contains_key(agent) {
+                    return Err(Invalid::new(
+                        format!("{path}.runner.agent"),
+                        "unresolved_reference",
+                    ));
+                }
+                let paths: Vec<_> = skills.iter().chain(references).collect();
+                if paths.len() > 512
+                    || paths.iter().any(|path| !plain_path(path))
+                    || skills.iter().any(|path| !path.ends_with(".md"))
+                    || paths.iter().collect::<BTreeSet<_>>().len() != paths.len()
+                {
+                    return Err(Invalid::new(format!("{path}.runner"), "invalid_input"));
+                }
+                Ok(())
+            }
             Runner::Command { gate } if !config.gates.iter().any(|g| &g.name == gate) => Err(
                 Invalid::new(format!("{path}.runner.gate"), "unresolved_reference"),
             ),

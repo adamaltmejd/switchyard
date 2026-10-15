@@ -40,6 +40,7 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
     let Some(crate::plan::Runner::Agent {
         agent: selected,
         instructions,
+        ..
     }) = plan.nodes.get(&node).map(|node| &node.runner)
     else {
         return Err(Fail::refused("review has no admitted agent runner"));
@@ -101,6 +102,15 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
         env: &env,
     };
     harness.stage(&stage).map_err(|error| error.to_string())?;
+    super::supervise::stage_selected(
+        daemon,
+        project,
+        &attempt,
+        &node,
+        &plan.nodes[&node].runner,
+        &input,
+    )
+    .await?;
 
     let stat = daemon
         .git
@@ -131,6 +141,11 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
     } else {
         prompt
     };
+    let prompt = format!(
+        "{}{}",
+        super::supervise::selected_prompt(&plan.nodes[&node].runner),
+        prompt
+    );
     let argv = harness
         .argv(&crate::harness::Launch {
             provider: agent.provider.as_deref(),
