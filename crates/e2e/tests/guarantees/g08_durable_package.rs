@@ -1032,7 +1032,7 @@ printf 'chain.txt filter=trip\n' > .git/info/attributes &&
 touch -t 200001010000 chain.txt &&
 git -c core.fsmonitor=false status --porcelain && test -f .git/filter-ran &&
 git status --porcelain && test -f .git/fsmonitor-ran &&
-mkdir .git/alternate && git archive HEAD | tar -x -C .git/alternate"#
+mkdir .git/alternate && git -c filter.trip.clean= -c filter.trip.smudge= -c filter.trip.process= -c filter.trip.required=false archive HEAD | tar -x -C .git/alternate"#
                             }
                         } else {
                             r#"test ! -e .git/fsmonitor-ran && test ! -e .git/filter-ran &&
