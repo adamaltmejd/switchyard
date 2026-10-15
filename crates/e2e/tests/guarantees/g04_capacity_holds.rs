@@ -162,7 +162,8 @@ fn an_execution_ending_revokes_only_its_own_project_grant() {
 /// before publishing a subset and a duplicate with both exact contributors.
 /// Sabotage: select by prose/index/latest result, drop a contributor, erase raw
 /// findings, forward all findings to repair, or let picker exclusion pass a
-/// required block. Fixture prose and
+/// required block, or bypass operator handling on an empty join carrying that
+/// block. Fixture prose and
 /// model profiles supply values; public store finding identities supply sources.
 /// G5/G8: real successful picker teardown leaves an inherited host owner held.
 /// Sabotage: clear ownership before lock freedom, or recognize only pass/fail
@@ -449,7 +450,7 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
             "requires": ["candidate"], "routes": {
                 "complete": [{"to": "review-2", "repeat": null}],
                 "failed": [{"to": "implementer", "repeat": 1}]}},
-        "review-0": {"runner": {"kind": "agent", "agent": "left", "instructions": "Left reader."}, "access": "read-only", "operator_failure": true,
+        "review-0": {"runner": {"kind": "agent", "agent": "left", "instructions": "Left reader."}, "access": "read-only",
             "inputs": {"candidate": candidate}, "outputs": {"result": "verdict"}, "outcomes": ["complete", "blocked"],
             "requires": ["candidate"], "routes": {"complete": [{"to": "review-2", "repeat": null}],
                 "blocked": [{"to": "implementer", "repeat": 3}]}},
@@ -457,7 +458,7 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
             "inputs": {"candidate": candidate}, "outputs": {"result": "verdict"}, "outcomes": ["complete", "blocked"],
             "requires": ["candidate"], "routes": {"complete": [{"to": "review-2", "repeat": null}],
                 "blocked": [{"to": "implementer", "repeat": 3}]}},
-        "review-2": {"runner": {"kind": "agent", "agent": "worker", "instructions": "Exact join."}, "access": "read-only",
+        "review-2": {"runner": {"kind": "agent", "agent": "worker", "instructions": "Exact join."}, "access": "read-only", "operator_failure": true,
             "inputs": {"candidate": candidate,
                 "command": {"node": "candidate-gate-read", "output": "result", "kind": "verdict"},
                 "left": {"node": "review-0", "output": "result", "kind": "verdict"},
@@ -1019,9 +1020,22 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
         "plan_revision": 2, "target": "main", "head": item["data"]["payload"]["head"],
         "proof": item["data"]["payload"]["proof"], "text": "Exact required failure decision"})
     };
+    // Sabotage: judge the join only by its own passing check instead of its
+    // unresolved carried blocks, or repair those blocks after exact acceptance.
     assert_eq!(
         failure["data"]["payload"]["evidence"]["check"]["verdict"],
-        "fail"
+        "pass"
+    );
+    assert_eq!(failure["data"]["payload"]["evidence"]["node"], "review-2");
+    let required = project.rows("SELECT c.id, c.verdict FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE e.attempt = 3 AND e.node = 'review-0' ORDER BY e.id DESC LIMIT 1");
+    assert_eq!(required[0]["verdict"], "fail");
+    assert_eq!(
+        failure["data"]["payload"]["evidence"]["result"]["outcome"],
+        "blocked"
+    );
+    assert_eq!(
+        failure["data"]["payload"]["evidence"]["result"]["outputs"]["result"]["value"]["blocked"],
+        json!([required[0]["id"]])
     );
     let before_repair = project.rows("SELECT * FROM finding ORDER BY id");
     let reviews_before_repair = project.rows("SELECT e.*, c.id AS check_id, c.verdict AS check_verdict FROM execution e JOIN \"check\" c ON c.execution = e.id WHERE e.attempt = 3 ORDER BY e.id");

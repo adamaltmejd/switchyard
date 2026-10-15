@@ -401,7 +401,11 @@ recovery; infrastructure failure retains the report without an eligible
 selection. After the join and checked picker release, required failed reviews
 still take their exact operator decision or existing bounded repair/limit
 path. Excluding a required finding never accepts its check or passes its
-verdict. A review-finding repair freezes precisely the committed groups into
+verdict. A required join's operator handling applies to unresolved required
+blocks carried by its immutable result, even when its own check passes.
+Exact join acceptance settles only the blocks that result carries; earlier
+accepted blocks do not trigger new attention or repair.
+A review-finding repair freezes precisely the committed groups into
 the existing implementer execution's feedback. Each group carries its reason,
 exact source references and every original contributor's finding, check, frozen node,
 settings and inputs. The repair prompt exposes those groups. Missing or stale

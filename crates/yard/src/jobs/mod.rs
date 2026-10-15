@@ -1147,13 +1147,26 @@ async fn advance(
             // and their operator decisions remain independent.
             if !node.advisory {
                 selected.push(check.id);
+                let carried = result
+                    .result
+                    .as_ref()
+                    .and_then(|result| result["outputs"]["result"]["value"]["blocked"].as_array());
+                let carries = |id| carried.is_some_and(|ids| ids.contains(&json!(id)));
+                let inherited =
+                    outcome == "blocked" && chosen_blocked.iter().any(|check| carries(check.id));
+                if node.operator_failure
+                    && decision.is_none()
+                    && (check.verdict != "pass" || inherited)
+                {
+                    chosen_failures.push((check.clone(), evidence.clone()));
+                }
                 if decision.as_deref() == Some("accept") {
                     accepted.push(evidence);
+                    if outcome == "blocked" {
+                        chosen_blocked.retain(|check| !carries(check.id));
+                    }
                 } else if check.verdict != "pass" {
                     chosen_blocked.push(check.clone());
-                    if node.operator_failure && decision.is_none() {
-                        chosen_failures.push((check.clone(), evidence));
-                    }
                 }
             }
             completed.insert(current);
