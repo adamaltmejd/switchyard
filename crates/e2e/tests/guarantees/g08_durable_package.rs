@@ -1095,8 +1095,10 @@ files = [{{root = "source", path = "chain.txt"}}]
                 == "cleanup"
     });
     assert!(*audit_refusal.lock().unwrap());
+    // Sabotage: let the audit mutate main, move main before approval, or
+    // report landing without updating it. Canonical is bare: read its ref.
     assert_eq!(
-        std::fs::read_to_string(project.canonical().join("chain.txt")).unwrap(),
+        git(&project.canonical(), &["show", "refs/heads/main:chain.txt"]),
         "base\n"
     );
     for path in ["debug-armed", "debug-held"] {
@@ -1243,7 +1245,7 @@ if printf 'changed\n' > /yard/proof/intrusion; then echo proof=written; else ech
         "repaired\n"
     );
     assert_eq!(
-        std::fs::read_to_string(project.canonical().join("chain.txt")).unwrap(),
+        git(&project.canonical(), &["show", "refs/heads/main:chain.txt"]),
         "base\n"
     );
     let rows = project.rows(&format!("SELECT id, node, result, reserved, teardown FROM execution WHERE attempt = {attempt} AND kind = 'implementation' ORDER BY id"));
@@ -1272,7 +1274,7 @@ if printf 'changed\n' > /yard/proof/intrusion; then echo proof=written; else ech
     ]);
     watch.event("attempt.ended", &[("outcome", "landed")]);
     assert_eq!(
-        std::fs::read_to_string(project.canonical().join("chain.txt")).unwrap(),
+        git(&project.canonical(), &["show", "refs/heads/main:chain.txt"]),
         "repaired\n"
     );
 }
