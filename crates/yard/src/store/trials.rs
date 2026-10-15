@@ -67,7 +67,7 @@ pub fn statistics(conn: &Connection, rows: &[executions::Execution]) -> Result<V
             continue;
         };
         let plan = Plan::admitted(&admission).map_err(|error| Fail::refused(error.to_string()))?;
-        if plan.selector().is_none() && plan.finding_selector().is_none() {
+        if !plan.writers() && plan.selector().is_none() && plan.finding_selector().is_none() {
             continue;
         }
         let Some(node) = row.node.as_ref().and_then(|node| plan.nodes.get(node)) else {
@@ -83,7 +83,9 @@ pub fn statistics(conn: &Connection, rows: &[executions::Execution]) -> Result<V
         if !matches!(node.runner, crate::plan::Runner::Agent { .. }) {
             continue;
         }
-        let role = if row.node.as_deref() == Some("selector") {
+        let role = if row.node.as_deref() == Some("selector")
+            && (plan.selector().is_some() || plan.finding_selector().is_some())
+        {
             "picker"
         } else if node
             .outputs

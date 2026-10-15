@@ -996,7 +996,8 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
     // G7: the fixture selected left useful/shared and right shared. The join
     // repeats the same review edges. Count each durable finding once and keep
     // both contributors to the combined group. Sabotages: attribute to picker,
-    // sum duplicate input edges, or lose a combined finding contributor.
+    // sum duplicate input edges, lose a combined finding contributor, or call
+    // a completed negative review an infrastructure failure.
     let stats = operator.call(
         "yard_attempt_stats",
         json!({"project": project.path, "ticket": "Y-1"}),
@@ -1012,6 +1013,10 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
         assert_eq!(model["eligible_count"], published);
         assert_eq!(model["selected_count"], selected);
         assert_eq!(model["selected_group_count"], groups);
+        assert_eq!(
+            model["outcomes"],
+            json!({"completed": 1, "failed": 0, "stopped": 0, "unknown": if name == "right-model" { 1 } else { 0 }})
+        );
         assert_eq!(model["selected_rate"], selected as f64 / published as f64);
         let expected: std::collections::BTreeSet<_> = raw_findings
             .iter()
@@ -1693,6 +1698,33 @@ fn five_writer_candidates_survive_continuation_and_restart() {
     watch.find("fifth checked stop", |e| {
         e["event"] == "execution.released" && e["execution"] == old["id"]
     });
+    // G7 sabotage: discard the causal stop at writer termination or require
+    // a picker to expose sources.
+    // The operator stopped this exact held fixture execution, before publication.
+    let stopped_stats = operator.call(
+        "yard_attempt_stats",
+        json!({"project": project.path, "ticket": "Y-1"}),
+    );
+    let stopped_model = stopped_stats["result"]["trials"]["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["identity"]["requested"]["model"] == "trial-model-4")
+        .unwrap();
+    assert_eq!(stopped_model["identity"]["role"], "implementer");
+    assert_eq!(stopped_model["executions"], json!([old["id"]]));
+    assert_eq!(
+        stopped_model["outcomes"],
+        json!({"completed": 0, "failed": 0, "stopped": 1, "unknown": 0})
+    );
+    assert_eq!(stopped_model["publication_count"], 0);
+    assert_eq!(
+        writer_rows(
+            &project,
+            &format!("SELECT outcome FROM execution WHERE id = {}", old["id"])
+        ),
+        vec![json!({"outcome": "unchanged"})]
+    );
     let fifth = writer_workspace(&root, "writer-4");
     let clone_inode = std::fs::metadata(fifth.join("clone")).unwrap().ino();
     assert_eq!(
@@ -2154,6 +2186,51 @@ fn five_writer_candidates_survive_continuation_and_restart() {
     });
     assert!(!root.exists());
     assert_eq!(std::fs::read(untouched).unwrap(), b"other workspace\n");
+    // Continuation and recovery add their own executions, never another sample
+    // of the stopped predecessor. Cleanup/restart must retain this same aggregate.
+    let retained = operator.call(
+        "yard_attempt_stats",
+        json!({"project": project.path, "ticket": "Y-1"}),
+    )["result"]["trials"]
+        .clone();
+    let model = retained["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["identity"]["requested"]["model"] == "trial-model-4")
+        .unwrap();
+    assert_eq!(
+        model["executions"],
+        json!([old["id"], successor["id"], final_writer["id"]])
+    );
+    assert_eq!(
+        model["outcomes"],
+        json!({"completed": 1, "failed": 0, "stopped": 1, "unknown": 1})
+    );
+    assert_eq!(model["publication_count"], 1);
+    assert_eq!(model["selected_count"], 0);
+    // A candidate-producing root spelled selector remains a source model.
+    let named_selector = retained["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["identity"]["requested"]["model"] == "trial-model-2")
+        .unwrap();
+    assert_eq!(named_selector["identity"]["role"], "implementer");
+    assert_eq!(
+        named_selector["outcomes"],
+        json!({"completed": 1, "failed": 0, "stopped": 0, "unknown": 0})
+    );
+    drop(watch);
+    machine.kill();
+    machine.start();
+    for _ in 0..2 {
+        let reopened = operator.call(
+            "yard_attempt_stats",
+            json!({"project": project.path, "ticket": "Y-1"}),
+        );
+        assert_eq!(reopened["result"]["trials"], retained);
+    }
 }
 
 // Locate the host seam; assertions above observe bytes and inode isolation.

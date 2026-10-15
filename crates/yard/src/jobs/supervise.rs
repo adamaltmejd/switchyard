@@ -1778,13 +1778,6 @@ pub async fn implement(
     run.stopped |= take_stop(daemon, project, execution).await;
     project.tx(|tx| {
         let current = attempts::get(tx, attempt.id)?;
-        if current.state != "live" {
-            return executions::end(tx, execution, executions::End {
-                outcome: "abandoned",
-                ticket: Some(ticket.id),
-                ..Default::default()
-            });
-        }
         let failure = match (&run.registered, &run.terminal) {
             (Some(crate::harness::Registration::Refused(reason)), _) => Some(("failed", Some("mcp"), reason.clone())),
             _ if run.timed_out => Some(("timeout", Some("timeout"), "a clock ran out".to_string())),
@@ -1818,6 +1811,20 @@ pub async fn implement(
             (report_only && !run.stopped && !edited && report.is_none())
                 .then(|| ("failed", Some("publication"), "missing_report".to_string()))
         });
+        let infrastructure = if failure.is_some() || teardown.is_err() || fetched.is_err()
+            || (listing.is_none() && !run.stopped)
+            || proof_snapshot.as_ref().is_some_and(Result::is_err) { "failed" }
+            else if run.stopped { "stopped" }
+            else if run.exit_code.is_some_and(|code| code != 0) { "failed" }
+            else { "completed" };
+        if current.state != "live" {
+            return executions::end(tx, execution, executions::End {
+                outcome: "abandoned",
+                infrastructure: Some(infrastructure),
+                ticket: Some(ticket.id),
+                ..Default::default()
+            });
+        }
         let stop = |tx: &rusqlite::Connection, reason: &str, detail: &str| -> Result<(), Fail> {
             attempts::raise(tx, attempts::Raise {
                 kind: "stopped",
@@ -1833,6 +1840,7 @@ pub async fn implement(
         if let Some((outcome, cause, detail)) = failure {
             executions::end(tx, execution, executions::End {
                 outcome,
+                infrastructure: Some("failed"),
                 detail: Some(&detail),
                 exit_cause: cause,
                 exit_code: run.exit_code,
@@ -1846,6 +1854,7 @@ pub async fn implement(
             let detail = format!("the box did not come down, so the clone cannot be trusted: {error}");
             executions::end(tx, execution, executions::End {
                 outcome: "failed",
+                infrastructure: Some("failed"),
                 detail: Some(&detail),
                 exit_cause: Some("box"),
                 exit_code: run.exit_code,
@@ -1858,6 +1867,7 @@ pub async fn implement(
             let detail = "the clone's status could not be read, so the candidate is refused";
             executions::end(tx, execution, executions::End {
                 outcome: "refused",
+                infrastructure: Some("failed"),
                 detail: Some(detail),
                 exit_code: run.exit_code,
                 ticket: Some(ticket.id),
@@ -1869,6 +1879,7 @@ pub async fn implement(
             let detail = format!("the clone was refused: {error}");
             executions::end(tx, execution, executions::End {
                 outcome: "refused",
+                infrastructure: Some("failed"),
                 detail: Some(&detail),
                 exit_code: run.exit_code,
                 ticket: Some(ticket.id),
@@ -1883,6 +1894,7 @@ pub async fn implement(
         {
             executions::end(tx, execution, executions::End {
                 outcome: "dirty",
+                infrastructure: Some(infrastructure),
                 detail: Some(listing),
                 exit_code: run.exit_code,
                 ticket: Some(ticket.id),
@@ -1900,6 +1912,7 @@ pub async fn implement(
             let detail = ".yard changes only through the operator's `yard sync`; the candidate touching it is refused. Take the .yard change out of your commits.";
             executions::end(tx, execution, executions::End {
                 outcome: "refused",
+                infrastructure: Some(infrastructure),
                 detail: Some(detail),
                 exit_code: run.exit_code,
                 ticket: Some(ticket.id),
@@ -1912,6 +1925,7 @@ pub async fn implement(
             let detail = error.clone();
             executions::end(tx, execution, executions::End {
                 outcome: "refused",
+                infrastructure: Some("failed"),
                 detail: Some(&detail),
                 exit_code: run.exit_code,
                 ticket: Some(ticket.id),
@@ -1922,6 +1936,7 @@ pub async fn implement(
         if report_only && (!workflow.read_only || cleanup_audit) {
             executions::end(tx, execution, executions::End {
                 outcome: if run.stopped || edited { "interrupted" } else { "complete" },
+                infrastructure: Some(infrastructure),
                 output: (!run.stopped && !edited).then(|| json!({"kind": "report", "value": report})),
                 exit_code: run.exit_code,
                 ticket: Some(ticket.id),
@@ -1955,6 +1970,7 @@ pub async fn implement(
         if !advanced {
             executions::end(tx, execution, executions::End {
                 outcome: "unchanged",
+                infrastructure: Some(infrastructure),
                 output: (workflow.read_only && !run.stopped && !edited).then(|| json!({"kind": "report", "value": report})),
                 exit_code: run.exit_code,
                 ticket: Some(ticket.id),
@@ -1990,6 +2006,7 @@ pub async fn implement(
         }
         executions::end(tx, execution, executions::End {
             outcome: "candidate",
+            infrastructure: Some(infrastructure),
             output: Some(json!({"kind": "candidate", "value": candidate})),
             exit_code: run.exit_code,
             ticket: Some(ticket.id),
@@ -2061,7 +2078,8 @@ async fn stop_preparation(
         let attempt = attempts::get(tx, row.required_attempt()?)?;
         if attempt.state != "live" {
             executions::end(tx, execution, executions::End {
-                outcome: "abandoned", ticket: Some(attempt.ticket), detail, ..Default::default()
+                outcome: "abandoned", infrastructure: Some(if stopped { "stopped" } else if detail.is_some() { "failed" } else { "unknown" }),
+                ticket: Some(attempt.ticket), detail, ..Default::default()
             })?;
             return Ok(true);
         }
@@ -2069,7 +2087,7 @@ async fn stop_preparation(
             return Ok(false);
         }
         executions::end(tx, execution, executions::End {
-            outcome: "unchanged", ticket: Some(attempt.ticket), detail, ..Default::default()
+            outcome: "unchanged", infrastructure: Some("stopped"), ticket: Some(attempt.ticket), detail, ..Default::default()
         })?;
         attempts::raise(tx, attempts::Raise {
             kind: "stopped", reason: "unchanged", ticket: Some(attempt.ticket),

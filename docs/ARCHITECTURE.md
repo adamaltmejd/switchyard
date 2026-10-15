@@ -1535,8 +1535,10 @@ report current transcript, gate-log and proof-snapshot availability from
 the filesystem. Retained rows and proof digests do not promise durable
 logs, transcripts or proof bytes. Default attention stays compact.
 
-Both statistics tools return `trials` for declared candidate and finding
-selection graphs. These are projections of retained executions and publications.
+Both statistics tools return `trials` for declared independent-writer,
+candidate-selection and finding-selection graphs. These are projections of
+retained executions and publications. Participant roles follow admitted output
+kinds; a candidate-producing node named selector is still an implementer.
 Each picker execution records an application fact once: candidate activation,
 or consumption of an eligible finding selection after checked ownership release.
 Earlier application history stays unknown. Statistics distinguish `applied`,
@@ -1573,6 +1575,12 @@ proxy, not objective correctness, a quality score or statistical significance.
 Model groups expose sample execution IDs, completed/failed/stopped/unknown
 infrastructure counts and the same partial usage, estimate and timing aggregates
 as other statistics. Timeouts count as failed; unavailable outcomes are unknown.
+Writer termination records infrastructure separately from raw publication
+outcomes: explicit stops, including preparation stops, are stopped; successful
+completion remains completed even for unchanged, dirty or policy-refused work.
+Preparation, harness, teardown and candidate-inspection failures are failed.
+Completed negative review judgments remain completed. Historical ambiguous
+outcomes stay unknown; raw outcomes and detail prose do not reconstruct them.
 Cohort timing is the observed wall span of its recorded graph node executions,
 from earliest start to latest end, null while any is unfinished. It is not the
 sum of concurrent durations or a claim that the whole graph has finished.

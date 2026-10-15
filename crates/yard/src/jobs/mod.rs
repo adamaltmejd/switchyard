@@ -842,6 +842,7 @@ pub fn spawn(daemon: &Arc<Daemon>, project: &Arc<Project>, kind: &str, execution
                         execution,
                         executions::End {
                             outcome: if ended { "abandoned" } else { "error" },
+                            infrastructure: (row.kind == "implementation").then_some("failed"),
                             detail: Some(&fail.message),
                             ..Default::default()
                         },
