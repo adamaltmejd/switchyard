@@ -1999,9 +1999,22 @@ async fn answer_start(
         .execution
         .map(|id| project.read(|conn| executions::get(conn, id)))
         .transpose()?;
+    let cleanup_audit = if let Some(row) = execution.as_ref().filter(|row| row.attempt.is_some()) {
+        let attempt = project.read(|conn| attempts::get(conn, row.required_attempt()?))?;
+        attempt
+            .admission
+            .as_ref()
+            .and_then(|admission| crate::plan::Plan::admitted(admission).ok())
+            .is_some_and(|plan| {
+                plan.cleanup_audits()
+                    .any(|(name, _)| row.node.as_ref() == Some(name))
+            })
+    } else {
+        false
+    };
     if let Some(previous) = execution
         .as_ref()
-        .filter(|row| row.kind == "implementation")
+        .filter(|row| row.kind == "implementation" && !cleanup_audit)
     {
         let attempt = project.read(|conn| attempts::get(conn, previous.required_attempt()?))?;
         if attempt
@@ -2077,7 +2090,7 @@ async fn answer_start(
         let Some(attempt) = item.attempt else {
             return Ok(());
         };
-        let rerun = execution
+        let rerun = cleanup_audit || execution
             .as_ref()
             .is_some_and(|row| matches!(row.kind.as_str(), "gate" | "review"));
         if !rerun {

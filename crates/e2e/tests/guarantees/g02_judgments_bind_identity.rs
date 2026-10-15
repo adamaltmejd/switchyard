@@ -1294,3 +1294,418 @@ fn delayed_candidate_acceptance_names_the_changed_identity_and_writes_nothing() 
         &["merge-base", "--is-ancestor", head, "refs/heads/main"],
     );
 }
+
+/// G2/G9/G13: selected ordinary and packaged reports consume different immutable
+/// publications around the existing cleanup handoff. Command-only reuse never
+/// enters either report harness, their selected sources or their model policy.
+/// Sabotage: reuse changed/unknown inputs, invalidate every result, copy a report
+/// as a new pass, retain old approval, or infer publication/landing from writes.
+/// One machine uses the existing package image fixture without a debugger build.
+/// Git and fixture bytes supply identities; host model counts expose replay.
+#[test]
+fn selected_cleanup_reuses_only_unchanged_actual_judgment_inputs() {
+    use std::sync::{Arc, Mutex};
+    let counts = Arc::new(Mutex::new(
+        std::collections::BTreeMap::<String, usize>::new(),
+    ));
+    let observed = counts.clone();
+    let machine = Machine::new("g2-cleanup-inputs", move |request| {
+        let model = request.body["model"].as_str().unwrap();
+        if request.opens() {
+            *observed.lock().unwrap().entry(model.into()).or_default() += 1;
+        }
+        let report = || {
+            tool(
+                "yard_publish_report",
+                json!({"outcome": "complete",
+            "report": {"summary": "Fixture code and proof observed", "findings": []}}),
+            )
+        };
+        if request
+            .last_tool_result()
+            .is_some_and(|(name, _)| name == "yard_publish_report")
+        {
+            return Reply::Text("done".into());
+        }
+        match model {
+            "fake-model" => {
+                if request.opens() {
+                    Reply::Tools(vec![report()])
+                } else {
+                    Reply::Text("planned".into())
+                }
+            }
+            "implementer-selected" => {
+                if request.opens() {
+                    Reply::Tools(vec![bash(
+                        "printf 'before\n' > chain.txt && git add chain.txt && git commit -qm Implement && printf 'before\n' > /yard/proof/chain.txt",
+                    )])
+                } else {
+                    Reply::Text("done".into())
+                }
+            }
+            "cleanup-selected" => {
+                if request.opens() {
+                    // The same operation is a no-op on its second invocation.
+                    Reply::Tools(vec![bash(
+                        "printf 'after\n' > chain.txt && git add chain.txt && (git diff --cached --quiet || git commit -qm Cleanup)",
+                    )])
+                } else {
+                    Reply::Tools(vec![report()])
+                }
+            }
+            "repair-selected" => {
+                if request.opens() {
+                    Reply::Tools(vec![bash(
+                        "test \"$(cat chain.txt)\" = after && printf 'after\n' > /yard/proof/chain.txt",
+                    )])
+                } else {
+                    Reply::Text("done".into())
+                }
+            }
+            "audit-current" | "audit-unknown" => {
+                if request.opens() {
+                    Reply::Tools(vec![bash(
+                        "test \"$(cat chain.txt)\" = \"$(cat /yard/proof/chain.txt)\" && printf 'audit-ok\n'",
+                    )])
+                } else {
+                    assert!(request.last_tool_result().unwrap().1.contains("audit-ok"));
+                    Reply::Tools(vec![report()])
+                }
+            }
+            "audit-original" => {
+                assert!(!request.has_tool("bash"));
+                if request.opens() {
+                    Reply::Tools(vec![tool(
+                        "read_declared",
+                        json!({"file": "source:chain.txt"}),
+                    )])
+                } else if request.last_tool_result().unwrap().0 == "read_declared" {
+                    assert!(request.last_tool_result().unwrap().1.contains("before"));
+                    Reply::Tools(vec![report()])
+                } else {
+                    Reply::Text("done".into())
+                }
+            }
+            other => panic!("unexpected model {other}"),
+        }
+    });
+    machine.start();
+    let project = super::g08_durable_package::fixture(&machine);
+    machine.wrapper(
+        "pinfold",
+        &format!(
+            r#"
+if [ "$1 $2" = 'image build' ]; then
+    previous=''
+    for arg do
+        if [ "$previous" = '--context' ]; then cp -R '{root}/build-inputs' "$arg/build-inputs"; fi
+        previous="$arg"
+    done
+fi
+"#,
+            root = machine.root.display()
+        ),
+    );
+    super::g08_durable_package::image(&project, "");
+    let mut configuration = String::from(
+        "\n[gates.verify]\ncommand = 'test \"$(cat chain.txt)\" = after'\nclosed_inputs = 'fixture-runtime-v1'\n",
+    );
+    for (role, output) in [
+        ("implementer", "candidate"),
+        ("cleanup", "report"),
+        ("repair", "candidate"),
+    ] {
+        configuration.push_str(&format!(
+            r#"
+[agents.{role}]
+harness = "pi"
+provider = "openrouter"
+model = "{role}-selected"
+[profiles.{role}]
+access = "write-allowed"
+outcomes = ["complete"]
+[profiles.{role}.outputs]
+result = "{output}"
+[profiles.{role}.runner]
+kind = "agent"
+agent = "{role}"
+instructions = "Run the selected fixture role."
+skills = ["trusted/selected.md"]
+"#
+        ));
+    }
+    for name in ["current", "original", "unknown"] {
+        configuration.push_str(&format!(
+            r#"
+[agents.audit-{name}]
+harness = "pi"
+provider = "openrouter"
+model = "audit-{name}"
+"#
+        ));
+        if name != "unknown" {
+            configuration.push_str(&format!(
+                r#"[agents.audit-{name}.judgment_inputs]
+configuration = "fixture-pinfold-v1"
+model = "scripted-fixture-v1"
+"#
+            ));
+        }
+        configuration.push_str(&format!(
+            r#"
+[profiles.audit-{name}]
+access = "read-only"
+outcomes = ["complete"]
+[profiles.audit-{name}.outputs]
+result = "report"
+[profiles.audit-{name}.runner]
+kind = "{}"
+agent = "audit-{name}"
+instructions = "Judge only the declared fixture input."
+"#,
+            if name == "original" {
+                "packaged"
+            } else {
+                "agent"
+            }
+        ));
+        configuration.push_str(if name == "original" {
+            "package = 'durable-audit'\nskill = 'trusted/selected.md'\nreferences = ['trusted/reference.txt']\nfiles = [{root = 'source', path = 'chain.txt'}]\n"
+        } else { "skills = ['trusted/selected.md']\n" });
+    }
+    project.reconfigure(&unreviewed(&configuration));
+    let mut graph = super::g13_runs_where_its_row_says::sequential_handoff_graph();
+    graph["inputs"]["candidate"] = json!("candidate");
+    for name in ["current", "original", "unknown"] {
+        let node = format!("cleanup-audit-{name}");
+        let candidate = if name == "original" {
+            json!({"node": "implementer", "output": "result", "kind": "candidate"})
+        } else {
+            json!({"output": "candidate", "kind": "candidate"})
+        };
+        graph["nodes"][&node] = json!({"profile": format!("audit-{name}"),
+            "inputs": {"candidate": candidate},
+            "requires": ["candidate"]});
+        graph["nodes"]["implementer"]["routes"]["complete"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"to": node}));
+    }
+    // This fixture selects the native landing gate only.
+    graph["nodes"]
+        .as_object_mut()
+        .unwrap()
+        .remove("candidate-gate-verify");
+    graph["nodes"]["repair"]["routes"]["complete"] = json!([{"to": "landing-gate-verify"}]);
+    let mut watch = project.watch(0);
+    let mut operator = machine.operator();
+    operator.initialize();
+    project.json(&[
+        "ticket",
+        "new",
+        "--title",
+        "Cleanup actual inputs",
+        "--workflow",
+        "plan",
+    ]);
+    let planned = watch.event("attempt.ended", &[("outcome", "planned")]);
+    let removed = watch.find("planning cleanup", |event| {
+        event["event"] == "execution.ended"
+            && event["data"]["kind"] == "cleanup"
+            && event["attempt"] == planned["attempt"]
+    });
+    watch.find("planning clone released", |event| {
+        event["event"] == "execution.released" && event["execution"] == removed["execution"]
+    });
+    let started = operator.call(
+        "yard_attempt_start",
+        json!({"project": project.path, "ticket": "Y-1", "graph": graph}),
+    );
+    assert!(started.get("error").is_none(), "{started}");
+    let attempt = started["result"]["attempt"].as_i64().unwrap();
+    let first = approval(&mut watch);
+    let rows =
+        project.rows("SELECT * FROM execution WHERE node LIKE 'cleanup-audit-%' ORDER BY id");
+    let original = |node: &str| rows.iter().find(|row| row["node"] == node).unwrap();
+    let before_head = original("cleanup-audit-current")["head"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let before_proof = original("cleanup-audit-current")["proof"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let after_head = head(&first);
+    let after_proof = proof(&first);
+    let consumed: Value = serde_json::from_str(
+        original("cleanup-audit-current")["inputs"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    let producer = consumed["candidate"]["source"]["execution"]
+        .as_i64()
+        .unwrap();
+    assert_eq!(
+        git(
+            &project.canonical(),
+            &[
+                "rev-parse",
+                &format!("refs/yard/candidates/{attempt}/{producer}")
+            ]
+        )
+        .trim(),
+        before_head
+    );
+    let snapshots = project
+        .path
+        .join(format!(".yard/local/attempts/{attempt}/proof-snapshots"));
+    for (digest, contents) in [(&before_proof, "before\n"), (&after_proof, "after\n")] {
+        assert_eq!(
+            std::fs::read_to_string(snapshots.join(digest).join("chain.txt")).unwrap(),
+            contents
+        );
+    }
+    assert_eq!(
+        git(
+            &project.canonical(),
+            &["show", &format!("{before_head}:chain.txt")]
+        ),
+        "before\n"
+    );
+    assert_eq!(
+        git(
+            &project.canonical(),
+            &["show", &format!("{after_head}:chain.txt")]
+        ),
+        "after\n"
+    );
+    assert_ne!(before_proof, after_proof);
+    let changed = rows
+        .iter()
+        .rev()
+        .find(|row| row["node"] == "cleanup-audit-current")
+        .unwrap();
+    assert_eq!(changed["head"], after_head);
+    assert_eq!(changed["proof"], after_proof);
+    assert_eq!(changed["outcome"], "complete");
+    let report: Value = serde_json::from_str(changed["report"].as_str().unwrap()).unwrap();
+    assert_eq!(report["head"], after_head);
+    assert_eq!(report["proof"], after_proof);
+    let assert_reference = |row: &Value, earlier: &Value| {
+        assert_eq!(row["outcome"], "reused");
+        let result: Value = serde_json::from_str(row["result"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            result["reference"],
+            json!({"execution": earlier["id"], "result": {"execution": earlier["id"]}})
+        );
+        assert_eq!(result["outputs"], json!({}));
+        assert_eq!(result["judgment"], Value::Null);
+        assert_eq!(row["report"], Value::Null);
+    };
+    assert_reference(
+        rows.iter()
+            .rev()
+            .find(|row| row["node"] == "cleanup-audit-original")
+            .unwrap(),
+        original("cleanup-audit-original"),
+    );
+    let before = project.rows("SELECT * FROM approval");
+    let stale = operator.call(
+        "yard_attempt_approve",
+        json!({"project": project.path,
+        "ticket": "Y-1", "target": "main", "head": before_head, "proof": before_proof}),
+    );
+    assert_eq!(stale["error"]["code"], "stale", "{stale}");
+    assert_eq!(
+        stale["error"]["data"],
+        json!({"identity": "head", "expected": before_head, "current": after_head})
+    );
+    assert_eq!(project.rows("SELECT * FROM approval"), before);
+    project.json(&[
+        "attempt",
+        "reject",
+        "Y-1",
+        "--target",
+        "main",
+        "--head",
+        &after_head,
+        "--proof",
+        &after_proof,
+        "--text",
+        "Run the no-op selected cleanup",
+    ]);
+    let second = approval(&mut watch);
+    assert_eq!(head(&second), after_head);
+    assert_eq!(proof(&second), after_proof);
+    let publications = project.rows("SELECT id, result FROM execution WHERE node = 'repair' AND outcome = 'candidate' ORDER BY id");
+    assert_eq!(publications.len(), 2);
+    assert_ne!(publications[0]["id"], publications[1]["id"]);
+    for publication in &publications {
+        assert_eq!(
+            git(
+                &project.canonical(),
+                &[
+                    "rev-parse",
+                    &format!("refs/yard/candidates/{attempt}/{}", publication["id"])
+                ]
+            )
+            .trim(),
+            after_head
+        );
+    }
+    let current =
+        project.rows("SELECT * FROM execution WHERE node LIKE 'cleanup-audit-%' ORDER BY id");
+    assert_reference(
+        current
+            .iter()
+            .rev()
+            .find(|row| row["node"] == "cleanup-audit-current")
+            .unwrap(),
+        changed,
+    );
+    assert_reference(
+        current
+            .iter()
+            .rev()
+            .find(|row| row["node"] == "cleanup-audit-original")
+            .unwrap(),
+        original("cleanup-audit-original"),
+    );
+    for old in &rows {
+        assert_eq!(
+            project.rows(&format!("SELECT * FROM execution WHERE id = {}", old["id"]))[0],
+            *old
+        );
+    }
+    assert!(project.rows("SELECT * FROM \"check\" WHERE execution IN (SELECT id FROM execution WHERE outcome = 'reused')").is_empty());
+    assert_eq!(
+        *counts.lock().unwrap(),
+        std::collections::BTreeMap::from([
+            ("fake-model".into(), 1),
+            ("implementer-selected".into(), 1),
+            ("cleanup-selected".into(), 2),
+            ("repair-selected".into(), 2),
+            ("audit-current".into(), 2),
+            ("audit-original".into(), 1),
+            ("audit-unknown".into(), 3)
+        ])
+    );
+    project.json(&[
+        "attempt",
+        "approve",
+        "Y-1",
+        "--target",
+        "main",
+        "--head",
+        &after_head,
+        "--proof",
+        &after_proof,
+    ]);
+    watch.event("landing.recorded", &[]);
+    assert_eq!(
+        git(&project.canonical(), &["show", "refs/heads/main:chain.txt"]),
+        "after\n"
+    );
+}

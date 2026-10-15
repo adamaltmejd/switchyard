@@ -56,6 +56,15 @@ pub struct Agent {
     pub model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub judgment_inputs: Option<JudgmentInputs>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JudgmentInputs {
+    pub configuration: String,
+    pub model: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize, Deserialize)]
@@ -213,6 +222,15 @@ impl Config {
             ));
         }
         for (name, agent) in &raw.agents {
+            if agent.judgment_inputs.as_ref().is_some_and(|inputs| {
+                inputs.configuration.trim().is_empty()
+                    || inputs.model.trim().is_empty()
+                    || agent.login.is_some()
+            }) {
+                return Err(format!(
+                    "agents.{name}.judgment_inputs requires configuration and model identities without login"
+                ));
+            }
             let Some(harness) = crate::harness::get(&agent.harness) else {
                 return Err(format!(
                     "agents.{name}.harness {:?} is unknown; Yard knows {}",

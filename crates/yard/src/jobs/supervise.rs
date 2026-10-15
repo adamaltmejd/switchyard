@@ -143,6 +143,7 @@ pub fn implementation_node(
                 .rev()
                 .find(|row| {
                     row.kind == "implementation"
+                        && row.workspace.is_some()
                         && row.plan_revision == attempt.plan_revision()
                         && row.ticket_revision == Some(revision)
                 })
@@ -169,7 +170,15 @@ pub fn start_implementation(
     feedback: Option<&Value>,
 ) -> Result<i64, Fail> {
     let attempt = attempts::get(tx, attempt.id)?;
-    let node = implementation_node(tx, &attempt)?;
+    let mut node = implementation_node(tx, &attempt)?;
+    if reason == "repair"
+        && node == "repair"
+        && attempt.admission.as_ref().is_some_and(|a| {
+            crate::plan::Plan::admitted(a).is_ok_and(|plan| plan.cleanup_audits().next().is_some())
+        })
+    {
+        node = "cleanup".into();
+    }
     start_writer(tx, &attempt, &node, reason, feedback)
 }
 
@@ -1020,13 +1029,19 @@ pub async fn implement(
     })? {
         ticket.body = body;
     }
-    let workflow = loaded.config.workflow(&attempt.workflow)?.clone();
+    let mut workflow = loaded.config.workflow(&attempt.workflow)?.clone();
     let plan = match &attempt.admission {
         Some(admission) => crate::plan::Plan::admitted(admission)
             .map_err(|error| Fail::refused(error.to_string()))?,
         None => loaded.config.workflow_plan(&attempt.workflow)?,
     };
     let declared = &plan.nodes[row.node.as_deref().unwrap_or("implementer")];
+    let cleanup_audit = plan
+        .cleanup_audits()
+        .any(|(name, _)| row.node.as_ref() == Some(name));
+    if cleanup_audit {
+        workflow.read_only = true;
+    }
     let packaged =
         matches!(declared.runner, crate::plan::Runner::Packaged { .. }).then_some(&declared.runner);
     let report_only = match declared.outputs.get("result") {
@@ -1149,6 +1164,7 @@ pub async fn implement(
     let state = storage.join("state");
     let input = storage.join("input");
     let checkpoint = if let Some(packaged) = packaged
+        && !cleanup_audit
         && attempt
             .admission
             .as_ref()
@@ -1260,7 +1276,7 @@ pub async fn implement(
                 }
             }));
             let mut prompt = format!("{instructions}\n{}\n{}", ticket.title, ticket.body);
-            prompt.push_str(&plan_handoff(daemon, project, &attempt, &row).await?);
+            if !cleanup_audit { prompt.push_str(&plan_handoff(daemon, project, &attempt, &row).await?); }
             if prompt.len() > 32768 {
                 return Err(Fail::refused("invalid_input: audit prompt bound"));
             }
@@ -1327,7 +1343,17 @@ pub async fn implement(
         }
         Ok(())
     })?;
-    let prompt = if packaged.is_some() {
+    let prompt = if cleanup_audit && packaged.is_none() {
+        let crate::plan::Runner::Agent { instructions, .. } = &declared.runner else {
+            unreachable!()
+        };
+        Ok(format!(
+            "{}\n{instructions}\n{}\n{}\nJudge the read-only source in /workspace and proof in /yard/proof. Publish a complete report with yard_publish_report. Source writes, candidate publication and landing are refused.\n",
+            selected_prompt(&declared.runner),
+            ticket.title,
+            ticket.body
+        ))
+    } else if packaged.is_some() {
         // Pi requires a prompt; the packaged input hook reads audit.json.
         Ok("Run the selected packaged audit.".to_string())
     } else {
@@ -1512,6 +1538,10 @@ pub async fn implement(
             super::verification(
                 daemon, project, execution, &clone, launch, runtime_evidence(&spec),
             ).await?;
+            if project.read(|conn| Ok(executions::get(conn, execution)?.verification
+                .is_some_and(|v| !v["reference"].is_null())))? {
+                return Ok(None);
+            }
         }
         run_harness(
             daemon,
@@ -1525,11 +1555,27 @@ pub async fn implement(
             Duration::from_secs(workflow.inactivity_timeout_minutes * 60),
             deadline,
         )
-        .await
+        .await.map(Some)
     }
     .await;
     let mut run = match run {
-        Ok(run) => run,
+        Ok(Some(run)) => run,
+        Ok(None) => {
+            daemon.grants.revoke(project, execution);
+            live.down(DOWN_TIMEOUT).await?;
+            return project.tx(|tx| {
+                executions::end(
+                    tx,
+                    execution,
+                    executions::End {
+                        outcome: "reused",
+                        infrastructure: Some("reused"),
+                        ticket: Some(ticket.id),
+                        ..Default::default()
+                    },
+                )
+            });
+        }
         Err(fail) => {
             daemon.grants.revoke(project, execution);
             let _ = live.down(DOWN_TIMEOUT).await;
@@ -1781,7 +1827,7 @@ pub async fn implement(
             })?;
             return stop(tx, "failed", &detail);
         }
-        if report_only && !workflow.read_only {
+        if report_only && (!workflow.read_only || cleanup_audit) {
             executions::end(tx, execution, executions::End {
                 outcome: if run.stopped || edited { "interrupted" } else { "complete" },
                 output: (!run.stopped && !edited).then(|| json!({"kind": "report", "value": report})),
@@ -1810,7 +1856,7 @@ pub async fn implement(
             && !workflow.read_only
             && !edited;
         let advanced = !run.stopped
-            && (new_head != previous || (!workflow.read_only && current_proof != digest) || rejudge || (plan.writers() && new_head != base));
+            && (new_head != previous || (!workflow.read_only && current_proof != digest) || rejudge || (plan.writers() && new_head != base) || (plan.handoff() && !edited && row.node.as_deref() == Some("repair")));
         if !advanced {
             executions::end(tx, execution, executions::End {
                 outcome: "unchanged",

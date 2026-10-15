@@ -210,6 +210,8 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
         super::verification(
             daemon, project, execution, &checkout, launch, supervise::runtime_evidence(&spec),
         ).await?;
+        if project.read(|conn| Ok(crate::store::executions::get(conn, execution)?.verification
+            .is_some_and(|v| !v["reference"].is_null())))? { return Ok(None); }
         supervise::run_harness(
             daemon,
             project,
@@ -222,13 +224,26 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
             timeout,
             tokio::time::Instant::now() + timeout,
         )
-        .await
+        .await.map(Some)
     }
     .await;
     daemon.grants.revoke(project, execution);
     live.down(supervise::DOWN_TIMEOUT).await?;
     let _ = std::fs::remove_dir_all(&dir);
-    let run = run?;
+    let Some(run) = run? else {
+        return project.tx(|tx| {
+            executions::end(
+                tx,
+                execution,
+                executions::End {
+                    outcome: "reused",
+                    infrastructure: Some("reused"),
+                    ticket: Some(ticket.id),
+                    ..Default::default()
+                },
+            )
+        });
+    };
 
     // Review verdicts survive a failed runner; selector results require success.
     // Eligibility also needs checked registration and ownership proofs.

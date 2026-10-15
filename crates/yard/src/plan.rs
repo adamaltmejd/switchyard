@@ -580,6 +580,9 @@ impl Plan {
     }
 
     pub fn concurrent(&self) -> bool {
+        if self.handoff() {
+            return false;
+        }
         self.writers()
             || self.nodes.values().any(|node| {
                 node.routes
@@ -666,11 +669,64 @@ impl Plan {
         }
     }
 
+    pub fn cleanup_audits(&self) -> impl Iterator<Item = (&String, &Node)> {
+        self.nodes
+            .iter()
+            .filter(|(name, _)| self.handoff() && name.starts_with("cleanup-audit-"))
+    }
+
     fn handoff_selection(&self, ordinary: &Self, config: &Config) -> bool {
         if !self.handoff() || ordinary.nodes["implementer"].access != Access::WriteAllowed {
             return false;
         }
         let mut reduced = self.clone();
+        let audits: Vec<_> = self
+            .cleanup_audits()
+            .map(|(name, _)| name.clone())
+            .collect();
+        for name in &audits {
+            let node = &self.nodes[name];
+            let current = Input {
+                node: None,
+                output: "candidate".into(),
+                kind: Output::Candidate,
+            };
+            let original = Input {
+                node: Some("implementer".into()),
+                output: "result".into(),
+                kind: Output::Candidate,
+            };
+            if node.workspace.is_some()
+                || node.operator_failure
+                || node.advisory
+                || node.access != Access::ReadOnly
+                || node.outputs != BTreeMap::from([("result".into(), Output::Report)])
+                || node.outcomes != ["complete"]
+                || !node.routes.is_empty()
+                || node.requires != ["candidate"]
+                || node.inputs.len() != 1
+                || !node
+                    .inputs
+                    .get("candidate")
+                    .is_some_and(|input| input == &current || input == &original)
+                || !config.profiles.values().any(|profile| {
+                    profile.runner == node.runner
+                        && profile.access == node.access
+                        && profile.outputs == node.outputs
+                        && profile.outcomes == node.outcomes
+                })
+                || !matches!(node.runner, Runner::Agent { .. } | Runner::Packaged { .. })
+            {
+                return false;
+            }
+            reduced.nodes.remove(name);
+        }
+        if !audits.is_empty() {
+            if self.inputs.get("candidate") != Some(&Output::Candidate) {
+                return false;
+            }
+            reduced.inputs.remove("candidate");
+        }
         for (name, output, source) in [
             ("implementer", Output::Candidate, None),
             (
@@ -729,8 +785,23 @@ impl Plan {
             {
                 return false;
             }
+            let mut routes = node.routes.clone();
+            if name == "implementer"
+                && let Some(complete) = routes.get_mut("complete")
+            {
+                for audit in &audits {
+                    let expected = Route {
+                        to: audit.clone(),
+                        repeat: None,
+                    };
+                    if complete.iter().filter(|route| **route == expected).count() != 1 {
+                        return false;
+                    }
+                    complete.retain(|route| route != &expected);
+                }
+            }
             if name != "repair"
-                && node.routes
+                && routes
                     != BTreeMap::from([(
                         "complete".into(),
                         vec![Route {
@@ -755,6 +826,7 @@ impl Plan {
         }
         if self.nodes.iter().any(|(name, node)| {
             !matches!(name.as_str(), "implementer" | "cleanup" | "repair")
+                && !audits.contains(name)
                 && (node.inputs.values().any(|input| {
                     input.kind == Output::Candidate
                         && input.node.is_some()

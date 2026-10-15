@@ -691,6 +691,23 @@ pub fn binding(
         let mut inputs = serde_json::Map::new();
         for (name, reference) in &declared.inputs {
             let Some(source) = reference.node.as_deref() else {
+                if plan.cleanup_audits().any(|(name, _)| name == &node)
+                    && reference.output == "candidate"
+                {
+                    let Some(producer) = query(conn,
+                        "attempt = ?1 AND kind = 'implementation' AND plan_revision = ?2 AND ticket_revision = ?3 AND json_extract(result, '$.outputs.result.kind') = 'candidate' ORDER BY id DESC LIMIT 1",
+                        params![attempt.id, attempt.plan_revision(), start.ticket_revision])?.pop()
+                        .filter(|producer| producer.result_eligible) else { return Ok(None); };
+                    let value = &producer.result.as_ref().expect("eligible publication")["outputs"]
+                        ["result"]["value"];
+                    inputs.insert(
+                        name.clone(),
+                        json!({"kind": "candidate", "source": {
+                        "execution": producer.id, "node": producer.node, "output": "result",
+                        "plan_revision": producer.plan_revision}, "value": value}),
+                    );
+                    continue;
+                }
                 if reference.output == "feedback" {
                     if let Some(feedback) = start.feedback {
                         inputs.insert(name.clone(), feedback.clone());

@@ -139,8 +139,11 @@ fn matching_identity(
     execution: &super::executions::Execution,
     evidence: &Value,
 ) -> Result<Option<Value>, Fail> {
-    if execution.kind != "gate" || evidence["reuse"] != "eligible" {
+    if evidence["reuse"] != "eligible" {
         return Ok(None);
+    }
+    if execution.kind != "gate" {
+        return judgment_identity(conn, execution, evidence);
     }
     let Some(mut identity) = evidence.get("identity").filter(|v| v.is_object()).cloned() else {
         return Ok(None);
@@ -168,11 +171,17 @@ fn matching_identity(
         policy.outcomes.retain(|outcome| outcome != "failed");
     }
     let expected_input = crate::plan::Input {
-        node: (!landing).then(|| "implementer".into()),
+        node: (!landing).then(|| {
+            policy
+                .inputs
+                .get(label)
+                .and_then(|input| input.node.clone())
+                .unwrap_or_default()
+        }),
         output: if landing { "merged" } else { "result" }.into(),
         kind: crate::plan::Output::Candidate,
     };
-    if policy.inputs != std::collections::BTreeMap::from([(label.into(), expected_input)])
+    if policy.inputs != std::collections::BTreeMap::from([(label.into(), expected_input.clone())])
         || policy.requires != [label]
         || !matches!(policy.runner, crate::plan::Runner::Command { .. })
     {
@@ -236,7 +245,7 @@ fn matching_identity(
         };
         let producer = super::executions::get(conn, producer)?;
         if producer.attempt != execution.attempt
-            || producer.node.as_deref() != Some("implementer")
+            || producer.node != expected_input.node
             || !producer.result_eligible
             || producer
                 .result
@@ -244,7 +253,11 @@ fn matching_identity(
                 .map(|r| &r["outputs"]["result"]["value"])
                 != Some(&candidate["value"])
             || candidate["source"]
-                != json!({"execution": producer.id, "node": "implementer", "output": "result"})
+                != if candidate["source"].get("plan_revision").is_some() {
+                    json!({"execution": producer.id, "node": producer.node, "output": "result", "plan_revision": producer.plan_revision})
+                } else {
+                    json!({"execution": producer.id, "node": producer.node, "output": "result"})
+                }
         {
             return Ok(None);
         }
@@ -256,6 +269,116 @@ fn matching_identity(
     Ok(Some(identity))
 }
 
+fn judgment_identity(
+    conn: &Connection,
+    execution: &super::executions::Execution,
+    evidence: &Value,
+) -> Result<Option<Value>, Fail> {
+    let Some(mut identity) = evidence.get("identity").filter(|v| v.is_object()).cloned() else {
+        return Ok(None);
+    };
+    let Ok(policy) =
+        serde_json::from_value::<crate::plan::Node>(evidence["policy"]["node"].clone())
+    else {
+        return Ok(None);
+    };
+    if policy.access != crate::plan::Access::ReadOnly
+        || !matches!(
+            policy.runner,
+            crate::plan::Runner::Agent { .. } | crate::plan::Runner::Packaged { .. }
+        )
+        || !matches!(execution.kind.as_str(), "implementation" | "review")
+    {
+        return Ok(None);
+    }
+    let Some(inputs) = identity["inputs"].as_object() else {
+        return Ok(None);
+    };
+    // Other typed suppliers keep their exact identities; they are not inferred
+    // pure merely because a candidate's publication was unchanged.
+    if inputs.len() != 1 {
+        return Ok(None);
+    }
+    let mut normalized = serde_json::Map::new();
+    for (name, input) in inputs {
+        let Some(producer) = input["source"]["execution"].as_i64() else {
+            return Ok(None);
+        };
+        let producer = super::executions::get(conn, producer)?;
+        if input["kind"] != "candidate"
+            || !input["tree"].is_string()
+            || !producer.result_eligible
+            || producer.attempt != execution.attempt
+            || input["source"]["node"] != json!(producer.node)
+            || input["source"]["output"] != "result"
+            || producer
+                .result
+                .as_ref()
+                .map(|r| &r["outputs"]["result"]["value"])
+                != Some(&input["value"])
+            || input["value"]["base"] != json!(execution.base)
+            || input["value"]["head"] != json!(execution.head)
+            || input["value"]["proof"] != json!(execution.proof.clone().unwrap_or_default())
+            || input["tree"] != identity["candidate"]["tree"]
+        {
+            return Ok(None);
+        }
+        normalized.insert(
+            name.clone(),
+            json!({"kind": "candidate", "tree": input["tree"],
+            "base": input["value"]["base"], "proof": input["value"]["proof"]}),
+        );
+    }
+    identity["inputs"] = json!(normalized);
+    identity["node_policy"] = json!(policy);
+    Ok(Some(identity))
+}
+
+fn reusable_judgment(
+    conn: &Connection,
+    execution: &super::executions::Execution,
+    evidence: &Value,
+) -> Result<Option<Value>, Fail> {
+    let Some(identity) = matching_identity(conn, execution, evidence)? else {
+        return Ok(None);
+    };
+    for original in super::executions::query(
+        conn,
+        "attempt = ?1 AND id < ?2 AND kind = ?3 AND node = ?4 ORDER BY id DESC",
+        params![
+            execution.attempt,
+            execution.id,
+            execution.kind,
+            execution.node
+        ],
+    )? {
+        if !original.result_eligible {
+            continue;
+        }
+        let Some(recorded) = original.verification.as_ref() else {
+            continue;
+        };
+        if matching_identity(conn, &original, recorded)?.as_ref() != Some(&identity) {
+            continue;
+        }
+        if let Some(check) = for_execution(conn, original.id)? {
+            if check.verdict == "pass" {
+                return Ok(Some(json!({"execution": original.id, "check": check.id,
+                    "result": {"execution": original.id}})));
+            }
+        } else if original.result.as_ref().is_some_and(|result| {
+            result["outcome"] == "complete"
+                && result["infrastructure"]["outcome"] == "completed"
+                && result["outputs"]["result"]["kind"] == "report"
+        }) {
+            return Ok(Some(
+                json!({"execution": original.id, "result": {"execution": original.id}}),
+            ));
+        }
+    }
+    Ok(None)
+}
+
 /// Reference an original passing check. Failed evidence and its operator
 /// acceptance never participate in matching, and no second verdict is made.
 pub fn reusable(
@@ -264,10 +387,8 @@ pub fn reusable(
     evidence: &Value,
 ) -> Result<Option<Value>, Fail> {
     let attempt = super::attempts::get(conn, execution.required_attempt()?)?;
-    if attempt.admission.as_ref().is_some_and(|admission| {
-        crate::plan::Plan::admitted(admission).is_ok_and(|plan| plan.handoff())
-    }) {
-        return Ok(None);
+    if execution.kind != "gate" {
+        return reusable_judgment(conn, execution, evidence);
     }
     if execution.parent.is_none()
         && attempt
@@ -320,14 +441,14 @@ fn referenced(
     name: &str,
     input: &Input,
 ) -> Result<Option<Check>, Fail> {
-    if kind != "gate" {
+    if !matches!(kind, "gate" | "review") {
         return Ok(None);
     }
     let attempt = super::attempts::get(conn, input.attempt)?;
     let ids = super::all(
         conn,
         "SELECT id FROM execution WHERE attempt = ?1
-        AND kind = 'gate' AND name = ?2 AND parent IS NULL AND base = ?3 AND head = ?4
+        AND kind = ?7 AND name = ?2 AND parent IS NULL AND base = ?3 AND head = ?4
         AND ticket_revision = ?5 AND COALESCE(proof, '') = ?6
         AND status = 'ended' AND outcome = 'reused' AND reserved = 0 AND teardown = 1
         ORDER BY id DESC",
@@ -337,7 +458,8 @@ fn referenced(
             input.base,
             input.head,
             input.ticket_revision,
-            input.proof
+            input.proof,
+            kind
         ],
         |row| row.get::<_, i64>(0),
     )?;

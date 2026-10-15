@@ -91,6 +91,70 @@ pub async fn verification(
         "external_services": {"status": "unknown"},
     });
     let definition = &evidence["policy"]["definition"];
+    let selected = definition["agent"]["settings"]["judgment_inputs"].clone();
+    let read_only = evidence["policy"]["node"]["access"] == "read-only";
+    if read_only
+        && selected["configuration"]
+            .as_str()
+            .is_some_and(|s| !s.trim().is_empty())
+        && selected["model"]
+            .as_str()
+            .is_some_and(|s| !s.trim().is_empty())
+        && definition["agent"]["settings"]["login"].is_null()
+        && evidence["runtime"]["egress"]["allow"]
+            .as_array()
+            .is_some_and(Vec::is_empty)
+    {
+        evidence["runtime"]["supported"] = daemon
+            .pinfold
+            .runtime_identity()
+            .await
+            .unwrap_or_else(|| json!({"status": "unknown"}));
+        evidence["runtime"]["environment"]["status"] = json!("declared");
+        evidence["runtime"]["environment"]["definition"] = json!("yard-selected-judgment-v1");
+        evidence["runtime"]["environment"]["configuration"] = selected["configuration"].clone();
+        if evidence["runtime"]["supported"]["version"].is_string()
+            && evidence["image"]["status"] == "observed"
+            && evidence["policy"]["definition"].is_object()
+            && row
+                .inputs
+                .as_ref()
+                .and_then(Value::as_object)
+                .is_some_and(|inputs| {
+                    inputs.len() == 1
+                        && inputs.values().all(|input| {
+                            input["kind"] == "candidate"
+                                && input["source"]["execution"].is_i64()
+                                && ["base", "head", "proof"]
+                                    .iter()
+                                    .all(|key| input["value"][key].is_string())
+                        })
+                })
+        {
+            let mut inputs = row.inputs.clone().unwrap_or_default();
+            for input in inputs.as_object_mut().expect("typed inputs").values_mut() {
+                if input["kind"] == "candidate" {
+                    let head = input["value"]["head"]
+                        .as_str()
+                        .ok_or_else(|| Fail::refused("unknown candidate identity"))?;
+                    input["tree"] =
+                        json!(daemon.git.root_tree(&project.canonical_dir(), head).await?);
+                }
+            }
+            evidence["identity"] = json!({"declaration": selected,
+                "candidate": {"tree": evidence["candidate"]["tree"], "base": row.base,
+                    "base_tree": evidence["candidate"]["base_tree"], "proof": row.proof},
+                "inputs": inputs, "definition": evidence["policy"]["definition"],
+                "launch": evidence["launch"], "image": evidence["image"],
+                "runtime": evidence["runtime"], "yard": evidence["tools"]["yard"],
+                "ticket_revision": row.ticket_revision});
+            evidence["reuse"] = json!("eligible");
+            evidence["external_services"] =
+                json!({"status": "declared", "model": selected["model"]});
+            evidence["tools"]["executed"] = json!({"status": "declared", "source": "observed-image", "contract": "pinfold-box-v1"});
+        }
+    }
+    let definition = &evidence["policy"]["definition"];
     let declaration = definition["gate"]["closed_inputs"].as_str();
     if row.kind == "gate"
         && declaration.is_some_and(|identity| !identity.trim().is_empty())
@@ -141,6 +205,110 @@ pub async fn verification(
         .read(|conn| checks::reusable(conn, &row, &evidence))?
         .unwrap_or(Value::Null);
     project.read(|conn| executions::verification(conn, execution, &evidence))
+}
+
+/// The bounded handoff judges immutable publications before cleanup and after repair.
+async fn cleanup_audits(
+    daemon: &Arc<Daemon>,
+    project: &Arc<Project>,
+    loaded: &Loaded,
+    attempt: &attempts::Attempt,
+    plan: &crate::plan::Plan,
+) -> Result<bool, Fail> {
+    let ticket = project.read(|conn| tickets::get(conn, attempt.ticket))?;
+    for (name, node) in plan.cleanup_audits() {
+        let ready = project.tx(|tx| {
+            let now = attempts::get(tx, attempt.id)?;
+            if now.state != "live"
+                || now.plan_revision() != attempt.plan_revision()
+                || now.candidate() != attempt.candidate()
+                || now.proof != attempt.proof
+                || tickets::get(tx, ticket.id)?.revision != ticket.revision
+            {
+                return Ok((false, None));
+            }
+            let start = executions::Start {
+                attempt: Some(now.id),
+                kind: "implementation",
+                node: Some(name),
+                ticket_revision: Some(ticket.revision),
+                ..Default::default()
+            };
+            let Some((_, inputs)) = executions::binding(tx, &now, &start)? else {
+                return Ok((false, None));
+            };
+            let rows = executions::attempt_work(tx, now.id)?;
+            let publication = rows
+                .iter()
+                .rev()
+                .find(|row| {
+                    row.result_eligible
+                        && row.result.as_ref().is_some_and(|result| {
+                            result["outputs"]["result"]["kind"] == "candidate"
+                        })
+                })
+                .map(|row| row.id)
+                .unwrap_or(0);
+            let previous = rows.iter().rev().find(|row| {
+                row.node.as_deref() == Some(name)
+                    && row.plan_revision == now.plan_revision()
+                    && row.ticket_revision == Some(ticket.revision)
+            });
+            if let Some(previous) = previous
+                && previous.id > publication
+                && previous.inputs.as_ref() == Some(&inputs)
+            {
+                if previous.result_eligible || checks::referenced_pass(tx, previous)? {
+                    return Ok((true, None));
+                }
+                let retry: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM attention WHERE execution = ?1
+                     AND state = 'resolved' AND resolution = 'start')",
+                    [previous.id],
+                    |row| row.get(0),
+                )?;
+                if !retry {
+                    return Ok((false, None));
+                }
+            }
+            if rows
+                .iter()
+                .any(|row| row.status == "running" || row.reserved)
+            {
+                return Ok((false, None));
+            }
+            let candidate = &inputs["candidate"]["value"];
+            let agent = match &node.runner {
+                crate::plan::Runner::Agent { agent, .. }
+                | crate::plan::Runner::Packaged { agent, .. } => agent,
+                _ => return Err(Fail::refused("invalid cleanup audit")),
+            };
+            let settings = now.writer_settings(name)?;
+            let id = executions::start(
+                tx,
+                executions::Start {
+                    base: candidate["base"].as_str(),
+                    head: candidate["head"].as_str(),
+                    proof: candidate["proof"].as_str(),
+                    name: Some(name),
+                    reason: Some("candidate"),
+                    ticket: Some(ticket.id),
+                    agent: Some((agent, &settings)),
+                    harness_version: crate::harness::get(&loaded.config.agents[agent].harness)
+                        .map(|h| h.version()),
+                    ..start
+                },
+            )?;
+            Ok((false, Some(id)))
+        })?;
+        if let Some(id) = ready.1 {
+            spawn(daemon, project, "implementation", id);
+        }
+        if !ready.0 {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Automatic readers cannot restore an input an uncertain mutation invalidated.
@@ -242,10 +410,13 @@ impl Loaded {
                 if plan.packaged().is_some() {
                     inputs["trusted_staged_sources"] = json!(sources);
                 } else {
-                    inputs["packaged_nodes"] = json!({name: {
+                    if inputs.get("packaged_nodes").is_none() {
+                        inputs["packaged_nodes"] = json!({});
+                    }
+                    inputs["packaged_nodes"][name] = json!({
                         "trusted_staged_sources": sources,
                         "package": crate::pi::package_identity(),
-                    }});
+                    });
                 }
             } else {
                 if inputs.get("selected_agent_sources").is_none() {
@@ -885,6 +1056,11 @@ async fn advance(
                 Ok((None, true))
             })?;
             if let Some(node) = next {
+                if node == "cleanup"
+                    && !cleanup_audits(daemon, project, loaded, attempt, &plan).await?
+                {
+                    return Ok(());
+                }
                 let execution = project.tx(|tx| {
                     attempts::require_plan(tx, attempt.id, attempt.plan_revision())?;
                     supervise::start_writer(
@@ -899,6 +1075,9 @@ async fn advance(
                 return Ok(());
             }
             if !complete {
+                return Ok(());
+            }
+            if !cleanup_audits(daemon, project, loaded, attempt, &plan).await? {
                 return Ok(());
             }
         }
@@ -1030,7 +1209,10 @@ async fn advance(
         .ok_or_else(|| Fail::refused("unsupported admitted complete routes"))?
         .into_iter()
         .filter(|node| {
-            *node != "implementer" && !(plan.handoff() && matches!(*node, "cleanup" | "repair"))
+            *node != "implementer"
+                && !(plan.handoff()
+                    && (matches!(*node, "cleanup" | "repair")
+                        || node.starts_with("cleanup-audit-")))
         })
     {
         let node = &plan.nodes[current];

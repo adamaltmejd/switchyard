@@ -96,7 +96,7 @@ fn checkpoint_daemon_source() -> std::path::PathBuf {
     source
 }
 
-fn fixture<'a>(machine: &'a Machine) -> Project<'a> {
+pub(super) fn fixture<'a>(machine: &'a Machine) -> Project<'a> {
     let inputs = std::env::var_os("YARD_E2E_DURABLE_INPUTS")
         .expect("YARD_E2E_DURABLE_INPUTS: public Node archive and packages/ locked archives");
     // Copy public build inputs only. No package or model code executes on host.
@@ -140,7 +140,7 @@ fn fixture<'a>(machine: &'a Machine) -> Project<'a> {
     project
 }
 
-fn image(project: &Project<'_>, sabotage: &str) {
+pub(super) fn image(project: &Project<'_>, sabotage: &str) {
     project.write("image-input", "PACKAGED_IMAGE_INPUT\n");
     let source = std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../runners/durable-audit/Dockerfile"),
