@@ -194,34 +194,57 @@ pub async fn advance(
             return Err(Fail::refused("invalid reader"));
         };
         let settings = serde_json::to_value(&loaded.config.agents[agent]).expect("agent settings");
+        let digest = loaded
+            .config
+            .review_digest(loaded.config.workflow(&attempt.workflow)?);
         let execution = project.tx(|tx| {
-            attempts::require_plan(tx, attempt.id, attempt.plan_revision())?;
-            executions::start(
-                tx,
-                executions::Start {
-                    attempt: Some(attempt.id),
-                    kind: "review",
-                    node: Some(name),
-                    name: Some(seat),
-                    reason: Some("first"),
-                    base: candidate["base"].as_str(),
-                    head: candidate["head"].as_str(),
-                    proof: candidate["proof"].as_str(),
-                    ticket_revision: Some(ticket.revision),
-                    ticket: Some(ticket.id),
-                    agent: Some((agent, &settings)),
-                    digest: Some(
-                        &loaded
-                            .config
-                            .review_digest(loaded.config.workflow(&attempt.workflow)?),
-                    ),
-                    harness_version: crate::harness::get(&loaded.config.agents[agent].harness)
-                        .map(|h| h.version()),
-                    ..Default::default()
-                },
-            )
+            let now = attempts::get(tx, attempt.id)?;
+            if now.state != "live"
+                || now.plan_revision() != attempt.plan_revision()
+                || now.choice != attempt.choice
+                || now.next.is_some()
+                || attempts::superseded_by_edit(tx, attempt.id, ticket.id, ticket.revision)?
+            {
+                return Ok(None);
+            }
+            let current_producer = executions::get(tx, producer.id)?;
+            if !current_producer.result_eligible || current_producer.result != producer.result {
+                return Ok(None);
+            }
+            let start = executions::Start {
+                attempt: Some(attempt.id),
+                kind: "review",
+                node: Some(name),
+                name: Some(seat),
+                reason: Some("first"),
+                base: candidate["base"].as_str(),
+                head: candidate["head"].as_str(),
+                proof: candidate["proof"].as_str(),
+                ticket_revision: Some(ticket.revision),
+                ticket: Some(ticket.id),
+                agent: Some((agent, &settings)),
+                digest: Some(&digest),
+                harness_version: crate::harness::get(&loaded.config.agents[agent].harness)
+                    .map(|h| h.version()),
+                ..Default::default()
+            };
+            let Some((_, inputs)) = executions::binding(tx, &now, &start)? else {
+                return Ok(None);
+            };
+            let bound = &inputs["candidate"];
+            if bound["source"]["execution"] != producer.id
+                || bound["value"] != *candidate
+                || bound["value"]["base"] != json!(start.base)
+                || bound["value"]["head"] != json!(start.head)
+                || bound["value"]["proof"] != start.proof.unwrap_or_default()
+            {
+                return Ok(None);
+            }
+            executions::start(tx, start).map(Some)
         })?;
-        spawn(daemon, project, "review", execution);
+        if let Some(execution) = execution {
+            spawn(daemon, project, "review", execution);
+        }
         unfinished = true;
     }
     if !unfinished && plan.selector().is_some() {

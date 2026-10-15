@@ -987,9 +987,10 @@ async fn advance(
                     // The gate's checkout and columns must name the same candidate
                     // as its immutable selection input, before any row is created.
                     if plan.selector().is_some()
-                        && inputs["candidate"]["value"]
-                            != json!({"base": start.base, "head": start.head,
-                                "proof": start.proof.unwrap_or_default()})
+                        && (inputs["candidate"]["value"]["base"] != json!(start.base)
+                            || inputs["candidate"]["value"]["head"] != json!(start.head)
+                            || inputs["candidate"]["value"]["proof"]
+                                != start.proof.unwrap_or_default())
                     {
                         return Ok(None);
                     }

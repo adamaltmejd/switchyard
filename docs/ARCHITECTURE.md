@@ -387,6 +387,10 @@ execution base before publication. A recreated clone starts at its recorded
 head or base. Another workspace's selection never advances that base.
 A reviewer binds its named producer's eligible execution and immutable result,
 then uses a detached clone from canonical and the published proof snapshot.
+Reader admission revalidates that exact eligible producer and result inside
+the execution-start transaction. Its current declared candidate input must
+name that producer and result, with base, head and proof matching the checkout
+columns. A superseded source starts no reader.
 It never reads a writable writer tree. Edits and definition handoffs drain
 prior owners before successors reread the frozen revision in their retained
 workspaces. Completed reader results remain history; a new candidate gets a
