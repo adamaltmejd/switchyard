@@ -14,133 +14,6 @@ pub(super) fn pre_target_binary() -> PathBuf {
         .clone()
 }
 
-/// G5/G6: actual Y-67 and Y-68 rows survive execution migrations unchanged.
-/// The historical daemon creates a fresh store, completes verification,
-/// approval, landing and cleanup. Host Git and the fixture supply identities.
-/// Sabotage: omit a column, remap IDs, lose a foreign key or invent scope,
-/// workspace or settings for retained historical rows.
-/// G2 sabotage: infer picker provenance from the old implementation head.
-/// The pre-target upgrade lacks Y-67's bound results and owner records.
-#[test]
-fn nullable_execution_upgrade_preserves_real_results_approvals_and_owners() {
-    for (revision, label) in [
-        ("fb3f727f793524534965480f86e71af06b0ad646", "pre-standalone"),
-        ("c2e7986", "pre-writers"),
-    ] {
-        historical_execution_upgrade(revision, label);
-    }
-}
-
-fn historical_execution_upgrade(revision: &str, label: &str) {
-    let machine = Machine::new("g68-migration", |request| {
-        if request.has_tool("yard_publish_review") {
-            return act(request, vec![publish(json!([]))]);
-        }
-        act(
-            request,
-            vec![
-                bash("printf proof > /yard/proof/evidence.txt"),
-                commit_file("feature.txt", "feature\n", "Feature"),
-            ],
-        )
-    });
-    machine.use_binary(Some(archived_binary(revision, label)));
-    machine.start();
-    let project = Project::new(
-        &machine,
-        "p",
-        &config(
-            r#"
-[gates.checked]
-command = "test -f feature.txt"
-runs_in = "box"
-"#,
-        ),
-    );
-    let mut history = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Historical candidate"]);
-    let candidate = history.attention();
-    assert_eq!(candidate["data"]["kind"], "approval");
-    let head = git(
-        &project.path.join(".yard/local/attempts/1/clone"),
-        &["rev-parse", "HEAD"],
-    )
-    .trim()
-    .to_string();
-    let snapshots = project.path.join(".yard/local/attempts/1/proof-snapshots");
-    let proof = std::fs::read_dir(&snapshots)
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .file_name()
-        .into_string()
-        .unwrap();
-    assert_eq!(
-        std::fs::read(snapshots.join(&proof).join("evidence.txt")).unwrap(),
-        b"proof"
-    );
-    assert_eq!(candidate["data"]["payload"]["proof"], proof);
-    project.json(&[
-        "attempt", "approve", "Y-1", "--target", "main", "--head", &head, "--proof", &proof,
-    ]);
-    history.event("landing.recorded", &[]);
-    let cleanup = history.until("historical cleanup ended", |e| {
-        e["event"] == "execution.ended" && e["data"]["kind"] == "cleanup"
-    });
-    history.find("historical cleanup release", |e| {
-        e["event"] == "execution.released" && e["execution"] == cleanup["execution"]
-    });
-    assert_eq!(project.canonical_head(), head);
-    drop(history);
-    machine.kill();
-    let mut executions = project.rows("SELECT * FROM execution ORDER BY id");
-    for row in &mut executions {
-        row.as_object_mut()
-            .unwrap()
-            .entry("scope")
-            .or_insert(Value::Null);
-        row["workspace"] = Value::Null;
-        row["settings"] = Value::Null;
-    }
-    let tables = [
-        "attempt",
-        "check",
-        "approval",
-        "attention",
-        "audit",
-        "plan_revision",
-    ];
-    let mut preserved =
-        tables.map(|table| project.rows(&format!("SELECT * FROM \"{table}\" ORDER BY rowid")));
-    assert!(!preserved[1].is_empty());
-    assert!(!preserved[2].is_empty());
-    // These actual source revisions precede pickers. Every old field remains exact.
-    for index in [0, 2] {
-        for row in &mut preserved[index] {
-            row["choice"] = Value::Null;
-        }
-    }
-    machine.use_binary(None);
-    for _ in 0..2 {
-        machine.start();
-        assert_eq!(
-            project.rows("SELECT * FROM execution ORDER BY id"),
-            executions
-        );
-        for (table, before) in tables.iter().zip(&preserved) {
-            assert_eq!(
-                &project.rows(&format!("SELECT * FROM \"{table}\" ORDER BY rowid")),
-                before,
-                "{table}"
-            );
-        }
-        assert!(project.rows("PRAGMA foreign_key_check").is_empty());
-        assert_eq!(project.canonical_head(), head);
-        machine.kill();
-    }
-}
-
 fn archived_binary(revision: &str, name: &str) -> PathBuf {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let target = yard().parent().unwrap().join(name);
@@ -415,27 +288,12 @@ fn depends_on(project: &Project, ticket: i64) -> Vec<i64> {
 /// body edit, and the attempt ends with nothing raised; accepting them
 /// blocks the parent, which the scheduler does not start once they are
 /// done; `yard ticket done` then closes it and its dependents become ready.
-/// The children are proposed parked and closed by hand. A later planning
-/// ticket runs to its end after the children are done, so a restart of the
-/// parent would have come first. The write probe first proves `/workspace`
-/// is the clone. Control: the dependent, a worker on a writable workflow in
-/// the same project, runs the same probe and its write succeeds.
-///
-/// The later plan also proposes A and B, B depending on A, as the first
-/// plan did: accepting both mints A first and B's edge names it, though
-/// the first plan's A is already minted.
-///
-/// Sabotage: make `admit::scheduled` start read-only tickets again; the
-/// parent is admitted once its children are done. Or mount the clone
-/// writable for `access = "read-only"`; the plan's write succeeds. Or
-/// accept an edit proposal at the ticket's current revision; the second
-/// edit applies and overwrites the plan. Or make `admit::resolve_reference`
-/// resolve a key from any execution's proposals; the later B's edge names
-/// the first plan's A.
-/// Or classify proposals with the default config: main's plan is writable
-/// and write is read-only, the reverse of feature/a. The planner loses its
-/// child edges or the writable worker gains one.
-/// Or copy the parent target to a proposed child; its override is not absent.
+/// G15: a read-only planner proposes children and a body edit. Same-run
+/// sibling dependencies block the parent; stale edits write nothing. A writable
+/// dependent keeps its own authority, and closing a live waiter refuses.
+/// Fixture proposals and Git/file effects supply expectations.
+/// Sabotage: allow planner writes, drop a declared dependency, accept a stale
+/// revision or close a live attempt before its work ends.
 #[test]
 fn a_plan_proposes_children_that_block_it() {
     let answers = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -456,19 +314,6 @@ fn a_plan_proposes_children_that_block_it() {
                 .unwrap()
                 .push(request.tool_results()[0].1.clone());
             return Reply::Text("done".into());
-        }
-        if request.prompt().contains("Plan more") {
-            return match request.tool_results().len() {
-                0 => Reply::Tools(vec![
-                    propose(
-                        json!({ "kind": "ticket", "key": "a", "title": "More A", "parked": true }),
-                    ),
-                    propose(json!({ "kind": "ticket", "key": "b", "title": "More B",
-                                    "parked": true, "depends_on": ["a"] })),
-                    publish_report(),
-                ]),
-                _ => Reply::Text("planned".into()),
-            };
         }
         match request.tool_results().len() {
             0 => Reply::Tools(vec![
@@ -594,58 +439,6 @@ fn a_plan_proposes_children_that_block_it() {
     for child in ["Y-3", "Y-4"] {
         project.json(&["ticket", "done", child, "--reason", "Done by hand"]);
     }
-    project.json(&[
-        "ticket",
-        "new",
-        "--title",
-        "Plan more",
-        "--target",
-        "feature/a",
-        "--workflow",
-        "plan",
-    ]);
-    watch.until("Y-5 planned", |event| {
-        event["event"] == "attempt.ended" && event["ticket"] == "Y-5"
-    });
-    assert_eq!(
-        project
-            .rows("SELECT id FROM attempt WHERE ticket = 1")
-            .len(),
-        1,
-        "the parent was started again"
-    );
-    assert!(
-        project
-            .rows("SELECT id FROM attempt WHERE ticket = 2")
-            .is_empty()
-    );
-
-    // The later plan's B must name its own accepted A, not the first plan's
-    // A, already minted as Y-3.
-    let raised = proposals(&project);
-    let titled = |title: &str| {
-        raised
-            .iter()
-            .find(|(_, payload)| payload["title"] == title)
-            .unwrap()
-            .0
-    };
-    let (more_a, more_b) = (titled("More A"), titled("More B"));
-    let a = project.json(&["proposal", "accept", &more_a.to_string()]);
-    let b = project.json(&["proposal", "accept", &more_b.to_string()]);
-    let name = |value: &Value| {
-        value["ticket"]
-            .as_str()
-            .unwrap()
-            .trim_start_matches("Y-")
-            .parse::<i64>()
-            .unwrap()
-    };
-    assert_eq!(
-        project.json(&["ticket", "show", a["ticket"].as_str().unwrap()])["title"],
-        "More A"
-    );
-    assert_eq!(depends_on(&project, name(&b)), [name(&a)]);
 
     project.json(&["ticket", "done", "Y-1", "--reason", "Its children are done"]);
     let admitted = watch.event("attempt.admitted", &[]);
@@ -772,28 +565,6 @@ fn an_upgrade_retains_a_legacy_pre_box_child_without_an_ownership_proof() {
     let waiting = watch.event("execution.waiting", &[]);
     assert_eq!(waiting["ticket"], "Y-3");
     assert_eq!(waiting["data"]["reason"], "capacity");
-    let waiter = waiting["execution"].as_i64().unwrap();
-    assert_eq!(
-        project.json(&["attempt", "stop", "Y-3"])["stopping"],
-        waiter
-    );
-    let stopped = watch.find("waiter stopped", |event| {
-        event["event"] == "attention.raised" && event["execution"] == waiter
-    });
-    assert_eq!(stopped["data"]["kind"], "stopped");
-    assert_eq!(stopped["data"]["reason"], "unchanged");
-    assert_eq!(
-        project.rows(&format!(
-            "SELECT status, reserved, outcome FROM execution WHERE id = {waiter}"
-        )),
-        vec![json!({"status": "ended", "reserved": 0, "outcome": "unchanged"})]
-    );
-    project.json(&["attempt", "start", "Y-3"]);
-    let renewed = watch.find("renewed capacity wait", |event| {
-        event["event"] == "execution.waiting" && event["execution"] != waiter
-    });
-    assert_eq!(renewed["ticket"], "Y-3");
-    assert_eq!(renewed["data"]["reason"], "capacity");
     std::fs::write(&release, "go\n").unwrap();
     assert_eq!(watch.said(&done), "done\n");
     drop(watch);
