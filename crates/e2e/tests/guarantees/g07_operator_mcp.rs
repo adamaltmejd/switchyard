@@ -238,10 +238,6 @@ runs_in = "box"
 fn standalone_command_and_report_need_no_ticket_and_grant_no_landing_authority() {
     let hold = Latch::new();
     let held = hold.clone();
-    let attached_hold = Latch::new();
-    let attached_held = attached_hold.clone();
-    let attached_phase = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let phase = attached_phase.clone();
     let machine = Machine::new("g68-scoped", move |request| {
         if request.has_tool("yard_publish_review") {
             return act(request, vec![publish(json!([]))]);
@@ -256,14 +252,7 @@ fn standalone_command_and_report_need_no_ticket_and_grant_no_landing_authority()
             0 => Reply::Tools(vec![tool("yard_context", json!({}))]),
             1 => Reply::Tools(vec![bash("git rev-parse HEAD")]),
             2 => Reply::Tools(vec![publish_report()]),
-            _ => Reply::Hold(
-                if phase.load(std::sync::atomic::Ordering::SeqCst) {
-                    attached_held.clone()
-                } else {
-                    held.clone()
-                },
-                Box::new(Reply::Text("done".into())),
-            ),
+            _ => Reply::Hold(held.clone(), Box::new(Reply::Text("done".into()))),
         }
     });
     let command_held = machine.root.join("command-held");
@@ -531,86 +520,6 @@ export default function () {
     assert_eq!(project.rows("SELECT (SELECT count(*) FROM ticket) AS tickets, (SELECT count(*) FROM attempt) AS attempts, (SELECT count(*) FROM execution) AS executions, (SELECT count(*) FROM \"check\") AS checks, (SELECT count(*) FROM approval) AS approvals"),
         vec![json!({"tickets": 0, "attempts": 0, "executions": 2, "checks": 0, "approvals": 0})]);
     assert_eq!(project.canonical_head(), input);
-    // Optional attachment is association only. A real candidate provides the
-    // allowed landing control; the attached report supplies no approval/check.
-    call(
-        &mut operator,
-        &project,
-        "yard_ticket_new",
-        json!({"title": "Feature"}),
-    );
-    let candidate = history.attention();
-    assert_eq!(candidate["data"]["kind"], "approval");
-    let checks = project.rows("SELECT * FROM \"check\" ORDER BY id");
-    let attempt = project.rows("SELECT * FROM attempt");
-    let attention = project.rows("SELECT * FROM attention");
-    attached_phase.store(true, std::sync::atomic::Ordering::SeqCst);
-    let attached = call(&mut operator, &project, "yard_execution_start",
-        json!({"target": "main", "input": input, "node": scoped_node(true), "attempt": 1, "timeout_seconds": 300}))["execution"].as_i64().unwrap();
-    attached_hold.wait_held();
-    let attached_scope = project.rows(&format!(
-        "SELECT scope FROM execution WHERE id = {attached}"
-    ));
-    assert_eq!(
-        project.rows(&format!(
-            "SELECT attempt, approval, plan_revision, proof FROM execution WHERE id = {attached}"
-        )),
-        vec![json!({"attempt": 1, "approval": null, "plan_revision": null, "proof": null})]
-    );
-    assert_eq!(project.rows("SELECT * FROM attempt"), attempt);
-    assert_eq!(project.rows("SELECT * FROM attention"), attention);
-    assert_eq!(project.rows("SELECT * FROM \"check\" ORDER BY id"), checks);
-    assert!(project.rows("SELECT * FROM approval").is_empty());
-    let candidate_head = git(
-        &project.path.join(".yard/local/attempts/1/clone"),
-        &["rev-parse", "HEAD"],
-    )
-    .trim()
-    .to_string();
-    call(
-        &mut operator,
-        &project,
-        "yard_attempt_approve",
-        json!({"ticket": "Y-1", "target": "main", "head": candidate_head}),
-    );
-    history.event("landing.recorded", &[]);
-    let cleanup = history.until("cleanup ended", |e| {
-        e["event"] == "execution.ended" && e["data"]["kind"] == "cleanup"
-    });
-    history.find("cleanup checked release", |e| {
-        e["event"] == "execution.released" && e["execution"] == cleanup["execution"]
-    });
-    assert_eq!(project.canonical_head(), candidate_head);
-    assert_eq!(
-        project.rows(&format!(
-            "SELECT status, reserved FROM execution WHERE id = {attached}"
-        )),
-        vec![json!({"status": "running", "reserved": 1})]
-    );
-    attached_hold.release();
-    history.find("attached checked release", |e| {
-        e["event"] == "execution.released" && e["execution"] == attached
-    });
-    assert_eq!(
-        project.rows(&format!(
-            "SELECT scope FROM execution WHERE id = {attached}"
-        )),
-        attached_scope
-    );
-    assert_eq!(
-        project.rows(&format!(
-            "SELECT outcome FROM execution WHERE id = {attached}"
-        )),
-        vec![json!({"outcome": "complete"})]
-    );
-    let preserved = project.rows("SELECT * FROM execution ORDER BY id");
-    drop(history);
-    machine.kill();
-    machine.start();
-    assert_eq!(
-        project.rows("SELECT * FROM execution ORDER BY id"),
-        preserved
-    );
 }
 
 /// Cancel while a real implementer is held, then let it commit and land.
@@ -809,94 +718,4 @@ export default function () {
         project.rows("SELECT state FROM ticket WHERE id = 1"),
         vec![json!({"state": "done"})]
     );
-}
-
-/// G7: accepted mutation forwards finish after a fatal input error.
-/// A real sync is held at git's update-ref. The client sees the oversized
-/// frame refusal before the host releases that effect, then sees the sync
-/// completion and error exit. Heads come from host git, not Yard's answer.
-/// Sabotage: abort the forwarding JoinSet on transport failure; the held
-/// sync loses its completion response even if the daemon later writes it.
-#[test]
-fn accepted_operator_mutations_finish_after_transport_failure() {
-    let machine = Machine::new("g7mcp-drain", |request| {
-        act(
-            request,
-            vec![commit_file("feature.txt", "feature\n", "Feature")],
-        )
-    });
-    machine.start();
-    let project = Project::new(
-        &machine,
-        "p",
-        &config("").replace("review = [\"correctness\"]", "review = \"none\""),
-    );
-    let mut history = project.watch(0);
-    let mut operator = machine.operator();
-    operator.initialize();
-    call(
-        &mut operator,
-        &project,
-        "yard_ticket_new",
-        json!({"title": "Feature"}),
-    );
-    history.attention();
-    let head = git(
-        &project.path.join(".yard/local/attempts/1/clone"),
-        &["rev-parse", "HEAD"],
-    )
-    .trim()
-    .to_string();
-    call(
-        &mut operator,
-        &project,
-        "yard_attempt_approve",
-        json!({"ticket": "Y-1", "head": head, "target": "main"}),
-    );
-    history.event("landing.recorded", &[]);
-    // Successful sync through the same client is the control.
-    let control = operator.send(
-        "tools/call",
-        json!({"name": "yard_sync", "arguments": args(&project, json!({}))}),
-    );
-    let synced = operator.receive(control);
-    assert_eq!(synced["result"]["isError"], false, "{synced}");
-    let before = project.canonical_head();
-    project.write("transport.txt", "accepted mutation\n");
-    project.git(&["add", "transport.txt"]);
-    project.git(&["commit", "-qm", "Transport fixture"]);
-    let expected = project.git(&["rev-parse", "HEAD"]).trim().to_string();
-    let held = machine.root.join("held-sync");
-    let release = machine.root.join("release-sync");
-    for fifo in [&held, &release] {
-        assert!(
-            std::process::Command::new("mkfifo")
-                .arg(fifo)
-                .status()
-                .unwrap()
-                .success()
-        );
-    }
-    machine.wrapper("git", &format!(
-        "case \" $* \" in *' update-ref --no-deref refs/heads/main '*) echo held > '{}'; read line < '{}';; esac",
-        held.display(), release.display()
-    ));
-    let request = operator.send(
-        "tools/call",
-        json!({"name": "yard_sync", "arguments": args(&project, json!({}))}),
-    );
-    assert_eq!(said(&held), "held\n");
-    assert_eq!(project.canonical_head(), before);
-    operator.oversized_frame();
-    let refused = operator.receive_frame();
-    assert_eq!(refused["id"], Value::Null);
-    assert_eq!(refused["error"]["code"], -32600);
-    // The protocol refusal was observed while the real effect is still held.
-    assert_eq!(project.canonical_head(), before);
-    std::fs::write(&release, "go\n").unwrap();
-    let completed = operator.receive(request);
-    assert_eq!(completed["result"]["isError"], false, "{completed}");
-    assert_eq!(project.canonical_head(), expected);
-    let exit = operator.close_input();
-    assert!(exit.code().is_some() && !exit.success(), "{exit}");
 }

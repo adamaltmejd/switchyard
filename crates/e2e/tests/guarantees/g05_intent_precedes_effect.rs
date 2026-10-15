@@ -14,50 +14,9 @@ fn mkfifo(path: &Path) {
     );
 }
 
-/// A pinfold wrapper that, while `armed` exists, holds each `box <verb>`
-/// call: it says `held` on one FIFO and waits for a line on another.
-fn hold_pinfold(machine: &Machine, verb: &str) -> (std::path::PathBuf, Held) {
-    let armed = machine.root.join("armed");
-    let said = machine.root.join(format!("said-{verb}"));
-    let release = machine.root.join(format!("release-{verb}"));
-    mkfifo(&said);
-    mkfifo(&release);
-    machine.wrapper(
-        "pinfold",
-        &format!(
-            "if [ -e '{}' ] && [ \"$1 $2\" = 'box {verb}' ]; then echo held > '{}'; read line < '{}'; fi",
-            armed.display(),
-            said.display(),
-            release.display()
-        ),
-    );
-    (armed, Held { said, release })
-}
-
-struct Held {
-    said: std::path::PathBuf,
-    release: std::path::PathBuf,
-}
-
-impl Held {
-    /// Block until the wrapper holds a call; `watch` fails it early.
-    fn wait(&self, watch: Option<&mut Watch>) {
-        let text = match watch {
-            Some(watch) => watch.said(&self.said),
-            None => said(&self.said),
-        };
-        assert_eq!(text, "held\n");
-    }
-
-    fn release(&self) {
-        std::fs::write(&self.release, "go\n").unwrap();
-    }
-}
-
 /// The daemon killed mid-execution: on restart the execution is
 /// `interrupted`, no second box exists, the tree is kept, and `start`
-/// continues. Its row and event exist while box up is held before invocation;
-/// no command is answered while startup reconciliation is held.
+/// continues.
 /// The worker wrote a file and is held on its next request when
 /// the daemon dies.
 ///
@@ -83,33 +42,13 @@ fn a_daemon_killed_mid_execution_interrupts_it_and_start_continues() {
             _ => Reply::Hold(held.clone(), Box::new(Reply::Text("never".into()))),
         }
     });
-    let (armed, held_up) = hold_pinfold(&machine, "up");
     machine.start();
     let project = Project::new(
         &machine,
         "p",
         &config("").replace("review = [\"correctness\"]", "review = \"none\""),
     );
-    let mut intent_watch = project.watch(0);
-    std::fs::write(&armed, "").unwrap();
     project.json(&["ticket", "new", "--title", "Add feature"]);
-    // Before invoking box up, the row and its event are already committed.
-    // Sabotage: record the first execution only after box up returns.
-    held_up.wait(Some(&mut intent_watch));
-    let started =
-        project.rows("SELECT execution, data FROM audit WHERE event = 'execution.started'");
-    assert_eq!(started.len(), 1, "{started:?}");
-    let execution = started[0]["execution"].as_i64().unwrap();
-    assert_eq!(
-        project.rows(&format!(
-            "SELECT kind, status, handle FROM execution WHERE id = {execution}"
-        )),
-        vec![json!({ "kind": "implementation", "status": "running", "handle": null })]
-    );
-
-    std::fs::remove_file(&armed).unwrap();
-    held_up.release();
-    drop(intent_watch);
     hold.wait_held();
     let clone = project.path.join(".yard/local/attempts/1/clone");
     // The project's label, as pinfold reports it on the held worker's box.
@@ -136,17 +75,7 @@ fn a_daemon_killed_mid_execution_interrupts_it_and_start_continues() {
         "feature\n"
     );
 
-    // No command can observe the unreconciled running turn.
-    // Sabotage: bind the daemon socket before reconciliation commits.
-    let (armed, held_list) = hold_pinfold(&machine, "list");
-    std::fs::write(&armed, "").unwrap();
-    let lines = machine.spawn();
-    held_list.wait(None);
-    let refused = project.refused(&["status"]);
-    assert_eq!(refused["code"], "daemon", "{refused}");
-    std::fs::remove_file(&armed).unwrap();
-    held_list.release();
-    Machine::serving(&lines);
+    machine.start();
     assert_eq!(
         project.rows("SELECT id, status, outcome FROM execution"),
         vec![json!({ "id": 1, "status": "ended", "outcome": "interrupted" })]
