@@ -1667,7 +1667,7 @@ instructions = "Judge only the declared fixture input."
     assert_eq!(stale["error"]["code"], "stale", "{stale}");
     assert_eq!(
         stale["error"]["data"],
-        json!({"identity": "head", "expected": before_head, "current": after_head})
+        json!({"expected": before_head, "current": after_head})
     );
     assert_eq!(project.rows("SELECT * FROM approval"), before);
     project.json(&[

@@ -1496,6 +1496,9 @@ An omitted effort adds no launch field, preserving the older sealed package
 protocol. New admissions with any selected packaged audit record
 `package_launch = "effort"` separately from
 the sealed package identity; revisions preserve that launch contract.
+An ordinary attempt's revision that first selects a packaged audit records
+the same contract. Revisions with retained packaged nodes preserve their
+historical capabilities, including an absent contract.
 That contract and cleanup's `source-write-v1` authorize supported effort even when the receiving
 daemon's compiled package differs from the frozen package.
 Loading validates each selected node's frozen package identity. Adoption

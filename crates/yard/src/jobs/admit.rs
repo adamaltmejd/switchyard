@@ -1564,6 +1564,21 @@ pub async fn attempt_revise(
             .inputs(&daemon.git, &project.canonical_dir(), &plan)
             .await?;
     }
+    // A first selected package uses today's launch contract. Retained frozen
+    // packages keep their historical capabilities, including an absent record.
+    if !old
+        .nodes
+        .values()
+        .any(|node| matches!(node.runner, crate::plan::Runner::Packaged { .. }))
+        && plan
+            .nodes
+            .values()
+            .any(|node| matches!(node.runner, crate::plan::Runner::Packaged { .. }))
+        && evidence.get("package_launch").is_none()
+    {
+        evidence["package_launch"] = json!("effort");
+        evidence["package_checkpoint"] = json!("exclusive-v1");
+    }
     let recorded = attempt.admission.as_ref().expect("recorded plan");
     for (name, node) in &plan.nodes {
         let crate::plan::Runner::Packaged { agent, .. } = &node.runner else {
