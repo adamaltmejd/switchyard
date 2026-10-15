@@ -736,7 +736,8 @@ pub fn binding(
                 };
                 value["review"] = json!({"check": check.to_json(),
                     "findings": super::checks::findings(conn, check.id)?,
-                    "node": plan.nodes[source], "settings": producer.settings});
+                    "node": plan.nodes[source], "settings": producer.settings,
+                    "inputs": producer.inputs});
             }
             inputs.insert(
                 name.clone(),

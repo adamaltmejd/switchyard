@@ -548,9 +548,10 @@ fn only_the_declared_choice_is_checked_and_landed() {
                 } else {
                     "P3"
                 };
-                return Reply::Tools(vec![publish(
-                    json!([{ "priority": priority, "body": "Fixture review evidence." }]),
-                )]);
+                return Reply::Tools(vec![publish(json!([
+                    { "priority": priority, "body": "Fixture review evidence." },
+                    { "priority": priority, "body": "Fixture review evidence." }
+                ]))]);
             }
             return Reply::Text("reviewed".into());
         }
@@ -867,6 +868,7 @@ fn only_the_declared_choice_is_checked_and_landed() {
         .find(|row| row["node"] == "selector" && row["outcome"] == "selected")
         .unwrap();
     assert_eq!(picker["inputs"].as_object().unwrap().len(), 10);
+    let inspected = project.json(&["attempt", "show", "Y-1"]);
     for n in 0..5 {
         assert_eq!(picker["inputs"][format!("c{n}")]["value"]["head"], heads[n]);
         assert_eq!(
@@ -889,6 +891,37 @@ fn only_the_declared_choice_is_checked_and_landed() {
             .unwrap();
         assert_eq!(execution["settings"]["model"], "fake-model");
         assert_eq!(execution["inputs"]["candidate"]["value"]["head"], heads[n]);
+        // G2: identical prose in multiple rows and reviews is not identity.
+        // Sabotage: derive IDs from text/index or use the newest check.
+        // The durable FK join supplies expectations outside the binary.
+        let sources = project.rows(&format!(
+            "SELECT f.id AS finding, f.\"check\" AS \"check\", e.id AS execution,
+             e.attempt, 'Y-' || a.ticket AS ticket, e.base, e.head, e.proof,
+             e.ticket_revision, e.plan_revision, e.digest
+             FROM finding f JOIN \"check\" c ON c.id = f.\"check\"
+             JOIN execution e ON e.id = c.execution JOIN attempt a ON a.id = e.attempt
+             WHERE e.id = {} ORDER BY f.priority, f.id",
+            execution["id"]
+        ));
+        assert_eq!(sources.len(), 2);
+        let raw = inspected["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["execution"] == execution["id"])
+            .unwrap();
+        assert_eq!(review["findings"], raw["findings"]);
+        assert_eq!(review["findings"].as_array().unwrap().len(), 2);
+        for (finding, source) in review["findings"].as_array().unwrap().iter().zip(sources) {
+            assert_eq!(
+                *finding,
+                json!({
+                    "source": source, "priority": "P3", "body": "Fixture review evidence.",
+                    "file": null, "line": null, "category": null
+                })
+            );
+        }
+        assert_eq!(review["inputs"], execution["inputs"]);
     }
     assert_eq!(
         picker["result"]["outputs"]["result"]["value"]["candidate"],
