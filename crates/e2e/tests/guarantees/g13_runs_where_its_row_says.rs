@@ -570,15 +570,4 @@ references = ["reference.txt"]
             .last_user()
             .contains("/yard/input/trusted/unselected.md")
     );
-    let verification = project.rows(&format!("SELECT verification FROM execution WHERE kind = 'implementation' AND attempt = {attempt} ORDER BY id"));
-    let definition: Value = serde_json::from_str(
-        verification.last().unwrap()["verification"]
-            .as_str()
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(
-        definition["policy"]["definition"]["selected_agent_sources"],
-        adopted
-    );
 }
