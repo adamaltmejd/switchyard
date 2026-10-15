@@ -852,7 +852,7 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
     assert_eq!(first_inputs["left"]["source"]["plan_revision"], 1);
     assert_eq!(first_inputs["right"]["source"]["plan_revision"], 1);
     assert_eq!(reviewer_opens("Exact join."), 1);
-    let raw_findings = project.rows("SELECT f.*, e.id AS execution, e.model FROM finding f JOIN \"check\" c ON c.id = f.\"check\" JOIN execution e ON e.id = c.execution WHERE e.attempt = 3 ORDER BY f.id");
+    let raw_findings = project.rows("SELECT f.*, e.id AS execution, e.model FROM finding f JOIN \"check\" c ON c.id = f.\"check\" JOIN execution e ON e.id = c.execution WHERE e.attempt = 3 AND e.plan_revision = 1 ORDER BY f.id");
     assert_eq!(raw_findings.len(), 4);
     let assert_selection = |row: &Value, revision: i64, expected_head: &str| {
         let result: Value = serde_json::from_str(row["result"].as_str().unwrap()).unwrap();
@@ -920,7 +920,9 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
         project.rows("SELECT * FROM execution WHERE attempt = 3 AND node = 'selector'"),
         first_selection
     );
-    assert_eq!(project.rows("SELECT f.*, e.id AS execution, e.model FROM finding f JOIN \"check\" c ON c.id = f.\"check\" JOIN execution e ON e.id = c.execution WHERE e.attempt = 3 ORDER BY f.id"), raw_findings);
+    // Sabotage: erase or rewrite old findings on revision. New reviewers may
+    // already publish, so compare the complete original revision only.
+    assert_eq!(project.rows("SELECT f.*, e.id AS execution, e.model FROM finding f JOIN \"check\" c ON c.id = f.\"check\" JOIN execution e ON e.id = c.execution WHERE e.attempt = 3 AND e.plan_revision = 1 ORDER BY f.id"), raw_findings);
     assert_eq!(
         project.rows(
             "SELECT * FROM execution WHERE attempt = 3 AND node = 'review-2' AND plan_revision = 1"
