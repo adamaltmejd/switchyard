@@ -122,13 +122,12 @@ fn only_the_declared_choice_is_checked_and_landed() {
             .unwrap()
             .parse()
             .unwrap();
-        if request.opens() {
+        let reply = if request.opens() {
             let version = turns[n].fetch_add(1, Ordering::SeqCst);
-            return Reply::Tools(vec![bash(&format!(
+            Reply::Tools(vec![bash(&format!(
                 "printf 'writer-{n}-{version}\\n' > same.txt && printf 'writer-{n}-{version}\\n' > /yard/proof/evidence.txt && git add same.txt && git commit -qm Independent && echo producer-ready"
-            ))]);
-        }
-        if request
+            ))])
+        } else if request
             .tool_results()
             .last()
             .is_some_and(|(_, text)| text.contains("producer-ready"))
@@ -138,10 +137,38 @@ fn only_the_declared_choice_is_checked_and_landed() {
             } else {
                 replacement_hold.clone()
             };
-            return Reply::Hold(hold, Box::new(Reply::Text("done".into())));
+            Reply::Hold(hold, Box::new(Reply::Text("done".into())))
+        } else {
+            Reply::Text("done".into())
+        };
+        Reply::ChatUsage {
+            input: if n == 2 { 0 } else { PROMPT_TOKENS },
+            output: if n == 2 { 0 } else { COMPLETION_TOKENS },
+            cache: None,
+            reply: Box::new(reply),
         }
-        Reply::Text("done".into())
     });
+    // Remove measurement fields only. Real Pi still runs and publishes normally.
+    machine.wrapper(
+        "pinfold",
+        r#"if [ "$1 $2" = 'box exec' ]; then
+  out=$(mktemp -d)
+  mkfifo "$out/frames"
+  "$REAL" "$@" >"$out/frames" &
+  child=$!
+  while IFS= read -r line; do
+    case "$line" in
+      *'"type":"message_end"'*'"model":"producer-3"'*)
+        line=$(printf '%s\n' "$line" | sed -E 's/,"cost":\{[^}]*\}//g; s/,"usage":\{[^}]*\}//g') ;;
+    esac
+    printf '%s\n' "$line"
+  done <"$out/frames"
+  wait "$child"
+  code=$?
+  rm -rf "$out"
+  exit "$code"
+fi"#,
+    );
     machine.start();
     let mut extra = String::from(
         "\n[agents.worker.judgment_inputs]\nconfiguration = 'fixture-pinfold-v1'\nmodel = 'scripted-fixture-v1'\n\
@@ -241,6 +268,7 @@ fn only_the_declared_choice_is_checked_and_landed() {
     let target = project.canonical_head();
     let mut operator = machine.operator();
     operator.initialize();
+    let before_start = std::time::Instant::now();
     let started = operator.call(
         "yard_attempt_start",
         json!({"project": project.path, "ticket": "Y-1",
@@ -251,6 +279,7 @@ fn only_the_declared_choice_is_checked_and_landed() {
     for hold in &holds {
         hold.wait_held();
     }
+    let all_held = std::time::Instant::now();
     // The completed planner also has a workspace. Count every writer in the
     // admitted graph attempt, without filtering to expected producer names.
     // Sabotage: schedule a sixth implementation workspace in this attempt.
@@ -284,7 +313,9 @@ fn only_the_declared_choice_is_checked_and_landed() {
         );
     }
     // Force B's publication before the final source. Newest-head selection loses.
+    let mut durations = Vec::new();
     for n in [1, 0, 2, 3, 4] {
+        let lower = all_held.elapsed().as_secs_f64();
         holds[n].release();
         let id = &writers
             .iter()
@@ -293,9 +324,68 @@ fn only_the_declared_choice_is_checked_and_landed() {
         watch.find("writer released", |event| {
             event["event"] == "execution.released" && &event["execution"] == id
         });
+        durations.push((id.clone(), lower, before_start.elapsed().as_secs_f64()));
     }
     let first = approval(&mut watch);
     assert_eq!(first["head"], heads[1]);
+    // G7: attribute to the producer, not the picker; use eligible source IDs,
+    // not edges, downstream checks or the newest workspace. Fixture tokens and
+    // host hold intervals supply expectations; missing usage cannot become zero.
+    let stats = operator.call(
+        "yard_attempt_stats",
+        json!({"project": project.path, "ticket": "Y-1"}),
+    );
+    let trials = &stats["result"]["trials"];
+    let models = trials["models"].as_array().unwrap();
+    for n in 0..5 {
+        let model = models
+            .iter()
+            .find(|model| model["identity"]["requested"]["model"] == format!("producer-{n}"))
+            .unwrap();
+        assert_eq!(model["publication_count"], 1);
+        assert_eq!(model["eligible_count"], 1);
+        assert_eq!(model["selected_count"], usize::from(n == 1));
+        assert_eq!(model["selected_rate"], if n == 1 { 1.0 } else { 0.0 });
+        assert_eq!(model["outcomes"]["completed"], 1);
+        assert_eq!(model["identity"]["observed"]["status"], "unknown");
+        let input = &model["measurements"]["input"];
+        if n == 3 {
+            assert_eq!(input["known_sum"], Value::Null);
+            assert_eq!(input["unknown_count"], 1);
+        } else {
+            assert_eq!(
+                input["known_sum"],
+                if n == 2 { 0 } else { 2 * PROMPT_TOKENS }
+            );
+            assert_eq!(input["complete_count"], 1);
+        }
+    }
+    let chosen_source = &trials["choices"][0]["selected_sources"][0];
+    assert_eq!(
+        chosen_source["execution"],
+        writers
+            .iter()
+            .find(|row| row["model"] == "producer-1")
+            .unwrap()["id"]
+    );
+    // Concurrent execution durations cannot be summed as graph wall time.
+    let span = trials["cohorts"][0]["timing"]["elapsed_seconds"]
+        .as_f64()
+        .unwrap();
+    assert!(
+        span + 0.01 >= durations.last().unwrap().1
+            && span <= before_start.elapsed().as_secs_f64() + 0.01
+    );
+    for (id, lower, upper) in durations {
+        let row = stats["result"]["executions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["execution"] == id)
+            .unwrap();
+        let elapsed = row["elapsed_seconds"].as_f64().unwrap();
+        assert!(elapsed + 0.01 >= lower && elapsed <= upper + 0.01, "{row}");
+    }
     let skipped = first["skipped"].as_array().unwrap();
     assert_eq!(skipped.len(), 2);
     assert!(skipped.contains(&json!("landing-gate-other")));
@@ -450,6 +540,34 @@ fn only_the_declared_choice_is_checked_and_landed() {
         "SELECT * FROM execution WHERE node = 'selector' AND outcome = 'selected' ORDER BY id",
     );
     let current = choices.last().unwrap();
+    // Repeated application of c1 and reused losing inputs are single source
+    // opportunities. An obsolete choice must not be reported as current.
+    let stats = operator.call(
+        "yard_attempt_stats",
+        json!({"project": project.path, "ticket": "Y-1"}),
+    );
+    let trials = &stats["result"]["trials"];
+    let producer = trials["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["identity"]["requested"]["model"] == "producer-1")
+        .unwrap();
+    assert_eq!(producer["eligible_count"], 2);
+    assert_eq!(producer["selected_count"], 2);
+    assert_eq!(producer["selected_rate"], 1.0);
+    assert_eq!(producer["current_selected_count"], 1);
+    for choice in trials["choices"].as_array().unwrap() {
+        assert_eq!(
+            choice["application"]["status"],
+            if choice["execution"] == third["choice"] {
+                "applied"
+            } else {
+                "superseded"
+            }
+        );
+        assert_eq!(choice["selected_sources"].as_array().unwrap().len(), 1);
+    }
     assert_eq!(current["inputs"]["c1"]["value"]["head"], replacement_head);
     assert_eq!(
         current["inputs"]["c1"]["value"]["producer"]["settings"]["model"],
@@ -525,4 +643,32 @@ fn only_the_declared_choice_is_checked_and_landed() {
             .iter()
             .all(|row| row["head"] == heads[1] || row["head"] == replacement_head)
     );
+    let cleanup = watch.find("selected trial cleanup", |event| {
+        event["event"] == "execution.ended"
+            && event["data"]["kind"] == "cleanup"
+            && event["attempt"] == attempt
+    });
+    watch.find("trial cleanup released", |event| {
+        event["event"] == "execution.released" && event["execution"] == cleanup["execution"]
+    });
+    let before = operator.call(
+        "yard_attempt_stats",
+        json!({"project": project.path, "ticket": "Y-1"}),
+    )["result"]["trials"]
+        .clone();
+    let producer = before["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["identity"]["requested"]["model"] == "producer-1")
+        .unwrap();
+    assert_eq!(producer["landings"].as_array().unwrap().len(), 1);
+    drop(watch);
+    machine.kill();
+    machine.start();
+    let after = operator.call(
+        "yard_attempt_stats",
+        json!({"project": project.path, "ticket": "Y-1"}),
+    );
+    assert_eq!(after["result"]["trials"], before);
 }

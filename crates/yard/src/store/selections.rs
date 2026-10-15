@@ -243,6 +243,35 @@ pub fn invalidate(tx: &Connection, attempt: &attempts::Attempt) -> Result<(), Fa
     Ok(())
 }
 
+/// An application fact on the existing execution, never another job.
+pub fn applied(tx: &Connection, id: i64) -> Result<(), Fail> {
+    let changed = tx.execute(
+        "UPDATE execution SET choice_application = ?2 WHERE id = ?1
+         AND json_extract(choice_application, '$.status') = 'unapplied'",
+        params![
+            id,
+            json!({"status": "applied", "at": super::now()}).to_string()
+        ],
+    )?;
+    if changed != 0 {
+        let row = executions::get(tx, id)?;
+        let attempt = attempts::get(tx, row.required_attempt()?)?;
+        audit(
+            tx,
+            "selection.applied",
+            Target {
+                ticket: Some(attempt.ticket),
+                attempt: row.attempt,
+                execution: Some(id),
+                ..Default::default()
+            },
+            None,
+            json!({"application": row.choice_application}),
+        )?;
+    }
+    Ok(())
+}
+
 pub fn activate(tx: &Connection, attempt: &attempts::Attempt, id: i64) -> Result<(), Fail> {
     let attempt = attempts::get(tx, attempt.id)?;
     let mut selected = attempt.clone();
@@ -272,6 +301,7 @@ pub fn activate(tx: &Connection, attempt: &attempts::Attempt, id: i64) -> Result
         }
     }
     invalidate(tx, &attempt)?;
+    applied(tx, id)?;
     let candidate =
         &row.result.as_ref().expect("choice")["outputs"]["result"]["value"]["candidate"]["value"];
     tx.execute(

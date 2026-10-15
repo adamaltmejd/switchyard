@@ -108,6 +108,9 @@ Pass an absolute registered `project` path. Status omits ticket bodies;
 use `yard_ticket_show`, `yard_attempt_tail` and `yard_attempt_stats` for
 drilldowns. Cancelling a wait releases the request while work continues.
 Workers keep their separate execution-scoped HTTP grants.
+Attempt and project statistics expose local model-trial source choices,
+eligible samples, frozen plan provenance and partial usage. Picker selection
+measures usefulness to that picker, not correctness.
 
 Use `yard_plan_catalog` with `project` to inspect target-bound presets,
 profiles, provider/model settings, selected skills and publication tools.

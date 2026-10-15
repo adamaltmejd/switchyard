@@ -266,7 +266,7 @@ async fn answer(message: &Value) -> Value {
                 "attempt.start" => "Start or retry through the existing attempt lifecycle.",
                 "plan.catalog" => "Inspect target-bound profiles, presets, agent settings and execution capabilities before selecting named node overrides.",
                 "attempt.tail" => "Read the live worker transcript explicitly.",
-                "attempt.stats" | "project.stats" => "Read retained execution usage and known increments with missing/partial coverage; billing is unavailable.",
+                "attempt.stats" | "project.stats" => "Read local execution usage and source-model trial choices, eligibility, applied/superseded provenance and sample counts. Selection measures picker usefulness, not correctness; billing is unavailable.",
                 _ => method,
             }, "inputSchema": schema(fields)})
         }).collect::<Vec<_>>()}),

@@ -12,6 +12,7 @@ pub mod checks;
 pub mod executions;
 pub mod selections;
 pub mod tickets;
+pub mod trials;
 use serde_json::{Value, json};
 use std::fs::File;
 use std::path::Path;

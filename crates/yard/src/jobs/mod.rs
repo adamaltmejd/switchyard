@@ -1261,9 +1261,14 @@ async fn advance(
                 .rev()
                 .find(|row| row.node.as_deref() == Some(current));
             if let Some(row) = previous {
-                if project
-                    .read(|conn| crate::store::selections::finding_current(conn, attempt, row))?
-                {
+                if project.tx(|tx| {
+                    let now = attempts::get(tx, attempt.id)?;
+                    let current = crate::store::selections::finding_current(tx, &now, row)?;
+                    if current {
+                        crate::store::selections::applied(tx, row.id)?;
+                    }
+                    Ok(current)
+                })? {
                     completed.insert(current);
                     continue;
                 }

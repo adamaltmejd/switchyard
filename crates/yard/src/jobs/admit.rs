@@ -3066,6 +3066,7 @@ pub fn project_stats(project: &Project) -> Result<Value, Fail> {
     project.read(|conn| {
         let rows = executions::query(conn, "1 ORDER BY id", [])?;
         Ok(json!({"aggregate": executions::aggregate(&rows)?,
+            "trials": store::trials::statistics(conn, &rows)?,
             "executions": rows.iter().map(|row| execution_inspection(project, row)).collect::<Vec<_>>()}))
     })
 }
@@ -3085,6 +3086,7 @@ pub fn attempt_stats(project: &Project, params: &Value) -> Result<Value, Fail> {
         };
         let rows = executions::for_attempt(conn, attempt.id)?;
         Ok(json!({"attempt": attempt.id, "aggregate": executions::aggregate(&rows)?,
+            "trials": store::trials::statistics(conn, &rows)?,
             "executions": rows.iter().map(|row| execution_inspection(project, row)).collect::<Vec<_>>()}))
     })
 }

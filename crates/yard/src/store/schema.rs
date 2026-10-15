@@ -326,4 +326,6 @@ CREATE INDEX execution_running ON execution(status) WHERE status = 'running';
     // Earlier stores have no picker provenance. Do not infer a choice from head.
     "ALTER TABLE attempt ADD COLUMN choice INTEGER REFERENCES execution(id);
      ALTER TABLE approval ADD COLUMN choice INTEGER REFERENCES execution(id);",
+    // A historical publication alone proves no application.
+    "ALTER TABLE execution ADD COLUMN choice_application TEXT;",
 ];

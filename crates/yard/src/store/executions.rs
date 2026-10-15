@@ -28,6 +28,7 @@ pub struct Execution {
     pub report: Option<Value>,
     pub teardown: Option<bool>,
     pub result_eligible: bool,
+    pub choice_application: Option<Value>,
     pub name: Option<String>,
     pub round: Option<i64>,
     pub handle: Option<String>,
@@ -62,7 +63,7 @@ const COLUMNS: &str = "id, attempt, parent, kind, reason, status, outcome, detai
     intent_state, progress, harness_version, resumed, reserved, lock_contract, intent_ref, plan_revision,
     tokens_in, tokens_out, cost, usage_fields, harness, model, node, inputs, result, teardown, report, prepared, verification, scope, workspace, settings,
     provider, agent, effort, started_at, ended_at,
-    (julianday(ended_at) - julianday(started_at)) * 86400.0, exit_cause, exit_code";
+    (julianday(ended_at) - julianday(started_at)) * 86400.0, exit_cause, exit_code, choice_application";
 
 pub const RESULT_ELIGIBLE: &str = "status = 'ended' AND reserved = 0 AND teardown = 1
     AND json_extract(result, '$.outputs.result') IS NOT NULL";
@@ -133,7 +134,8 @@ fn row(row: &Row) -> rusqlite::Result<Execution> {
         elapsed_seconds: row.get(48)?,
         exit_cause: row.get(49)?,
         exit_code: row.get(50)?,
-        result_eligible: row.get(51)?,
+        choice_application: json_column(row, 51)?,
+        result_eligible: row.get(52)?,
     })
 }
 
@@ -192,6 +194,7 @@ impl Execution {
             "report": self.report,
             "teardown": self.teardown,
             "result_eligible": self.result_eligible,
+            "choice_application": self.choice_application,
             "name": self.name,
             "round": self.round,
             "usage": self.usage,
@@ -608,6 +611,22 @@ pub fn start(tx: &Connection, start: Start) -> Result<i64, Fail> {
         params![id, revision, binding.as_ref().map(|(node, _)| node),
             binding.as_ref().map(|(_, inputs)| inputs.to_string()).or_else(|| start.feedback.map(|feedback| json!({"feedback": feedback}).to_string())), binding.as_ref().map(|_| false)],
     )?;
+    if binding.as_ref().is_some_and(|(node, _)| node == "selector")
+        && attempt
+            .as_ref()
+            .and_then(|attempt| attempt.admission.as_ref())
+            .is_some_and(|admission| {
+                matches!(
+                    admission["plan"]["nodes"]["selector"]["outputs"]["result"].as_str(),
+                    Some("selection" | "finding-selection")
+                )
+            })
+    {
+        tx.execute(
+            r#"UPDATE execution SET choice_application = '{"status":"unapplied"}' WHERE id = ?1"#,
+            [id],
+        )?;
+    }
     if let Some(scope) = start.scope {
         tx.execute("UPDATE execution SET scope = ?2, node = 'standalone', inputs = ?3, teardown = 0, plan_revision = NULL WHERE id = ?1",
             params![id, scope.to_string(), scope["input"].to_string()])?;

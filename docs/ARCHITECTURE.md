@@ -1530,10 +1530,53 @@ artifact cleanup. Recorded model/provider/effort are requested settings;
 observed model identity remains unknown. Start, end, exit cause and exit code
 come from the execution row. Elapsed seconds cover ended executions only.
 Their aggregate is summed execution time, not concurrent graph wall time.
-No usefulness score is inferred. Execution show, attempt show and statistics
+Execution show, attempt show and statistics
 report current transcript, gate-log and proof-snapshot availability from
 the filesystem. Retained rows and proof digests do not promise durable
 logs, transcripts or proof bytes. Default attention stays compact.
+
+Both statistics tools return `trials` for declared candidate and finding
+selection graphs. These are projections of retained executions and publications.
+Each picker execution records an application fact once: candidate activation,
+or consumption of an eligible finding selection after checked ownership release.
+Earlier application history stays unknown. Statistics distinguish `applied`,
+`superseded`, `unapplied` and `unknown`; current input and choice identity decide
+whether a recorded application is still current. Publication alone proves no
+application. Raw losing candidates, reviews and findings remain unchanged.
+
+Model groups bind role, requested harness/provider/model/effort, attempt,
+ticket revision and admitted plan revision. Each cohort exposes its frozen
+admission, including profile definitions. Execution drilldowns expose the
+consumed inputs; choice drilldowns retain picker settings, exact eligible and
+chosen source references, grouped contributors and application evidence.
+Observed identity remains separately unknown when unavailable.
+Source attribution uses the publication's execution, never the picker model.
+`published_count` counts candidate publications or source findings;
+`publication_count` counts publishing executions, including empty reviews
+and picker reports.
+Eligibility counts distinct source identities offered as picker inputs;
+eligible publication counts include empty reviews. `selected_count` counts
+distinct sources in choices recorded as applied at least once, including
+historical applications now superseded. Repeated selection, input edges,
+reopen, result reuse and downstream consumers add no source sample.
+`selected_rate` divides that count by eligible sources, or is null without
+opportunities. Current and superseded selected counts are separate subsets
+and may overlap. Group contribution counts distinct sets of exact source
+finding identities per source model; combining retains every contributor.
+
+Publication, picker use, repair execution consumption and final candidate
+landing have separate identities and counts. A repair consumer names an
+execution that received the selected feedback, not proof of a correct repair.
+Landing attribution requires the successful landing's exact approval choice.
+Finding selections grant no landing choice. Picker-selected usefulness is a
+proxy, not objective correctness, a quality score or statistical significance.
+Model groups expose sample execution IDs, completed/failed/stopped/unknown
+infrastructure counts and the same partial usage, estimate and timing aggregates
+as other statistics. Timeouts count as failed; unavailable outcomes are unknown.
+Cohort timing is the observed wall span of its recorded graph node executions,
+from earliest start to latest end, null while any is unfinished. It is not the
+sum of concurrent durations or a claim that the whole graph has finished.
+All statistics stay local; they send no telemetry and retain no transcript archive.
 
 Packaged Durable executions read their own boxed usage baseline before
 starting pending work. Token observations and terminal usage subtract that
@@ -1987,7 +2030,7 @@ The events, each naming its ticket, attempt, execution or attention target:
 `sync.imported`, `sync.consumed`, `sync.default`; `ticket.new`, `ticket.edited`,
 `ticket.parked`, `ticket.unparked`, `ticket.linked`, `ticket.done`,
 `ticket.abandoned`; `attempt.admitted`, `attempt.candidate`,
-`attempt.stopped`, `attempt.abandoned`, `attempt.ended`; `candidate.selected`; `plan.revised`;
+`attempt.stopped`, `attempt.abandoned`, `attempt.ended`; `candidate.selected`, `selection.applied`; `plan.revised`;
 `execution.started`, `execution.ended`, `execution.waiting`, `execution.stopped`,
 `execution.reserved`, `execution.released`; `check.recorded`; `approval.given`,
 `approval.ended`; `landing.prepared`, `landing.continued`, `landing.intent`, `landing.recorded`; `attention.raised`,
@@ -2469,7 +2512,7 @@ combination, lifecycle or historical version.
 | 4 | Capacity holds | Concurrent starts preserve one live attempt and the lane bound. Two held mixed reader/worker effects have exactly two native project boxes; the join waits for exact results. One-slot landing children exclude a worker and still land. An inherited native owner retains capacity across restart. Identical execution IDs in different projects keep separate grants. |
 | 5 | Intent precedes effect, and a restart loses only the turn; Durable continuation is a new exclusive execution after proved predecessor removal; individually useful work needs no ticket | A real held writable turn survives daemon death as interrupted work and resumes its retained tree. Startup removes a surviving host gate process group before requeue. A legacy owner without trustworthy lock proof remains reserved across upgrade. Matching Durable unsafe intent resumes only after old-box removal; corrupt checkpoint identity refuses before a fresh retry. A completed registered finding picker retains its immutable selection, reservation and exact ownership item across restart while a real runtime descendant holds its inherited effect lock after box removal; checked release reconciles only that item without replay. |
 | 6 | Inspectable presets and targeted profile overrides resolve declared capabilities at the boundary; inputs are validated; new supported workflow admissions retain immutable resolved input evidence, and unrecorded history stays unknown; standalone scope is explicit | Malformed worker MCP input writes no proposal; the valid same-turn control succeeds. Unavailable role overrides refuse with the exact profile reference; the valid named override resolves the complete fixture plan. Unsupported selected admission creates no work, while a supported held execution keeps its frozen inputs across template sync. A real historical store preserves rows, audit and foreign keys and supports current decisions after upgrade. |
-| 7 | Complete shipped presets cover ordinary, reduced, audit, cleanup, classification, joins and independent model trials through existing executions; a ticket lands end to end and leaves only rows; usage is optional measured data with provenance and honest partial aggregates; Codex token totals retain their meaning and unreported monetary cost is unknown | A real ticket goes through commit, gate, review, approval and native landing, then leaves rows while unrelated live work remains. Actual optional Pi frames retain unknown, interrupted partial and resumed explicit-zero measurements across reopen. Trusted statistics sum known execution increments with missing/partial counts after cleanup and restart; the landing drilldown includes positive measured costs. Operator stdio preserves worker authorization and stale mutation identity while canceled waits and stdin EOF leave work running. Standalone command/report execution has no ticket or landing authority. |
+| 7 | Complete shipped presets cover ordinary, reduced, audit, cleanup, classification, joins and independent model trials through existing executions; local trial statistics attribute distinct applied choices to source models with frozen provenance and honest opportunities; a ticket lands end to end and leaves only rows; usage is optional measured data with provenance and honest partial aggregates; Codex token totals retain their meaning and unreported monetary cost is unknown | A real ticket goes through commit, gate, review, approval and native landing, then leaves rows while unrelated live work remains. Actual optional Pi frames retain unknown, interrupted partial and resumed explicit-zero measurements across reopen. Trusted statistics sum known execution increments with missing/partial counts after cleanup and restart; the landing drilldown includes positive measured costs. Existing five-writer selection and multi-reviewer join scenarios attribute candidate wins and grouped finding contributions to exact source models, distinguish unapplied and superseded choices, and retain counts after cleanup and restart. Operator stdio preserves worker authorization and stale mutation identity while canceled waits and stdin EOF leave work running. Standalone command/report execution has no ticket or landing authority. |
 | 8 | Reviews, audits, classification and read-only candidate and finding selections are explicit bounded publications; classification chooses bounded continuation while failures remain unchanged; an empty selected panel is unreviewed; selected eligible merged failures require exact operator decisions | Silent or unregistered review publication cannot authorize approval; a proven same-project retry can. Report validation and held publication preserve exact frozen identity and eligibility, and successful text alone creates no report. Five-model selection binds own reviews and one replacement to actual landing. A correctly resealed changed packaged controller refuses before model/code effects; its unmodified control publishes through real Pi. The exact multi-model join picker refuses malformed groups and repeated contributors before a valid subset and two-source duplicate publication. Checked ownership release preserves one typed selection and all raw sources. Named original and fixer repairs retain failing verdicts before an explicit operator acceptance; text without publication is infrastructure failure and a fresh execution retries publication. Command classification retries the same failed node once, then raises attention without resetting its bound on a ticket edit. Its repair prompt carries precisely the selected groups, including an advisory contributor; an excluded required block still refuses stale acceptance before exact acceptance permits approval. |
 | 9 | Each implementer execution starts from its frozen target and the right candidate; independent writers retain isolated reusable workspaces, including integration from named candidates; the bounded implementer, cleanup and repair path retains one exclusive clone, including selected Durable cleanup and read-only audits of immutable publications | A held worker receives operator edits and adopted definitions in its next execution. Stop/start delivers the edit while retaining configured model identity. Five independent writer workspaces preserve their own bytes, sessions and frozen read-only review inputs through continuation and restart. Held integration retains partial work across restart; source writes and canonical access fail while its own write succeeds. Conflicts require repair before selection. Boxed Git inodes, fixture bytes and ancestry survive sequential selected roles; a held cleanup refuses a competing workspace retry, and checked release precedes handoff. Durable cleanup resumes a held unsafe source write in a new exclusive execution after checked release, without replay; its boxed commit passes the same clone to ordinary repair and native landing. |
 | 10 | The queue lands one at a time per target and re-judges what does not merge | Two approvals land in order; a red merge returns for repair. A feature ticket uses its frozen target source, definitions and image, repairs a real conflict, and lands only on that branch. |

@@ -825,6 +825,23 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
         serde_json::from_str(held_selection[0]["result"].as_str().unwrap()).unwrap();
     assert_eq!(committed["infrastructure"]["outcome"], "completed");
     assert_eq!(committed["outputs"]["result"]["kind"], "finding-selection");
+    // G7: a publication whose inherited owner is still live is not applied.
+    // Sabotage: count the published report before checked teardown.
+    let pending = operator.call(
+        "yard_attempt_stats",
+        json!({"project": project.path, "ticket": "Y-1"}),
+    );
+    assert_eq!(
+        pending["result"]["trials"]["choices"][0]["application"]["status"],
+        "unapplied"
+    );
+    assert!(
+        pending["result"]["trials"]["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|model| model["selected_count"] == 0)
+    );
     assert!(
         !machine
             .boxes("dev.yard.project")
@@ -976,6 +993,37 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
         project.rows("SELECT * FROM execution WHERE attempt = 3 AND node = 'selector'");
     assert_eq!(first_selection.len(), 1);
     assert_selection(&first_selection[0], 1, &head);
+    // G7: the fixture selected left useful/shared and right shared. The join
+    // repeats the same review edges. Count each durable finding once and keep
+    // both contributors to the combined group. Sabotages: attribute to picker,
+    // sum duplicate input edges, or lose a combined finding contributor.
+    let stats = operator.call(
+        "yard_attempt_stats",
+        json!({"project": project.path, "ticket": "Y-1"}),
+    );
+    for (name, published, selected, groups) in [("left-model", 3, 2, 2), ("right-model", 1, 1, 1)] {
+        let model = stats["result"]["trials"]["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|model| model["identity"]["requested"]["model"] == name)
+            .unwrap();
+        assert_eq!(model["published_count"], published);
+        assert_eq!(model["eligible_count"], published);
+        assert_eq!(model["selected_count"], selected);
+        assert_eq!(model["selected_group_count"], groups);
+        assert_eq!(model["selected_rate"], selected as f64 / published as f64);
+        let expected: std::collections::BTreeSet<_> = raw_findings
+            .iter()
+            .filter(|finding| finding["model"] == name && finding["body"] != "unselected")
+            .map(|finding| format!("finding:{}", finding["id"]))
+            .collect();
+        assert_eq!(model["selected_sources"], json!(expected));
+    }
+    assert_eq!(
+        stats["result"]["trials"]["choices"][0]["application"]["status"],
+        "applied"
+    );
     assert_eq!(
         project.rows("SELECT choice FROM attempt WHERE id = 3"),
         vec![json!({"choice": null})]
@@ -995,6 +1043,22 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
     );
     assert_eq!(changed["result"]["plan_revision"], 2, "{changed}");
     revised.wait_held();
+    // An applied historical selection is superseded by the admitted revision.
+    let obsolete = operator.call(
+        "yard_attempt_stats",
+        json!({"project": project.path, "ticket": "Y-1"}),
+    );
+    assert_eq!(
+        obsolete["result"]["trials"]["choices"][0]["application"]["status"],
+        "superseded"
+    );
+    assert!(
+        obsolete["result"]["trials"]["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|model| model["current_selected_count"] == 0)
+    );
     assert_eq!(
         project.rows("SELECT * FROM execution WHERE attempt = 3 AND node = 'selector'"),
         first_selection
@@ -1285,6 +1349,29 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
         "fixture\n"
     );
     assert_eq!(project.rows("SELECT * FROM execution WHERE attempt = 3 AND kind = 'review' AND node != 'selector' AND status = 'ended' AND plan_revision = 1 ORDER BY id"), source_rows);
+    let retained_stats = operator.call(
+        "yard_attempt_stats",
+        json!({"project": project.path, "ticket": "Y-1"}),
+    )["result"]["trials"]
+        .clone();
+    assert!(
+        retained_stats["choices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|choice| choice["repair_consumers"]
+                .as_array()
+                .is_some_and(|consumers| consumers.len() == 1))
+    );
+    // Cleanup and reopen preserve the same source samples and application facts.
+    drop(watch);
+    machine.kill();
+    machine.start();
+    let reopened = operator.call(
+        "yard_attempt_stats",
+        json!({"project": project.path, "ticket": "Y-1"}),
+    );
+    assert_eq!(reopened["result"]["trials"], retained_stats);
     five_writer_candidates_survive_continuation_and_restart();
 }
 
