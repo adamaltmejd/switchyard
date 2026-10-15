@@ -120,6 +120,22 @@ pub fn start_writer(
             || json!({"kind": "verdict", "source": {"external": "feedback"}, "value": next}),
         )
     });
+    if independent
+        && executions::binding(
+            tx,
+            &attempt,
+            &executions::Start {
+                kind: "implementation",
+                node: Some(node),
+                ticket_revision: Some(ticket.revision),
+                ..Default::default()
+            },
+        )?
+        .is_none()
+    {
+        return Err(Fail::refused("integration_inputs")
+            .with(json!({"reason": "integration_inputs", "workspace": node})));
+    }
     let id = executions::start(
         tx,
         executions::Start {
@@ -129,12 +145,20 @@ pub fn start_writer(
             workspace: Some(node),
             reason: Some(reason),
             base: Some(&base),
-            head: candidate
-                .and_then(|value| value["head"].as_str())
-                .or(attempt.head.as_deref()),
-            proof: candidate
-                .and_then(|value| value["proof"].as_str())
-                .or(attempt.proof.as_deref()),
+            head: candidate.and_then(|value| value["head"].as_str()).or({
+                if independent {
+                    None
+                } else {
+                    attempt.head.as_deref()
+                }
+            }),
+            proof: candidate.and_then(|value| value["proof"].as_str()).or({
+                if independent {
+                    None
+                } else {
+                    attempt.proof.as_deref()
+                }
+            }),
             ticket_revision: Some(ticket.revision),
             ticket: Some(ticket.id),
             agent: Some((name, &implementer)),
@@ -416,6 +440,78 @@ pub fn worker_spec(daemon: &Daemon, project: &Project, worker: &Worker) -> BoxSp
         }),
         memory: daemon.machine.box_memory.clone(),
     }
+}
+
+pub async fn candidate_mounts(
+    daemon: &Daemon,
+    project: &Project,
+    row: &executions::Execution,
+    bundles: bool,
+) -> Result<Vec<Mount>, Fail> {
+    let attempt = row.required_attempt()?;
+    let dir = project
+        .attempt_dir(attempt)
+        .join("candidate-inputs")
+        .join(row.id.to_string());
+    std::fs::create_dir_all(dir.parent().expect("input parent"))
+        .map_err(|error| error.to_string())?;
+    std::fs::create_dir(&dir).map_err(|error| error.to_string())?;
+    let mut mounts = Vec::new();
+    for (name, candidate) in row
+        .inputs
+        .as_ref()
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .filter(|(_, input)| input["kind"] == "candidate")
+    {
+        let key = crate::config::hex(name.as_bytes());
+        let path = dir.join(&key);
+        let source = path.join("source");
+        let head = candidate["value"]["head"]
+            .as_str()
+            .ok_or_else(|| Fail::refused("invalid_candidate"))?;
+        daemon
+            .git
+            .clone_detached(&project.canonical_dir(), &source, head)
+            .await?;
+        mounts.push(Mount {
+            host: source,
+            guest: format!("/yard/candidates/{key}/source"),
+            readonly: true,
+        });
+        if bundles {
+            let producer = candidate["source"]["execution"]
+                .as_i64()
+                .ok_or_else(|| Fail::refused("invalid_candidate"))?;
+            let bundle = path.join("candidate.bundle");
+            daemon
+                .git
+                .candidate_bundle(
+                    &project.canonical_dir(),
+                    &bundle,
+                    &format!("refs/yard/candidates/{attempt}/{producer}"),
+                    head,
+                )
+                .await?;
+            mounts.push(Mount {
+                host: bundle,
+                guest: format!("/yard/candidates/{key}/candidate.bundle"),
+                readonly: true,
+            });
+        }
+        if let Some(digest) = candidate["value"]["proof"]
+            .as_str()
+            .filter(|digest| !digest.is_empty())
+        {
+            mounts.push(Mount {
+                host: proof::snapshot_path(project, attempt, digest),
+                guest: format!("/yard/candidates/{key}/proof"),
+                readonly: true,
+            });
+        }
+    }
+    Ok(mounts)
 }
 
 pub fn labels(project: &Project) -> BTreeMap<String, String> {
@@ -1101,6 +1197,18 @@ pub async fn implement(
             "checkpoint_incompatible: containment policy changed before launch",
         ));
     }
+    let candidate_inputs = if plan
+        .integration()
+        .is_some_and(|(name, _)| row.node.as_deref() == Some(name))
+    {
+        let mounts = candidate_mounts(daemon, project, &row, true).await;
+        let Some(mounts) = preparation_result(daemon, project, execution, mounts).await? else {
+            return Ok(());
+        };
+        mounts
+    } else {
+        Vec::new()
+    };
     let kind = if workflow.read_only {
         crate::mcp::Kind::Audit
     } else {
@@ -1128,6 +1236,7 @@ pub async fn implement(
             egress: &egress,
         },
     );
+    spec.mounts.extend(candidate_inputs);
     if let Some(checkpoint) = &checkpoint {
         // Staging never enters retained guest bytes. The only reused mount is
         // the checkpoint root, after the store's exclusive ownership claim.
@@ -1720,6 +1829,13 @@ async fn implementer_prompt(
                 prompt.push('\n');
             }
         }
+    }
+    if plan
+        .as_ref()
+        .and_then(|plan| plan.integration())
+        .is_some_and(|(name, _)| execution.node.as_deref() == Some(name))
+    {
+        prompt.push_str(&format!("Integrate these exact candidate inputs into your own workspace:\n{}\nEach input is read-only at /yard/candidates/<hex input name>/source and /proof. Fetch its candidate.bundle with ref refs/yard/candidates/{}/<source execution>, verify FETCH_HEAD equals the declared head, then combine the changes. Resolve conflicts and commit a clean result; unresolved conflicts publish no candidate. No input approval or review carries to your output.\n", serde_json::to_string_pretty(&execution.inputs).expect("inputs serialize"), attempt.id));
     }
     let detail = next["detail"]
         .as_str()

@@ -112,6 +112,27 @@ pub async fn advance(
         {
             continue;
         }
+        let binding = if node.access == Access::WriteAllowed && !node.inputs.is_empty() {
+            let Some((_, inputs)) = project.read(|conn| {
+                executions::binding(
+                    conn,
+                    attempt,
+                    &executions::Start {
+                        kind: "implementation",
+                        node: Some(name),
+                        ticket_revision: Some(ticket.revision),
+                        ..Default::default()
+                    },
+                )
+            })?
+            else {
+                unfinished = true;
+                continue;
+            };
+            Some(inputs)
+        } else {
+            None
+        };
         let current = rows.iter().rev().find(|row| {
             row.node.as_deref() == Some(name)
                 && row.ticket_revision == Some(ticket.revision)
@@ -122,7 +143,15 @@ pub async fn advance(
                 unfinished = true;
                 continue;
             }
-            if node.access == Access::WriteAllowed {
+            if node.access == Access::WriteAllowed
+                && binding.as_ref().is_none_or(|inputs| {
+                    let mut recorded = row.inputs.clone().unwrap_or_default();
+                    if let Some(recorded) = recorded.as_object_mut() {
+                        recorded.remove("feedback");
+                    }
+                    *inputs == recorded
+                })
+            {
                 if !row.result_eligible {
                     if row.outcome.as_deref() == Some("dirty")
                         && row.reason.as_deref() != Some("dirty")
@@ -137,7 +166,7 @@ pub async fn advance(
                 }
                 continue;
             }
-            if row.result_eligible {
+            if node.access == Access::ReadOnly && row.result_eligible {
                 let source = node.inputs["candidate"]
                     .node
                     .as_deref()
