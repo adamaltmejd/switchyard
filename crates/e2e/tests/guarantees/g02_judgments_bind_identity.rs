@@ -391,6 +391,8 @@ stage = "landing"
 runs_in = "box"
 command = '''jq '{outcome: "retry", identity: .identity, report: {summary: "Retry the same exact check", findings: []}}' /yard/classification/classification.json'''
 "#);
+    // This command is only a classifier, so its declared landing gate remains
+    // omitted from normal verification and needs exact operator acceptance.
     project.reconfigure(&failed_definition);
     let source = project.git(&["rev-parse", "HEAD"]).trim().to_string();
     let mut graph = project.json(&["attempt", "show", "Y-1"])["attempt"]["plan"]["plan"].clone();
@@ -555,7 +557,7 @@ command = '''jq '{outcome: "retry", identity: .identity, report: {summary: "Retr
         "revision": final_item["payload"]["revision"], "plan_revision": plan_revision,
         "attention": current["attention"][0]["attention"],
         "accept_skipped": ["candidate-gate-unknown"],
-        "observe_landing_skipped": ["landing-gate-closed", "landing-gate-unknown"],
+        "observe_landing_skipped": ["landing-gate-classifier", "landing-gate-closed", "landing-gate-unknown"],
         "text": "Accept this exact omitted gate"}),
     );
     assert!(approved.get("error").is_none(), "{approved}");
@@ -595,7 +597,7 @@ command = '''jq '{outcome: "retry", identity: .identity, report: {summary: "Retr
         json!({"attempt": attempt, "target": "main",
         "base": final_item["payload"]["base"], "head": final_item["payload"]["head"],
         "proof": final_item["payload"]["proof"], "revision": final_item["payload"]["revision"],
-        "plan_revision": plan_revision, "skipped": ["landing-gate-closed", "landing-gate-unknown"]})
+        "plan_revision": plan_revision, "skipped": ["landing-gate-classifier", "landing-gate-closed", "landing-gate-unknown"]})
     );
     let answer = operator.call(
         "yard_attempt_accept",
@@ -605,7 +607,7 @@ command = '''jq '{outcome: "retry", identity: .identity, report: {summary: "Retr
         "proof": final_item["payload"]["proof"], "revision": final_item["payload"]["revision"],
         "plan_revision": plan_revision, "landing": landing["execution"],
         "old": landing["prepared"]["old"], "merged": merged,
-        "accept_skipped": ["landing-gate-closed", "landing-gate-unknown"],
+        "accept_skipped": ["landing-gate-classifier", "landing-gate-closed", "landing-gate-unknown"],
         "text": "Accept these exact merged omissions"}),
     );
     assert!(answer.get("error").is_none(), "{answer}");
@@ -622,7 +624,7 @@ command = '''jq '{outcome: "retry", identity: .identity, report: {summary: "Retr
         "SELECT node, head, outcome FROM execution WHERE attempt = {attempt} AND reason = 'landing' AND kind = 'gate' ORDER BY id"
     )), vec![json!({"node": "landing-gate-other", "head": merged, "outcome": "pass"})]);
     let log = std::fs::read_to_string(&commands).unwrap();
-    for (name, count) in [("closed", 9), ("other", 5), ("unknown", 5)] {
+    for (name, count) in [("closed", 10), ("other", 5), ("unknown", 5)] {
         assert_eq!(log.lines().filter(|line| *line == name).count(), count);
     }
     git(
