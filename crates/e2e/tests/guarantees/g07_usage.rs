@@ -7,7 +7,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// cache-inclusive message, then an explicit-zero resumed completion. The host
 /// wrapper removes fields from real frames; Pi otherwise supplies catalog cost.
 /// Sabotage: drop cacheRead or cacheWrite, unwrap_or(0), save only terminal
-/// usage, or count resumed history.
+/// usage, count resumed history, or rewrite interrupted usage/provenance or
+/// its harness/model/session/resumed identity on reopen.
 /// Fresh Codex and the ordinary Pi landing cannot expose these mechanisms.
 #[test]
 fn pi_unknowns_and_interrupted_resume_usage_remain_execution_local() {
@@ -136,11 +137,25 @@ fi"#,
             "fields": {"input": partial, "output": partial, "cost": unknown}
         })
     );
-    // The interrupted record survives reopening; the fixture is still held.
+    // G7 retains measured usage and resume identity across reopening while
+    // the fixture is held. Stopped attention can precede checked release,
+    // so reservation and teardown may legitimately change during restart.
     drop(history);
     machine.kill();
     machine.start();
-    assert_eq!(pi_usage(&project, 2), second);
+    let reopened = pi_usage(&project, 2);
+    for field in [
+        "execution",
+        "harness",
+        "harness_version",
+        "model",
+        "session_id",
+        "resumed",
+        "outcome",
+        "usage",
+    ] {
+        assert_eq!(reopened[field], second[field], "{field}");
+    }
     let mut history = project.watch(stopped["seq"].as_i64().unwrap());
     project.json(&["attempt", "start", "Y-1"]);
     assert_eq!(history.attention()["data"]["kind"], "approval");
