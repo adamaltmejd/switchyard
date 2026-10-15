@@ -571,3 +571,337 @@ references = ["reference.txt"]
             .contains("/yard/input/trusted/unselected.md")
     );
 }
+
+/// G2/G9/G13: one ordinary three-role path retains its clone while changing
+/// selected settings and grants. One machine, planner, three role boxes and
+/// one repair continuation also reach native verification and landing.
+/// Expected bytes, inodes and ancestry come from the fixture, boxed Git and
+/// host Git; settings come from requests received by the host model.
+/// Sabotage: allocate a second clone for a sequential role; inode/ancestry or
+/// retained bytes differ. Bypass workspace ownership; the held retry starts.
+/// Infer publication/operator authority from source access; cleanup publishes
+/// a candidate or its landing tool succeeds. Carry old judgment to a new
+/// publication with the same tree; the second gate references the old check.
+#[test]
+fn selected_cleanup_hands_one_exclusive_clone_to_separately_configured_repair() {
+    use std::os::unix::fs::MetadataExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let hold = Latch::new();
+    let cleanup_hold = hold.clone();
+    let probes = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+    let captured = probes.clone();
+    let repairs = AtomicUsize::new(0);
+    let machine = Machine::new("g13-handoff", move |request| {
+        let model = request.body["model"].as_str().unwrap();
+        if model == "fake-model" {
+            return planned(request);
+        }
+        if model == "cleanup-selected" {
+            return match request.tool_results().len() {
+                0 => Reply::Tools(vec![tool("yard_context", json!({}))]),
+                1 => Reply::Tools(vec![bash(
+                    "test \"$(cat chain.txt)\" = implemented && \
+                     test \"$(cat /yard/input/trusted/cleanup.md)\" = trusted-cleanup && \
+                     printf 'cleaned\\n' > chain.txt && git add chain.txt && git commit -qm Cleanup && \
+                     echo inode=$(stat -c %i .git) && echo source_write=0 && \
+                     cat /tmp/landing-probe.json",
+                )]),
+                2 => {
+                    captured
+                        .lock()
+                        .unwrap()
+                        .push((model.into(), request.last_tool_result().unwrap().1));
+                    Reply::Hold(
+                        cleanup_hold.clone(),
+                        Box::new(Reply::Tools(vec![publish_report()])),
+                    )
+                }
+                _ => Reply::Text("done".into()),
+            };
+        }
+        if request.opens() {
+            let command = if model == "implementer-selected" {
+                "printf 'implemented\\n' > chain.txt && git add chain.txt && git commit -qm Implement && echo inode=$(stat -c %i .git)"
+            } else if repairs.fetch_add(1, Ordering::SeqCst) == 0 {
+                "test \"$(cat chain.txt)\" = cleaned && test \"$(cat /yard/input/trusted/repair.md)\" = trusted-repair && printf 'repaired\\n' > chain.txt && git add chain.txt && git commit -qm Repair && echo inode=$(stat -c %i .git)"
+            } else {
+                "test \"$(cat chain.txt)\" = repaired && git commit --allow-empty -qm 'Fresh publication' && echo inode=$(stat -c %i .git)"
+            };
+            return Reply::Tools(vec![bash(command)]);
+        }
+        captured
+            .lock()
+            .unwrap()
+            .push((model.into(), request.last_tool_result().unwrap().1));
+        Reply::Text("done".into())
+    });
+    machine.start();
+    let mut extra = String::from(
+        "\n[gates.verify]\ncommand = 'test \"$(cat chain.txt)\" = repaired'\nstage = 'candidate'\nruns_in = 'host'\n",
+    );
+    for (role, output) in [
+        ("implementer", "candidate"),
+        ("cleanup", "report"),
+        ("repair", "candidate"),
+    ] {
+        extra.push_str(&format!(
+            "\n[agents.{role}]\nharness = 'pi'\nprovider = 'openrouter'\nmodel = '{role}-selected'\n\n[profiles.{role}]\naccess = 'write-allowed'\noutcomes = ['complete']\n[profiles.{role}.outputs]\nresult = '{output}'\n[profiles.{role}.runner]\nkind = 'agent'\nagent = '{role}'\ninstructions = 'Selected {role} role.'\n"
+        ));
+        if role != "implementer" {
+            extra.push_str(&format!("skills = ['{role}.md']\n"));
+        }
+    }
+    let project = Project::new(
+        &machine,
+        "p",
+        &config(&extra).replace("review = [\"correctness\"]", "review = \"none\""),
+    );
+    project.write("cleanup.md", "trusted-cleanup\n");
+    project.write("repair.md", "trusted-repair\n");
+    // Probe through the harness's actual MCP session, from a trusted fixture
+    // extension. No second session or bearer enters the assertion.
+    project.write(
+        ".pi/extensions/probe/index.ts",
+        r#"import { writeFileSync } from 'node:fs';
+export default function () {
+  const original = globalThis.fetch;
+  globalThis.fetch = async function (url, options) {
+    const message = JSON.parse(options?.body || '{}');
+    if (message.method === 'tools/call' && message.params?.name === 'yard_context') {
+      const probe = await original(url, { ...options, body: JSON.stringify({
+        jsonrpc: '2.0', id: 9876, method: 'tools/call', params: {
+          name: 'yard_attempt_approve', arguments: {}
+        }
+      }) });
+      writeFileSync('/tmp/landing-probe.json', await probe.text());
+    }
+    return original(url, options);
+  };
+}
+"#,
+    );
+    project.git(&["add", "-A"]);
+    project.git(&["commit", "-qm", "Trusted handoff inputs"]);
+    project.json(&["sync"]);
+    let mut watch = project.watch(0);
+    project.json(&[
+        "ticket",
+        "new",
+        "--title",
+        "Sequential fixture",
+        "--workflow",
+        "plan",
+    ]);
+    let planner = watch.event("attempt.ended", &[("outcome", "planned")]);
+    let cleanup = watch.find("planner cleanup", |event| {
+        event["event"] == "execution.ended"
+            && event["data"]["kind"] == "cleanup"
+            && event["attempt"] == planner["attempt"]
+    });
+    watch.find("planner release", |event| {
+        event["event"] == "execution.released" && event["execution"] == cleanup["execution"]
+    });
+    let graph = json!({"inputs": {"merged": "candidate", "feedback": "verdict"}, "nodes": {
+        "implementer": {"profile": "implementer", "workspace": "implementer",
+            "routes": {"complete": [{"to": "cleanup"}]}},
+        "cleanup": {"profile": "cleanup", "workspace": "implementer",
+            "inputs": {"candidate": {"node": "implementer", "output": "result", "kind": "candidate"}},
+            "requires": ["candidate"], "routes": {"complete": [{"to": "repair"}]}},
+        "repair": {"profile": "repair", "workspace": "implementer",
+            "inputs": {"cleanup": {"node": "cleanup", "output": "result", "kind": "report"},
+                "feedback": {"output": "feedback", "kind": "verdict"}},
+            "requires": ["cleanup"], "routes": {"complete": [{"to": "candidate-gate-verify"}]}},
+        "candidate-gate-verify": {"runner": {"kind": "command", "gate": "verify"},
+            "access": "write-allowed", "inputs": {"candidate": {"node": "repair", "output": "result", "kind": "candidate"}},
+            "requires": ["candidate"], "outputs": {"result": "verdict"}, "outcomes": ["complete", "failed"],
+            "routes": {"complete": [{"to": "landing-gate-verify"}], "failed": [{"to": "repair", "repeat": 1}]}},
+        "landing-gate-verify": {"runner": {"kind": "command", "gate": "verify"},
+            "access": "write-allowed", "inputs": {"merged": {"output": "merged", "kind": "candidate"}},
+            "requires": ["merged"], "outputs": {"result": "verdict"}, "outcomes": ["complete"]}
+    }});
+    let mut operator = machine.operator();
+    operator.initialize();
+    let started = operator.call(
+        "yard_attempt_start",
+        json!({"project": project.path, "ticket": "Y-1", "graph": graph}),
+    );
+    assert!(started.get("error").is_none(), "{started}");
+    let attempt = started["result"]["attempt"].as_i64().unwrap();
+    hold.wait_held();
+    let owner = project.rows(&format!("SELECT id FROM execution WHERE attempt = {attempt} AND node = 'cleanup' AND status = 'running'"))[0]["id"].as_i64().unwrap();
+    let clone = project
+        .path
+        .join(format!(".yard/local/attempts/{attempt}/clone"));
+    let inode = std::fs::metadata(clone.join(".git")).unwrap().ino();
+    assert_eq!(
+        std::fs::read_to_string(clone.join("chain.txt")).unwrap(),
+        "cleaned\n"
+    );
+    let refused = operator.call(
+        "yard_attempt_start",
+        json!({"project": project.path, "ticket": "Y-1", "workspace": "implementer"}),
+    );
+    assert_eq!(
+        refused["error"]["data"],
+        json!({"reason": "workspace_owned", "workspace": "implementer", "execution": owner}),
+        "{refused}"
+    );
+    let probe = probes.lock().unwrap().last().unwrap().1.clone();
+    assert!(probe.contains("source_write=0"), "{probe}");
+    let reply: Value =
+        serde_json::from_str(probe.lines().find(|line| line.starts_with('{')).unwrap()).unwrap();
+    let failure = &reply["result"]["structuredContent"]["error"];
+    assert_eq!(failure["data"]["execution"], owner, "{failure}");
+    assert_eq!(failure["message"], "operator_only", "{failure}");
+    hold.release();
+    let approval = watch.until("handoff approval", |event| {
+        event["event"] == "attention.raised" && event["data"]["kind"] == "approval"
+    });
+    let first = approval["data"]["payload"].clone();
+    let rows = project.rows(&format!("SELECT id, node, workspace, resumed, result, teardown, reserved FROM execution WHERE attempt = {attempt} AND kind = 'implementation' ORDER BY id"));
+    assert_eq!(
+        rows.iter()
+            .map(|row| row["node"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["implementer", "cleanup", "repair"]
+    );
+    for row in &rows {
+        assert_eq!(row["workspace"], "implementer");
+        assert_eq!(row["teardown"], 1);
+        assert_eq!(row["reserved"], 0);
+        assert_eq!(row["resumed"], Value::Null);
+    }
+    for pair in rows.windows(2) {
+        let release = project.rows(&format!(
+            "SELECT seq FROM audit WHERE event = 'execution.released' AND execution = {}",
+            pair[0]["id"]
+        ))[0]["seq"]
+            .as_i64()
+            .unwrap();
+        let start = project.rows(&format!(
+            "SELECT seq FROM audit WHERE event = 'execution.started' AND execution = {}",
+            pair[1]["id"]
+        ))[0]["seq"]
+            .as_i64()
+            .unwrap();
+        assert!(release < start);
+    }
+    let result: Value = serde_json::from_str(rows[1]["result"].as_str().unwrap()).unwrap();
+    assert_eq!(result["outputs"]["result"]["kind"], "report");
+    assert_eq!(project.rows(&format!("SELECT json_extract(data, '$.candidate') AS execution FROM audit WHERE event = 'attempt.candidate' AND attempt = {attempt} ORDER BY seq")), vec![json!({"execution": rows[0]["id"]}), json!({"execution": rows[2]["id"]})]);
+    let first_gate = project.rows(&format!("SELECT id, verification FROM execution WHERE attempt = {attempt} AND kind = 'gate' AND parent IS NULL"))[0].clone();
+    project.json(&[
+        "attempt",
+        "reject",
+        "--target",
+        "main",
+        "Y-1",
+        "--head",
+        first["head"].as_str().unwrap(),
+        "--text",
+        "Publish again with the same tree",
+    ]);
+    let approval = watch.until("fresh approval", |event| {
+        event["event"] == "attention.raised" && event["data"]["kind"] == "approval"
+    });
+    let second = &approval["data"]["payload"];
+    let first_tree = git(
+        &project.canonical(),
+        &[
+            "rev-parse",
+            &format!("{}^{{tree}}", first["head"].as_str().unwrap()),
+        ],
+    );
+    let second_tree = git(
+        &project.canonical(),
+        &[
+            "rev-parse",
+            &format!("{}^{{tree}}", second["head"].as_str().unwrap()),
+        ],
+    );
+    assert_eq!(first_tree, second_tree);
+    assert_ne!(first["head"], second["head"]);
+    let gates = project.rows(&format!("SELECT id, outcome, verification FROM execution WHERE attempt = {attempt} AND kind = 'gate' AND parent IS NULL ORDER BY id"));
+    assert_eq!(gates.len(), 2, "{gates:?}");
+    assert_ne!(gates[1]["id"], first_gate["id"]);
+    assert_eq!(gates[1]["outcome"], "pass");
+    let verification: Value =
+        serde_json::from_str(gates[1]["verification"].as_str().unwrap()).unwrap();
+    assert!(
+        verification.get("reference").is_none_or(Value::is_null),
+        "{verification}"
+    );
+    let judgments = project.rows(&format!("SELECT c.id, e.head, json_extract(e.inputs, '$.candidate.source.execution') AS producer FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE e.attempt = {attempt} AND e.parent IS NULL ORDER BY c.id"));
+    assert_eq!(judgments.len(), 2, "{judgments:?}");
+    assert_ne!(judgments[0]["id"], judgments[1]["id"]);
+    assert_eq!(judgments[0]["head"], first["head"]);
+    assert_eq!(judgments[0]["producer"], rows[2]["id"]);
+    assert_eq!(judgments[1]["head"], second["head"]);
+    let repair = project.rows(&format!("SELECT id FROM execution WHERE attempt = {attempt} AND node = 'repair' ORDER BY id DESC LIMIT 1"))[0]["id"].clone();
+    assert_eq!(judgments[1]["producer"], repair);
+    assert_ne!(judgments[0]["producer"], judgments[1]["producer"]);
+    assert_eq!(std::fs::metadata(clone.join(".git")).unwrap().ino(), inode);
+    let probes = probes.lock().unwrap();
+    let inodes: Vec<_> = probes
+        .iter()
+        .map(|(_, probe)| {
+            probe
+                .lines()
+                .find(|line| line.starts_with("inode="))
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(inodes.len(), 4);
+    assert!(inodes.iter().all(|value| *value == inodes[0]), "{inodes:?}");
+    for role in ["implementer", "cleanup", "repair"] {
+        let request = machine
+            .model
+            .requests()
+            .into_iter()
+            .find(|request| request.opens() && request.body["model"] == format!("{role}-selected"))
+            .unwrap();
+        assert!(
+            request
+                .last_user()
+                .contains(&format!("Selected {role} role."))
+        );
+        assert_eq!(
+            request.body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|message| message["role"] == "user")
+                .count(),
+            1
+        );
+    }
+    let ancestry = git(
+        &project.canonical(),
+        &[
+            "rev-list",
+            "--format=%s",
+            "--no-commit-header",
+            second["head"].as_str().unwrap(),
+            "-4",
+        ],
+    );
+    assert_eq!(
+        ancestry.lines().collect::<Vec<_>>(),
+        ["Fresh publication", "Repair", "Cleanup", "Implement"]
+    );
+    project.json(&[
+        "attempt",
+        "approve",
+        "--target",
+        "main",
+        "Y-1",
+        "--head",
+        second["head"].as_str().unwrap(),
+    ]);
+    watch.event("landing.recorded", &[]);
+    assert_eq!(
+        git(&project.canonical(), &["show", "refs/heads/main:chain.txt"]),
+        "repaired\n"
+    );
+}

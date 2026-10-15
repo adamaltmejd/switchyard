@@ -43,6 +43,23 @@ pub fn implementation_node(
     tx: &rusqlite::Connection,
     attempt: &attempts::Attempt,
 ) -> Result<String, Fail> {
+    if let Some(admission) = &attempt.admission {
+        let plan = crate::plan::Plan::admitted(admission)
+            .map_err(|error| Fail::refused(error.to_string()))?;
+        if plan.handoff() {
+            let revision = tickets::get(tx, attempt.ticket)?.revision;
+            return Ok(executions::attempt_work(tx, attempt.id)?
+                .into_iter()
+                .rev()
+                .find(|row| {
+                    row.kind == "implementation"
+                        && row.plan_revision == attempt.plan_revision()
+                        && row.ticket_revision == Some(revision)
+                })
+                .and_then(|row| row.node)
+                .unwrap_or_else(|| "implementer".into()));
+        }
+    }
     let choice = crate::store::selections::current(tx, attempt)?;
     Ok(choice
         .as_ref()
@@ -80,11 +97,22 @@ pub fn start_writer(
     }
     super::admit::refuse_during_intent(tx, attempt.ticket)?;
     let implementer = attempt.writer_settings(node)?;
+    let plan = attempt
+        .admission
+        .as_ref()
+        .map(crate::plan::Plan::admitted)
+        .transpose()
+        .map_err(|error| Fail::refused(error.to_string()))?;
+    let workspace = plan
+        .as_ref()
+        .and_then(|plan| plan.nodes.get(node))
+        .and_then(|node| node.workspace.as_deref())
+        .unwrap_or(node);
     let ticket = tickets::get(tx, attempt.ticket)?;
     let previous = executions::query(
         tx,
         "attempt = ?1 AND workspace = ?2 AND kind = 'implementation' AND json_extract(result, '$.outputs.result.kind') = 'candidate' ORDER BY id DESC LIMIT 1",
-        rusqlite::params![attempt.id, node],
+        rusqlite::params![attempt.id, workspace],
     )?
     .pop();
     let candidate = previous
@@ -103,7 +131,7 @@ pub fn start_writer(
         executions::query(
             tx,
             "attempt = ?1 AND workspace = ?2 AND kind = 'implementation' ORDER BY id DESC LIMIT 1",
-            rusqlite::params![attempt.id, node],
+            rusqlite::params![attempt.id, workspace],
         )?
         .pop()
         .and_then(|row| row.base)
@@ -142,7 +170,7 @@ pub fn start_writer(
             attempt: Some(attempt.id),
             kind: "implementation",
             node: Some(node),
-            workspace: Some(node),
+            workspace: Some(workspace),
             reason: Some(reason),
             base: Some(&base),
             head: candidate.and_then(|value| value["head"].as_str()).or({
@@ -909,6 +937,12 @@ pub async fn implement(
         None => loaded.config.workflow_plan(&attempt.workflow)?,
     };
     let packaged = plan.packaged();
+    let declared = &plan.nodes[row.node.as_deref().unwrap_or("implementer")];
+    let report_only = match declared.outputs.get("result") {
+        Some(crate::plan::Output::Report) => true,
+        Some(crate::plan::Output::Candidate) => false,
+        _ => return Err(Fail::refused("undeclared_publication")),
+    };
     let implementer = match &row.settings {
         Some(settings) => settings.clone(),
         None => attempt.writer_settings(row.node.as_deref().unwrap_or("implementer"))?,
@@ -940,7 +974,9 @@ pub async fn implement(
     } else {
         dir.clone()
     };
-    let candidate_ref = if plan.writers() {
+    let candidate_ref = if plan.handoff() && report_only {
+        format!("refs/yard/work/{}/{}", attempt.id, execution)
+    } else if plan.writers() || plan.handoff() {
         format!("refs/yard/candidates/{}/{}", attempt.id, execution)
     } else {
         crate::git::candidate_ref(attempt.id)
@@ -1270,7 +1306,7 @@ pub async fn implement(
     } else {
         Vec::new()
     };
-    let kind = if workflow.read_only {
+    let kind = if report_only {
         crate::mcp::Kind::Audit
     } else {
         crate::mcp::Kind::Implementation
@@ -1529,7 +1565,7 @@ pub async fn implement(
         let edited = if plan.writers() { ticket.revision != tickets::get(tx, attempt.ticket)?.revision
             || executions::plan_superseded(tx, &current, &row)? } else { attempts::edit_pending(tx, attempt.id)? };
         let failure = failure.or_else(|| {
-            (workflow.read_only && !run.stopped && !edited && report.is_none())
+            (report_only && !run.stopped && !edited && report.is_none())
                 .then(|| ("failed", Some("publication"), "missing_report".to_string()))
         });
         let stop = |tx: &rusqlite::Connection, reason: &str, detail: &str| -> Result<(), Fail> {
@@ -1633,6 +1669,16 @@ pub async fn implement(
             })?;
             return stop(tx, "failed", &detail);
         }
+        if report_only && !workflow.read_only {
+            executions::end(tx, execution, executions::End {
+                outcome: if run.stopped || edited { "interrupted" } else { "complete" },
+                output: (!run.stopped && !edited).then(|| json!({"kind": "report", "value": report})),
+                exit_code: run.exit_code,
+                ticket: Some(ticket.id),
+                ..Default::default()
+            })?;
+            return Ok(());
+        }
         let previous = if plan.writers() { row.head.clone().unwrap_or_else(|| row.base.clone().unwrap_or_else(|| current.base.clone())) }
             else { current.head.clone().unwrap_or_else(|| current.base.clone()) };
         let new_head = head.clone().unwrap_or_else(|| previous.clone());
@@ -1676,7 +1722,7 @@ pub async fn implement(
             rusqlite::params![attempt.id, new_head, base, digest],
         )?; }
         let mut candidate = json!({"base": base, "head": new_head, "proof": digest});
-        if plan.writers() {
+        if plan.writers() || plan.handoff() {
             candidate["candidate"] = json!(execution);
             candidate["workspace"] = json!(row.workspace);
             candidate["producer"] = json!({
@@ -1872,6 +1918,14 @@ async fn implementer_prompt(
             prompt.push_str("Your workspace is read-only. Plan the work: propose child tickets and an edit of this ticket's body with yard_propose. Publish exactly once with yard_publish_report: outcome complete, report with a nonempty summary and a findings list (empty if none), then stop.\n\n");
         } else {
             prompt.push_str("Work in /workspace on the current branch. Commit your work with git and leave the tree clean; uncommitted or untracked files send the work back to you. Do not change .yard/. Record progress with yard_progress. Files under /yard/proof are snapshotted with the candidate and are not merged. Propose follow-up tickets with yard_propose; if the ticket is too large, propose the split and stop.\n\n");
+            if plan.as_ref().is_some_and(|plan| {
+                plan.nodes[execution.node.as_deref().unwrap_or("implementer")]
+                    .outputs
+                    .get("result")
+                    == Some(&crate::plan::Output::Report)
+            }) {
+                prompt.push_str("Publish exactly once with yard_publish_report: outcome complete, a nonempty summary and a findings list. Your source access grants no candidate publication or operator landing tools.\n\n");
+            }
         }
         if reason != "first"
             && let Some((base, head)) = previous_candidate

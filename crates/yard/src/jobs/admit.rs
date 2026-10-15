@@ -106,11 +106,10 @@ pub(super) fn take_lane_in(
 
 fn refuse_pending_continuation(conn: &rusqlite::Connection, attempt: i64) -> Result<(), Fail> {
     let attempt = attempts::get(conn, attempt)?;
-    if attempt
-        .admission
-        .as_ref()
-        .is_some_and(|admission| admission["runtime"] == "writer-graph")
-        && let Some(next) = attempt.next
+    if attempt.admission.as_ref().is_some_and(|admission| {
+        admission["runtime"] == "writer-graph"
+            || crate::plan::Plan::admitted(admission).is_ok_and(|plan| plan.handoff())
+    }) && let Some(next) = attempt.next
     {
         return Err(Fail::refused("pending_continuation").with(json!({
             "reason": "pending_continuation", "identity": "pending_continuation",
@@ -340,7 +339,7 @@ fn writer_profiles(
 ) -> Value {
     json!(plan.nodes.iter()
         .filter(|(_, node)| node.access == crate::plan::Access::WriteAllowed
-            && node.outputs.get("result") == Some(&crate::plan::Output::Candidate))
+            && matches!(node.runner, crate::plan::Runner::Agent { .. }))
         .map(|(name, node)| {
             let selected = request.overrides.get(name)
                 .or_else(|| request.graph.as_ref().and_then(|graph| graph.nodes.get(name)))
@@ -1417,11 +1416,14 @@ pub async fn attempt_revise(
     {
         *instructions = previous.clone();
     }
-    if plan.writers()
+    if (plan.writers() || plan.handoff())
         && (plan
             .nodes
             .iter()
-            .filter(|(_, node)| node.outputs.get("result") == Some(&crate::plan::Output::Candidate))
+            .filter(|(_, node)| {
+                node.access == crate::plan::Access::WriteAllowed
+                    && matches!(node.runner, crate::plan::Runner::Agent { .. })
+            })
             .any(|(name, node)| {
                 old.nodes.get(name).is_none_or(|previous| {
                     let mut node = node.clone();
@@ -1451,7 +1453,8 @@ pub async fn attempt_revise(
                 })
             })
             || old.nodes.iter().any(|(name, node)| {
-                node.outputs.get("result") == Some(&crate::plan::Output::Candidate)
+                node.access == crate::plan::Access::WriteAllowed
+                    && matches!(node.runner, crate::plan::Runner::Agent { .. })
                     && !plan.nodes.contains_key(name)
             }))
     {
@@ -1465,8 +1468,9 @@ pub async fn attempt_revise(
     if adopting {
         for (name, node) in &old.nodes {
             if name != "implementer"
-                && (!old.writers()
-                    || node.outputs.get("result") != Some(&crate::plan::Output::Candidate))
+                && (!(old.writers() || old.handoff())
+                    || node.access != crate::plan::Access::WriteAllowed
+                    || !matches!(node.runner, crate::plan::Runner::Agent { .. }))
             {
                 continue;
             }
@@ -1742,11 +1746,12 @@ pub async fn attempt_start(
                 .ok_or_else(|| Fail::refused("undeclared_workspace"))?,
         )
         .map_err(|error| Fail::refused(error.to_string()))?;
-        if !plan.writers()
-            || plan.nodes.get(workspace).is_none_or(|node| {
-                node.access != crate::plan::Access::WriteAllowed
-                    || node.outputs.get("result") != Some(&crate::plan::Output::Candidate)
-            })
+        if !(plan.handoff() && workspace == "implementer")
+            && (!plan.writers()
+                || plan.nodes.get(workspace).is_none_or(|node| {
+                    node.access != crate::plan::Access::WriteAllowed
+                        || node.outputs.get("result") != Some(&crate::plan::Output::Candidate)
+                }))
         {
             return Err(Fail::refused("undeclared_workspace")
                 .with(json!({"reason": "undeclared_workspace", "workspace": workspace})));
@@ -1766,8 +1771,12 @@ pub async fn attempt_start(
                     )
                     .with(json!({"reason": item.reason, "attention": item.id})));
                 }
-                let execution =
-                    super::supervise::start_writer(tx, attempt, workspace, "retry", None)?;
+                let node = if plan.handoff() {
+                    super::supervise::implementation_node(tx, attempt)?
+                } else {
+                    workspace.to_owned()
+                };
+                let execution = super::supervise::start_writer(tx, attempt, &node, "retry", None)?;
                 if !take_lane_in(tx, &default, attempt.id)? {
                     return Err(
                         Fail::refused("no lane is free").with(json!({"reason": "capacity"}))

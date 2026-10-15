@@ -114,6 +114,7 @@ pub struct Profile {
 impl Profile {
     pub fn node(&self) -> Node {
         Node {
+            workspace: None,
             operator_failure: false,
             advisory: false,
             runner: self.runner.clone(),
@@ -147,6 +148,8 @@ pub struct Route {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Node {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub operator_failure: bool,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -167,6 +170,8 @@ pub struct Node {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NodeSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operator_failure: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -198,6 +203,10 @@ impl NodeSpec {
                 .advisory
                 .or_else(|| base.map(|n| n.advisory))
                 .unwrap_or(false),
+            workspace: self
+                .workspace
+                .clone()
+                .or_else(|| base.and_then(|n| n.workspace.clone())),
             operator_failure: self
                 .operator_failure
                 .or_else(|| base.map(|n| n.operator_failure))
@@ -353,6 +362,7 @@ impl Config {
         let mut chain = vec![(
             "implementer".to_string(),
             Node {
+                workspace: None,
                 operator_failure: false,
                 advisory: false,
                 runner: Runner::Agent {
@@ -390,6 +400,7 @@ impl Config {
                         chain.push((
                             format!("review-{index}"),
                             Node {
+                                workspace: None,
                                 operator_failure: false,
                                 advisory: false,
                                 runner: Runner::Agent {
@@ -424,6 +435,7 @@ impl Config {
                             gate.name
                         ),
                         Node {
+                            workspace: None,
                             operator_failure: false,
                             advisory: false,
                             runner: Runner::Command {
@@ -512,6 +524,7 @@ impl Config {
                             || plan.read_only_selection(&ordinary, self)
                             || plan.finding_selection(&ordinary, self)
                             || plan.writer_selection(self, name)
+                            || plan.handoff_selection(&ordinary, self)
                     }
                 })
             })
@@ -621,14 +634,151 @@ impl Plan {
     /// Independent writers are roots; integration consumes their candidates.
     /// A selector may route an existing publication into native verification.
     pub fn writers(&self) -> bool {
-        self.nodes
-            .values()
-            .filter(|node| {
-                node.access == Access::WriteAllowed
-                    && node.outputs.get("result") == Some(&Output::Candidate)
-            })
-            .count()
-            > 1
+        !self.handoff()
+            && self
+                .nodes
+                .values()
+                .filter(|node| {
+                    node.access == Access::WriteAllowed
+                        && node.outputs.get("result") == Some(&Output::Candidate)
+                })
+                .count()
+                > 1
+    }
+
+    /// Only the admitted three-role path may name a shared workspace.
+    pub fn handoff(&self) -> bool {
+        self.nodes.values().any(|node| node.workspace.is_some())
+    }
+
+    pub fn candidate_node(&self) -> &str {
+        if self.handoff() {
+            "repair"
+        } else {
+            "implementer"
+        }
+    }
+
+    fn handoff_selection(&self, ordinary: &Self, config: &Config) -> bool {
+        if !self.handoff() || ordinary.nodes["implementer"].access != Access::WriteAllowed {
+            return false;
+        }
+        let mut reduced = self.clone();
+        for (name, output, source) in [
+            ("implementer", Output::Candidate, None),
+            (
+                "cleanup",
+                Output::Report,
+                Some(("candidate", "implementer", Output::Candidate)),
+            ),
+            (
+                "repair",
+                Output::Candidate,
+                Some(("cleanup", "cleanup", Output::Report)),
+            ),
+        ] {
+            let Some(node) = self.nodes.get(name) else {
+                return false;
+            };
+            let mut inputs = BTreeMap::new();
+            if name == "repair" {
+                inputs.insert(
+                    "feedback".into(),
+                    Input {
+                        node: None,
+                        output: "feedback".into(),
+                        kind: Output::Verdict,
+                    },
+                );
+            }
+            let requires = if let Some((input, source, kind)) = source {
+                inputs.insert(
+                    input.into(),
+                    Input {
+                        node: Some(source.into()),
+                        output: "result".into(),
+                        kind,
+                    },
+                );
+                vec![input.to_string()]
+            } else {
+                Vec::new()
+            };
+            if node.workspace.as_deref() != Some("implementer")
+                || node.operator_failure
+                || node.access != Access::WriteAllowed
+                || node.outputs != BTreeMap::from([("result".into(), output)])
+                || node.inputs != inputs
+                || node.requires != requires
+                || node.outcomes != ["complete"]
+                || !matches!(node.runner, Runner::Agent { .. })
+                || !config.profiles.values().any(|profile| {
+                    profile.runner == node.runner
+                        && profile.access == node.access
+                        && profile.outputs == node.outputs
+                        && profile.outcomes == node.outcomes
+                })
+            {
+                return false;
+            }
+            if name != "repair"
+                && node.routes
+                    != BTreeMap::from([(
+                        "complete".into(),
+                        vec![Route {
+                            to: if name == "implementer" {
+                                "cleanup"
+                            } else {
+                                "repair"
+                            }
+                            .into(),
+                            repeat: None,
+                        }],
+                    )])
+            {
+                return false;
+            }
+        }
+        if self.nodes.iter().any(|(name, node)| {
+            !matches!(name.as_str(), "implementer" | "cleanup" | "repair")
+                && node.workspace.is_some()
+        }) {
+            return false;
+        }
+        if self.nodes.iter().any(|(name, node)| {
+            !matches!(name.as_str(), "implementer" | "cleanup" | "repair")
+                && (node.inputs.values().any(|input| {
+                    input.kind == Output::Candidate
+                        && input.node.is_some()
+                        && input.node.as_deref() != Some("repair")
+                }) || node
+                    .routes
+                    .values()
+                    .flatten()
+                    .any(|route| route.to == "implementer" || route.to == "cleanup"))
+        }) {
+            return false;
+        }
+        let mut implementer = ordinary.nodes["implementer"].clone();
+        implementer.routes = self.nodes["repair"].routes.clone();
+        reduced.nodes.insert("implementer".into(), implementer);
+        reduced.nodes.remove("cleanup");
+        reduced.nodes.remove("repair");
+        for node in reduced.nodes.values_mut() {
+            for input in node.inputs.values_mut() {
+                if input.node.as_deref() == Some("repair") {
+                    input.node = Some("implementer".into());
+                }
+            }
+            for route in node.routes.values_mut().flatten() {
+                if route.to == "repair" {
+                    route.to = "implementer".into();
+                }
+            }
+        }
+        reduced
+            .ordinary_selection(ordinary, config.review.max_rounds, &config.profiles)
+            .is_some()
     }
 
     pub fn selector(&self) -> Option<&Node> {
@@ -774,6 +924,9 @@ impl Plan {
     }
 
     fn writer_selection(&self, config: &Config, workflow: &str) -> bool {
+        if self.handoff() {
+            return false;
+        }
         if self.selector().is_some() {
             return self.selected_writer_graph(config, workflow);
         }
@@ -1101,7 +1254,8 @@ impl Plan {
     }
 
     fn read_only_selection(&self, ordinary: &Self, config: &Config) -> bool {
-        if !self.concurrent()
+        if self.handoff()
+            || !self.concurrent()
             || self.inputs != ordinary.inputs
             || !self.nodes.contains_key("implementer")
         {

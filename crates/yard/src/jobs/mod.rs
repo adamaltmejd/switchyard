@@ -824,6 +824,63 @@ async fn advance(
         }
     }
     // A pending edit is derived: the ticket is newer than the last implementer's read.
+    if let Some(admission) = &attempt.admission {
+        let plan = crate::plan::Plan::admitted(admission)
+            .map_err(|error| Fail::refused(error.to_string()))?;
+        if plan.handoff() {
+            let (next, complete) = project.read(|conn| {
+                for name in ["implementer", "cleanup", "repair"] {
+                    let row = executions.iter().rev().find(|row| {
+                        row.node.as_deref() == Some(name)
+                            && row.ticket_revision == Some(ticket.revision)
+                            && row.plan_revision == attempt.plan_revision()
+                    });
+                    if row.is_none() {
+                        return Ok((Some(name), false));
+                    }
+                    let row = row.expect("present");
+                    if !row.result_eligible {
+                        return Ok((None, false));
+                    }
+                    let bound = executions::binding(
+                        conn,
+                        attempt,
+                        &executions::Start {
+                            kind: "implementation",
+                            node: Some(name),
+                            ticket_revision: Some(ticket.revision),
+                            feedback: row
+                                .inputs
+                                .as_ref()
+                                .and_then(|inputs| inputs.get("feedback")),
+                            ..Default::default()
+                        },
+                    )?;
+                    if bound.map(|(_, inputs)| inputs) != row.inputs {
+                        return Ok((Some(name), false));
+                    }
+                }
+                Ok((None, true))
+            })?;
+            if let Some(node) = next {
+                let execution = project.tx(|tx| {
+                    attempts::require_plan(tx, attempt.id, attempt.plan_revision())?;
+                    supervise::start_writer(
+                        tx,
+                        attempt,
+                        node,
+                        if edited { "edit" } else { "first" },
+                        None,
+                    )
+                })?;
+                spawn(daemon, project, "implementation", execution);
+                return Ok(());
+            }
+            if !complete {
+                return Ok(());
+            }
+        }
+    }
     if edited {
         let execution = project.tx(|tx| {
             attempts::require_plan(tx, attempt.id, attempt.plan_revision())?;
@@ -886,6 +943,9 @@ async fn advance(
         .any(|row| row.status == "running" || row.reserved);
     let mut unfinished = false;
     let mut completed = std::collections::BTreeSet::from(["implementer"]);
+    if plan.handoff() {
+        completed.extend(["cleanup", "repair"]);
+    }
     let reviewed = project.read(|conn| candidate_reviewed(conn, attempt, &plan))?;
     if let Some(choice) = project.read(|conn| crate::store::selections::current(conn, attempt))? {
         let value =
@@ -947,7 +1007,9 @@ async fn advance(
         .complete_order()
         .ok_or_else(|| Fail::refused("unsupported admitted complete routes"))?
         .into_iter()
-        .filter(|node| *node != "implementer")
+        .filter(|node| {
+            *node != "implementer" && !(plan.handoff() && matches!(*node, "cleanup" | "repair"))
+        })
     {
         let node = &plan.nodes[current];
         if plan.selector().is_some() && matches!(node.runner, crate::plan::Runner::Agent { .. }) {
@@ -1201,7 +1263,7 @@ async fn advance(
             .get(outcome)
             .and_then(|routes| routes.first())
             .ok_or_else(|| Fail::refused("judgment has no admitted outcome route"))?;
-        if route.to != "implementer" || route.repeat.is_none() {
+        if route.to != plan.candidate_node() || route.repeat.is_none() {
             return Err(Fail::refused("unsupported admitted repair route"));
         }
         // One eligible result buys one back edge, never a reversal of a result.

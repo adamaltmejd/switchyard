@@ -196,7 +196,7 @@ fn tools(kind: Kind) -> Vec<Value> {
     });
     let report = json!({
         "name": "yard_publish_report",
-        "description": "Publish your read-only report once with the declared outcome complete.",
+        "description": "Publish your declared report once with outcome complete.",
         "inputSchema": {
             "type": "object", "additionalProperties": false,
             "properties": {
@@ -343,7 +343,10 @@ async fn call(daemon: &Arc<Daemon>, grant: &Grant, params: &Value) -> Value {
     let granted = tools(grant.kind)
         .iter()
         .any(|tool| tool["name"].as_str() == Some(name));
-    let outcome = if name.starts_with("yard_execution_") {
+    let outcome = if name.starts_with("yard_execution_")
+        || name.starts_with("yard_attempt_")
+        || name == "yard_sync"
+    {
         Err(Fail::refused("operator_only").with(json!({"execution": grant.execution})))
     } else if !granted {
         Err(Fail::refused(format!(
@@ -385,6 +388,7 @@ async fn call(daemon: &Arc<Daemon>, grant: &Grant, params: &Value) -> Value {
                 "content": [{ "type": "text", "text": if fail.data.is_null() {
                     format!("{}: {}", fail.code, fail.message)
                 } else { fail.to_json().to_string() } }],
+                "structuredContent": {"error": fail.to_json()},
                 "isError": true,
             })
         }

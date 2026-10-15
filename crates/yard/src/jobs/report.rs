@@ -1,4 +1,4 @@
-//! Read-only publication bound by the daemon to the execution's frozen inputs.
+//! Report publication bound by the daemon to the execution's frozen inputs.
 
 use crate::api::Fail;
 use crate::mcp::Grant;
