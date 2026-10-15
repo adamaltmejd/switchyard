@@ -9,25 +9,26 @@ AGENTS.md's Tests section is the policy, and the guarantees table in
 ARCHITECTURE.md is the list. The unit is the assertion block: each one
 shows a clause of a guarantee row's "Shown by".
 
-Keep the smallest suite that proves those clauses. Exhaustive coverage of
-commands, options, combinations and hypothetical contingencies is not a
-goal. A new scenario must expose a distinct way a guarantee could fail.
+Keep a small risk-based core. Prefer checks for unauthorized effects, stale
+identity, corruption and recovery, ownership, isolation, secrets and
+representative end-to-end use. A unique mechanism or existing Shown by clause
+does not by itself justify its runtime and maintenance cost. Product controls
+remain exact; automated coverage is deliberately selective.
 
 ## Gate: a change touches a test
 
-For new or changed assertion blocks, the diff and its message must answer
-all four questions; send the change back if one is missing.
+For a new or changed assertion block, answer:
 
-1. Which guarantee row and which "Shown by" clause does it show? If no
-   clause describes the scenario, add one in the same commit.
-2. Which change to the binary makes it fail? The test's comment names it.
-3. Why don't the row's existing blocks already catch that failure, and is
-   this the hardest case for that mechanism?
-4. Where does each expected value come from outside yard?
+1. Which material failure and product guarantee does it protect? Why is the
+   impact worth the fixture cost?
+2. Which change to the binary makes it fail? Name it in the comment.
+3. Can an existing hard case replace this work? Count fixture machines,
+   historical builds, boxes and model turns, not only test functions.
+4. Where does each expected value come from outside Yard?
 
-A crash scenario also says where the daemon is held, and how the test
-proves the state from outside before restarting. No tag in `sweep.md` may
-apply to the new blocks.
+A crash needs a genuinely held point and externally proved state before
+restart. Keep meaningful allowed controls for retained refusals. Add neither
+replacement tests nor a coverage matrix merely because a behavior is untested.
 
 ## Sweep
 
@@ -43,17 +44,15 @@ file paths and "Follow `.agents/skills/test-audit/sweep.md`."
    and name the survivor.
 2. Settle any doubted sabotage: apply it, run that test
    (`cargo test -p e2e --locked g03_`), and revert it.
-3. Before removing or weakening a guarantee or a "Shown by" clause,
-   send the proposed change to the operator and wait for the answer. A
-   deletion that leaves a clause without coverage counts as weakening it,
-   even if the spec text is unchanged.
-
-   For an unshown existing clause, add focused coverage within the
-   authorized audit. Apply the Gate above; no operator approval is needed
-   to add coverage while preserving the existing promise.
-4. Delete invalid or duplicate blocks and the helpers they orphan. Keep
-   the row's "Shown by" accurate without weakening it. One commit per
-   test file.
+3. Ask the operator before changing a product control, promised behavior or
+   guarantee. Reducing automated coverage alone does not change the product
+   contract and needs no further approval within an authorized audit. Judge
+   unique cases by risk and cost too. Record deliberately untested behavior
+   and narrow Shown by to the checks actually retained. Do not turn every
+   absent observation into new work.
+4. Delete invalid, duplicate or lower-value blocks and orphan helpers. Keep
+   Shown by accurate and product guarantees unchanged. One commit per test
+   file, including its module registration and dated disposition where needed.
 
 A kept block that fails on the branch is a product bug. Reproduce it
 through the CLI and ticket it; never delete it.

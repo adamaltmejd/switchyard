@@ -2,10 +2,17 @@ Read AGENTS.md, then the `## Guarantees` section of docs/ARCHITECTURE.md
 and the sections its rows cite. Read `crates/e2e/src/lib.rs` and
 `model.rs` whole, then your files whole. Edit nothing.
 
-One line per assertion block that fails the bar, no hedging:
+Judge whole fixture cost as well as assertion validity. Recommend a compact
+keep set and concrete scenario or phase deletions. Unique secondary options,
+lifecycle combinations and historical variants may be deliberately untested.
+Never propose replacing each deleted case with another test.
+
+One line per assertion block that fails the bar:
 
 `<file>:L<a>-<b>: <tag> <what>. <delete|rewrite>. [G<N>]`
 
+- `surface:` unique coverage whose failure impact does not justify its fixture
+  and maintenance cost. Name the deliberately untested behavior.
 - `taut:` the expected value comes from yard's own output or a copy of its
   logic, and the guarantee is not that two outputs agree.
 - `easy:` a weak case of the same mechanism. Name the harder one that
@@ -29,9 +36,10 @@ One line per assertion block that fails the bar, no hedging:
 - `nosabotage:` no sabotage in the comment, or one that would not fail this
   block. Say whether you doubt it.
 
-Use `rewrite` only when the block is the only proof of a "Shown by" clause;
-otherwise use `delete`. Then add one line for each clause of your files'
-rows that no block shows: `G<N> unshown: <clause>.`
+Prefer deletion. Use rewrite when a retained core failure needs a better
+external observation. Do not preserve every Shown by clause as mandatory
+coverage. Name any high-impact core risk left without representative proof;
+absence alone does not mandate a new test. Product controls stay exact.
 
-End with `<N> blocks, <M> to delete, <K> clauses unshown.` or, when
-nothing is found, `Lean already.`
+End with the kept scenarios, deleted scenarios and real fixture/build/box
+work removed. Do not infer runtime savings from line or scenario counts.

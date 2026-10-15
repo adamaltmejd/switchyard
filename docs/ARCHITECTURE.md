@@ -2066,6 +2066,10 @@ These are the invariants: binding, cited elsewhere in this spec as G1 to
 G15. Each is shown by one or more end-to-end scenarios; testing policy is in
 `AGENTS.md`.
 
+The guarantees are product requirements. Shown by describes representative
+automated checks, not exhaustive coverage or a promise to test every option,
+combination, lifecycle or historical version.
+
 | # | Guarantee | Shown by |
 |---|---|---|
 | 1 | Only the queue lands | A worker with its MCP bearer and its clone: `git push` fails, no RPC lands, canonical is not reachable from the box. Control: the queue lands the same candidate. In one project, the full default chain lands before reduced and empty operator selections; a protected empty selection under auto policy waits for operator approval, then lands only through the queue. A worker's initialized HTTP session is refused an operator tool as `refused`; trusted stdio performs the same operation and approves the candidate for queue landing. A retained landing gate in the reduced selection permits operator handling; selected failed merged gates still land only through the authorized queue after exact acceptance and remaining gates. Named landing omission acceptance and empty landing decisions also land only through the queue. |
