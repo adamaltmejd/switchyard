@@ -443,6 +443,9 @@ fn selected_failures_keep_exact_operator_accept_and_repair() {
 /// Sabotage: activate A while retaining B's pending target-fetch instructions.
 /// Explicit starts of A or B must leave automatic repair alone.
 /// Sabotage: let an operator writer start consume or relabel pending repair.
+/// A second held scheduler lets a body edit supersede pending B repair.
+/// Sabotage: retain old next across the edit, or dispatch it after the lane wait.
+/// Fresh revision-two candidates, own reviews and a new conflict still repair B.
 #[test]
 fn only_the_declared_choice_is_checked_and_landed() {
     let holds: Vec<_> = (0..5).map(|_| Latch::new()).collect();
@@ -453,6 +456,10 @@ fn only_the_declared_choice_is_checked_and_landed() {
     let repair_hold = repair.clone();
     let landing_repair = Latch::new();
     let landing_repair_hold = landing_repair.clone();
+    let edited_writer = Latch::new();
+    let edited_writer_hold = edited_writer.clone();
+    let fresh_repair = Latch::new();
+    let fresh_repair_hold = fresh_repair.clone();
     let superseding = Latch::new();
     let superseding_hold = superseding.clone();
     let dirty_writer = Latch::new();
@@ -556,7 +563,21 @@ fn only_the_declared_choice_is_checked_and_landed() {
             .unwrap();
         if request.opens() {
             let version = turns[n].fetch_add(1, Ordering::SeqCst);
-            let fix = if n == 1 && version == 4 {
+            let fix = if n == 1 && version == 6 {
+                assert!(
+                    request
+                        .last_user()
+                        .contains("git fetch /yard/input/target.bundle refs/heads/feature/a")
+                );
+                "git fetch /yard/input/target.bundle refs/heads/feature/a && test \"$(git show FETCH_HEAD:same.txt)\" = operator-edited-target && (git merge --no-commit FETCH_HEAD || test -f .git/MERGE_HEAD) && "
+            } else if n == 1 && version == 5 {
+                assert!(
+                    request
+                        .last_user()
+                        .contains("Edited pending repair instructions.")
+                );
+                ""
+            } else if n == 1 && version == 4 {
                 assert!(
                     request
                         .last_user()
@@ -589,6 +610,10 @@ fn only_the_declared_choice_is_checked_and_landed() {
         {
             let hold = if turns[n].load(Ordering::SeqCst) == 1 {
                 writer_holds[n].clone()
+            } else if n == 1 && turns[n].load(Ordering::SeqCst) == 7 {
+                fresh_repair_hold.clone()
+            } else if n == 1 && turns[n].load(Ordering::SeqCst) == 6 {
+                edited_writer_hold.clone()
             } else if n == 1 && turns[n].load(Ordering::SeqCst) == 5 {
                 landing_repair_hold.clone()
             } else if n == 1 && turns[n].load(Ordering::SeqCst) == 4 {
@@ -1516,6 +1541,157 @@ fn only_the_declared_choice_is_checked_and_landed() {
         project.rows("SELECT base FROM attempt WHERE state = 'live'"),
         vec![json!({"base": target})]
     );
+    // Hold the same real lane-reacquisition Git read again, now across an edit.
+    project.write("same.txt", "operator-edited-target\n");
+    project.git(&["add", "same.txt"]);
+    project.git(&["commit", "-qm", "Advance target before pending repair edit"]);
+    project.json(&["sync", "feature/a"]);
+    let target = git(&project.canonical(), &["rev-parse", "refs/heads/feature/a"])
+        .trim()
+        .to_owned();
+    std::fs::write(&pending_armed, "").unwrap();
+    let pending_since = project.rows("SELECT MAX(seq) AS seq FROM audit")[0]["seq"]
+        .as_i64()
+        .unwrap();
+    let approved = operator.call(
+        "yard_attempt_approve",
+        json!({
+            "project": project.path, "ticket": "Y-1", "target": "feature/a",
+            "head": landed_head, "proof": fifth["proof"], "choice": fifth["choice"]
+        }),
+    );
+    assert!(approved.get("error").is_none(), "{approved}");
+    assert_eq!(watch.said(&pending_said), "held\n");
+    let conflict_end = watch.find("second pending conflict ended", |event| {
+        event["event"] == "execution.ended"
+            && event["data"]["outcome"] == "conflict"
+            && event["seq"].as_i64().unwrap() > pending_since
+    });
+    watch.find("second pending conflict released", |event| {
+        event["event"] == "execution.released"
+            && event["execution"] == conflict_end["execution"]
+            && event["seq"].as_i64().unwrap() > conflict_end["seq"].as_i64().unwrap()
+    });
+    let pending = project.rows(&format!("SELECT * FROM attempt WHERE id = {attempt}"));
+    assert_eq!(pending[0]["lane"], 0);
+    assert_eq!(pending[0]["choice"], fifth["choice"]);
+    let next: Value = serde_json::from_str(pending[0]["next"].as_str().unwrap()).unwrap();
+    assert_eq!(next["reason"], "repair");
+    assert_eq!(next["target"], target);
+    let bundle_bytes = std::fs::read(&bundle).unwrap();
+    let before_writers =
+        project.rows("SELECT * FROM execution WHERE kind = 'implementation' ORDER BY id");
+    let edited = operator.call(
+        "yard_ticket_edit",
+        json!({
+            "project": project.path, "ticket": "Y-1", "revision": 1,
+            "body": "Edited pending repair instructions."
+        }),
+    );
+    assert!(edited.get("error").is_none(), "{edited}");
+    let current = project.rows(&format!(
+        "SELECT choice, next, lane, lane_since FROM attempt WHERE id = {attempt}"
+    ));
+    assert_eq!(
+        current,
+        vec![json!({"choice": null, "next": null, "lane": 0, "lane_since": null})]
+    );
+    assert_eq!(
+        project.rows("SELECT * FROM execution WHERE kind = 'implementation' ORDER BY id"),
+        before_writers
+    );
+    assert_eq!(std::fs::read(&bundle).unwrap(), bundle_bytes);
+    std::fs::remove_file(&pending_armed).unwrap();
+    std::fs::remove_file(&pending_ready).unwrap();
+    std::fs::write(&pending_release, "go\n").unwrap();
+    edited_writer.wait_held();
+    let edited_source = rows(
+        &project,
+        &format!(
+            "SELECT * FROM execution WHERE attempt = {attempt} AND workspace = 'writer-1' AND kind = 'implementation' ORDER BY id DESC LIMIT 1"
+        ),
+    );
+    assert_eq!(edited_source[0]["reason"], "edit");
+    assert_eq!(edited_source[0]["ticket_revision"], 2);
+    assert_eq!(
+        edited_source[0]["body"],
+        "Edited pending repair instructions."
+    );
+    assert!(edited_source[0]["inputs"]["feedback"].is_null());
+    let edited_head = git(&clone, &["rev-parse", "HEAD"]).trim().to_owned();
+    assert_eq!(git(&clone, &["show", "HEAD:same.txt"]).trim(), "writer-1-5");
+    edited_writer.release();
+    let sixth = approval(&mut watch);
+    assert_eq!(sixth["head"], edited_head);
+    assert_eq!(sixth["skipped"], fifth["skipped"]);
+    assert_ne!(sixth["choice"], fifth["choice"]);
+    let edited_sources = rows(
+        &project,
+        &format!(
+            "SELECT * FROM execution WHERE attempt = {attempt} AND kind = 'implementation' AND ticket_revision = 2 ORDER BY id"
+        ),
+    );
+    assert_eq!(edited_sources.len(), 5);
+    assert!(edited_sources.iter().all(|row| row["reason"] == "edit"
+        && row["body"] == "Edited pending repair instructions."
+        && row["inputs"]["feedback"].is_null()));
+    // The fresh revision still conflicts. Only its newly selected B repairs it.
+    let approved = operator.call(
+        "yard_attempt_approve",
+        json!({
+            "project": project.path, "ticket": "Y-1", "target": "feature/a",
+            "head": edited_head, "proof": sixth["proof"], "choice": sixth["choice"]
+        }),
+    );
+    assert!(approved.get("error").is_none(), "{approved}");
+    fresh_repair.wait_held();
+    let repaired_source = rows(
+        &project,
+        &format!(
+            "SELECT * FROM execution WHERE attempt = {attempt} AND kind = 'implementation' ORDER BY id DESC LIMIT 1"
+        ),
+    );
+    assert_eq!(repaired_source[0]["workspace"], "writer-1");
+    assert_eq!(repaired_source[0]["reason"], "repair");
+    assert_eq!(repaired_source[0]["ticket_revision"], 2);
+    assert_eq!(repaired_source[0]["head"], edited_head);
+    assert_eq!(
+        repaired_source[0]["inputs"]["feedback"]["value"]["target"],
+        target
+    );
+    assert_eq!(git(&clone, &["rev-parse", "FETCH_HEAD"]).trim(), target);
+    assert_eq!(git(&clone, &["rev-parse", "HEAD^2"]).trim(), target);
+    let fresh_landed_head = git(&clone, &["rev-parse", "HEAD"]).trim().to_owned();
+    fresh_repair.release();
+    let seventh = approval(&mut watch);
+    assert_eq!(seventh["head"], fresh_landed_head);
+    assert_eq!(seventh["skipped"], fifth["skipped"]);
+    let history = rows(
+        &project,
+        "SELECT * FROM execution WHERE status = 'ended' ORDER BY id",
+    );
+    for old in &after_continuation {
+        assert_eq!(history.iter().find(|row| row["id"] == old["id"]), Some(old));
+    }
+    let picker = history
+        .iter()
+        .find(|row| row["id"] == seventh["choice"])
+        .unwrap();
+    assert_eq!(
+        picker["inputs"]["c1"]["source"]["execution"],
+        repaired_source[0]["id"]
+    );
+    let review = history
+        .iter()
+        .find(|row| row["id"] == picker["inputs"]["r1"]["source"]["execution"])
+        .unwrap();
+    assert_eq!(review["inputs"]["candidate"], picker["inputs"]["c1"]);
+    assert!(
+        seventh["checks"]
+            .as_array()
+            .unwrap()
+            .contains(&picker["inputs"]["r1"]["value"]["publication"])
+    );
     // Reopening revalidates current suppliers without rewriting the immutable choice.
     machine.kill();
     machine.start();
@@ -1526,7 +1702,7 @@ fn only_the_declared_choice_is_checked_and_landed() {
     let mut watch = project.watch(since);
     std::fs::write(&armed, "").unwrap();
     let approved = operator.call("yard_attempt_approve", json!({"project": project.path, "ticket": "Y-1",
-        "target": "feature/a", "head": landed_head, "proof": fifth["proof"], "choice": fifth["choice"],
+        "target": "feature/a", "head": fresh_landed_head, "proof": seventh["proof"], "choice": seventh["choice"],
         "observe_landing_skipped": ["landing-gate-other"], "text": "Observe the omitted landing gate"}));
     assert!(approved.get("error").is_none(), "{approved}");
     let omission = watch.find("selected landing omission", |event| {
@@ -1535,7 +1711,7 @@ fn only_the_declared_choice_is_checked_and_landed() {
             && event["data"]["reason"] == "landing"
     });
     let payload = &omission["data"]["payload"];
-    assert_eq!(payload["choice"], fifth["choice"]);
+    assert_eq!(payload["choice"], seventh["choice"]);
     assert_eq!(payload["evidence"]["nodes"], json!(["landing-gate-other"]));
     assert_eq!(
         payload["evidence"]["identity"]["skipped"],
@@ -1550,7 +1726,7 @@ fn only_the_declared_choice_is_checked_and_landed() {
     });
     let accepted = operator.call("yard_attempt_accept", json!({
         "project": project.path, "ticket": "Y-1", "attention": omission["attention"],
-        "plan_revision": 1, "target": "feature/a", "head": landed_head, "proof": fifth["proof"],
+        "plan_revision": 1, "target": "feature/a", "head": fresh_landed_head, "proof": seventh["proof"],
         "base": identity["base"], "revision": identity["revision"], "landing": identity["execution"],
         "old": identity["prepared"]["old"], "merged": identity["prepared"]["merged"],
         "accept_skipped": ["landing-gate-other"], "text": "Accept this exact selected landing omission"
@@ -1595,7 +1771,7 @@ fn only_the_declared_choice_is_checked_and_landed() {
     });
     assert_eq!(
         git(&project.canonical(), &["show", "feature/a:same.txt"]).trim(),
-        "writer-1-4"
+        "writer-1-6"
     );
     assert_eq!(project.canonical_head(), main);
     let gates = rows(
@@ -1627,6 +1803,13 @@ fn only_the_declared_choice_is_checked_and_landed() {
             .iter()
             .any(|row| row["parent"].is_null() && row["head"] == landed_head)
     );
+    for head in [&edited_head, &fresh_landed_head] {
+        assert!(
+            gates
+                .iter()
+                .any(|row| row["parent"].is_null() && row["head"] == *head)
+        );
+    }
     assert!(
         gates
             .iter()
@@ -1635,14 +1818,20 @@ fn only_the_declared_choice_is_checked_and_landed() {
                 || row["head"] == replacement_head
                 || row["head"] == repaired_head
                 || row["head"] == superseding_head
-                || row["head"] == landed_head)
+                || row["head"] == landed_head
+                || row["head"] == edited_head
+                || row["head"] == fresh_landed_head)
     );
     let approved = project.rows("SELECT * FROM approval ORDER BY id");
-    assert_eq!(approved.len(), 3);
+    assert_eq!(approved.len(), 5);
     assert_eq!(approved[0]["choice"], third["choice"]);
     assert_eq!(approved[0]["state"], "withdrawn");
     assert_eq!(approved[1]["choice"], fresh["choice"]);
     assert_eq!(approved[1]["state"], "retired");
     assert_eq!(approved[2]["choice"], fifth["choice"]);
-    assert_eq!(approved[2]["state"], "landed");
+    assert_eq!(approved[2]["state"], "retired");
+    assert_eq!(approved[3]["choice"], sixth["choice"]);
+    assert_eq!(approved[3]["state"], "retired");
+    assert_eq!(approved[4]["choice"], seventh["choice"]);
+    assert_eq!(approved[4]["state"], "landed");
 }

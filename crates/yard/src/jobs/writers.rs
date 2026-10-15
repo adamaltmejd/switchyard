@@ -10,8 +10,15 @@ use std::sync::Arc;
 /// A ticket edit takes its stopped exits only after every old owner drains.
 /// Ownership attention belongs to checked release, never to an edit.
 pub fn steer(tx: &rusqlite::Connection, attempt: &attempts::Attempt) -> Result<Vec<i64>, Fail> {
-    if attempt.choice.is_some() && crate::store::selections::current(tx, attempt)?.is_none() {
-        crate::store::selections::invalidate(tx, attempt)?;
+    let attempt = attempts::get(tx, attempt.id)?;
+    if attempt.state != "live" {
+        return Ok(Vec::new());
+    }
+    if attempts::edit_pending(tx, attempt.id)? {
+        attempts::set_next(tx, attempt.id, None)?;
+    }
+    if attempt.choice.is_some() && crate::store::selections::current(tx, &attempt)?.is_none() {
+        crate::store::selections::invalidate(tx, &attempt)?;
     }
     let rows = executions::attempt_work(tx, attempt.id)?;
     let readers = rows
@@ -60,6 +67,10 @@ pub async fn advance(
     let ticket = project.read(|conn| tickets::get(conn, attempt.ticket))?;
     let rows = project.read(|conn| executions::attempt_work(conn, attempt.id))?;
     project.tx(|tx| steer(tx, attempt))?;
+    let current = project.read(|conn| attempts::get(conn, attempt.id))?;
+    if current.choice != attempt.choice || current.next != attempt.next {
+        return Ok(false);
+    }
     if plan.selector().is_some()
         && project
             .read(|conn| crate::store::selections::current(conn, attempt))?

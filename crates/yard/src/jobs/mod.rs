@@ -750,6 +750,52 @@ async fn advance(
     let executions = project.read(|conn| executions::attempt_work(conn, attempt.id))?;
     let edited = project.read(|conn| attempts::edit_pending(conn, attempt.id))?;
     let ticket = project.read(|conn| tickets::get(conn, attempt.ticket))?;
+    if let Some(next) = &attempt.next {
+        let canonical = if !attempt.lane {
+            Some(project.canonical.lock().await)
+        } else {
+            None
+        };
+        let default = if let Some(canonical) = &canonical {
+            let Ok(default) = refresh_default(daemon, project, canonical).await else {
+                return Ok(());
+            };
+            Some(default)
+        } else {
+            None
+        };
+        let execution = {
+            let _admission = daemon.admission.lock().expect("admission lock");
+            project.tx(|tx| {
+                let now = attempts::get(tx, attempt.id)?;
+                if now.state != "live"
+                    || now.plan_revision() != attempt.plan_revision()
+                    || now.choice != attempt.choice
+                    || now.candidate() != attempt.candidate()
+                    || now.proof != attempt.proof
+                    || now.lane != attempt.lane
+                    || now.next.as_ref() != Some(next)
+                    || attempts::superseded_by_edit(tx, now.id, ticket.id, ticket.revision)?
+                    || (now.choice.is_some()
+                        && crate::store::selections::current(tx, &now)?.is_none())
+                    || runnable(tx, loaded, &now)?.is_none()
+                {
+                    return Ok(None);
+                }
+                if let Some(default) = &default
+                    && !admit::take_lane_in(tx, default, now.id)?
+                {
+                    return Ok(None);
+                }
+                let reason = next["reason"].as_str().unwrap_or("repair");
+                supervise::start_implementation(tx, &now, reason, next.get("feedback")).map(Some)
+            })?
+        };
+        if let Some(execution) = execution {
+            spawn(daemon, project, "implementation", execution);
+        }
+        return Ok(());
+    }
     if !attempt.lane {
         let canonical = project.canonical.lock().await;
         let Ok(default) = refresh_default(daemon, project, &canonical).await else {
@@ -758,15 +804,6 @@ async fn advance(
         if !admit::take_lane(daemon, project, &default, attempt.id)? {
             return Ok(());
         }
-    }
-    if let Some(next) = &attempt.next {
-        let reason = next["reason"].as_str().unwrap_or("repair").to_string();
-        let execution = project.tx(|tx| {
-            attempts::require_plan(tx, attempt.id, attempt.plan_revision())?;
-            supervise::start_implementation(tx, attempt, &reason, next.get("feedback"))
-        })?;
-        spawn(daemon, project, "implementation", execution);
-        return Ok(());
     }
     // A pending edit is derived: the ticket is newer than the last implementer's read.
     if edited {

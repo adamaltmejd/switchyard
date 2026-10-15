@@ -89,7 +89,11 @@ pub fn take_lane(
     project.tx(|tx| take_lane_in(tx, loaded, attempt))
 }
 
-fn take_lane_in(tx: &rusqlite::Connection, loaded: &Loaded, attempt: i64) -> Result<bool, Fail> {
+pub(super) fn take_lane_in(
+    tx: &rusqlite::Connection,
+    loaded: &Loaded,
+    attempt: i64,
+) -> Result<bool, Fail> {
     if attempts::get(tx, attempt)?.lane {
         return Ok(true);
     }
