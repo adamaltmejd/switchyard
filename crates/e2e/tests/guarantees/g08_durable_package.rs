@@ -1102,7 +1102,7 @@ files = [{{root = "source", path = "chain.txt"}}]
     );
     // A failed predecessor cannot reach a cleanup model latch. Observe its
     // terminal event first so staging/startup failures fail promptly.
-    // Sabotage: stage broad base extensions despite explicit selected inputs.
+    // Sabotage: fail the ordinary predecessor before cleanup can start.
     let implemented = |watch: &mut Watch, attempt: i64| {
         let event = watch.until("selected implementer ended", |event| {
             event["event"] == "execution.ended"
@@ -1141,6 +1141,11 @@ files = [{{root = "source", path = "chain.txt"}}]
         git(&project.canonical(), &["show", "refs/heads/main:chain.txt"]),
         "base\n"
     );
+    // Ordinary Pi loads trusted base extensions even with selected skills.
+    // Keep the hostile extension in the audit's history, then retire it.
+    project.git(&["rm", ".pi/extensions/unselected.js"]);
+    project.git(&["commit", "-qm", "Retire audit-only hostile extension"]);
+    project.json(&["sync"]);
     for path in ["debug-armed", "debug-held"] {
         assert!(
             std::process::Command::new("mkfifo")

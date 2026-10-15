@@ -1,6 +1,6 @@
 # Y-157 filter decoding and selected fixture inputs — 2026-10-15
 
-Review3697/check1926 identified a P1 in `commit_source`: Node's default
+Review3697/check1927 identified a P1 in `commit_source`: Node's default
 UTF-8 replacement decoding could change a raw filter subsection name.
 The resulting override would disable a different filter before `git add`.
 Git output now remains bytes within the existing 32768-byte stream bound.

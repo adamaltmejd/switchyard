@@ -90,6 +90,10 @@ async fn packaged_status(daemon: &Daemon, name: &str) -> Option<String> {
         return None;
     }
     for key in configured.stdout.split('\0').filter(|key| !key.is_empty()) {
+        // Git -c splits at the first equals sign, including in subsections.
+        if key.contains('=') {
+            return None;
+        }
         argv.push("-c".into());
         argv.push(format!(
             "{key}={}",

@@ -308,8 +308,11 @@ async function main() {
           configured = new TextDecoder('utf-8', { fatal: true }).decode(output);
         }
         catch (error) { if (error.code !== 1) throw error; }
-        for (const key of configured.split('\0').filter(Boolean))
+        for (const key of configured.split('\0').filter(Boolean)) {
+          // Git -c splits at the first equals sign, including in subsections.
+          if (key.includes('=')) return text('source_commit_failed');
           filters.push('-c', `${key}=${key.endsWith('.required') ? 'false' : ''}`);
+        }
         await git(['add', '--', ...paths]);
         // Explicit paths exclude any index entries left by a predecessor.
         await git(['commit', '--only', '-m', args.message, '--', ...paths]);
