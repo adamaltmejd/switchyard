@@ -135,7 +135,8 @@ fn the_queue_lands_in_order_and_rejudges_a_red_merge() {
 /// objects. Sabotage: overwrite it from the changed repair base or regenerate
 /// it from current templates on restart. No existing block observes immutable
 /// admission evidence while the candidate base and current templates change.
-/// Omit committed scaffold skills from capture: complete fixture equality fails.
+/// Omit committed scaffold skills or their references from capture, including
+/// test-audit's skill and sweep reference: complete fixture equality fails.
 /// Substitute parser defaults for selected definitions: literal expectations
 /// fail against the explicit non-default limits, timeouts and instructions
 /// declared in configured(), independently of admission or inspection output.
@@ -243,6 +244,10 @@ fn a_ticket_binds_feature_inputs_repairs_and_lands_on_its_target() {
         "trusted_staged_sources": [
             {"path": ".agents/skills/admission/SKILL.md",
              "blob": object(&format!("{base}:.agents/skills/admission/SKILL.md")), "executable": true},
+            {"path": ".agents/skills/test-audit/SKILL.md",
+             "blob": object(&format!("{base}:.agents/skills/test-audit/SKILL.md")), "executable": false},
+            {"path": ".agents/skills/test-audit/sweep.md",
+             "blob": object(&format!("{base}:.agents/skills/test-audit/sweep.md")), "executable": false},
             {"path": ".agents/skills/yard-drive/SKILL.md",
              "blob": object(&format!("{base}:.agents/skills/yard-drive/SKILL.md")), "executable": false},
             {"path": ".agents/skills/yard-file/SKILL.md",

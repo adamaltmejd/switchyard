@@ -197,8 +197,8 @@ Trial profiles initially share the scaffold's model settings; operators
 choose their models and effort through normal agent definitions. Existing
 execution limits apply. These templates do not change installed projects.
 The operator alone edits and syncs project configuration. Init also installs
-the selected test-audit skill. The scaffold's minimal Git check is replaced
-with project gates by the operator.
+the selected test-audit skill and its sweep reference. The operator replaces
+the scaffold's minimal Git check with project gates.
 
 A node's `runner` is `{kind = "agent", agent = "NAME", instructions = "TEXT",
 skills = ["PATH"], references = ["PATH"]}`
