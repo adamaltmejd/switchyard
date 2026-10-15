@@ -694,7 +694,7 @@ pub fn binding(
     };
     let plan =
         crate::plan::Plan::admitted(admission).map_err(|error| Fail::refused(error.to_string()))?;
-    if plan.writers() {
+    if plan.writers() || plan.handoff() {
         let declared = plan
             .nodes
             .get(&node)
@@ -702,6 +702,12 @@ pub fn binding(
         let mut inputs = serde_json::Map::new();
         for (name, reference) in &declared.inputs {
             let Some(source) = reference.node.as_deref() else {
+                if reference.output == "feedback" {
+                    if let Some(feedback) = start.feedback {
+                        inputs.insert(name.clone(), feedback.clone());
+                    }
+                    continue;
+                }
                 if reference.output != "merged" || start.parent.is_none() {
                     return Ok(None);
                 }
@@ -727,7 +733,8 @@ pub fn binding(
             if !producer.result_eligible {
                 return Ok(None);
             }
-            if (reference.kind == crate::plan::Output::Verdict
+            if (plan.handoff()
+                || reference.kind == crate::plan::Output::Verdict
                 || (reference.kind == crate::plan::Output::Candidate
                     && !plan.nodes[source].inputs.is_empty()))
                 && binding(

@@ -264,6 +264,11 @@ pub fn reusable(
     evidence: &Value,
 ) -> Result<Option<Value>, Fail> {
     let attempt = super::attempts::get(conn, execution.required_attempt()?)?;
+    if attempt.admission.as_ref().is_some_and(|admission| {
+        crate::plan::Plan::admitted(admission).is_ok_and(|plan| plan.handoff())
+    }) {
+        return Ok(None);
+    }
     if execution.parent.is_none()
         && attempt
             .admission
