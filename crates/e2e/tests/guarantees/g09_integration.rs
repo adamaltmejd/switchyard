@@ -262,6 +262,13 @@ fn integration_retains_partial_work_and_approves_only_its_output() {
     drop(watch);
     machine.start();
     let mut watch = project.watch(0);
+    // Startup may retain the crashed owner until a later checked release.
+    // Resume only after that exact execution has both released and ended.
+    for event in ["execution.released", "execution.ended"] {
+        watch.find("crashed integrator reconciled", |entry| {
+            entry["event"] == event && entry["execution"] == row["id"]
+        });
+    }
     continue_integration(&project);
     let bound = approval(&mut watch);
     hold.release();
