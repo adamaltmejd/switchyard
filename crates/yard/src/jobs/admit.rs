@@ -3004,7 +3004,7 @@ pub fn attempt_show(project: &Project, params: &Value) -> Result<Value, Fail> {
             .ok_or_else(|| Fail::not_found(format!("{} has no attempt", ticket_name(id))))?;
         let executions: Vec<Value> = executions::for_attempt(conn, attempt.id)?
             .iter()
-            .map(executions::Execution::to_json)
+            .map(|row| execution_inspection(project, row))
             .collect();
         let mut checks_json = Vec::new();
         for check in checks::for_attempt(conn, attempt.id)? {
@@ -3035,30 +3035,57 @@ pub fn attempt_show(project: &Project, params: &Value) -> Result<Value, Fail> {
     })
 }
 
-/// Explicit drilldown of recorded values; absent usage stays absent.
+/// Explicit drilldowns share the authoritative execution usage metadata.
+pub fn execution_inspection(project: &Project, row: &executions::Execution) -> Value {
+    let mut value = row.to_json();
+    let transcript = if row.scope.is_some() {
+        super::capacity::dir(project, row).join("transcript.jsonl")
+    } else {
+        super::supervise::transcript(project, row.attempt.expect("attempt execution"), row.id)
+    };
+    let proof = row
+        .attempt
+        .zip(row.proof.as_deref())
+        .map(|(attempt, digest)| super::proof::snapshot_path(project, attempt, digest));
+    let gate_log = row.attempt.map(|attempt| {
+        let dir = row.parent.map_or_else(
+            || project.attempt_dir(attempt),
+            |parent| super::queue::landing_dir(project, parent),
+        );
+        dir.join("gates").join(format!("{}.log", row.id))
+    });
+    value["artifacts"] = json!({
+        "transcript": if transcript.is_file() { "available" } else { "unavailable" },
+        "proof": if proof.is_some_and(|path| path.is_dir()) { "available" } else { "unavailable" },
+        "gate_log": if row.kind == "gate" && gate_log.is_some_and(|path| path.is_file()) { "available" } else { "unavailable" },
+    });
+    value
+}
+
+pub fn project_stats(project: &Project) -> Result<Value, Fail> {
+    project.read(|conn| {
+        let rows = executions::query(conn, "1 ORDER BY id", [])?;
+        Ok(json!({"aggregate": executions::aggregate(&rows)?,
+            "executions": rows.iter().map(|row| execution_inspection(project, row)).collect::<Vec<_>>()}))
+    })
+}
+
 pub fn attempt_stats(project: &Project, params: &Value) -> Result<Value, Fail> {
     let id = ticket_param(params)?;
     project.read(|conn| {
-        let attempt = attempts::latest_for(conn, id)?
-            .ok_or_else(|| Fail::not_found(format!("{} has no attempt", ticket_name(id))))?;
-        let mut query = conn.prepare(
-            "SELECT id, kind, model, provider, tokens_in, tokens_out, cost
-             FROM execution WHERE attempt = ?1 ORDER BY id",
-        )?;
-        let values = query
-            .query_map([attempt.id], |row| {
-                Ok(json!({
-                    "execution": row.get::<_, i64>(0)?,
-                    "kind": row.get::<_, String>(1)?,
-                    "model": row.get::<_, Option<String>>(2)?,
-                    "provider": row.get::<_, Option<String>>(3)?,
-                    "tokens_in": row.get::<_, Option<i64>>(4)?,
-                    "tokens_out": row.get::<_, Option<i64>>(5)?,
-                    "cost": row.get::<_, Option<f64>>(6)?,
-                }))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(json!({"attempt": attempt.id, "executions": values}))
+        let attempt = if let Some(attempt) = params["attempt"].as_i64() {
+            let attempt = attempts::get(conn, attempt)?;
+            if attempt.ticket != id {
+                return Err(Fail::invalid("attempt belongs to another ticket"));
+            }
+            attempt
+        } else {
+            attempts::latest_for(conn, id)?
+                .ok_or_else(|| Fail::not_found(format!("{} has no attempt", ticket_name(id))))?
+        };
+        let rows = executions::for_attempt(conn, attempt.id)?;
+        Ok(json!({"attempt": attempt.id, "aggregate": executions::aggregate(&rows)?,
+            "executions": rows.iter().map(|row| execution_inspection(project, row)).collect::<Vec<_>>()}))
     })
 }
 

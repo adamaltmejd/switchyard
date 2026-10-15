@@ -167,6 +167,96 @@ fi"#,
             "fields": {"input": complete, "output": complete, "cost": complete}
         })
     );
+    // G7: external fixture increments, not predecessor session totals. Sabotage:
+    // sum cumulative spend or COALESCE absent costs into complete zero bills.
+    // These MCP reads add no machines, boxes, builds or model turns.
+    let mut operator = machine.operator();
+    let stats = operator.call(
+        "yard_attempt_stats",
+        json!({"project": project.path, "ticket": "Y-1"}),
+    );
+    let stats = &stats["result"];
+    assert_eq!(
+        stats["aggregate"]["input"]["known_sum"].as_f64(),
+        Some(PROMPT_TOKENS as f64)
+    );
+    assert_eq!(stats["aggregate"]["input"]["partial_count"], 1);
+    assert_eq!(stats["aggregate"]["input"]["unknown_count"], 1);
+    assert_eq!(
+        stats["aggregate"]["cost"]["reported"],
+        json!({
+            "known_sum": 0.0, "missing_count": 2, "unknown_count": 2,
+            "partial_count": 0, "complete_count": 1, "completeness": "partial"
+        })
+    );
+    assert_eq!(
+        stats["aggregate"]["cost"]["billing"]["status"],
+        "unavailable"
+    );
+    for expected in [&first, &second, &third] {
+        let actual = stats["executions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["execution"] == expected["execution"])
+            .unwrap();
+        assert_eq!(actual["usage"], expected["usage"]);
+    }
+    let project_stats = operator.call("yard_project_stats", json!({"project": project.path}));
+    assert_eq!(project_stats["result"]["aggregate"], stats["aggregate"]);
+    project.json(&["attempt", "abandon", "Y-1"]);
+    history.until("cleanup", |event| {
+        event["event"] == "execution.ended" && event["data"]["kind"] == "cleanup"
+    });
+    assert!(!project.path.join(".yard/local/attempts/1").exists());
+    drop(operator);
+    drop(history);
+    machine.kill();
+    machine.start();
+    let mut operator = machine.operator();
+    let retained = operator.call(
+        "yard_attempt_stats",
+        json!({"project": project.path, "ticket": "Y-1", "attempt": 1}),
+    );
+    let retained = &retained["result"];
+    // The cleanup execution has no measurement. Retained rows are still
+    // increments, and a digest/row does not promise archived artifacts.
+    assert_eq!(
+        retained["aggregate"]["cost"]["reported"],
+        json!({
+            "known_sum": 0.0, "missing_count": 3, "unknown_count": 3,
+            "partial_count": 0, "complete_count": 1, "completeness": "partial"
+        })
+    );
+    assert_eq!(
+        retained["aggregate"]["input"]["known_sum"],
+        stats["aggregate"]["input"]["known_sum"]
+    );
+    for expected in [&first, &second, &third] {
+        let actual = retained["executions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["execution"] == expected["execution"])
+            .unwrap();
+        assert_eq!(actual["usage"], expected["usage"]);
+        assert_eq!(actual["binding"], expected["binding"]);
+        assert_eq!(actual["result"], expected["result"]);
+        for field in [
+            "requested_identity",
+            "started_at",
+            "ended_at",
+            "elapsed_seconds",
+        ] {
+            assert_eq!(actual[field], expected[field]);
+        }
+        assert_eq!(
+            actual["artifacts"],
+            json!({"transcript": "unavailable", "proof": "unavailable", "gate_log": "unavailable"})
+        );
+    }
+    let project_stats = operator.call("yard_project_stats", json!({"project": project.path}));
+    assert_eq!(project_stats["result"]["aggregate"], retained["aggregate"]);
     hold.release();
 }
 

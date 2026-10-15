@@ -47,12 +47,22 @@ pub struct Execution {
     pub usage: Usage,
     pub harness: Option<String>,
     pub model: Option<String>,
+    pub provider: Option<String>,
+    pub agent: Option<String>,
+    pub effort: Option<String>,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    pub elapsed_seconds: Option<f64>,
+    pub exit_cause: Option<String>,
+    pub exit_code: Option<i64>,
 }
 
 const COLUMNS: &str = "id, attempt, parent, kind, reason, status, outcome, detail, base, head,
     proof, ticket_revision, name, round, handle, session_id, approval, intent_old, intent_merged,
     intent_state, progress, harness_version, resumed, reserved, lock_contract, intent_ref, plan_revision,
-    tokens_in, tokens_out, cost, usage_fields, harness, model, node, inputs, result, teardown, report, prepared, verification, scope, workspace, settings";
+    tokens_in, tokens_out, cost, usage_fields, harness, model, node, inputs, result, teardown, report, prepared, verification, scope, workspace, settings,
+    provider, agent, effort, started_at, ended_at,
+    (julianday(ended_at) - julianday(started_at)) * 86400.0, exit_cause, exit_code";
 
 pub const RESULT_ELIGIBLE: &str = "status = 'ended' AND reserved = 0 AND teardown = 1
     AND json_extract(result, '$.outputs.result') IS NOT NULL";
@@ -115,7 +125,15 @@ fn row(row: &Row) -> rusqlite::Result<Execution> {
         scope: json_column(row, 40)?,
         workspace: row.get(41)?,
         settings: json_column(row, 42)?,
-        result_eligible: row.get(43)?,
+        provider: row.get(43)?,
+        agent: row.get(44)?,
+        effort: row.get(45)?,
+        started_at: row.get(46)?,
+        ended_at: row.get(47)?,
+        elapsed_seconds: row.get(48)?,
+        exit_cause: row.get(49)?,
+        exit_code: row.get(50)?,
+        result_eligible: row.get(51)?,
     })
 }
 
@@ -148,7 +166,7 @@ impl Execution {
     }
 
     pub fn to_json(&self) -> Value {
-        json!({
+        let mut value = json!({
             "execution": self.id,
             "attempt": self.attempt,
             "workspace": self.workspace,
@@ -186,8 +204,94 @@ impl Execution {
             "intent": self.intent_state.as_ref().map(|state| json!({
                 "state": state, "target_ref": self.intent_ref, "old": self.intent_old, "merged": self.intent_merged,
             })),
-        })
+        });
+        value.as_object_mut().expect("execution object").extend(
+            json!({
+                "cost_basis": {"kind": "local_estimate", "unit": "USD", "billing": "unavailable"},
+                "provider": self.provider,
+                "agent": self.agent,
+                "effort": self.effort,
+                "requested_identity": {"harness": self.harness, "provider": self.provider,
+                    "model": self.model, "effort": self.effort},
+                "observed_identity": {"status": "unknown"},
+                "started_at": self.started_at,
+                "ended_at": self.ended_at,
+                "elapsed_seconds": self.elapsed_seconds,
+                "exit_cause": self.exit_cause,
+                "exit_code": self.exit_code,
+            })
+            .as_object()
+            .expect("statistics object")
+            .clone(),
+        );
+        value
     }
+}
+
+/// Rows, not session chains or audit events, own measured increments.
+pub fn aggregate(rows: &[Execution]) -> Result<Value, Fail> {
+    use crate::harness::{Completeness, Provenance};
+    let field = |name: &str| {
+        let mut known_sum = None;
+        let mut token_sum = 0_u64;
+        let mut cost_sum = 0.0;
+        let (mut missing, mut unknown, mut partial, mut complete) = (0, 0, 0, 0);
+        for row in rows {
+            let (present, metadata) = match name {
+                "input" => (row.usage.input.is_some(), &row.usage.fields.input),
+                "output" => (row.usage.output.is_some(), &row.usage.fields.output),
+                _ => (row.usage.cost.is_some(), &row.usage.fields.cost),
+            };
+            if !present {
+                missing += 1;
+            }
+            if !present
+                || matches!(metadata.completeness, Completeness::Unknown)
+                || matches!(
+                    metadata.provenance,
+                    Provenance::Legacy | Provenance::Unreported
+                )
+            {
+                unknown += 1;
+                continue;
+            }
+            known_sum = Some(if name == "cost" {
+                cost_sum += row.usage.cost.expect("present cost");
+                if !cost_sum.is_finite() {
+                    return Err(Fail::from("cost aggregate overflow".to_string()));
+                }
+                json!(cost_sum)
+            } else {
+                let value = if name == "input" {
+                    row.usage.input
+                } else {
+                    row.usage.output
+                };
+                token_sum = token_sum
+                    .checked_add(value.expect("present tokens"))
+                    .ok_or_else(|| Fail::from("token aggregate overflow".to_string()))?;
+                json!(token_sum)
+            });
+            match metadata.completeness {
+                Completeness::Partial => partial += 1,
+                Completeness::Complete => complete += 1,
+                Completeness::Unknown => unreachable!(),
+            }
+        }
+        Ok(
+            json!({"known_sum": known_sum, "missing_count": missing, "unknown_count": unknown,
+            "partial_count": partial, "complete_count": complete,
+            "completeness": if known_sum.is_none() { "unknown" } else if unknown > 0 || partial > 0 { "partial" } else { "complete" }}),
+        )
+    };
+    Ok(
+        json!({"execution_count": rows.len(), "input": field("input")?, "output": field("output")?,
+        "cost": {"unit": "USD", "kind": "local_estimate", "reported": field("cost")?,
+            "billing": {"status": "unavailable"}},
+        "timing": {"kind": "sum_execution_elapsed_seconds",
+            "known_sum": rows.iter().filter_map(|row| row.elapsed_seconds).reduce(|a, b| a + b),
+            "missing_count": rows.iter().filter(|row| row.elapsed_seconds.is_none()).count()}}),
+    )
 }
 
 pub fn get(conn: &Connection, id: i64) -> Result<Execution, Fail> {

@@ -1891,6 +1891,7 @@ pub async fn command(daemon: &Arc<Daemon>, method: &str, params: Value) -> Resul
             inspect_plan(daemon, &project, method, params).await
         }
         "status" => admit::status(daemon, &project).await,
+        "project.stats" => admit::project_stats(&project),
         "sync" => admit::sync(daemon, &project, &params).await,
         "doctor" => admit::doctor(daemon, &project).await,
         "ticket.new" => admit::ticket_new(daemon, &project, &params).await,

@@ -152,7 +152,12 @@ pub fn show(project: &Project, params: &Value) -> Result<Value, Fail> {
     let id = params["execution"]
         .as_i64()
         .ok_or_else(|| Fail::invalid("execution required"))?;
-    project.read(|conn| Ok(executions::get(conn, id)?.to_json()))
+    project.read(|conn| {
+        Ok(super::admit::execution_inspection(
+            project,
+            &executions::get(conn, id)?,
+        ))
+    })
 }
 
 pub fn stop(daemon: &Daemon, project: &Project, params: &Value) -> Result<Value, Fail> {

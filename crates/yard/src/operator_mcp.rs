@@ -13,6 +13,7 @@ const IN_FLIGHT_MAX: usize = 64;
 const OPERATIONS: &[(&str, &str)] = &[
     ("daemon.status", ""),
     ("project.list", ""),
+    ("project.stats", "project!"),
     ("project.forget", "path!"),
     ("init", "path!"),
     ("doctor", "project!"),
@@ -83,7 +84,7 @@ const OPERATIONS: &[(&str, &str)] = &[
     ("attempt.show", "project! ticket!"),
     ("attempt.diff", "project! ticket!"),
     ("attempt.tail", "project! ticket!"),
-    ("attempt.stats", "project! ticket!"),
+    ("attempt.stats", "project! ticket! attempt:i"),
     ("proposal.accept", "project! attention:i! text"),
     ("proposal.reject", "project! attention:i! text"),
 ];
@@ -265,7 +266,7 @@ async fn answer(message: &Value) -> Value {
                 "attempt.start" => "Start or retry through the existing attempt lifecycle.",
                 "plan.catalog" => "Inspect target-bound profiles, presets, agent settings and execution capabilities before selecting named node overrides.",
                 "attempt.tail" => "Read the live worker transcript explicitly.",
-                "attempt.stats" => "Read recorded execution statistics; missing values remain null.",
+                "attempt.stats" | "project.stats" => "Read retained execution usage and known increments with missing/partial coverage; billing is unavailable.",
                 _ => method,
             }, "inputSchema": schema(fields)})
         }).collect::<Vec<_>>()}),

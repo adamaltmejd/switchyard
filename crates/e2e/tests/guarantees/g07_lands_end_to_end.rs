@@ -317,6 +317,37 @@ fn a_ticket_lands_end_to_end_and_leaves_only_rows() {
     assert_eq!(implementation["tokens_out"], 2 * COMPLETION_TOKENS as i64);
     assert!(implementation["cost"].as_f64().unwrap() > 0.0);
 
+    // G7: the retained positive costs are summed once. The raw measured rows
+    // are external evidence; fixture turns supply the token expectation.
+    // Sabotage: sum predecessor totals or hide unknown gate/cleanup costs.
+    let mut operator = machine.operator();
+    let stats = operator.call(
+        "yard_attempt_stats",
+        json!({"project": project.path, "ticket": "Y-1"}),
+    );
+    let aggregate = &stats["result"]["aggregate"];
+    assert_eq!(
+        aggregate["input"]["known_sum"].as_f64(),
+        Some((4 * PROMPT_TOKENS) as f64)
+    );
+    assert_eq!(
+        aggregate["cost"]["reported"]["known_sum"].as_f64(),
+        Some(
+            workers
+                .iter()
+                .map(|row| row["cost"].as_f64().unwrap())
+                .sum::<f64>()
+        )
+    );
+    assert_eq!(aggregate["cost"]["reported"]["complete_count"], 2);
+    assert!(
+        aggregate["cost"]["reported"]["missing_count"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert_eq!(aggregate["cost"]["reported"]["completeness"], "partial");
+
     // The landed attempt left rows only: no directory, no box, and no proof
     // snapshot; the check and approval rows carry the proof digest.
     assert!(!project.path.join(".yard/local/attempts/1").exists());

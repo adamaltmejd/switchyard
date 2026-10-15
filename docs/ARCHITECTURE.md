@@ -1455,7 +1455,7 @@ started (`first`, `repair`, `edit`, `retry`, `dirty`, `restart`).
 Usage is optional measured data with per-field completeness and provenance.
 The nullable `tokens_in`, `tokens_out` and `cost` columns hold the values;
 `usage_fields` holds their metadata. Execution JSON, including trusted MCP
-`yard_attempt_show`, exposes `usage` with nullable `input`, `output`, `cost`
+`yard_attempt_show` and `yard_attempt_stats`, exposes `usage` with nullable `input`, `output`, `cost`
 and `fields` for each, alongside harness, harness version, model and resumed
 execution identity. No report means unknown, not zero. Explicit zero is
 a numeric observation. Cost is reported USD, never a bill inferred from
@@ -1505,7 +1505,36 @@ failed results retain `partial` completeness.
 The adapter contract is increments for the new execution only, never a
 repeated session total. `partial` means an observed increment with missing
 coverage, not a complete total; `unknown` makes no coverage claim. These raw
-records have no aggregate, mandatory cap or prominent board display.
+records have no mandatory cap or prominent board display.
+
+Trusted `yard_project_stats` reads all retained execution rows, including
+standalone work. `yard_attempt_stats` reads one attempt, latest by default;
+an explicit `attempt` must belong to the named ticket. Both return execution
+drilldowns and aggregates from the same rows. Each execution ID contributes
+once. No predecessor session totals or audit events are added. Per-field
+`known_sum` includes only numeric complete or partial increments with harness
+or adapter provenance. Legacy, unreported and unknown-coverage numbers remain
+visible in drilldowns but do not enter sums. A sum with no known increments
+is null. Token sums keep integer precision; numeric overflow fails the
+statistics read. Each field reports complete, partial, unknown and missing
+counts; missing is the subset of unknown rows with no numeric value. Aggregate
+completeness is unknown without a known increment, partial with any unknown
+or partial row, otherwise complete. Non-agent rows also count as missing
+when they carry no measurement. Cost sums are local USD estimates; billing
+is unavailable even when estimate coverage is complete.
+
+Execution drilldowns retain frozen node inputs, result and publication
+references, candidate producer, parent, plan revision and resumed identity.
+These references join candidate, review/finding and picker evidence after
+artifact cleanup. Recorded model/provider/effort are requested settings;
+observed model identity remains unknown. Start, end, exit cause and exit code
+come from the execution row. Elapsed seconds cover ended executions only.
+Their aggregate is summed execution time, not concurrent graph wall time.
+No usefulness score is inferred. Execution show, attempt show and statistics
+report current transcript, gate-log and proof-snapshot availability from
+the filesystem. Retained rows and proof digests do not promise durable
+logs, transcripts or proof bytes. Default attention stays compact.
+
 Packaged Durable executions read their own boxed usage baseline before
 starting pending work. Token observations and terminal usage subtract that
 baseline; cost remains unreported. Changed observations publish
@@ -2320,7 +2349,7 @@ and repair. Standalone execution start takes a node definition object.
 `initialize`, `notifications/initialized`, `ping`, `tools/list` and
 `tools/call` are served. Operator tools are `yard_` plus the daemon method
 with dots replaced by underscores. They cover `daemon.status`,
-`project.list`, `project.forget`, `init`, `doctor`, `sync`, `status`,
+`project.list`, `project.stats`, `project.forget`, `init`, `doctor`, `sync`, `status`,
 `events`, `attention`, all ticket, attempt and proposal operations listed
 below, `attempt.stats`, and `execution.start`, `execution.show`, `execution.stop`. Arguments name absolute registered `project`
 paths; `init` and `project.forget` instead take an absolute `path`.
@@ -2330,8 +2359,8 @@ validation remains authoritative. Results carry the same compact JSON in
 text and `structuredContent`, as `{result}` or `{error: {code, message,
 data}}`; errors set `isError`. Stale expected/current identities are intact.
 Status and ticket lists omit bodies; `ticket.show` reads a body explicitly.
-Transcripts and recorded statistics appear only through `attempt.tail`
-and `attempt.stats`; missing recorded statistics remain null.
+Transcripts appear through `attempt.tail`. Recorded usage is explicit in
+execution/attempt show and attempt/project statistics; missing values remain null.
 
 `events` returns one page of at most 500 audit events after `since`, waiting
 at most 25 seconds if empty. `attention` is one bounded poll of the same
@@ -2440,7 +2469,7 @@ combination, lifecycle or historical version.
 | 4 | Capacity holds | Concurrent starts preserve one live attempt and the lane bound. Two held mixed reader/worker effects have exactly two native project boxes; the join waits for exact results. One-slot landing children exclude a worker and still land. An inherited native owner retains capacity across restart. Identical execution IDs in different projects keep separate grants. |
 | 5 | Intent precedes effect, and a restart loses only the turn; Durable continuation is a new exclusive execution after proved predecessor removal; individually useful work needs no ticket | A real held writable turn survives daemon death as interrupted work and resumes its retained tree. Startup removes a surviving host gate process group before requeue. A legacy owner without trustworthy lock proof remains reserved across upgrade. Matching Durable unsafe intent resumes only after old-box removal; corrupt checkpoint identity refuses before a fresh retry. A completed registered finding picker retains its immutable selection, reservation and exact ownership item across restart while a real runtime descendant holds its inherited effect lock after box removal; checked release reconciles only that item without replay. |
 | 6 | Inspectable presets and targeted profile overrides resolve declared capabilities at the boundary; inputs are validated; new supported workflow admissions retain immutable resolved input evidence, and unrecorded history stays unknown; standalone scope is explicit | Malformed worker MCP input writes no proposal; the valid same-turn control succeeds. Unavailable role overrides refuse with the exact profile reference; the valid named override resolves the complete fixture plan. Unsupported selected admission creates no work, while a supported held execution keeps its frozen inputs across template sync. A real historical store preserves rows, audit and foreign keys and supports current decisions after upgrade. |
-| 7 | Complete shipped presets cover ordinary, reduced, audit, cleanup, classification, joins and independent model trials through existing executions; a ticket lands end to end and leaves only rows; usage is optional measured data with provenance; Codex token totals retain their meaning and unreported monetary cost is unknown | A real ticket goes through commit, gate, review, approval and native landing, then leaves rows while unrelated live work remains. Actual optional Pi frames retain unknown, interrupted partial and resumed explicit-zero measurements across reopen. Operator stdio preserves worker authorization and stale mutation identity while canceled waits and stdin EOF leave work running. Standalone command/report execution has no ticket or landing authority. |
+| 7 | Complete shipped presets cover ordinary, reduced, audit, cleanup, classification, joins and independent model trials through existing executions; a ticket lands end to end and leaves only rows; usage is optional measured data with provenance and honest partial aggregates; Codex token totals retain their meaning and unreported monetary cost is unknown | A real ticket goes through commit, gate, review, approval and native landing, then leaves rows while unrelated live work remains. Actual optional Pi frames retain unknown, interrupted partial and resumed explicit-zero measurements across reopen. Trusted statistics sum known execution increments with missing/partial counts after cleanup and restart; the landing drilldown includes positive measured costs. Operator stdio preserves worker authorization and stale mutation identity while canceled waits and stdin EOF leave work running. Standalone command/report execution has no ticket or landing authority. |
 | 8 | Reviews, audits, classification and read-only candidate and finding selections are explicit bounded publications; classification chooses bounded continuation while failures remain unchanged; an empty selected panel is unreviewed; selected eligible merged failures require exact operator decisions | Silent or unregistered review publication cannot authorize approval; a proven same-project retry can. Report validation and held publication preserve exact frozen identity and eligibility, and successful text alone creates no report. Five-model selection binds own reviews and one replacement to actual landing. A correctly resealed changed packaged controller refuses before model/code effects; its unmodified control publishes through real Pi. The exact multi-model join picker refuses malformed groups and repeated contributors before a valid subset and two-source duplicate publication. Checked ownership release preserves one typed selection and all raw sources. Named original and fixer repairs retain failing verdicts before an explicit operator acceptance; text without publication is infrastructure failure and a fresh execution retries publication. Command classification retries the same failed node once, then raises attention without resetting its bound on a ticket edit. Its repair prompt carries precisely the selected groups, including an advisory contributor; an excluded required block still refuses stale acceptance before exact acceptance permits approval. |
 | 9 | Each implementer execution starts from its frozen target and the right candidate; independent writers retain isolated reusable workspaces, including integration from named candidates; the bounded implementer, cleanup and repair path retains one exclusive clone, including selected Durable cleanup and read-only audits of immutable publications | A held worker receives operator edits and adopted definitions in its next execution. Stop/start delivers the edit while retaining configured model identity. Five independent writer workspaces preserve their own bytes, sessions and frozen read-only review inputs through continuation and restart. Held integration retains partial work across restart; source writes and canonical access fail while its own write succeeds. Conflicts require repair before selection. Boxed Git inodes, fixture bytes and ancestry survive sequential selected roles; a held cleanup refuses a competing workspace retry, and checked release precedes handoff. Durable cleanup resumes a held unsafe source write in a new exclusive execution after checked release, without replay; its boxed commit passes the same clone to ordinary repair and native landing. |
 | 10 | The queue lands one at a time per target and re-judges what does not merge | Two approvals land in order; a red merge returns for repair. A feature ticket uses its frozen target source, definitions and image, repairs a real conflict, and lands only on that branch. |
