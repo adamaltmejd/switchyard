@@ -797,6 +797,8 @@ pub fn binding(
             );
         }
         if start.kind == "implementation"
+            // Packaged cleanup consumes declared inputs, not retry bookkeeping.
+            && !matches!(declared.runner, crate::plan::Runner::Packaged { .. })
             && let Some(feedback) = start.feedback
         {
             inputs.insert("feedback".into(), feedback.clone());

@@ -914,6 +914,7 @@ fn checkpoint_source() -> &'static std::path::PathBuf {
 /// Git ancestry and execution history supply the expected values.
 /// Sabotage: grant audit writes, replay an unsafe write, reuse a workspace or
 /// checkpoint before checked release, or let cleanup publish/land a candidate.
+/// Adding undeclared retry feedback to packaged inputs also prevents continuation.
 /// One machine adds an audit, implementation, interrupted cleanup, resumed
 /// cleanup and repair box; the debugger-enabled build is shared with G5.
 #[test]
@@ -924,6 +925,8 @@ fn selected_durable_cleanup_commits_without_replaying_an_interrupted_write() {
     let held_initial = initial.clone();
     let resumed = Latch::new();
     let held_resumed = resumed.clone();
+    let resumed_request = Arc::new(Mutex::new(None::<std::path::PathBuf>));
+    let model_resumed_request = resumed_request.clone();
     let inspection = Latch::new();
     let held_inspection = inspection.clone();
     let nested_mode = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -969,6 +972,8 @@ fn selected_durable_cleanup_commits_without_replaying_an_interrupted_write() {
                 }
                 let (name, result) = request.last_tool_result().unwrap();
                 if result.contains("interrupted") {
+                    let path = model_resumed_request.lock().unwrap().take().unwrap();
+                    std::fs::write(path, "request\n").unwrap();
                     return Reply::Hold(
                         held_resumed.clone(),
                         Box::new(Reply::Tools(vec![write("cleaned\n")])),
@@ -1028,6 +1033,8 @@ test "$(cat chain.txt)" = cleaned && test "$(cat /yard/input/trusted/repair.md)"
             other => panic!("unexpected selected model {other}"),
         }
     });
+    let resumed_request_path = machine.root.join("cleanup-resumed");
+    *resumed_request.lock().unwrap() = Some(resumed_request_path.clone());
     machine.kill();
     let source = checkpoint_source();
     machine.use_binary(Some(source.parent().unwrap().join("debug/yard")));
@@ -1146,7 +1153,7 @@ files = [{{root = "source", path = "chain.txt"}}]
     project.git(&["rm", ".pi/extensions/unselected.js"]);
     project.git(&["commit", "-qm", "Retire audit-only hostile extension"]);
     project.json(&["sync"]);
-    for path in ["debug-armed", "debug-held"] {
+    for path in ["debug-armed", "debug-held", "cleanup-resumed"] {
         assert!(
             std::process::Command::new("mkfifo")
                 .arg(machine.root.join(path))
@@ -1252,12 +1259,21 @@ if printf 'changed\n' > /yard/proof/intrusion; then echo proof=written; else ech
     std::fs::write(clone.join("chain.txt"), "after-release\n").unwrap();
     let mut watch = project.watch(project.json(&["status"])["seq"].as_i64().unwrap());
     project.json(&["attempt", "start", "Y-1"]);
-    resumed.wait_held();
+    let replacement_started = watch.until("replacement cleanup started", |event| {
+        event["event"] == "execution.started"
+            && event["attempt"] == attempt
+            && event["data"]["kind"] == "implementation"
+    });
+    let replacement_id = replacement_started["execution"].as_i64().unwrap();
+    assert_eq!(
+        watch.said_before_end(&resumed_request_path, Some(replacement_id)),
+        "request\n"
+    );
     assert_eq!(
         std::fs::read_to_string(clone.join("chain.txt")).unwrap(),
         "after-release\n"
     );
-    let replacement = project.rows(&format!("SELECT id, resumed, prepared FROM execution WHERE attempt = {attempt} AND node = 'cleanup' AND status = 'running'"))[0].clone();
+    let replacement = project.rows(&format!("SELECT id, resumed, prepared FROM execution WHERE id = {replacement_id} AND attempt = {attempt} AND node = 'cleanup' AND status = 'running'"))[0].clone();
     assert_ne!(replacement["id"], id);
     assert_eq!(replacement["resumed"], id);
     let prepared: Value = serde_json::from_str(replacement["prepared"].as_str().unwrap()).unwrap();

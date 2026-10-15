@@ -1489,6 +1489,8 @@ interrupted work still needs an explicit start or an edit.
 `prepared.durable` records checkpoint origin, predecessor and frozen node,
 typed inputs, candidate/proof, ticket/plan revisions, consumed code/package,
 model, selected skill/tool sources and containment/work policy identities.
+Packaged cleanup binds only declared node inputs; implicit controller retry
+feedback is not a consumed input or prompt.
 `resumed` names the predecessor execution. Only matching identities reuse
 that checkpoint; changed pending-work inputs start fresh. A competing start
 refuses as `checkpoint_owned`, naming checkpoint and execution identities.
