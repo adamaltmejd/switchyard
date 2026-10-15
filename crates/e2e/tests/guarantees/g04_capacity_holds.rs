@@ -252,7 +252,7 @@ fn concurrent_readers_share_capacity_and_join_exact_results_across_restart() {
             let right_shared = source("right", "shared");
             let foreign = picker_foreign.lock().unwrap().clone().unwrap();
             let old = picker_history.lock().unwrap().clone();
-            let refusals = if old.is_some() { 4 } else { 3 };
+            let refusals = if old.is_some() { 1 } else { 3 };
             let count = request.tool_results().len();
             let response = || {
                 let text = request.last_tool_result().unwrap().1;
@@ -261,14 +261,16 @@ fn concurrent_readers_share_capacity_and_join_exact_results_across_restart() {
                 )
                 .unwrap()
             };
-            let rejected = |step: usize| match step {
-                0 => json!({"groups": [{"reason": "foreign", "sources": [foreign.clone()]}]}),
-                1 => json!({"groups": [{"reason": "   ", "sources": [useful.clone()]}]}),
-                2 => {
-                    json!({"groups": [{"reason": "repeated", "sources": [useful.clone(), useful.clone()]}]})
+            let rejected = |step: usize| match (old.as_ref(), step) {
+                (Some(old), _) => {
+                    json!({"groups": [{"reason": "historical", "sources": [old]}]})
                 }
-                _ => {
-                    json!({"groups": [{"reason": "historical", "sources": [old.clone().unwrap()]}]})
+                (None, 0) => {
+                    json!({"groups": [{"reason": "foreign", "sources": [foreign.clone()]}]})
+                }
+                (None, 1) => json!({"groups": [{"reason": "   ", "sources": [useful.clone()]}]}),
+                (None, _) => {
+                    json!({"groups": [{"reason": "repeated", "sources": [useful.clone(), useful.clone()]}]})
                 }
             };
             if count > 0 && count <= refusals {
