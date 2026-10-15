@@ -99,13 +99,34 @@ pub fn invalidate(tx: &Connection, attempt: &attempts::Attempt) -> Result<(), Fa
 }
 
 pub fn activate(tx: &Connection, attempt: &attempts::Attempt, id: i64) -> Result<(), Fail> {
+    let attempt = attempts::get(tx, attempt.id)?;
     let mut selected = attempt.clone();
     selected.choice = Some(id);
     let row = current(tx, &selected)?.ok_or_else(|| Fail::refused("superseded_selection"))?;
     if attempt.choice == Some(id) {
         return Ok(());
     }
-    invalidate(tx, attempt)?;
+    if attempt.next.is_some() {
+        let previous = attempt
+            .choice
+            .map(|choice| executions::get(tx, choice))
+            .transpose()?;
+        let expected = previous.as_ref().and_then(|choice| {
+            choice
+                .result
+                .as_ref()
+                .map(|result| &result["outputs"]["result"]["value"]["candidate"])
+        });
+        let candidate =
+            &row.result.as_ref().expect("choice")["outputs"]["result"]["value"]["candidate"];
+        if expected != Some(candidate) {
+            return Err(Fail::refused("pending_continuation").with(json!({
+                "reason": "pending_continuation", "identity": "pending_continuation",
+                "expected": expected, "current": candidate
+            })));
+        }
+    }
+    invalidate(tx, &attempt)?;
     let candidate =
         &row.result.as_ref().expect("choice")["outputs"]["result"]["value"]["candidate"]["value"];
     tx.execute(

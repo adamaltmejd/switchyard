@@ -438,6 +438,9 @@ fn selected_failures_keep_exact_operator_accept_and_repair() {
 /// conflict must withdraw without staging a bundle or overwriting continuation.
 /// Sabotage: resolve the return producer from a cleared current choice or check
 /// only ticket revision. A fresh conflict below must still repair B normally.
+/// With B's repair pending, a real scheduler Git read holds lane reacquisition.
+/// Choosing A refuses without a write; choosing the same exact B still repairs B.
+/// Sabotage: activate A while retaining B's pending target-fetch instructions.
 #[test]
 fn only_the_declared_choice_is_checked_and_landed() {
     let holds: Vec<_> = (0..5).map(|_| Latch::new()).collect();
@@ -607,7 +610,18 @@ fn only_the_declared_choice_is_checked_and_landed() {
     let merge_armed = machine.root.join("merge-armed");
     let merge_said = machine.root.join("merge-said");
     let merge_release = machine.root.join("merge-release");
-    for fifo in [&said, &release, &merge_said, &merge_release] {
+    let pending_armed = machine.root.join("pending-armed");
+    let pending_ready = machine.root.join("pending-ready");
+    let pending_said = machine.root.join("pending-said");
+    let pending_release = machine.root.join("pending-release");
+    for fifo in [
+        &said,
+        &release,
+        &merge_said,
+        &merge_release,
+        &pending_said,
+        &pending_release,
+    ] {
         assert!(
             std::process::Command::new("mkfifo")
                 .arg(fifo)
@@ -620,9 +634,15 @@ fn only_the_declared_choice_is_checked_and_landed() {
         "if [ -e '{}' ]; then case \" $* \" in *' update-ref --no-deref refs/heads/feature/a '*)\n\
          echo held > '{}'; read line < '{}';; esac; fi\n\
          if [ -e '{}' ]; then case \" $* \" in *' merge-tree --write-tree '*)\n\
+         echo held > '{}'; read line < '{}';; esac; fi\n\
+         if [ -e '{}' ]; then case \" $* \" in *' bundle create --quiet '*'/target.bundle '*)\n\
+         \"$REAL\" \"$@\" || exit $?; touch '{}'; exit 0;; esac; fi\n\
+         if [ -e '{}' ]; then case \" $* \" in *' symbolic-ref --quiet --short HEAD '*)\n\
          echo held > '{}'; read line < '{}';; esac; fi",
         armed.display(), said.display(), release.display(),
-        merge_armed.display(), merge_said.display(), merge_release.display()
+        merge_armed.display(), merge_said.display(), merge_release.display(),
+        pending_armed.display(), pending_ready.display(), pending_ready.display(),
+        pending_said.display(), pending_release.display()
     ));
     machine.start();
     let mut extra = String::from(
@@ -1154,12 +1174,86 @@ fn only_the_declared_choice_is_checked_and_landed() {
     assert_eq!(fresh["head"], superseding_head);
     assert_ne!(fresh["choice"], third["choice"]);
     assert_eq!(fresh["skipped"], first["skipped"]);
+    std::fs::write(&pending_armed, "").unwrap();
     let approved = operator.call(
         "yard_attempt_approve",
         json!({"project": project.path, "ticket": "Y-1", "target": "feature/a",
             "head": superseding_head, "proof": fresh["proof"], "choice": fresh["choice"]}),
     );
     assert!(approved.get("error").is_none(), "{approved}");
+    assert_eq!(watch.said(&pending_said), "held\n");
+    let conflict_end = watch.find("selected conflict ended before pending repair", |event| {
+        event["event"] == "execution.ended" && event["data"]["outcome"] == "conflict"
+    });
+    watch.find(
+        "selected conflict released before pending repair",
+        |event| {
+            event["event"] == "execution.released"
+                && event["execution"] == conflict_end["execution"]
+                && event["seq"].as_i64().unwrap() > conflict_end["seq"].as_i64().unwrap()
+        },
+    );
+    let pending = project.rows(&format!("SELECT * FROM attempt WHERE id = {attempt}"));
+    assert_eq!(pending[0]["lane"], 0);
+    assert_eq!(pending[0]["choice"], fresh["choice"]);
+    let next: Value = serde_json::from_str(pending[0]["next"].as_str().unwrap()).unwrap();
+    assert_eq!(next["reason"], "repair");
+    assert_eq!(next["target"], target);
+    assert_eq!(next["branch"], "feature/a");
+    let bundle = project.path.join(format!(
+        ".yard/local/attempts/{attempt}/writers/7772697465722d31/input/target.bundle"
+    ));
+    let bundle_bytes = std::fs::read(&bundle).unwrap();
+    let choice = rows(
+        &project,
+        &format!("SELECT * FROM execution WHERE id = {}", fresh["choice"]),
+    );
+    let mut direct = json!({"project": project.path, "ticket": "Y-1", "attempt": attempt,
+        "revision": 1, "plan_revision": 1, "target": "feature/a", "choice": fresh["choice"],
+        "inputs": choice[0]["inputs"], "candidate": "c0"});
+    let before = project.rows("SELECT * FROM audit ORDER BY seq");
+    let refused = operator.call("yard_attempt_select", direct.clone());
+    assert_eq!(refused["error"]["code"], "refused", "{refused}");
+    assert_eq!(refused["error"]["data"]["reason"], "pending_continuation");
+    assert_eq!(refused["error"]["data"]["identity"], "pending_continuation");
+    assert_eq!(
+        refused["error"]["data"]["expected"],
+        choice[0]["inputs"]["c1"]
+    );
+    assert_eq!(
+        refused["error"]["data"]["current"],
+        choice[0]["inputs"]["c0"]
+    );
+    assert_eq!(project.rows("SELECT * FROM audit ORDER BY seq"), before);
+    assert_eq!(
+        project.rows(&format!("SELECT * FROM attempt WHERE id = {attempt}")),
+        pending
+    );
+    assert_eq!(std::fs::read(&bundle).unwrap(), bundle_bytes);
+    direct["candidate"] = json!("c1");
+    let selected = operator.call("yard_attempt_select", direct);
+    assert!(selected.get("error").is_none(), "{selected}");
+    let current = project.rows(&format!(
+        "SELECT choice, next FROM attempt WHERE id = {attempt}"
+    ));
+    assert_eq!(current[0]["choice"], selected["result"]["choice"]);
+    assert_ne!(current[0]["choice"], fresh["choice"]);
+    assert_eq!(current[0]["next"], pending[0]["next"]);
+    assert_eq!(std::fs::read(&bundle).unwrap(), bundle_bytes);
+    let reselected = rows(
+        &project,
+        &format!(
+            "SELECT * FROM execution WHERE id = {}",
+            selected["result"]["choice"]
+        ),
+    );
+    assert_eq!(
+        reselected[0]["result"]["outputs"]["result"]["value"]["candidate"],
+        choice[0]["inputs"]["c1"]
+    );
+    std::fs::remove_file(&pending_armed).unwrap();
+    std::fs::remove_file(&pending_ready).unwrap();
+    std::fs::write(&pending_release, "go\n").unwrap();
     landing_repair.wait_held();
     let repairs = rows(
         &project,
@@ -1199,7 +1293,12 @@ fn only_the_declared_choice_is_checked_and_landed() {
         &project,
         "SELECT * FROM execution WHERE status = 'ended' ORDER BY id",
     );
-    for old in before_conflict.iter().chain(&conflict) {
+    for old in before_conflict
+        .iter()
+        .chain(&conflict)
+        .chain(&choice)
+        .chain(&reselected)
+    {
         assert_eq!(
             after_conflict.iter().find(|row| row["id"] == old["id"]),
             Some(old)

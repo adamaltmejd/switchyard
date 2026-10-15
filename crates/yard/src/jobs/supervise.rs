@@ -61,8 +61,9 @@ pub fn start_implementation(
     reason: &str,
     feedback: Option<&Value>,
 ) -> Result<i64, Fail> {
-    let node = implementation_node(tx, attempt)?;
-    start_writer(tx, attempt, &node, reason, feedback)
+    let attempt = attempts::get(tx, attempt.id)?;
+    let node = implementation_node(tx, &attempt)?;
+    start_writer(tx, &attempt, &node, reason, feedback)
 }
 
 pub fn start_writer(
