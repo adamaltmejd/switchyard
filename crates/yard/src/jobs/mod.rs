@@ -1074,11 +1074,28 @@ async fn advance(
                 "external": "feedback", "execution": check.execution, "node": current, "output": "result"},
                 "value": {"verdict": "fail", "gate": name, "detail": result.detail.unwrap_or_default()}});
             project.tx(|tx| {
-                attempts::require_plan(tx, attempt.id, attempt.plan_revision())?;
-                if attempts::superseded_by_edit(tx, attempt.id, ticket.id, ticket.revision)? {
+                // The failed check belongs to the observed choice, not whichever
+                // producer a concurrent operator selection would dispatch now.
+                let now = attempts::get(tx, attempt.id)?;
+                if now.state != "live"
+                    || now.plan_revision() != attempt.plan_revision()
+                    || now.choice != attempt.choice
+                    || now.candidate() != attempt.candidate()
+                    || now.proof != attempt.proof
+                    || now.next.is_some()
+                    || attempts::superseded_by_edit(tx, attempt.id, ticket.id, ticket.revision)?
+                    || (now.choice.is_some()
+                        && crate::store::selections::current(tx, &now)?.is_none())
+                    || checks::current(tx, kind, name, &input)?
+                        .filter(|current| current.verdict != "pass")
+                        .map(|current| (current.id, current.execution))
+                        != Some((check.id, check.execution))
+                    || checks::decision(tx, attempt.id, &checks::evidence(tx, &check, &input)?)?
+                        != decision
+                {
                     return Ok(None);
                 }
-                supervise::start_implementation(tx, attempt, "repair", Some(&feedback)).map(Some)
+                supervise::start_implementation(tx, &now, "repair", Some(&feedback)).map(Some)
             })?
         };
         if let Some(execution) = execution {

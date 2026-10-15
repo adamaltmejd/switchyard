@@ -449,7 +449,11 @@ bound to the chosen producer; a candidate's review-shaped name grants no role.
 Admission and plan revisions record a verification node as skipped when its
 name lacks the configured runner role and verdict output. A writer shadowing
 that name leaves the omission visible and eligible for exact operator decisions.
-Repairs use the selected producer's workspace. Landing returns stage the target
+Repairs use the selected producer's workspace. Automatic candidate-gate repair
+revalidates the observed choice, candidate, proof and exact eligible failed check
+and decision inside the writer-start transaction. A superseded trigger starts
+no writer and changes no choice or approval.
+Landing returns stage the target
 bundle in that producer's input mount under the existing landing reservation.
 The landing-bound approval and immutable choice identify that producer. A
 superseded return withdraws without delivering a bundle or installing repair.
