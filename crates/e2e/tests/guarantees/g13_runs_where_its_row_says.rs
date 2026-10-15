@@ -724,7 +724,7 @@ export default function () {
     operator.initialize();
     let started = operator.call(
         "yard_attempt_start",
-        json!({"project": project.path, "ticket": "Y-1", "workflow": "default", "graph": graph}),
+        json!({"project": project.path, "ticket": "Y-1", "graph": graph}),
     );
     assert!(started.get("error").is_none(), "{started}");
     let attempt = started["result"]["attempt"].as_i64().unwrap();
