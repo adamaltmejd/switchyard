@@ -82,8 +82,11 @@ fn fetch(input: &str) -> String {
 /// history rejects an ended execution before the host signals that request.
 /// The store and host file prove that state before reconciliation.
 /// Expected contents and target come from the fixture and host Git.
-/// Sabotage: mount canonical into C, make candidate inputs writable, reuse
-/// A's candidate/approval for C, or recreate C's clone after interruption.
+/// Sabotage: in integration startup, mount the fixture's canonical directory
+/// (or .yard/local) read-write into C at its actual host path. The held-box
+/// absence/read/write probe fails even if canonical HEAD never moves.
+/// Make candidate inputs writable, reuse A's candidate/approval for C, or
+/// recreate C's clone after interruption.
 /// Mount a regular bundle file instead of its directory; startup ends before
 /// the held request, so history fails the wait instead of awaiting the latch.
 /// After planner release, admission refuses feedback without a new attempt
@@ -223,6 +226,29 @@ fn integration_retains_partial_work_and_approves_only_its_output() {
     ]);
     assert_eq!(out.status.code(), Some(37));
     assert_eq!(std::fs::read_to_string(clone.join("a.txt")).unwrap(), "A\n");
+    let canonical = project.canonical();
+    let sentinel = canonical.join("integration-containment-probe");
+    std::fs::write(&sentinel, "fixture canonical\n").unwrap();
+    let out = machine.pinfold(&[
+        "box",
+        "exec",
+        row["handle"].as_str().unwrap(),
+        "--",
+        "sh",
+        "-c",
+        "test ! -e \"$1\" || exit 38; \
+         if cat \"$2\" 2>/dev/null; then exit 39; fi; \
+         if (printf changed > \"$2\") 2>/dev/null; then exit 40; fi; \
+         printf 'partial\\n' > /workspace/partial.txt",
+        "integration-containment",
+        canonical.to_str().unwrap(),
+        sentinel.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        std::fs::read_to_string(&sentinel).unwrap(),
+        "fixture canonical\n"
+    );
     assert_eq!(project.canonical_head(), target);
     machine.kill();
     assert_eq!(
