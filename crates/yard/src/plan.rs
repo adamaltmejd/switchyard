@@ -649,6 +649,7 @@ impl Plan {
         };
         if picker.access != Access::ReadOnly
             || picker.operator_failure
+            || picker.advisory
             || picker.outputs != BTreeMap::from([("result".into(), Output::FindingSelection)])
             || picker.outcomes != ["complete"]
             || !picker.routes.is_empty()
@@ -1644,6 +1645,20 @@ impl Plan {
             for end in ends {
                 pending.remove(&end);
             }
+        }
+        if let Some((name, _)) = self.nodes.iter().find(|(_, node)| node.advisory)
+            && !std::iter::once("default")
+                .chain(config.workflows.keys().map(String::as_str))
+                .any(|workflow| {
+                    config
+                        .workflow_plan(workflow)
+                        .is_ok_and(|ordinary| self.finding_selection(&ordinary, config))
+                })
+        {
+            return Err(Invalid::new(
+                format!("nodes.{name}.advisory"),
+                "invalid_input",
+            ));
         }
         Ok(())
     }

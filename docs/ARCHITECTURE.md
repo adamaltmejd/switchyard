@@ -370,6 +370,8 @@ above. Each bound review input exposes its immutable result, raw public
 findings, check, frozen node, settings and inputs.
 
 Only this graph may explicitly mark an agent review `advisory: true`.
+Shared plan validation rejects advisory declarations outside this complete
+family, including advisory selectors.
 Reviews default to required. Advisory reviews cannot declare
 `operator_failure`; their findings remain eligible picker inputs, but their
 own failed checks do not contribute required blocks or replace required

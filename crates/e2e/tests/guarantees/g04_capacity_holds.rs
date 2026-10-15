@@ -514,6 +514,30 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
             event["event"] == "execution.released" && event["execution"] == cleanup["execution"]
         });
     }
+    // Sabotage: strip selector before validating advisory declarations. Moving
+    // the declaration from a reviewer to the picker must create no work.
+    let mut invalid = graph.clone();
+    invalid["nodes"]["review-1"]
+        .as_object_mut()
+        .unwrap()
+        .remove("advisory");
+    invalid["nodes"]["selector"]["advisory"] = json!(true);
+    let attempts = project.rows("SELECT id FROM attempt ORDER BY id");
+    let executions = project.rows("SELECT id FROM execution ORDER BY id");
+    let refused = operator.call(
+        "yard_attempt_start",
+        json!({"project": project.path, "ticket": "Y-1", "graph": invalid}),
+    );
+    assert_eq!(refused["error"]["code"], "invalid", "{refused}");
+    assert_eq!(
+        refused["error"]["data"],
+        json!({"input": "nodes.selector.advisory", "reason": "invalid_input"})
+    );
+    assert_eq!(project.rows("SELECT id FROM attempt ORDER BY id"), attempts);
+    assert_eq!(
+        project.rows("SELECT id FROM execution ORDER BY id"),
+        executions
+    );
     let started = operator.call(
         "yard_attempt_start",
         json!({"project": project.path, "ticket": "Y-1", "graph": graph}),
