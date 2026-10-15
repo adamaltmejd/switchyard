@@ -433,6 +433,12 @@ non-candidate input refuses as `selection_input`; changed frozen inputs refuse
 by identity. Successful registered completion and checked ownership release
 publish a selection result naming the existing input reference and picker
 execution/settings/source. Selection never creates an implementation or verdict.
+Automatic picker activation and startup revalidate the observed choice,
+candidate, proof, plan, ticket revision, absence of pending continuation and
+current declared inputs in one transaction. They require the same latest
+selector execution and recheck its ownership and result eligibility before
+activation or startup. Superseded scheduling leaves a newer operator choice
+and its approvals unchanged and starts no picker.
 Publication followed by infrastructure failure retains the raw report but no
 selection result. It raises ordinary `red:review` attention; only its supported
 `start` exit retries the picker. Stopped or superseded runs raise no failure.

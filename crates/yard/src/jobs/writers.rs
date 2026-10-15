@@ -248,29 +248,59 @@ pub async fn advance(
         unfinished = true;
     }
     if !unfinished && plan.selector().is_some() {
-        if let Some(row) = rows
+        let observed_selector = rows
             .iter()
             .rev()
-            .find(|row| row.node.as_deref() == Some("selector"))
-        {
-            if row.status == "running" || row.reserved {
-                return Ok(false);
-            }
-            let mut expected = attempt.clone();
-            expected.choice = Some(row.id);
-            if project
-                .read(|conn| crate::store::selections::current(conn, &expected))?
-                .is_some()
-            {
-                project.tx(|tx| crate::store::selections::activate(tx, attempt, row.id))?;
-                return Ok(false);
-            }
+            .find(|row| row.node.as_deref() == Some("selector"));
+        if observed_selector.is_some_and(|row| row.status == "running" || row.reserved) {
+            return Ok(false);
         }
+        let Some(observed_inputs) =
+            project.read(|conn| crate::store::selections::inputs(conn, attempt))?
+        else {
+            return Ok(false);
+        };
         let Runner::Agent { agent, .. } = &plan.nodes["selector"].runner else {
             return Err(Fail::refused("invalid selector"));
         };
         let settings = serde_json::to_value(&loaded.config.agents[agent]).expect("settings");
         let execution = project.tx(|tx| {
+            let now = attempts::get(tx, attempt.id)?;
+            if now.state != "live"
+                || now.plan_revision() != attempt.plan_revision()
+                || now.choice != attempt.choice
+                || now.candidate() != attempt.candidate()
+                || now.proof != attempt.proof
+                || now.next.is_some()
+                || attempts::superseded_by_edit(tx, attempt.id, ticket.id, ticket.revision)?
+                || attempts::open_for_attempt(tx, attempt.id)?
+                    .iter()
+                    .any(|item| item.kind != "proposal" || item.reason == "edit")
+                || crate::store::selections::inputs(tx, &now)?.as_ref() != Some(&observed_inputs)
+            {
+                return Ok(None);
+            }
+            let current_rows = executions::attempt_work(tx, attempt.id)?;
+            let selector = current_rows
+                .iter()
+                .rev()
+                .find(|row| row.node.as_deref() == Some("selector"));
+            if selector.map(|row| row.id) != observed_selector.map(|row| row.id) {
+                return Ok(None);
+            }
+            // Activation and a new picker share this fence: neither can replace
+            // an operator choice or make its selected result cease to be latest.
+            if let Some(row) = selector {
+                if row.status == "running" || row.reserved {
+                    return Ok(None);
+                }
+                let mut expected = now.clone();
+                expected.choice = Some(row.id);
+                if crate::store::selections::current(tx, &expected)?.is_some() {
+                    crate::store::selections::activate(tx, &now, row.id)?;
+                    return Ok(None);
+                }
+            }
             executions::start(
                 tx,
                 executions::Start {
@@ -279,8 +309,8 @@ pub async fn advance(
                     node: Some("selector"),
                     name: Some("selector"),
                     reason: Some("first"),
-                    base: Some(&attempt.base),
-                    head: Some(&attempt.base),
+                    base: Some(&now.base),
+                    head: Some(&now.base),
                     ticket_revision: Some(ticket.revision),
                     ticket: Some(ticket.id),
                     agent: Some((agent, &settings)),
@@ -289,8 +319,11 @@ pub async fn advance(
                     ..Default::default()
                 },
             )
+            .map(Some)
         })?;
-        spawn(daemon, project, "review", execution);
+        if let Some(execution) = execution {
+            spawn(daemon, project, "review", execution);
+        }
         return Ok(false);
     }
     if !unfinished
