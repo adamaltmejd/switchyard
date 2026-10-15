@@ -541,18 +541,46 @@ pub fn add_finding(tx: &Connection, check: i64, finding: &Finding) -> Result<(),
     Ok(())
 }
 
-pub fn findings(conn: &Connection, check: i64) -> Result<Vec<Finding>, Fail> {
+/// Identity comes from the publication rows, never from worker text.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SourceFinding {
+    pub source: Value,
+    #[serde(flatten)]
+    pub finding: Finding,
+}
+
+pub fn findings(conn: &Connection, check: i64) -> Result<Vec<SourceFinding>, Fail> {
     super::all(
         conn,
-        "SELECT priority, file, line, category, body FROM finding WHERE \"check\" = ?1 ORDER BY priority, id",
+        "SELECT f.priority, f.file, f.line, f.category, f.body,
+            f.id, f.\"check\", e.id, e.attempt, a.ticket, e.base, e.head, e.proof,
+            e.ticket_revision, e.plan_revision, e.digest
+         FROM finding f JOIN \"check\" c ON c.id = f.\"check\"
+         JOIN execution e ON e.id = c.execution JOIN attempt a ON a.id = e.attempt
+         WHERE f.\"check\" = ?1 ORDER BY f.priority, f.id",
         [check],
         |row| {
-            Ok(Finding {
-                priority: format!("P{}", row.get::<_, i64>(0)?),
-                file: row.get(1)?,
-                line: row.get(2)?,
-                category: row.get(3)?,
-                body: row.get(4)?,
+            Ok(SourceFinding {
+                source: json!({
+                    "finding": row.get::<_, i64>(5)?,
+                    "check": row.get::<_, i64>(6)?,
+                    "execution": row.get::<_, i64>(7)?,
+                    "attempt": row.get::<_, i64>(8)?,
+                    "ticket": format!("Y-{}", row.get::<_, i64>(9)?),
+                    "base": row.get::<_, Option<String>>(10)?,
+                    "head": row.get::<_, Option<String>>(11)?,
+                    "proof": row.get::<_, Option<String>>(12)?,
+                    "ticket_revision": row.get::<_, Option<i64>>(13)?,
+                    "plan_revision": row.get::<_, Option<i64>>(14)?,
+                    "digest": row.get::<_, Option<String>>(15)?,
+                }),
+                finding: Finding {
+                    priority: format!("P{}", row.get::<_, i64>(0)?),
+                    file: row.get(1)?,
+                    line: row.get(2)?,
+                    category: row.get(3)?,
+                    body: row.get(4)?,
+                },
             })
         },
     )

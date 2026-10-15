@@ -340,8 +340,8 @@ fn a_seat_that_exits_without_publishing_is_a_review_error() {
 /// A seat killed after publishing has published: the daemon dies while the
 /// fixture holds the seat's next request, and on restart the publication
 /// reaches approval without a second review. Before the crash the seat
-/// publishes a pass, then a block: the second publication is refused and
-/// the first stands.
+/// publishes a nonblocking finding, then a block: the second publication is
+/// refused and the first stands.
 ///
 /// Sabotage: defer recording the check to the execution's end; restart
 /// reruns the seat. Drop `review::publish`'s already-published check; the
@@ -402,7 +402,9 @@ fn published_owner_scenario(standalone: bool) {
                 return implementer(request);
             }
             match request.tool_results().len() {
-                0 => Reply::Tools(vec![publish(json!([]))]),
+                0 => Reply::Tools(vec![publish(json!([
+                    { "priority": "P3", "body": "durable source" }
+                ]))]),
                 1 => Reply::Tools(vec![publish(json!([
                     { "priority": "P0", "body": "second thoughts" }
                 ]))]),
@@ -543,7 +545,9 @@ fn published_owner_scenario(standalone: bool) {
     );
     hold.wait_held();
     drop(setup);
-    assert!(project.rows("SELECT id FROM finding").is_empty());
+    if standalone {
+        assert!(project.rows("SELECT id FROM finding").is_empty());
+    }
     if !standalone {
         assert_eq!(
             project
@@ -627,6 +631,26 @@ fn published_owner_scenario(standalone: bool) {
     };
     if !standalone {
         assert_eq!(publication["execution"], review["execution"]);
+        // G8/G2: the held real seat has committed its finding before death.
+        // Sabotage: reassign finding identity on recovery.
+        // The original FK rows, not publication output, supply the identity.
+        let sources = project.rows(&format!(
+            "SELECT f.id AS finding, f.\"check\" AS \"check\", e.id AS execution,
+             e.attempt, 'Y-' || a.ticket AS ticket, e.base, e.head, e.proof,
+             e.ticket_revision, e.plan_revision, e.digest
+             FROM finding f JOIN \"check\" c ON c.id = f.\"check\"
+             JOIN execution e ON e.id = c.execution JOIN attempt a ON a.id = e.attempt
+             WHERE e.id = {}",
+            review["execution"]
+        ));
+        assert_eq!(sources.len(), 1);
+        assert_eq!(
+            publication["findings"],
+            json!([{
+                "source": sources[0], "priority": "P3", "body": "durable source",
+                "file": null, "line": null, "category": null
+            }])
+        );
     }
     assert_eq!(
         project.rows(&format!(
@@ -634,7 +658,12 @@ fn published_owner_scenario(standalone: bool) {
         ))[0]["handle"],
         owner_box
     );
+    let finding_rows = project.rows("SELECT * FROM finding ORDER BY id");
     machine.kill();
+    assert_eq!(
+        project.rows("SELECT * FROM finding ORDER BY id"),
+        finding_rows
+    );
 
     if !standalone {
         assert_eq!(
@@ -815,6 +844,10 @@ fn published_owner_scenario(standalone: bool) {
         );
     }
     assert_eq!(after["checks"], before["checks"]);
+    assert_eq!(
+        project.rows("SELECT * FROM finding ORDER BY id"),
+        finding_rows
+    );
     assert_eq!(
         project.rows(&format!(
             "SELECT state, resolution FROM attention WHERE id = {}",
