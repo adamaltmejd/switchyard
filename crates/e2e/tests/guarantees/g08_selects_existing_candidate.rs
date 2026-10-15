@@ -972,7 +972,7 @@ fn only_the_declared_choice_is_checked_and_landed() {
         "SELECT * FROM execution WHERE status = 'ended' ORDER BY id",
     );
     let raw_reviews = project.rows("SELECT * FROM finding ORDER BY id");
-    assert_eq!(raw_reviews.len(), 5);
+    assert_eq!(raw_reviews.len(), 10);
     let raw_checks = project.rows("SELECT * FROM \"check\" ORDER BY id");
     let retry = operator.call(
         "yard_attempt_start",
