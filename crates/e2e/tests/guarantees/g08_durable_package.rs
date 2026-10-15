@@ -924,6 +924,8 @@ fn selected_durable_cleanup_commits_without_replaying_an_interrupted_write() {
     let held_initial = initial.clone();
     let resumed = Latch::new();
     let held_resumed = resumed.clone();
+    let inspection = Latch::new();
+    let held_inspection = inspection.clone();
     let audit_refusal = Arc::new(Mutex::new(false));
     let observed_refusal = audit_refusal.clone();
     let machine = Machine::new("g13-durable-cleanup", move |request| {
@@ -973,16 +975,28 @@ fn selected_durable_cleanup_commits_without_replaying_an_interrupted_write() {
                 } else {
                     assert_eq!(name, "commit_source");
                     assert_eq!(result, "source_committed");
-                    Reply::Tools(vec![audit_report()])
+                    Reply::Hold(
+                        held_inspection.clone(),
+                        Box::new(Reply::Tools(vec![audit_report()])),
+                    )
                 }
             }
             "implementer-selected" | "repair-selected" => {
                 if request.opens() {
                     return Reply::Tools(vec![bash(
                         if request.body["model"] == "implementer-selected" {
-                            "printf 'implemented\\n' > chain.txt && git add chain.txt && git commit -qm Implement"
+                            r#"printf 'implemented\n' > chain.txt && git add chain.txt && git commit -qm Implement &&
+git config core.fsmonitor 'touch /workspace/.git/fsmonitor-ran; false' &&
+git config filter.trip.clean 'touch /workspace/.git/filter-ran; cat' &&
+git config filter.trip.required true &&
+printf 'chain.txt filter=trip\n' > .git/info/attributes &&
+touch -t 200001010000 chain.txt &&
+git -c core.fsmonitor=false status --porcelain && test -f .git/filter-ran &&
+git status --porcelain && test -f .git/fsmonitor-ran"#
                         } else {
-                            "test \"$(cat chain.txt)\" = cleaned && test \"$(cat /yard/input/trusted/repair.md)\" = trusted-repair && printf 'repaired\\n' > chain.txt && git add chain.txt && git commit -qm Repair"
+                            r#"test ! -e .git/fsmonitor-ran && test ! -e .git/filter-ran &&
+git config --unset core.fsmonitor && git config --remove-section filter.trip &&
+test "$(cat chain.txt)" = cleaned && test "$(cat /yard/input/trusted/repair.md)" = trusted-repair && printf 'repaired\n' > chain.txt && git add chain.txt && git commit -qm Repair"#
                         },
                     )]);
                 }
@@ -1111,6 +1125,13 @@ files = [{{root = "source", path = "chain.txt"}}]
         .path
         .join(format!(".yard/local/attempts/{attempt}/clone"));
     let inode = std::fs::metadata(clone.join(".git")).unwrap().ino();
+    // Positive controls above execute both predecessor helpers. Sabotage:
+    // inspect packaged cleanup with plain status, or leave clean filters enabled.
+    for marker in ["fsmonitor-ran", "filter-ran"] {
+        let path = clone.join(".git").join(marker);
+        assert!(path.is_file(), "ordinary Git did not execute {marker}");
+        std::fs::remove_file(path).unwrap();
+    }
     let readonly = machine.pinfold(&["box", "exec", handle, "--", "sh", "-c", r#"
 test "$(cat /yard/input/trusted/trusted/reference.txt)" = TRUSTED_REFERENCE_Y92 || exit 1
 if printf 'changed\n' > /yard/input/trusted/trusted/reference.txt; then echo trusted=written; else echo trusted=refused; fi
@@ -1196,9 +1217,26 @@ if printf 'changed\n' > /yard/proof/intrusion; then echo proof=written; else ech
     assert_eq!(prepared["durable"]["predecessor"], id);
     assert_eq!(project.rows(&format!("SELECT id FROM execution WHERE attempt = {attempt} AND node = 'cleanup' AND reserved = 1")).len(), 1);
     resumed.release();
+    inspection.wait_held();
+    // Force status to recheck content even after commit_source refreshed the
+    // index. Without this, Git may skip the clean filter on matching stat data.
+    std::fs::File::open(clone.join("chain.txt"))
+        .unwrap()
+        .set_times(
+            std::fs::FileTimes::new()
+                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(946684800)),
+        )
+        .unwrap();
+    inspection.release();
     let approval = watch.until("cleanup handoff approval", |event| {
         event["event"] == "attention.raised" && event["data"]["kind"] == "approval"
     });
+    for marker in ["fsmonitor-ran", "filter-ran"] {
+        assert!(
+            !clone.join(".git").join(marker).exists(),
+            "packaged cleanup executed predecessor {marker}"
+        );
+    }
     assert_eq!(std::fs::metadata(clone.join(".git")).unwrap().ino(), inode);
     assert_eq!(
         std::fs::read_to_string(clone.join("chain.txt")).unwrap(),

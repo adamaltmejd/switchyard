@@ -24,6 +24,65 @@ pub fn box_name(project: &Project, execution: i64) -> String {
     format!("yard-{}-{execution}", project.key)
 }
 
+async fn packaged_status(daemon: &Daemon, name: &str) -> Option<String> {
+    // The predecessor owns repository config. Inspection must not execute its
+    // helpers outside the controller's bounded unsafe tools.
+    let mut argv: Vec<String> = [
+        "/usr/bin/env",
+        "-i",
+        "PATH=/usr/bin:/bin",
+        "GIT_CONFIG_NOSYSTEM=1",
+        "GIT_CONFIG_GLOBAL=/dev/null",
+        "GIT_TERMINAL_PROMPT=0",
+        "/usr/bin/git",
+        "-c",
+        "safe.directory=/workspace",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "core.fsmonitor=false",
+    ]
+    .map(String::from)
+    .into();
+    let mut query = argv.clone();
+    query.extend(
+        [
+            "config",
+            "--null",
+            "--name-only",
+            "--get-regexp",
+            "^filter\\..*\\.(clean|smudge|process|required)$",
+        ]
+        .map(String::from),
+    );
+    let configured = daemon
+        .pinfold
+        .exec(name, Some("/workspace"), &query, Duration::from_secs(120))
+        .await
+        .ok()?;
+    if (configured.code != 0 && configured.code != 1) || configured.stdout.contains('\u{fffd}') {
+        return None;
+    }
+    for key in configured.stdout.split('\0').filter(|key| !key.is_empty()) {
+        argv.push("-c".into());
+        argv.push(format!(
+            "{key}={}",
+            if key.ends_with(".required") {
+                "false"
+            } else {
+                ""
+            }
+        ));
+    }
+    argv.extend(["status", "--porcelain", "--untracked-files=all"].map(String::from));
+    let out = daemon
+        .pinfold
+        .exec(name, Some("/workspace"), &argv, Duration::from_secs(120))
+        .await
+        .ok()?;
+    (out.code == 0).then_some(out.stdout)
+}
+
 /// Names only: route headers and environment values can contain credentials.
 pub fn runtime_evidence(spec: &BoxSpec) -> Value {
     json!({"runs_in": "box", "memory": spec.memory,
@@ -1455,6 +1514,8 @@ pub async fn implement(
     // admits a candidate and keeps its tree for the next execution.
     let listing = if run.stopped || run.timed_out || refused(&run.registered) {
         None
+    } else if packaged.is_some() {
+        packaged_status(daemon, &live.name).await
     } else {
         daemon
             .pinfold
