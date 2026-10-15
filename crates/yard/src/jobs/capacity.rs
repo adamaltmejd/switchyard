@@ -277,6 +277,13 @@ pub async fn release(
             let completed_judgment = matches!(released.kind.as_str(), "review" | "gate")
                 && released.lock_contract
                 && (matches!(released.outcome.as_deref(), Some("pass" | "fail"))
+                    || (released.reason.as_deref() == Some("classification")
+                        && released.outcome.as_deref() == Some("complete")
+                        && released.result.as_ref().is_some_and(|result| {
+                            result["outputs"]["result"]["kind"] == "report"
+                                && released.report.as_ref()
+                                    == Some(&result["outputs"]["result"]["value"])
+                        }))
                     || (released.kind == "review"
                         && released.status == "ended"
                         && released.outcome.as_deref() == Some("selected")

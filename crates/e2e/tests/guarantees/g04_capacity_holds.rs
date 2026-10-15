@@ -198,7 +198,38 @@ fn concurrent_readers_share_capacity_and_join_exact_results_across_restart() {
     let picker_foreign = foreign_source.clone();
     let (reader_opened, reader_openings) = std::sync::mpsc::channel();
     let (repair_sent, repair_received) = std::sync::mpsc::channel();
+    let (classified, classification_inputs) = std::sync::mpsc::channel();
     let machine = Machine::new("g4-graph-join", move |request| {
+        if request
+            .prompt()
+            .contains("Classify these frozen failed-check inputs: ")
+        {
+            let prompt = request.prompt();
+            let frozen = prompt
+                .split("Classify these frozen failed-check inputs: ")
+                .nth(1)
+                .unwrap();
+            let inputs = serde_json::Deserializer::from_str(frozen)
+                .into_iter::<Value>()
+                .next()
+                .unwrap()
+                .unwrap();
+            if request.opens() {
+                classified
+                    .send(inputs["feedback"]["value"]["groups"].clone())
+                    .unwrap();
+            }
+            return act(
+                request,
+                vec![tool(
+                    "yard_publish_report",
+                    json!({
+                        "outcome": "operator", "identity": inputs["identity"],
+                        "report": {"summary": "Required block remains; exact groups selected", "findings": []}
+                    }),
+                )],
+            );
+        }
         if request.has_tool("yard_publish_report") {
             return planned(request);
         }
@@ -439,7 +470,10 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
     project.git(&["checkout", "-q", "main"]);
 
     let candidate = json!({"node": "implementer", "output": "result", "kind": "candidate"});
-    let graph = json!({"inputs": {"feedback": "verdict", "merged": "candidate"}, "nodes": {
+    let graph = json!({"classifiers": {"review-2": {
+        "runner": {"kind": "agent", "agent": "worker", "instructions": "Classify the selected groups."},
+        "outcomes": {"operator": {"kind": "operator"}}, "repeat": 1}},
+        "inputs": {"feedback": "verdict", "merged": "candidate"}, "nodes": {
         "implementer": {"runner": {"kind": "agent", "agent": "worker", "instructions": "Implement fixture."},
             "access": "write-allowed", "inputs": {"feedback": {"node": null, "output": "feedback", "kind": "verdict"}},
             "outputs": {"result": "candidate"}, "outcomes": ["complete"], "requires": [],
@@ -1070,6 +1104,13 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
     // The host observes the real resumed Pi request. Forwarding all findings
     // or losing either shared contributor fails this exact group comparison.
     let received = repair_received.recv_timeout(e2e::DEADLINE).unwrap();
+    // G2/G8: classification and remediation consume the identical Y132 packet.
+    // Sabotage: rebuild groups from raw reviews, strip a contributor, or treat
+    // an omitted finding as acceptance of the independent required block.
+    assert_eq!(
+        classification_inputs.recv_timeout(e2e::DEADLINE).unwrap(),
+        received
+    );
     let groups = &selected["outputs"]["result"]["value"]["groups"];
     let mut routed = received.clone();
     for group in routed.as_array_mut().unwrap() {

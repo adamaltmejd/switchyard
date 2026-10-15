@@ -320,7 +320,28 @@ async fn answer(daemon: &Arc<Daemon>, request: Request<Incoming>) -> Response<Fu
                 "serverInfo": { "name": "yard", "version": env!("CARGO_PKG_VERSION") },
             }))
         }
-        ("tools/list", Some(_)) => Ok(json!({ "tools": tools(grant.kind) })),
+        ("tools/list", Some(_)) => (|| {
+            let mut selected = tools(grant.kind);
+            let row = grant
+                .project
+                .read(|conn| crate::store::executions::get(conn, grant.execution))
+                .map_err(|fail| json!({"code": -32603, "message": fail.message}))?;
+            if row.reason.as_deref() == Some("classification") {
+                for tool in &mut selected {
+                    if tool["name"] == "yard_publish_report" {
+                        tool["description"] = json!(
+                            "Publish one declared classification with its exact frozen identity."
+                        );
+                        tool["inputSchema"]["properties"]["outcome"] = json!({"type": "string",
+                            "enum": row.inputs.as_ref().and_then(|inputs| inputs["identity"]["policy"]["outcomes"].as_object())
+                                .map(|outcomes| outcomes.keys().collect::<Vec<_>>()).unwrap_or_default()});
+                        tool["inputSchema"]["properties"]["identity"] = json!({"type": "object"});
+                        tool["inputSchema"]["required"] = json!(["outcome", "identity", "report"]);
+                    }
+                }
+            }
+            Ok(json!({"tools": selected}))
+        })(),
         ("tools/call", Some(_)) => Ok(call(daemon, &grant, &message["params"]).await),
         _ => Err(json!({ "code": -32601, "message": format!("method {method:?} is not served") })),
     };

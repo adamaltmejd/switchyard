@@ -242,9 +242,20 @@ fn admit(
     for name in workflow.review.iter().filter(|_| !workflow.read_only) {
         seats.insert(name, &loaded.config.seats[name]);
     }
-    for node in plan.nodes.values() {
+    let classifier_profiles = classifier_profiles(&loaded.config, &plan);
+    for runner in plan
+        .nodes
+        .values()
+        .map(|node| &node.runner)
+        .chain(
+            plan.classifiers
+                .values()
+                .map(|classifier| &classifier.runner),
+        )
+        .chain(classifier_profiles.values().map(|profile| &profile.runner))
+    {
         if let crate::plan::Runner::Agent { agent, .. }
-        | crate::plan::Runner::Packaged { agent, .. } = &node.runner
+        | crate::plan::Runner::Packaged { agent, .. } = runner
         {
             let settings = &loaded.config.agents[agent];
             let harness = crate::harness::get(&settings.harness)
@@ -281,6 +292,7 @@ fn admit(
         "selection": {"preset": request.preset, "workflow": request.workflow,
             "graph": request.graph, "overrides": request.overrides},
         "agents": agents,
+        "classifier_profiles": classifier_profiles,
         "seats": seats,
         "review": if workflow.read_only { None } else { Some(&loaded.config.review) },
         "gates": if workflow.read_only { &[][..] } else { &loaded.config.gates[..] },
@@ -362,6 +374,22 @@ fn writer_profiles(
             }
             (name, definition)
         }).collect::<std::collections::BTreeMap<_, _>>())
+}
+
+fn classifier_profiles<'a>(
+    config: &'a crate::config::Config,
+    plan: &'a crate::plan::Plan,
+) -> std::collections::BTreeMap<&'a str, &'a crate::plan::Profile> {
+    plan.classifiers
+        .values()
+        .flat_map(|policy| policy.outcomes.values())
+        .filter_map(|action| match action {
+            crate::plan::Continuation::Fixer { profile } => {
+                Some((profile.as_str(), &config.profiles[profile]))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// The admission daemon's tool implementation identity, read once per process.
@@ -1618,9 +1646,21 @@ pub async fn attempt_revise(
             .ok_or_else(|| Fail::invalid("plan revision overflow"))?
     );
     evidence["plan"] = json!(plan);
-    for node in plan.nodes.values() {
+    let classifier_profiles = classifier_profiles(&loaded.config, &plan);
+    evidence["classifier_profiles"] = json!(classifier_profiles);
+    for runner in plan
+        .nodes
+        .values()
+        .map(|node| &node.runner)
+        .chain(
+            plan.classifiers
+                .values()
+                .map(|classifier| &classifier.runner),
+        )
+        .chain(classifier_profiles.values().map(|profile| &profile.runner))
+    {
         if let crate::plan::Runner::Agent { agent, .. }
-        | crate::plan::Runner::Packaged { agent, .. } = &node.runner
+        | crate::plan::Runner::Packaged { agent, .. } = runner
         {
             let settings = &loaded.config.agents[agent];
             let harness = crate::harness::get(&settings.harness)
@@ -2031,6 +2071,19 @@ async fn answer_start(
         .execution
         .map(|id| project.read(|conn| executions::get(conn, id)))
         .transpose()?;
+    if let Some(row) = execution
+        .as_ref()
+        .filter(|row| row.reason.as_deref() == Some("classification"))
+    {
+        let successor = project.tx(|tx| {
+            let row = executions::get(tx, row.id)?;
+            let successor = super::classify::retry(tx, &row)?;
+            attempts::resolve(tx, item, "start", None)?;
+            Ok(successor)
+        })?;
+        spawn(daemon, project, "review", successor);
+        return Ok(json!({"started": item.id, "execution": successor}));
+    }
     let cleanup_audit = if let Some(row) = execution.as_ref().filter(|row| row.attempt.is_some()) {
         let attempt = project.read(|conn| attempts::get(conn, row.required_attempt()?))?;
         attempt

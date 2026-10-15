@@ -379,6 +379,7 @@ impl Config {
         };
         for (name, profile) in &config.profiles {
             crate::plan::Plan {
+                classifiers: BTreeMap::new(),
                 inputs: BTreeMap::new(),
                 nodes: BTreeMap::from([(name.clone(), profile.node())]),
             }

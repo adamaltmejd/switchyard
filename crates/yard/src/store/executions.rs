@@ -252,6 +252,22 @@ pub fn session(
         || owner.status != "ended"
         || owner.teardown != Some(true)
         || owner.settings != active.settings
+        || owner
+            .prepared
+            .as_ref()
+            .and_then(|prepared| prepared.get("fixer"))
+            != active
+                .prepared
+                .as_ref()
+                .and_then(|prepared| prepared.get("fixer"))
+        || owner
+            .prepared
+            .as_ref()
+            .and_then(|prepared| prepared.get("fixer_profile"))
+            != active
+                .prepared
+                .as_ref()
+                .and_then(|prepared| prepared.get("fixer_profile"))
         || owner.settings.is_none()
     {
         return Ok(None);
@@ -268,10 +284,8 @@ pub fn session(
         };
         let plan = crate::plan::Plan::admitted(&admission)
             .map_err(|error| Fail::refused(error.to_string()))?;
-        Ok(plan
-            .nodes
-            .get(node)
-            .and_then(|policy| consumed_definition(&admission, &policy.runner, node, false)))
+        let policy = crate::jobs::classify::effective_node(&plan, execution)?;
+        Ok(consumed_definition(&admission, &policy.runner, node, false))
     };
     if definition(&owner)? != definition(&active)? {
         return Ok(None);
@@ -654,6 +668,9 @@ pub fn binding(
     let Some(admission) = &attempt.admission else {
         return Ok(None);
     };
+    if start.reason == Some("classification") {
+        return crate::jobs::classify::binding(conn, attempt, start);
+    }
     let node = if let Some(node) = start.node {
         node.to_string()
     } else {
@@ -1002,6 +1019,17 @@ pub fn qualifies(
     execution: &Execution,
     digest: &str,
 ) -> Result<bool, Fail> {
+    if execution
+        .prepared
+        .as_ref()
+        .is_some_and(|prepared| prepared.get("fixer").is_some())
+        && execution.plan_revision != attempt.plan_revision()
+    {
+        return Ok(false);
+    }
+    if execution.reason.as_deref() == Some("classification") {
+        return crate::jobs::classify::current(conn, execution);
+    }
     let Some(node) = execution.node.as_deref() else {
         return Ok(execution.plan_revision == attempt.plan_revision());
     };
@@ -1274,7 +1302,9 @@ pub fn end(tx: &Connection, id: i64, end: End) -> Result<(), Fail> {
             .and(execution.report.as_ref())
             .and_then(|report| report["outcome"].as_str())
             .unwrap_or("complete");
-        if let Some(admission) = &attempt.admission {
+        if let Some(admission) = &attempt.admission
+            && execution.reason.as_deref() != Some("classification")
+        {
             let plan = crate::plan::Plan::admitted(admission)
                 .map_err(|error| Fail::refused(error.to_string()))?;
             let node = &plan.nodes[execution.node.as_deref().expect("bound node")];

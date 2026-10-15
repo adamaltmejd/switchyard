@@ -378,10 +378,16 @@ fi"#,
     // boundary to observe skip, reference and accepted failure together.
     // Sabotage: reference failed results, carry acceptance to a new identity,
     // or manufacture a check for the omitted node.
-    let failed_definition = changed_runtime.replace(
+    let mut failed_definition = changed_runtime.replace(
         "echo reuse-closed; test -f feature.txt && test -s feature.txt",
         "echo reuse-closed; exit 7",
     );
+    failed_definition.push_str(r#"
+[gates.classifier]
+stage = "landing"
+runs_in = "box"
+command = '''node -e 'const fs = require("fs"); const input = JSON.parse(fs.readFileSync("/yard/classification.json", "utf8")); console.log(JSON.stringify({outcome: "retry", identity: input.identity, report: {summary: "Retry the same exact check", findings: []}}));' '''
+"#);
     project.reconfigure(&failed_definition);
     let source = project.git(&["rev-parse", "HEAD"]).trim().to_string();
     let mut graph = project.json(&["attempt", "show", "Y-1"])["attempt"]["plan"]["plan"].clone();
@@ -401,6 +407,9 @@ fi"#,
         .unwrap()
         .remove("complete");
     graph["nodes"]["candidate-gate-closed"]["operator_failure"] = json!(true);
+    graph["classifiers"] = json!({"candidate-gate-closed": {
+        "runner": {"kind": "command", "gate": "classifier"},
+        "outcomes": {"retry": {"kind": "retry"}}, "repeat": 1}});
     let revised = operator.call("yard_attempt_revise", json!({"project": project.path,
         "ticket": "Y-1", "plan_revision": plan_revision, "definition_commit": source, "graph": graph}));
     plan_revision += 1;
@@ -412,7 +421,7 @@ fi"#,
     let mut failed_executions = Vec::new();
     let mut decisions = Vec::new();
     let mut final_item = Value::Null;
-    for (body, expected_closed) in [(None, 8), (Some("Bookkeeping after acceptance"), 9)] {
+    for (body, expected_closed) in [(None, 9), (Some("Bookkeeping after acceptance"), 10)] {
         if let Some(body) = body {
             let revision = project.json(&["ticket", "show", "Y-1"])["revision"]
                 .as_i64()
@@ -430,6 +439,10 @@ fi"#,
         let raised = watch.attention();
         let item = raised["data"].clone();
         assert_eq!(item["kind"], "candidate", "{item}");
+        // G8: a command classifier retries once, then raises attention at its
+        // durable declared bound. Sabotage: silently repeat or reset on edit.
+        assert_eq!(item["payload"]["classification"]["used"], 1);
+        assert_eq!(item["payload"]["classification"]["exhausted"], true);
         let check = &item["payload"]["evidence"]["check"];
         assert_eq!(check["verdict"], "fail");
         let answer = operator.call(
@@ -447,6 +460,7 @@ fi"#,
             approved["payload"]["skipped"],
             json!([
                 "candidate-gate-unknown",
+                "landing-gate-classifier",
                 "landing-gate-closed",
                 "landing-gate-unknown"
             ])
@@ -1156,11 +1170,65 @@ fn manual_policy_withdraws_auto_approval_without_rejudgment() {
 /// Expected revisions are the two CLI edits; heads come from host git.
 /// Sabotage: omit ticket revision or head from candidate decisions, or let a
 /// repaired decision carry to the next candidate's check.
+/// G8: named original/fixer repairs precede an acceptance request. Sabotage:
+/// record continuation as pass, ignore the frozen fixer, accept an undeclared
+/// or stale publication, or let the classifier authorize landing itself.
 #[test]
 fn delayed_candidate_acceptance_names_the_changed_identity_and_writes_nothing() {
     let hold = Latch::new();
     let held = hold.clone();
+    let classifications = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = classifications.clone();
+    let repairs = std::sync::atomic::AtomicUsize::new(0);
     let machine = Machine::new("g2-accept-stale", move |request| {
+        if request.body["model"] == "classifier-model" {
+            let prompt = request.prompt();
+            let frozen = prompt
+                .split("Classify these frozen failed-check inputs: ")
+                .nth(1)
+                .unwrap();
+            let inputs = serde_json::Deserializer::from_str(frozen)
+                .into_iter::<Value>()
+                .next()
+                .unwrap()
+                .unwrap();
+            let count = if request.opens() {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+            } else {
+                counted.load(std::sync::atomic::Ordering::SeqCst)
+            };
+            if count == 4 {
+                return Reply::Text("Text alone requests acceptance.".into());
+            }
+            if request
+                .last_tool_result()
+                .is_some_and(|(_, result)| result.contains("published"))
+            {
+                return Reply::Text("done".into());
+            }
+            if !request.opens() {
+                let result = request.last_tool_result().unwrap().1;
+                assert!(
+                    result.contains(if count == 1 {
+                        "undeclared_outcome"
+                    } else {
+                        "classification_input"
+                    }),
+                    "{result}"
+                );
+                if count == 2 {
+                    assert!(result.contains("stale"), "{result}");
+                }
+            }
+            let mut publication = json!({"outcome": match count {1 => "original", 2 => "fixer", _ => "accept"},
+                "identity": inputs["identity"], "report": {"summary": "Fixture continuation", "findings": []}});
+            if request.opens() && count == 1 {
+                publication["outcome"] = json!("undeclared");
+            } else if request.opens() && count == 2 {
+                publication["identity"]["candidate"]["head"] = json!("stale");
+            }
+            return Reply::Tools(vec![tool("yard_publish_report", publication)]);
+        }
         if request
             .prompt()
             .contains("Your workspace is read-only. Plan the work")
@@ -1178,8 +1246,14 @@ fn delayed_candidate_acceptance_names_the_changed_identity_and_writes_nothing() 
                 )])),
             );
         }
-        let command = if request.last_user().contains("The gate check failed") {
-            "cd /workspace && touch ready.txt && git add -A && git commit -qm Ready"
+        let command = if request.body["model"] == "fixer-model" {
+            "cd /workspace && touch fixer.txt && git add -A && git commit -qm Fixer"
+        } else if request.last_user().contains("The gate check failed") {
+            if request.opens() && repairs.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                "cd /workspace && touch original.txt && git add -A && git commit -qm Original"
+            } else {
+                "cd /workspace && touch ready.txt && git add -A && git commit -qm Ready"
+            }
         } else {
             "cd /workspace && touch feature.txt && git add -A && git commit -qm Feature"
         };
@@ -1189,7 +1263,26 @@ fn delayed_candidate_acceptance_names_the_changed_identity_and_writes_nothing() 
     let project = Project::new(
         &machine,
         "p",
-        &config("[gates.check]\ncommand = \"test -f ready.txt\"\nstage = \"candidate\"\n"),
+        &config(
+            r#"
+[gates.check]
+command = "test -f ready.txt"
+stage = "candidate"
+[agents.classifier]
+harness = "pi"
+provider = "openrouter"
+model = "classifier-model"
+[agents.fixer]
+harness = "pi"
+provider = "openrouter"
+model = "fixer-model"
+[profiles.fixer]
+access = "write-allowed"
+outputs = {result = "candidate"}
+outcomes = ["complete"]
+runner = {kind = "agent", agent = "fixer", instructions = "Repair the frozen failure."}
+"#,
+        ),
     );
     let mut watch = project.watch(0);
     project.json(&[
@@ -1211,11 +1304,21 @@ fn delayed_candidate_acceptance_names_the_changed_identity_and_writes_nothing() 
     });
     let mut operator = machine.operator();
     operator.initialize();
+    let resolved = operator.call(
+        "yard_plan_resolve",
+        json!({"project": project.path, "workflow": "default"}),
+    );
+    let mut graph = resolved["result"]["plan"].clone();
+    graph["nodes"]["candidate-gate-check"]["operator_failure"] = json!(true);
+    graph["classifiers"] = json!({"candidate-gate-check": {
+        "runner": {"kind": "agent", "agent": "classifier", "instructions": "Choose a declared continuation."},
+        "outcomes": {"original": {"kind": "original"}, "fixer": {"kind": "fixer", "profile": "fixer"},
+            "accept": {"kind": "accept"}}, "repeat": 2}});
     let admitted = operator.call(
         "yard_attempt_start",
         json!({
-            "project": project.path, "ticket": "Y-1", "workflow": "default",
-            "overrides": {"candidate-gate-check": {"operator_failure": true}}
+            "project": project.path, "ticket": "Y-1",
+            "graph": graph
         }),
     );
     assert!(admitted.get("error").is_none(), "{admitted}");
@@ -1232,6 +1335,22 @@ fn delayed_candidate_acceptance_names_the_changed_identity_and_writes_nothing() 
         "project": project.path, "ticket": "Y-1", "attention": first_item["attention"], "check": first_item["payload"]["evidence"]["check"]["check"], "plan_revision": 1,
         "target": "main", "head": first_head, "proof": first_item["payload"]["proof"], "text": "Accept the old failure"
     });
+    assert_eq!(classifications.load(std::sync::atomic::Ordering::SeqCst), 3);
+    assert_eq!(project.rows("SELECT id FROM approval"), Vec::<Value>::new());
+    assert_eq!(
+        project.rows("SELECT verdict FROM \"check\" WHERE kind = 'gate'"),
+        vec![json!({"verdict": "fail"}); 3]
+    );
+    assert_eq!(
+        project.rows("SELECT model FROM execution WHERE reason = 'repair' ORDER BY id"),
+        vec![
+            json!({"model": "fake-model"}),
+            json!({"model": "fixer-model"})
+        ]
+    );
+    let accepted = operator.call("yard_attempt_accept", delayed.clone());
+    assert!(accepted.get("error").is_none(), "{accepted}");
+    assert_eq!(watch.attention()["data"]["kind"], "approval");
     project.json(&[
         "ticket",
         "edit",
@@ -1251,6 +1370,25 @@ fn delayed_candidate_acceptance_names_the_changed_identity_and_writes_nothing() 
     );
     assert_eq!(project.rows("SELECT * FROM audit ORDER BY seq"), before);
     hold.release();
+    // A successful classifier process without publication is infrastructure
+    // failure. Sabotage: infer a route from its text or reuse that empty result.
+    let missing = watch.attention();
+    assert_eq!(missing["data"]["kind"], "red");
+    assert_eq!(missing["data"]["reason"], "classification");
+    let missing_row = project.rows(&format!(
+        "SELECT result, report FROM execution WHERE id = {}",
+        missing["execution"]
+    ))[0]
+        .clone();
+    assert_eq!(missing_row["report"], Value::Null);
+    let result: Value = serde_json::from_str(missing_row["result"].as_str().unwrap()).unwrap();
+    assert_eq!(result["outputs"], json!({}));
+    assert_eq!(result["infrastructure"]["outcome"], "error");
+    let retried = operator.call(
+        "yard_attempt_start",
+        json!({"project": project.path, "ticket": "Y-1", "attention": missing["attention"]}),
+    );
+    assert!(retried.get("error").is_none(), "{retried}");
     let second = watch.attention();
     assert_eq!(second["data"]["kind"], "candidate");
     let second_head = git(
