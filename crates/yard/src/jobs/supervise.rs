@@ -484,7 +484,9 @@ pub async fn candidate_mounts(
             let producer = candidate["source"]["execution"]
                 .as_i64()
                 .ok_or_else(|| Fail::refused("invalid_candidate"))?;
-            let bundle = path.join("candidate.bundle");
+            let bundle_dir = path.join("bundle");
+            std::fs::create_dir(&bundle_dir).map_err(|error| error.to_string())?;
+            let bundle = bundle_dir.join("candidate.bundle");
             daemon
                 .git
                 .candidate_bundle(
@@ -495,8 +497,8 @@ pub async fn candidate_mounts(
                 )
                 .await?;
             mounts.push(Mount {
-                host: bundle,
-                guest: format!("/yard/candidates/{key}/candidate.bundle"),
+                host: bundle_dir,
+                guest: format!("/yard/candidates/{key}/bundle"),
                 readonly: true,
             });
         }
@@ -1835,7 +1837,7 @@ async fn implementer_prompt(
         .and_then(|plan| plan.integration())
         .is_some_and(|(name, _)| execution.node.as_deref() == Some(name))
     {
-        prompt.push_str(&format!("Integrate these exact candidate inputs into your own workspace:\n{}\nEach input is read-only at /yard/candidates/<hex input name>/source and /proof. Fetch its candidate.bundle with ref refs/yard/candidates/{}/<source execution>, verify FETCH_HEAD equals the declared head, then combine the changes. Resolve conflicts and commit a clean result; unresolved conflicts publish no candidate. No input approval or review carries to your output.\n", serde_json::to_string_pretty(&execution.inputs).expect("inputs serialize"), attempt.id));
+        prompt.push_str(&format!("Integrate these exact candidate inputs into your own workspace:\n{}\nEach input is read-only at /yard/candidates/<hex input name>/source and /proof. Fetch /yard/candidates/<hex input name>/bundle/candidate.bundle with ref refs/yard/candidates/{}/<source execution>, verify FETCH_HEAD equals the declared head, then combine the changes. Resolve conflicts and commit a clean result; unresolved conflicts publish no candidate. No input approval or review carries to your output.\n", serde_json::to_string_pretty(&execution.inputs).expect("inputs serialize"), attempt.id));
     }
     let detail = next["detail"]
         .as_str()

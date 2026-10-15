@@ -436,7 +436,9 @@ An explicit integration start before its inputs are ready refuses as
 The integration writer starts at the frozen target in its own reusable clone.
 It receives fresh detached source snapshots, proof snapshots and validated
 Git bundles at `/yard/candidates/<hex-input>/source`, `/proof` and
-`/candidate.bundle`, read-only. Bundles export the exact canonical publication
+`/bundle/candidate.bundle`, read-only. Each bundle is exposed through its own
+directory mount, separate from the source and proof snapshots.
+Bundles export the exact canonical publication
 ref `refs/yard/candidates/<attempt>/<producer-execution>` and its ancestry.
 Canonical and other writers' live clones are never mounted. The agent fetches
 and combines the inputs in its own clone. A conflict left dirty follows the

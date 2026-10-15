@@ -2,6 +2,7 @@
 use e2e::*;
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 fn configuration() -> String {
     let mut extra = include_str!("../../../../docs/examples/integration.toml").to_string();
@@ -71,17 +72,20 @@ fn approval(watch: &mut Watch) -> Value {
 // Fetch only the named immutable bundle ref. Git supplies the expected head.
 fn fetch(input: &str) -> String {
     format!(
-        "(bundle=/yard/candidates/{input}/candidate.bundle; git fetch \"$bundle\" \"$(git bundle list-heads \"$bundle\" | cut -d' ' -f2)\" && test \"$(git rev-parse FETCH_HEAD)\" = \"$(git -c safe.directory=/yard/candidates/{input}/source -C /yard/candidates/{input}/source rev-parse HEAD)\")"
+        "(bundle=/yard/candidates/{input}/bundle/candidate.bundle; git fetch \"$bundle\" \"$(git bundle list-heads \"$bundle\" | cut -d' ' -f2)\" && test \"$(git rev-parse FETCH_HEAD)\" = \"$(git -c safe.directory=/yard/candidates/{input}/source -C /yard/candidates/{input}/source rev-parse HEAD)\")"
     )
 }
 
 /// G2/G9's integration clauses. Unlike independent writer/selection scenarios,
 /// C imports two exact publications and has a partially merged tree at restart.
 /// A host-model latch holds the real box after its tool wrote partial.txt;
-/// the store and host file prove that state before reconciliation.
+/// history rejects an ended execution before the host signals that request.
+/// The store and host file prove that state before reconciliation.
 /// Expected contents and target come from the fixture and host Git.
 /// Sabotage: mount canonical into C, make candidate inputs writable, reuse
 /// A's candidate/approval for C, or recreate C's clone after interruption.
+/// Mount a regular bundle file instead of its directory; startup ends before
+/// the held request, so history fails the wait instead of awaiting the latch.
 /// After planner release, admission refuses feedback without a new attempt
 /// or execution, then supported named sources succeed on the same ticket;
 /// sabotage: allow that source to collide with internal repair feedback.
@@ -89,6 +93,8 @@ fn fetch(input: &str) -> String {
 fn integration_retains_partial_work_and_approves_only_its_output() {
     let hold = Latch::new();
     let held = hold.clone();
+    let request_signal = Arc::new(Mutex::new(None::<std::path::PathBuf>));
+    let model_signal = request_signal.clone();
     let turns = AtomicUsize::new(0);
     let machine = Machine::new("g9-integration", move |request| {
         if request.has_tool("yard_publish_report") {
@@ -121,6 +127,9 @@ fn integration_retains_partial_work_and_approves_only_its_output() {
                 .last_tool_result()
                 .is_some_and(|(_, text)| text.contains("integration-held"))
             {
+                if let Some(path) = model_signal.lock().unwrap().take() {
+                    std::fs::write(path, "integration-held\n").unwrap();
+                }
                 return Reply::Hold(held.clone(), Box::new(Reply::Text("done".into())));
             }
             return Reply::Text("done".into());
@@ -137,6 +146,15 @@ fn integration_retains_partial_work_and_approves_only_its_output() {
             ))],
         )
     });
+    let request_held = machine.root.join("integration-held");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&request_held)
+            .status()
+            .unwrap()
+            .success()
+    );
+    *request_signal.lock().unwrap() = Some(request_held.clone());
     machine.start();
     let project = Project::new(&machine, "p", &configuration());
     let target = project.canonical_head();
@@ -170,6 +188,21 @@ fn integration_retains_partial_work_and_approves_only_its_output() {
     );
     drop(operator);
     let attempt = start(&project);
+    let started = watch.find("integration execution started", |event| {
+        event["event"] == "execution.started"
+            && event["attempt"] == attempt
+            && event["data"]["kind"] == "implementation"
+            && project
+                .rows(&format!(
+                    "SELECT id FROM execution WHERE attempt = {attempt} AND node = 'integrate'"
+                ))
+                .iter()
+                .any(|row| row["id"] == event["execution"])
+    });
+    assert_eq!(
+        watch.said_before_end(&request_held, Some(started["execution"].as_i64().unwrap())),
+        "integration-held\n"
+    );
     hold.wait_held();
     let row = project
         .rows("SELECT id, status, handle FROM execution WHERE node = 'integrate'")
