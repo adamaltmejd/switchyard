@@ -287,7 +287,11 @@ fn admit(
         "inputs": inputs,
         "yard_runner": {"version": env!("CARGO_PKG_VERSION"), "sha256": runner_identity()?},
     });
-    if plan.packaged().is_some() {
+    if plan
+        .nodes
+        .values()
+        .any(|node| matches!(node.runner, crate::plan::Runner::Packaged { .. }))
+    {
         admission["package_launch"] = json!("effort");
         admission["package_checkpoint"] = json!("exclusive-v1");
     }
@@ -1516,17 +1520,6 @@ pub async fn attempt_revise(
             };
             let mut settings = loaded.config.agents[agent].clone();
             let previous = &frozen.config.agents[agent];
-            if matches!(node.runner, crate::plan::Runner::Packaged { .. })
-                && !crate::pi::package_effort_capable(&evidence)
-                && settings.effort.is_some()
-                && settings.effort != previous.effort
-            {
-                return Err(
-                    Fail::refused("recorded package cannot control requested effort")
-                        .with(json!({"reason": "unsupported_effort", "identity": "effort",
-                    "expected": settings.effort, "current": previous.effort})),
-                );
-            }
             settings.model = previous.model.clone();
             settings.effort = previous.effort.clone();
             if settings != *previous || loaded.config.egress != frozen.config.egress {
@@ -1571,12 +1564,36 @@ pub async fn attempt_revise(
             .inputs(&daemon.git, &project.canonical_dir(), &plan)
             .await?;
     }
-    if plan.packaged_cleanup().is_some() {
-        evidence["inputs"]["packaged_nodes"]["cleanup"]["package"] = attempt
-            .admission
-            .as_ref()
-            .expect("recorded plan")["inputs"]["packaged_nodes"]["cleanup"]["package"]
-            .clone();
+    let recorded = attempt.admission.as_ref().expect("recorded plan");
+    for (name, node) in &plan.nodes {
+        let crate::plan::Runner::Packaged { agent, .. } = &node.runner else {
+            continue;
+        };
+        if old
+            .nodes
+            .get(name)
+            .is_some_and(|node| matches!(node.runner, crate::plan::Runner::Packaged { .. }))
+        {
+            let identity = crate::pi::package_inputs(recorded, name)["package"].clone();
+            if plan.packaged().is_some() {
+                evidence["inputs"]["package"] = identity;
+            } else {
+                evidence["inputs"]["packaged_nodes"][name]["package"] = identity;
+            }
+        }
+        let settings = &loaded.config.agents[agent];
+        let previous = &recorded["agents"][agent]["settings"]["effort"];
+        if adopting
+            && !crate::pi::package_effort_capable(&evidence, name)
+            && settings.effort.is_some()
+            && json!(settings.effort) != *previous
+        {
+            return Err(
+                Fail::refused("recorded package cannot control requested effort")
+                    .with(json!({"reason": "unsupported_effort", "identity": "effort",
+                    "expected": settings.effort, "current": previous})),
+            );
+        }
     }
     let ordinary = loaded.config.workflow_plan(&attempt.workflow)?;
     let skipped = skipped_nodes(&plan, &ordinary);

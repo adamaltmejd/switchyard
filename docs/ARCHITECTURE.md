@@ -1493,12 +1493,17 @@ opencode-go sends OpenAI-compatible `reasoning_effort`. Unsupported effort
 values refuse; omitted effort enables no reasoning capability. Explicit SDK
 maps preserve the accepted xhigh and max levels without clamping.
 An omitted effort adds no launch field, preserving the older sealed package
-protocol. New singleton audit admissions record `package_launch = "effort"` separately from
+protocol. New admissions with any selected packaged audit record
+`package_launch = "effort"` separately from
 the sealed package identity; revisions preserve that launch contract.
 That contract and cleanup's `source-write-v1` authorize supported effort even when the receiving
 daemon's compiled package differs from the frozen package.
-Without that record, only an exact match to the daemon's compiled package
-establishes effort support. Other preserved packages receive the original
+Loading validates each selected node's frozen package identity. Adoption
+preserves each retained packaged node's identity through `package_inputs`,
+including audits around ordinary cleanup.
+Without that record, only an exact match of the consuming node's frozen
+package to the daemon's compiled package establishes effort support.
+Other preserved packages receive the original
 six-field launch even when their historical settings record effort. That
 setting remains recorded but does not control the older inner agent.
 Adoption uses the same capability reading as startup. Without effort support,

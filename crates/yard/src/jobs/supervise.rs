@@ -1338,7 +1338,7 @@ pub async fn implement(
                 }
                 launch["source_write"] = json!(true);
             }
-            if crate::pi::package_effort_capable(admitted) && !implementer["effort"].is_null() {
+            if crate::pi::package_effort_capable(admitted, node_name) && !implementer["effort"].is_null() {
                 launch["effort"] = implementer["effort"].clone();
             }
             if let Some(checkpoint) = &checkpoint {

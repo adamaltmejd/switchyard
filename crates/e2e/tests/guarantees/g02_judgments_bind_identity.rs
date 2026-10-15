@@ -1302,6 +1302,8 @@ fn delayed_candidate_acceptance_names_the_changed_identity_and_writes_nothing() 
 /// as a new pass, retain old approval, or infer publication/landing from writes.
 /// Dropping feedback at packaged cleanup or starting repair as first work loses
 /// the rejected head and instructions in the repair input and host model prompt.
+/// Dropping selected packaged effort loses the requested medium reasoning level
+/// at the host model, even if the audit still passes.
 /// One machine uses the existing package image fixture without a debugger build.
 /// Git and fixture bytes supply identities; host model counts expose replay.
 #[test]
@@ -1333,11 +1335,8 @@ fn selected_cleanup_reuses_only_unchanged_actual_judgment_inputs() {
         }
         match model {
             "fake-model" => {
-                if request.opens() {
-                    Reply::Tools(vec![report()])
-                } else {
-                    Reply::Text("planned".into())
-                }
+                assert!(request.has_tool("yard_publish_report"));
+                planned(request)
             }
             "implementer-selected" => {
                 if request.opens() {
@@ -1409,6 +1408,15 @@ fn selected_cleanup_reuses_only_unchanged_actual_judgment_inputs() {
     });
     machine.start();
     let project = super::g08_durable_package::fixture(&machine);
+    // Ordinary Pi loads trusted extensions. Retire this audit-only hostile
+    // extension in this project's Git before ordinary planning or source work.
+    project.git(&["rm", ".pi/extensions/unselected.js"]);
+    project.git(&[
+        "commit",
+        "-qm",
+        "Retire audit-only hostile extension for ordinary work",
+    ]);
+    project.json(&["sync"]);
     machine.wrapper(
         "pinfold",
         &format!(
@@ -1470,6 +1478,9 @@ provider = "openrouter"
 model = "audit-{name}"
 "#
         ));
+        if name == "original" {
+            configuration.push_str("effort = 'medium'\n");
+        }
         if name != "unknown" {
             configuration.push_str(&format!(
                 r#"[agents.audit-{name}.judgment_inputs]
@@ -1535,7 +1546,17 @@ instructions = "Judge only the declared fixture input."
         "--workflow",
         "plan",
     ]);
-    let planned = watch.event("attempt.ended", &[("outcome", "planned")]);
+    let planned = watch.until("ordinary planning ended", |event| {
+        if event["event"] == "execution.ended" && event["data"]["kind"] == "implementation" {
+            assert_eq!(event["data"]["outcome"], "unchanged", "{event}");
+        }
+        assert_ne!(
+            event["event"], "attention.raised",
+            "unexpected planning attention: {event}"
+        );
+        event["event"] == "attempt.ended"
+    });
+    assert_eq!(planned["data"]["outcome"], "planned", "{planned}");
     let removed = watch.find("planning cleanup", |event| {
         event["event"] == "execution.ended"
             && event["data"]["kind"] == "cleanup"
@@ -1731,6 +1752,18 @@ instructions = "Judge only the declared fixture input."
             ("audit-original".into(), 1),
             ("audit-unknown".into(), 3)
         ])
+    );
+    let efforts: Vec<_> = machine
+        .model
+        .requests()
+        .iter()
+        .filter(|request| request.body["model"] == "audit-original")
+        .map(|request| request.body["reasoning"]["effort"].clone())
+        .collect();
+    assert!(!efforts.is_empty());
+    assert!(
+        efforts.iter().all(|effort| effort == "medium"),
+        "{efforts:?}"
     );
     project.json(&[
         "attempt",

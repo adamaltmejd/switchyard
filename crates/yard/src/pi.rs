@@ -58,13 +58,13 @@ pub fn package_identity() -> Value {
         "lock_sha256": crate::config::hex(&Sha256::digest(include_bytes!("../../../runners/durable-audit/package-lock.json")))})
 }
 
-pub fn package_effort_capable(admission: &Value) -> bool {
+pub fn package_effort_capable(admission: &Value, node: &str) -> bool {
     // Before capability recording, only these exact compiled package bytes
     // establish effort support. Other packages retain the six-field protocol.
     admission["package_launch"] == "effort"
         || admission["package_launch"] == "source-write-v1"
         || (admission.get("package_launch").is_none()
-            && admission["inputs"]["package"] == package_identity())
+            && package_inputs(admission, node)["package"] == package_identity())
 }
 
 pub fn package_inputs<'a>(admission: &'a Value, node: &str) -> &'a Value {

@@ -651,7 +651,11 @@ pub async fn load_attempt(
         loaded.config.workflow_plan(&attempt.workflow)?
     };
     let mut recorded_inputs = admission["inputs"].clone();
-    if admitted.packaged().is_some() || admitted.packaged_cleanup().is_some() {
+    if admitted
+        .nodes
+        .values()
+        .any(|node| matches!(node.runner, crate::plan::Runner::Packaged { .. }))
+    {
         if admission.get("package_checkpoint").is_some()
             && admission["package_checkpoint"] != "exclusive-v1"
         {
@@ -664,13 +668,14 @@ pub async fn load_attempt(
         {
             return Err(Fail::refused("invalid admitted package launch contract"));
         }
-        let package = if admitted.packaged_cleanup().is_some() {
-            &recorded_inputs["packaged_nodes"]["cleanup"]["package"]
-        } else {
-            &recorded_inputs["package"]
-        };
-        if !crate::pi::valid_package_identity(package) {
-            return Err(Fail::refused("invalid admitted package identity"));
+        for (name, node) in &admitted.nodes {
+            if matches!(node.runner, crate::plan::Runner::Packaged { .. })
+                && !crate::pi::valid_package_identity(
+                    &crate::pi::package_inputs(admission, name)["package"],
+                )
+            {
+                return Err(Fail::refused("invalid admitted package identity"));
+            }
         }
         if admitted.packaged().is_some() {
             recorded_inputs
@@ -682,9 +687,13 @@ pub async fn load_attempt(
     let mut expected_inputs = loaded
         .inputs(&daemon.git, &project.canonical_dir(), &admitted)
         .await?;
-    if admitted.packaged_cleanup().is_some() {
-        expected_inputs["packaged_nodes"]["cleanup"]["package"] =
-            recorded_inputs["packaged_nodes"]["cleanup"]["package"].clone();
+    for (name, node) in &admitted.nodes {
+        if matches!(node.runner, crate::plan::Runner::Packaged { .. })
+            && admitted.packaged().is_none()
+        {
+            expected_inputs["packaged_nodes"][name]["package"] =
+                crate::pi::package_inputs(admission, name)["package"].clone();
+        }
     }
     if !separate {
         for key in ["definition_commit", "staging_commit", "image_commit"] {
