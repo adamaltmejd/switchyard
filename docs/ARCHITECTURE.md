@@ -1753,6 +1753,8 @@ children inside one controller share its slot. Waiting executions own no
 box. Landing releases its slot while awaiting child gates; each child
 reserves its own slot, so a limit of one completes sequential gates and
 the final Git effect without counting the parent twice.
+Native landing heap-pins the child gate's capacity future at its shared dispatch
+boundary. It retains the same execution, reservation and checked release.
 Effects reserve capacity before taking target locks. Final landing keeps its
 target lock through intent, publication and the effect's ownership proof.
 The queue screens existing rows only. It creates the landing before any

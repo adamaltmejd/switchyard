@@ -402,12 +402,13 @@ async fn reference_input(
 }
 
 async fn run_child(daemon: &Arc<Daemon>, project: &Arc<Project>, child: i64) -> Result<(), Fail> {
-    let result = super::capacity::effect(
+    // Inlining this future inflates land and run_child poll frames (Y-73).
+    let result = Box::pin(super::capacity::effect(
         daemon,
         project,
         child,
         super::supervise::gate(daemon, project, child),
-    )
+    ))
     .await;
     if let Err(fail) = &result {
         project.tx(|tx| {
