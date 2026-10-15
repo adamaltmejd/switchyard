@@ -227,10 +227,13 @@ fi"#,
     }
     // A changed observed image and its declared tool source invalidates every
     // boxed consumer, while preserving the exact frozen command definitions.
+    // Supply the later command classifier's JSON tool without an agent harness.
     let dockerfile = project.git(&["show", "HEAD:.yard/Dockerfile"]);
     project.write(
         ".yard/Dockerfile",
-        &format!("{dockerfile}\nENV Y150_IMAGE_REVISION=second\n"),
+        &format!(
+            "{dockerfile}\nRUN apt-get update && apt-get install -y --no-install-recommends jq && rm -rf /var/lib/apt/lists/*\nENV Y150_IMAGE_REVISION=second\n"
+        ),
     );
     project.git(&["commit", "--quiet", "-am", "Change declared image tools"]);
     let image = project.git(&["rev-parse", "HEAD"]).trim().to_string();
@@ -386,7 +389,7 @@ fi"#,
 [gates.classifier]
 stage = "landing"
 runs_in = "box"
-command = '''node -e 'const fs = require("fs"); const input = JSON.parse(fs.readFileSync("/yard/classification/classification.json", "utf8")); console.log(JSON.stringify({outcome: "retry", identity: input.identity, report: {summary: "Retry the same exact check", findings: []}}));' '''
+command = '''jq '{outcome: "retry", identity: .identity, report: {summary: "Retry the same exact check", findings: []}}' /yard/classification/classification.json'''
 "#);
     project.reconfigure(&failed_definition);
     let source = project.git(&["rev-parse", "HEAD"]).trim().to_string();
