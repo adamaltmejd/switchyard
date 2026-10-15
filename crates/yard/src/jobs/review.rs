@@ -458,11 +458,13 @@ pub fn blocked(
                 return Ok(None);
             }
         }
-        if current.admission.as_ref().map(crate::plan::Plan::admitted).transpose()
+        // Only review findings consume a picker. Other repair feedback keeps
+        // the gate, landing or pre-publication failure that caused it.
+        let selection = if current.admission.as_ref().map(crate::plan::Plan::admitted).transpose()
             .map_err(|error| Fail::refused(error.to_string()))?
             .is_some_and(|plan| plan.finding_selector().is_some()) {
-            crate::store::selections::remediation(tx, &current)?;
-        }
+            Some(crate::store::selections::remediation(tx, &current)?)
+        } else { None };
         tx.execute(
             "UPDATE attempt SET rounds = ?2 WHERE id = ?1",
             rusqlite::params![attempt.id, rounds],
@@ -490,10 +492,14 @@ pub fn blocked(
             )?;
             return Ok(None);
         }
-        let source = executions::get(tx, trigger.execution)?;
-        let feedback = json!({"kind": "verdict", "source": {
-            "external": "feedback", "execution": trigger.execution, "node": source.node, "output": "result"},
-            "value": {"verdict": "fail", "findings": findings}});
+        let feedback = if let Some(selection) = selection {
+            selection
+        } else {
+            let source = executions::get(tx, trigger.execution)?;
+            json!({"kind": "verdict", "source": {
+                "external": "feedback", "execution": trigger.execution, "node": source.node, "output": "result"},
+                "value": {"verdict": "fail", "findings": findings}})
+        };
         supervise::start_implementation(tx, attempt, "repair", Some(&feedback)).map(Some)
     })
 }

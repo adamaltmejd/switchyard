@@ -401,14 +401,17 @@ recovery; infrastructure failure retains the report without an eligible
 selection. After the join and checked picker release, required failed reviews
 still take their exact operator decision or existing bounded repair/limit
 path. Excluding a required finding never accepts its check or passes its
-verdict. A repair freezes precisely the committed groups into the existing
-implementer execution's feedback. Each group carries its reason, exact source
-references and every original contributor's finding, check, frozen node,
+verdict. A review-finding repair freezes precisely the committed groups into
+the existing implementer execution's feedback. Each group carries its reason,
+exact source references and every original contributor's finding, check, frozen node,
 settings and inputs. The repair prompt exposes those groups. Missing or stale
-selection refuses before repair starts; no partial or prior-candidate action
-set is used. Advisory findings may contribute to this repair action set.
-Selection adds no lifecycle or grant and changes no candidate choice,
-acceptance, protected approval, ownership or landing authority. Candidate
+selection refuses before review-finding repair starts; no partial or
+prior-candidate action set is used. Advisory findings may contribute to this
+repair action set.
+Gate, landing and pre-publication repairs retain their own failure feedback
+and do not require a finding selection. Selection adds no lifecycle or grant
+and changes no candidate choice, acceptance, protected approval, ownership
+or landing authority. Candidate
 selection below is unchanged.
 
 A selected `writer-graph` declares independent writable agent roots,

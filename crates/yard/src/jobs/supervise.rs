@@ -63,20 +63,7 @@ pub fn start_implementation(
 ) -> Result<i64, Fail> {
     let attempt = attempts::get(tx, attempt.id)?;
     let node = implementation_node(tx, &attempt)?;
-    let selection = if reason == "repair"
-        && attempt
-            .admission
-            .as_ref()
-            .map(crate::plan::Plan::admitted)
-            .transpose()
-            .map_err(|error| Fail::refused(error.to_string()))?
-            .is_some_and(|plan| plan.finding_selector().is_some())
-    {
-        Some(crate::store::selections::remediation(tx, &attempt)?)
-    } else {
-        None
-    };
-    start_writer(tx, &attempt, &node, reason, selection.as_ref().or(feedback))
+    start_writer(tx, &attempt, &node, reason, feedback)
 }
 
 pub fn start_writer(
