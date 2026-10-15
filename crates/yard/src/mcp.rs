@@ -213,7 +213,7 @@ fn tools(kind: Kind) -> Vec<Value> {
     let selection = json!({
         "name": "yard_publish_selection",
         "description": "Publish the admitted selection once: one candidate input, or finding groups with exact public source objects. This grants no write, repair, acceptance, approval or landing authority.",
-        "inputSchema": {"oneOf": [
+        "inputSchema": {"type": "object", "oneOf": [
             {"type": "object", "additionalProperties": false,
                 "properties": {"candidate": {"type": "string", "minLength": 1, "maxLength": 1024}},
                 "required": ["candidate"]},

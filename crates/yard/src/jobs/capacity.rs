@@ -276,7 +276,22 @@ pub async fn release(
                 && dir(project, &released).join("lock").is_file();
             let completed_judgment = matches!(released.kind.as_str(), "review" | "gate")
                 && released.lock_contract
-                && matches!(released.outcome.as_deref(), Some("pass" | "fail"))
+                && (matches!(released.outcome.as_deref(), Some("pass" | "fail"))
+                    || (released.kind == "review"
+                        && released.status == "ended"
+                        && released.outcome.as_deref() == Some("selected")
+                        && released.result.as_ref().is_some_and(|result| {
+                            matches!(
+                                result["outputs"]["result"]["kind"].as_str(),
+                                Some("selection" | "finding-selection")
+                            ) && released.report.as_ref()
+                                == Some(&result["outputs"]["result"]["value"])
+                        })
+                        && tx.query_row(
+                            "SELECT COALESCE(mcp, '') FROM execution WHERE id = ?1",
+                            [released.id],
+                            |row| row.get::<_, String>(0),
+                        )? == "registered"))
                 && released.result_eligible
                 && released
                     .result
