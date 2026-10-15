@@ -424,6 +424,10 @@ fn selected_failures_keep_exact_operator_accept_and_repair() {
 /// After B merges an operator .yard change, another retained producer refuses
 /// its own .yard edit, then publishes cleanly at its independent original base.
 /// Sabotage: bind that producer or its publication to the selected attempt base.
+/// B continues while a real merge-tree is held before intent. Its obsolete
+/// conflict must withdraw without staging a bundle or overwriting continuation.
+/// Sabotage: resolve the return producer from a cleared current choice or check
+/// only ticket revision. A fresh conflict below must still repair B normally.
 #[test]
 fn only_the_declared_choice_is_checked_and_landed() {
     let holds: Vec<_> = (0..5).map(|_| Latch::new()).collect();
@@ -434,6 +438,8 @@ fn only_the_declared_choice_is_checked_and_landed() {
     let repair_hold = repair.clone();
     let landing_repair = Latch::new();
     let landing_repair_hold = landing_repair.clone();
+    let superseding = Latch::new();
+    let superseding_hold = superseding.clone();
     let dirty_writer = Latch::new();
     let dirty_writer_hold = dirty_writer.clone();
     let clean_writer = Latch::new();
@@ -535,7 +541,7 @@ fn only_the_declared_choice_is_checked_and_landed() {
             .unwrap();
         if request.opens() {
             let version = turns[n].fetch_add(1, Ordering::SeqCst);
-            let fix = if n == 1 && version == 3 {
+            let fix = if n == 1 && version == 4 {
                 assert!(
                     request
                         .last_user()
@@ -568,8 +574,10 @@ fn only_the_declared_choice_is_checked_and_landed() {
         {
             let hold = if turns[n].load(Ordering::SeqCst) == 1 {
                 writer_holds[n].clone()
-            } else if n == 1 && turns[n].load(Ordering::SeqCst) == 4 {
+            } else if n == 1 && turns[n].load(Ordering::SeqCst) == 5 {
                 landing_repair_hold.clone()
+            } else if n == 1 && turns[n].load(Ordering::SeqCst) == 4 {
+                superseding_hold.clone()
             } else if n == 1 && turns[n].load(Ordering::SeqCst) == 3 {
                 repair_hold.clone()
             } else if n == 2 && turns[n].load(Ordering::SeqCst) == 2 {
@@ -586,7 +594,10 @@ fn only_the_declared_choice_is_checked_and_landed() {
     let armed = machine.root.join("landing-armed");
     let said = machine.root.join("landing-said");
     let release = machine.root.join("landing-release");
-    for fifo in [&said, &release] {
+    let merge_armed = machine.root.join("merge-armed");
+    let merge_said = machine.root.join("merge-said");
+    let merge_release = machine.root.join("merge-release");
+    for fifo in [&said, &release, &merge_said, &merge_release] {
         assert!(
             std::process::Command::new("mkfifo")
                 .arg(fifo)
@@ -597,8 +608,11 @@ fn only_the_declared_choice_is_checked_and_landed() {
     }
     machine.wrapper("git", &format!(
         "if [ -e '{}' ]; then case \" $* \" in *' update-ref --no-deref refs/heads/feature/a '*)\n\
+         echo held > '{}'; read line < '{}';; esac; fi\n\
+         if [ -e '{}' ]; then case \" $* \" in *' merge-tree --write-tree '*)\n\
          echo held > '{}'; read line < '{}';; esac; fi",
-        armed.display(), said.display(), release.display()
+        armed.display(), said.display(), release.display(),
+        merge_armed.display(), merge_said.display(), merge_release.display()
     ));
     machine.start();
     let mut extra = String::from(
@@ -994,6 +1008,7 @@ fn only_the_declared_choice_is_checked_and_landed() {
     let target = git(&project.canonical(), &["rev-parse", "refs/heads/feature/a"])
         .trim()
         .to_owned();
+    std::fs::write(&merge_armed, "").unwrap();
     let approved = operator.call(
         "yard_attempt_approve",
         json!({
@@ -1002,7 +1017,7 @@ fn only_the_declared_choice_is_checked_and_landed() {
         }),
     );
     assert!(approved.get("error").is_none(), "{approved}");
-    landing_repair.wait_held();
+    assert_eq!(watch.said(&merge_said), "held\n");
     let limited_picker = before_conflict
         .iter()
         .find(|row| row["id"] == third["choice"])
@@ -1035,6 +1050,107 @@ fn only_the_declared_choice_is_checked_and_landed() {
         )),
         vec![json!({"verdict": "fail"})]
     );
+    let obsolete = rows(
+        &project,
+        &format!(
+            "SELECT * FROM execution WHERE kind = 'landing' AND approval = {}",
+            overridden[0]["id"]
+        ),
+    );
+    assert_eq!(obsolete.len(), 1);
+    let obsolete = &obsolete[0];
+    assert_eq!(obsolete["status"], "running");
+    assert!(obsolete["intent_state"].is_null());
+    assert_eq!(obsolete["head"], repaired_head);
+    let continued = operator.call(
+        "yard_attempt_start",
+        json!({"project": project.path, "ticket": "Y-1", "workspace": "writer-1"}),
+    );
+    assert!(continued.get("error").is_none(), "{continued}");
+    let continuation = rows(
+        &project,
+        &format!(
+            "SELECT id, workspace, settings, head, inputs, reason, plan_revision, ticket_revision FROM execution WHERE id = {}",
+            continued["result"]["execution"]
+        ),
+    );
+    assert_eq!(continuation[0]["workspace"], "writer-1");
+    assert_eq!(continuation[0]["settings"]["model"], "producer-1");
+    assert_eq!(continuation[0]["head"], repaired_head);
+    let pending = project.rows(&format!(
+        "SELECT next, target, landing_reds, choice FROM attempt WHERE id = {attempt}"
+    ));
+    assert!(pending[0]["choice"].is_null());
+    assert!(pending[0]["next"].is_null());
+    std::fs::remove_file(&merge_armed).unwrap();
+    std::fs::write(&merge_release, "go\n").unwrap();
+    let withdrawn = watch.find("obsolete selected landing withdrawn", |event| {
+        event["event"] == "execution.ended" && event["execution"] == obsolete["id"]
+    });
+    assert_eq!(withdrawn["data"]["outcome"], "withdrawn");
+    watch.find("obsolete selected landing released", |event| {
+        event["event"] == "execution.released" && event["execution"] == obsolete["id"]
+    });
+    // Producer launch takes the same target lock as merge preparation. Its
+    // supported continuation is already recorded before that lock releases.
+    superseding.wait_held();
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT next, target, landing_reds, choice FROM attempt WHERE id = {attempt}"
+        )),
+        pending
+    );
+    assert_eq!(
+        rows(
+            &project,
+            &format!(
+                "SELECT id, workspace, settings, head, inputs, reason, plan_revision, ticket_revision FROM execution WHERE id = {}",
+                continued["result"]["execution"]
+            )
+        ),
+        continuation
+    );
+    for node in ["implementer", "writer-1"] {
+        let hex = node.bytes().map(|b| format!("{b:02x}")).collect::<String>();
+        assert!(
+            !project
+                .path
+                .join(format!(
+                    ".yard/local/attempts/{attempt}/writers/{hex}/input/target.bundle"
+                ))
+                .exists()
+        );
+    }
+    assert!(
+        !project
+            .path
+            .join(format!(
+                ".yard/local/landings/{}/target.bundle",
+                obsolete["id"]
+            ))
+            .exists()
+    );
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT state FROM approval WHERE id = {}",
+            overridden[0]["id"]
+        )),
+        vec![json!({"state": "withdrawn"})]
+    );
+    let superseding_head = git(&clone, &["rev-parse", "HEAD"]).trim().to_owned();
+    assert_ne!(superseding_head, repaired_head);
+    superseding.release();
+    let fresh = approval(&mut watch);
+    assert_eq!(fresh["head"], superseding_head);
+    assert_ne!(fresh["choice"], third["choice"]);
+    assert_eq!(fresh["skipped"], first["skipped"]);
+    let approved = operator.call(
+        "yard_attempt_approve",
+        json!({"project": project.path, "ticket": "Y-1", "target": "feature/a",
+            "head": superseding_head, "proof": fresh["proof"], "choice": fresh["choice"]}),
+    );
+    assert!(approved.get("error").is_none(), "{approved}");
+    landing_repair.wait_held();
     let repairs = rows(
         &project,
         "SELECT * FROM execution WHERE kind = 'implementation' AND reason = 'repair' ORDER BY id",
@@ -1043,7 +1159,7 @@ fn only_the_declared_choice_is_checked_and_landed() {
     let returned = &repairs[1];
     assert_eq!(returned["workspace"], "writer-1");
     assert_eq!(returned["settings"]["model"], "producer-1");
-    assert_eq!(returned["head"], repaired_head);
+    assert_eq!(returned["head"], superseding_head);
     assert_eq!(returned["inputs"]["feedback"]["value"]["target"], target);
     assert_eq!(
         returned["inputs"]["feedback"]["value"]["branch"],
@@ -1054,12 +1170,12 @@ fn only_the_declared_choice_is_checked_and_landed() {
         "SELECT * FROM execution WHERE kind = 'landing' AND outcome = 'conflict'",
     );
     assert_eq!(conflict.len(), 1);
-    assert_eq!(conflict[0]["head"], repaired_head);
+    assert_eq!(conflict[0]["head"], superseding_head);
     assert_eq!(git(&clone, &["rev-parse", "FETCH_HEAD"]).trim(), target);
     let landed_head = git(&clone, &["rev-parse", "HEAD"]).trim().to_owned();
-    assert_ne!(landed_head, repaired_head);
+    assert_ne!(landed_head, superseding_head);
     assert_eq!(git(&clone, &["rev-parse", "HEAD^2"]).trim(), target);
-    assert_eq!(git(&clone, &["show", "HEAD:same.txt"]).trim(), "writer-1-3");
+    assert_eq!(git(&clone, &["show", "HEAD:same.txt"]).trim(), "writer-1-4");
     assert_eq!(
         git(&project.canonical(), &["rev-parse", "refs/heads/feature/a"]).trim(),
         target
@@ -1322,7 +1438,7 @@ fn only_the_declared_choice_is_checked_and_landed() {
     });
     assert_eq!(
         git(&project.canonical(), &["show", "feature/a:same.txt"]).trim(),
-        "writer-1-3"
+        "writer-1-4"
     );
     assert_eq!(project.canonical_head(), main);
     let gates = rows(
@@ -1347,6 +1463,11 @@ fn only_the_declared_choice_is_checked_and_landed() {
     assert!(
         gates
             .iter()
+            .any(|row| row["parent"].is_null() && row["head"] == superseding_head)
+    );
+    assert!(
+        gates
+            .iter()
             .any(|row| row["parent"].is_null() && row["head"] == landed_head)
     );
     assert!(
@@ -1356,12 +1477,15 @@ fn only_the_declared_choice_is_checked_and_landed() {
             .all(|row| row["head"] == heads[1]
                 || row["head"] == replacement_head
                 || row["head"] == repaired_head
+                || row["head"] == superseding_head
                 || row["head"] == landed_head)
     );
     let approved = project.rows("SELECT * FROM approval ORDER BY id");
-    assert_eq!(approved.len(), 2);
+    assert_eq!(approved.len(), 3);
     assert_eq!(approved[0]["choice"], third["choice"]);
-    assert_eq!(approved[0]["state"], "retired");
-    assert_eq!(approved[1]["choice"], fifth["choice"]);
-    assert_eq!(approved[1]["state"], "landed");
+    assert_eq!(approved[0]["state"], "withdrawn");
+    assert_eq!(approved[1]["choice"], fresh["choice"]);
+    assert_eq!(approved[1]["state"], "retired");
+    assert_eq!(approved[2]["choice"], fifth["choice"]);
+    assert_eq!(approved[2]["state"], "landed");
 }

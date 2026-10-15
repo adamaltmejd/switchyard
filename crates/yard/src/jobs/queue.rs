@@ -409,6 +409,33 @@ impl Lapse {
     }
 }
 
+fn superseded(
+    conn: &rusqlite::Connection,
+    approval: &checks::Approval,
+    attempt: &attempts::Attempt,
+    ticket: &tickets::Ticket,
+) -> Result<Option<&'static str>, Fail> {
+    Ok(if approval.state != "active" {
+        Some("the approval was withdrawn")
+    } else if attempt.state != "live" {
+        Some("the attempt ended")
+    } else if approval.choice != attempt.choice
+        || (attempt.choice.is_some() && crate::store::selections::current(conn, attempt)?.is_none())
+    {
+        Some("the choice changed")
+    } else if attempt.candidate() != Some((approval.base.as_str(), approval.head.as_str()))
+        || attempt.proof.clone().unwrap_or_default() != approval.proof
+    {
+        Some("the candidate changed")
+    } else if attempts::superseded_by_edit(conn, attempt.id, ticket.id, approval.ticket_revision)? {
+        Some("the ticket changed")
+    } else if approval.plan_revision != attempt.plan_revision() {
+        Some("the plan revision changed")
+    } else {
+        None
+    })
+}
+
 /// Whether an approval still holds against current rows and policy.
 async fn holds(
     daemon: &Daemon,
@@ -419,27 +446,11 @@ async fn holds(
     attempt: &attempts::Attempt,
     ticket: &tickets::Ticket,
 ) -> Result<Option<Lapse>, Fail> {
-    let superseded = if approval.state != "active" {
-        Some("the approval was withdrawn")
-    } else if attempt.state != "live" {
-        Some("the attempt ended")
-    } else if attempt.target_branch.as_deref() != Some(loaded.branch.as_str()) {
+    if let Some(reason) = project.read(|conn| superseded(conn, approval, attempt, ticket))? {
+        return Ok(Some(Lapse::Superseded(reason)));
+    }
+    let superseded = if attempt.target_branch.as_deref() != Some(loaded.branch.as_str()) {
         Some("the target changed")
-    } else if approval.choice != attempt.choice
-        || (attempt.choice.is_some()
-            && project
-                .read(|conn| crate::store::selections::current(conn, attempt))?
-                .is_none())
-    {
-        Some("the choice changed")
-    } else if attempt.candidate() != Some((approval.base.as_str(), approval.head.as_str()))
-        || attempt.proof.clone().unwrap_or_default() != approval.proof
-    {
-        Some("the candidate changed")
-    } else if ticket.revision != approval.ticket_revision {
-        Some("the ticket changed")
-    } else if approval.plan_revision != attempt.plan_revision() {
-        Some("the plan revision changed")
     } else if approval.gate_digest != loaded.gate_digest {
         Some("the gate configuration changed")
     } else if approval.review_digest != loaded.review_digest(&attempt.workflow)? {
@@ -1390,11 +1401,44 @@ async fn returned(
     detail: &str,
     evidence: Option<&Value>,
 ) -> Result<(), Fail> {
-    let (attempt, approval) = project.read(|conn| {
+    let _canonical = project.canonical.lock().await;
+    let current = |conn: &rusqlite::Connection| {
         let row = executions::get(conn, execution)?;
+        if row.status != "running" {
+            return Ok(None);
+        }
         let approval = checks::approval(conn, row.approval.expect("a landing binds an approval"))?;
-        Ok((attempts::get(conn, row.required_attempt()?)?, approval))
-    })?;
+        let attempt = attempts::get(conn, row.required_attempt()?)?;
+        let ticket = tickets::get(conn, attempt.ticket)?;
+        let lapse = superseded(conn, &approval, &attempt, &ticket)?.or_else(|| {
+            (row.base.as_deref() != Some(approval.base.as_str())
+                || row.head.as_deref() != Some(approval.head.as_str())
+                || row.proof.as_deref() != Some(approval.proof.as_str())
+                || row.ticket_revision != Some(approval.ticket_revision)
+                || row.plan_revision != approval.plan_revision)
+                .then_some("the landing input changed")
+        });
+        if let Some(reason) = lapse {
+            executions::end(
+                conn,
+                execution,
+                executions::End {
+                    outcome: "withdrawn",
+                    detail: Some(reason),
+                    ticket: Some(ticket.id),
+                    ..Default::default()
+                },
+            )?;
+            if approval.state == "active" {
+                checks::set_approval_state(conn, &approval, "withdrawn", ticket.id, Some(reason))?;
+            }
+            return Ok(None);
+        }
+        Ok(Some((attempt, approval)))
+    };
+    let Some((attempt, approval)) = project.tx(|tx| current(tx))? else {
+        return Ok(());
+    };
     let ticket = attempt.ticket;
     let mut storage = project.attempt_dir(attempt.id);
     if attempt
@@ -1402,14 +1446,27 @@ async fn returned(
         .as_ref()
         .is_some_and(|admission| admission["runtime"] == "writer-graph")
     {
-        let node = project.read(|conn| super::supervise::implementation_node(conn, &attempt))?;
+        let node = if let Some(choice) = approval.choice {
+            let choice = project.read(|conn| executions::get(conn, choice))?;
+            choice
+                .result
+                .as_ref()
+                .and_then(|result| {
+                    result["outputs"]["result"]["value"]["candidate"]["source"]["node"].as_str()
+                })
+                .ok_or_else(|| Fail::refused("landing choice has no producer"))?
+                .to_owned()
+        } else {
+            "implementer".to_owned()
+        };
         storage = storage
             .join("writers")
             .join(crate::config::hex(node.as_bytes()));
     }
     let input = storage.join("input");
-    std::fs::create_dir_all(&input).map_err(|error| error.to_string())?;
-    let bundle = input.join("target.bundle");
+    let staging = landing_dir(project, execution);
+    std::fs::create_dir_all(&staging).map_err(|error| error.to_string())?;
+    let bundle = staging.join("target.bundle");
     let _ = std::fs::remove_file(&bundle);
     if target != attempt.base {
         daemon
@@ -1428,6 +1485,17 @@ async fn returned(
             .await?;
     }
     project.tx(|tx| {
+        // Source continuation can supersede this landing while Git creates
+        // the bundle. Touch the producer input only with current identities.
+        let Some((attempt, approval)) = current(tx)? else {
+            return Ok(());
+        };
+        std::fs::create_dir_all(&input).map_err(|error| error.to_string())?;
+        let destination = input.join("target.bundle");
+        let _ = std::fs::remove_file(&destination);
+        if target != attempt.base {
+            std::fs::rename(&bundle, &destination).map_err(|error| error.to_string())?;
+        }
         executions::end(
             tx,
             execution,
@@ -1439,10 +1507,6 @@ async fn returned(
             },
         )?;
         checks::set_approval_state(tx, &approval, "retired", ticket, Some(outcome))?;
-        // An edit since the landing began owns the next step.
-        if attempts::superseded_by_edit(tx, attempt.id, ticket, approval.ticket_revision)? {
-            return Ok(());
-        }
         let reds = if outcome == "red" {
             attempt.landing_reds + 1
         } else {
