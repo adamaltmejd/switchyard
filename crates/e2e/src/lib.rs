@@ -556,6 +556,7 @@ impl<'a> Project<'a> {
             send,
             heard,
             seen: Vec::new(),
+            history_closed: false,
         }
     }
 }
@@ -568,12 +569,17 @@ pub struct Watch {
     heard: mpsc::Receiver<Heard>,
     /// Every event read so far.
     pub seen: Vec<Value>,
+    history_closed: bool,
 }
 
 impl Watch {
     /// Read events until one matches, and return it. Panics on the deadline.
     #[track_caller]
     pub fn until(&mut self, what: &str, matches: impl Fn(&Value) -> bool) -> Value {
+        assert!(
+            !self.history_closed,
+            "history stream closed while waiting for {what}"
+        );
         let deadline = std::time::Instant::now() + DEADLINE;
         loop {
             let left = deadline.saturating_duration_since(std::time::Instant::now());
@@ -661,10 +667,8 @@ impl Watch {
                         path.display()
                     );
                 }
-                Ok(Heard::Closed) => panic!(
-                    "history stream closed before the held call at {}",
-                    path.display()
-                ),
+                // A crash fixture may wait on its FIFO after daemon death.
+                Ok(Heard::Closed) => self.history_closed = true,
                 Err(_) => panic!("no call held at {} within {DEADLINE:?}", path.display()),
             }
         }
