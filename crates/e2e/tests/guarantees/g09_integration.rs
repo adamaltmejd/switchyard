@@ -18,7 +18,27 @@ fn configuration() -> String {
         .replace("git diff --check \"$YARD_BASE\" HEAD", "if test -f conflict.txt; then test \"$(cat conflict.txt)\" = resolved; else test \"$(cat a.txt)\" = A && test \"$(cat b.txt)\" = B && test \"$(cat partial.txt)\" = partial; fi")
 }
 
-fn start(project: &Project<'_>) {
+fn settle_planner(project: &Project<'_>, watch: &mut Watch) {
+    project.json(&[
+        "ticket",
+        "new",
+        "--title",
+        "Combine inputs",
+        "--workflow",
+        "plan",
+    ]);
+    let planner = watch.event("attempt.ended", &[("outcome", "planned")]);
+    let cleanup = watch.find("planner cleanup", |event| {
+        event["event"] == "execution.ended"
+            && event["data"]["kind"] == "cleanup"
+            && event["attempt"] == planner["attempt"]
+    });
+    watch.find("planner released", |event| {
+        event["event"] == "execution.released" && event["execution"] == cleanup["execution"]
+    });
+}
+
+fn start(project: &Project<'_>) -> i64 {
     let mut operator = project.machine.operator();
     operator.initialize();
     let answer = operator.call(
@@ -27,6 +47,7 @@ fn start(project: &Project<'_>) {
         "ticket": "Y-1", "preset": "integration"}),
     );
     assert!(answer.get("error").is_none(), "{answer}");
+    answer["result"]["attempt"].as_i64().unwrap()
 }
 
 fn continue_integration(project: &Project<'_>) {
@@ -61,7 +82,8 @@ fn fetch(input: &str) -> String {
 /// Expected contents and target come from the fixture and host Git.
 /// Sabotage: mount canonical into C, make candidate inputs writable, reuse
 /// A's candidate/approval for C, or recreate C's clone after interruption.
-/// Admission first refuses a source named feedback without any execution;
+/// After planner release, admission refuses feedback without a new attempt
+/// or execution, then supported named sources succeed on the same ticket;
 /// sabotage: allow that source to collide with internal repair feedback.
 #[test]
 fn integration_retains_partial_work_and_approves_only_its_output() {
@@ -69,6 +91,9 @@ fn integration_retains_partial_work_and_approves_only_its_output() {
     let held = hold.clone();
     let turns = AtomicUsize::new(0);
     let machine = Machine::new("g9-integration", move |request| {
+        if request.has_tool("yard_publish_report") {
+            return planned(request);
+        }
         if request.has_tool("yard_publish_selection") {
             return act(
                 request,
@@ -115,8 +140,10 @@ fn integration_retains_partial_work_and_approves_only_its_output() {
     machine.start();
     let project = Project::new(&machine, "p", &configuration());
     let target = project.canonical_head();
-    let watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Combine inputs", "--parked"]);
+    let mut watch = project.watch(0);
+    settle_planner(&project, &mut watch);
+    let attempts = project.rows("SELECT id FROM attempt ORDER BY id");
+    let executions = project.rows("SELECT id FROM execution ORDER BY id");
     let mut operator = machine.operator();
     operator.initialize();
     let refused = operator.call(
@@ -136,18 +163,21 @@ fn integration_retains_partial_work_and_approves_only_its_output() {
             "input": "nodes.integrate.inputs.feedback", "reason": "invalid_input"
         })
     );
-    assert!(project.rows("SELECT id FROM attempt").is_empty());
-    assert!(project.rows("SELECT id FROM execution").is_empty());
+    assert_eq!(project.rows("SELECT id FROM attempt ORDER BY id"), attempts);
+    assert_eq!(
+        project.rows("SELECT id FROM execution ORDER BY id"),
+        executions
+    );
     drop(operator);
-    start(&project);
+    let attempt = start(&project);
     hold.wait_held();
     let row = project
         .rows("SELECT id, status, handle FROM execution WHERE node = 'integrate'")
         .pop()
         .unwrap();
-    let clone = project
-        .path
-        .join(".yard/local/attempts/1/writers/696e74656772617465/clone");
+    let clone = project.path.join(format!(
+        ".yard/local/attempts/{attempt}/writers/696e74656772617465/clone"
+    ));
     // These writes exercise actual mounts, not their declared specifications.
     let out = machine.pinfold(&[
         "box",
@@ -187,13 +217,14 @@ fn integration_retains_partial_work_and_approves_only_its_output() {
             expected
         );
     }
-    let sources = project
-        .rows("SELECT id FROM execution WHERE node = 'implementer' AND outcome = 'candidate'");
+    let sources = project.rows(&format!(
+        "SELECT id FROM execution WHERE attempt = {attempt} AND node = 'implementer' AND outcome = 'candidate'"
+    ));
     let source_head = git(
         &project.canonical(),
         &[
             "rev-parse",
-            &format!("refs/yard/candidates/1/{}", sources[0]["id"]),
+            &format!("refs/yard/candidates/{attempt}/{}", sources[0]["id"]),
         ],
     )
     .trim()
@@ -232,6 +263,9 @@ fn integration_retains_partial_work_and_approves_only_its_output() {
 fn integration_conflicts_require_repair_before_selection() {
     let turns = AtomicUsize::new(0);
     let machine = Machine::new("g9-integration-conflict", move |request| {
+        if request.has_tool("yard_publish_report") {
+            return planned(request);
+        }
         if request.has_tool("yard_publish_selection") {
             return act(
                 request,
@@ -263,14 +297,14 @@ fn integration_conflicts_require_repair_before_selection() {
     let project = Project::new(&machine, "p", &configuration());
     let target = project.canonical_head();
     let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Combine inputs", "--parked"]);
-    start(&project);
+    settle_planner(&project, &mut watch);
+    let attempt = start(&project);
     watch.until("integration conflict attention", |event| {
         event["event"] == "attention.raised" && event["data"]["reason"] == "dirty"
     });
-    let clone = project
-        .path
-        .join(".yard/local/attempts/1/writers/696e74656772617465/clone");
+    let clone = project.path.join(format!(
+        ".yard/local/attempts/{attempt}/writers/696e74656772617465/clone"
+    ));
     assert!(!git(&clone, &["ls-files", "--unmerged"]).is_empty());
     assert_eq!(project.canonical_head(), target);
     assert!(project.rows("SELECT id FROM approval").is_empty());
