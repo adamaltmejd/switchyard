@@ -627,17 +627,7 @@ fn approval_row(row: &Row) -> rusqlite::Result<Approval> {
         proof: row.get(10)?,
         plan_revision: row.get(11)?,
         choice: row.get(13)?,
-        accepted_skipped: row
-            .get::<_, Option<String>>(12)?
-            .map(|raw| serde_json::from_str(&raw))
-            .transpose()
-            .map_err(|error| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    12,
-                    rusqlite::types::Type::Text,
-                    Box::new(error),
-                )
-            })?,
+        accepted_skipped: super::json_column(row, 12)?,
     })
 }
 

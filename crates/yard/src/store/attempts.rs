@@ -1,4 +1,4 @@
-use super::{Target, all, audit, now, ticket_name};
+use super::{Target, all, audit, json_column, now, ticket_name};
 use crate::api::Fail;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::{Value, json};
@@ -63,30 +63,8 @@ fn row(row: &Row) -> rusqlite::Result<Attempt> {
         extra_rounds: row.get(15)?,
         landing_reds: row.get(16)?,
         target_branch: row.get(17)?,
-        original_admission: row
-            .get::<_, Option<String>>(18)?
-            .map(|text| {
-                serde_json::from_str(&text).map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        18,
-                        rusqlite::types::Type::Text,
-                        Box::new(error),
-                    )
-                })
-            })
-            .transpose()?,
-        admission: row
-            .get::<_, Option<String>>(19)?
-            .map(|text| {
-                serde_json::from_str(&text).map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        19,
-                        rusqlite::types::Type::Text,
-                        Box::new(error),
-                    )
-                })
-            })
-            .transpose()?,
+        original_admission: json_column(row, 18)?,
+        admission: json_column(row, 19)?,
     })
 }
 
