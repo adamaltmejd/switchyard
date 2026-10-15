@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 //! `yard`: client and daemon in one binary.
 
 mod agent_env;

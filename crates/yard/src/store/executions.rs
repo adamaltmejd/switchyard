@@ -168,7 +168,7 @@ impl Execution {
     }
 
     pub fn to_json(&self) -> Value {
-        let mut value = json!({
+        json!({
             "execution": self.id,
             "attempt": self.attempt,
             "workspace": self.workspace,
@@ -207,9 +207,6 @@ impl Execution {
             "intent": self.intent_state.as_ref().map(|state| json!({
                 "state": state, "target_ref": self.intent_ref, "old": self.intent_old, "merged": self.intent_merged,
             })),
-        });
-        value.as_object_mut().expect("execution object").extend(
-            json!({
                 "cost_basis": {"kind": "local_estimate", "unit": "USD", "billing": "unavailable"},
                 "provider": self.provider,
                 "agent": self.agent,
@@ -222,12 +219,7 @@ impl Execution {
                 "elapsed_seconds": self.elapsed_seconds,
                 "exit_cause": self.exit_cause,
                 "exit_code": self.exit_code,
-            })
-            .as_object()
-            .expect("statistics object")
-            .clone(),
-        );
-        value
+        })
     }
 }
 
@@ -950,27 +942,22 @@ pub fn binding(
         }
         return Ok(Some((node, Value::Object(inputs))));
     }
-    let declared = serde_json::to_value(
-        &plan
-            .nodes
-            .get(&node)
-            .ok_or_else(|| Fail::refused("node absent from admitted plan"))?
-            .inputs,
-    )
-    .expect("inputs serialize");
-    let declared = declared
-        .as_object()
-        .ok_or_else(|| Fail::refused("node absent from admitted plan"))?;
+    let declared = &plan
+        .nodes
+        .get(&node)
+        .ok_or_else(|| Fail::refused("node absent from admitted plan"))?
+        .inputs;
     let mut inputs = serde_json::Map::new();
     for (name, reference) in declared {
-        if reference["output"] == "feedback" {
+        if reference.output == "feedback" {
             if let Some(feedback) = start.feedback {
                 inputs.insert(name.clone(), feedback.clone());
             }
             continue;
         }
-        if let Some(source) = reference["node"]
-            .as_str()
+        if let Some(source) = reference
+            .node
+            .as_deref()
             .filter(|node| *node != "implementer")
         {
             if plan.concurrent() {
@@ -1013,8 +1000,8 @@ pub fn binding(
                     .result
                     .as_ref()
                     .ok_or_else(|| Fail::refused("missing supplier result"))?["outputs"]
-                    [reference["output"].as_str().unwrap_or_default()];
-                if output["kind"] != reference["kind"] {
+                    [&reference.output];
+                if output["kind"] != serde_json::to_value(&reference.kind).expect("output kind") {
                     return Ok(None);
                 }
                 let mut value = output["value"].clone();
@@ -1026,9 +1013,9 @@ pub fn binding(
                 }
                 inputs.insert(
                     name.clone(),
-                    json!({"kind": reference["kind"],
+                    json!({"kind": reference.kind,
                     "source": {"execution": producer.id, "node": source,
-                        "output": reference["output"], "plan_revision": producer.plan_revision},
+                        "output": reference.output, "plan_revision": producer.plan_revision},
                     "value": value}),
                 );
                 continue;
@@ -1059,7 +1046,7 @@ pub fn binding(
                         .result
                         .ok_or_else(|| Fail::refused("missing panel result"))?;
                     (
-                        json!({"execution": producer, "node": source, "output": reference["output"]}),
+                        json!({"execution": producer, "node": source, "output": reference.output}),
                         result["outputs"]["result"]["value"].clone(),
                     )
                 }
@@ -1099,13 +1086,13 @@ pub fn binding(
             }
             inputs.insert(
                 name.clone(),
-                json!({"kind": reference["kind"],
+                json!({"kind": reference.kind,
                 "source": supplier, "value": value}),
             );
             continue;
         }
         let value = json!({"base": start.base, "head": start.head, "proof": start.proof.unwrap_or_default()});
-        let source = if reference["node"] == "implementer" {
+        let source = if reference.node.as_deref() == Some("implementer") {
             let producer = conn.query_row(
                 &format!("SELECT id FROM execution WHERE attempt = ?1 AND node = 'implementer'
                  AND {RESULT_ELIGIBLE} AND json_extract(result, '$.outputs.result.value.base') = ?2
@@ -1128,7 +1115,7 @@ pub fn binding(
         };
         inputs.insert(
             name.clone(),
-            json!({"kind": reference["kind"], "source": source, "value": value}),
+            json!({"kind": reference.kind, "source": source, "value": value}),
         );
     }
     Ok(Some((node, Value::Object(inputs))))
