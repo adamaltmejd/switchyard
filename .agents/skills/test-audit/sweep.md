@@ -26,8 +26,8 @@ One line per assertion block that fails the bar:
 - `promise:` the name or comment claims more than the scenario exercises.
 - `seam:` an observation through yard's internals or a test-only binary
   hook instead of a user seam. A helper's caller count is not a defect.
-- `clock:` a sleep, a retry, or a deadline poll where `status --history
-  --since` would do, or a scenario that waits out a timeout.
+- `clock:` a sleep, a retry, or a deadline poll where ordered `events` pages
+  would do, or a scenario that waits out a timeout.
 - `unheld:` a crash at a point that doesn't hold until the kill (seeing a
   row or a ref is not holding), or a restart before the state is proved
   from outside.

@@ -6,8 +6,8 @@ description: File work into a Yard project. Admit or reject proposals by the pro
 # yard-file
 
 Filing is the decision to spend: a ready ticket starts on the scheduler's
-next tick. Write the body before you file. `--parked` is only for work that
-must wait on something other than a ticket (`--depends-on` covers those).
+next tick. Write the body before calling `yard_ticket_new`. `parked` is only
+for work that must wait on something other than a ticket (`depends_on` covers those).
 
 ## Admission
 
@@ -17,7 +17,7 @@ beyond the threat model. The project's own rule, usually in `AGENTS.md`,
 governs.
 
 When you reject, record the condition that would re-admit the work:
-`yard proposal reject ID --text "re-file if X happens"`.
+`yard_proposal_reject` with the attention id and text "re-file if X happens".
 
 Proposals:
 - **Accepting a proposal starts work, like filing.** Accept only what you
@@ -29,7 +29,7 @@ Proposals:
 ## Size
 
 - **One ticket is one change you can read in one sitting.** Split larger
-  work into tickets linked with `--depends-on`.
+  work into tickets linked with `depends_on`.
 - **One mechanism per ticket.** A change that must hold across several
   independent mechanisms (harnesses, backends, adapters) is one ticket per
   mechanism, after a shared first one.
@@ -38,7 +38,7 @@ Proposals:
   the next pair of states it missed. File one ticket per state the rule
   changes, or cut the rule to the states that need it and say what the
   others do.
-- **`--workflow plan` makes a read-only planner propose children and a
+- **`workflow: "plan"` makes a read-only planner propose children and a
   body.** It does not make oversized work legitimate.
 - **A frightening size means the scope is wrong.** Cut or defer behaviour
   before splitting.
@@ -58,17 +58,17 @@ Include the evidence you traced it from. Do not write the implementation.
 - **Decide before you file.** Write every choice a reviewer could block on
   as a decision: which option, and what is excluded. An open question makes
   each round a coin toss.
-- **Probe what you can.** A question the real tool answers (a CLI's flags,
+- **Probe what you can.** A question the real tool answers (an MCP schema,
   a config's precedence, a harness's discovery) is answered before filing;
   put the command and its output in the body.
 
 A candidate that touches `.yard/` is refused. When the work needs a package,
 a gate or a config change, the ticket says so, and the operator makes that
-change with a commit and `yard sync`.
+change with a commit and `yard_sync`.
 
 ## Yard's own defects
 
 Yard doing what its spec or help says it does not do is a defect in Yard,
 not work for this project. Report it on Yard's repository: one observation
-per issue, with the command and its `--json` output, keys and private paths
+per issue, with the method, arguments and structured response, keys and private paths
 redacted. Work around it here meanwhile.

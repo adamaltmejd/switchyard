@@ -318,7 +318,7 @@ export default function () {
     project.write(".pi/extensions/probe/index.ts", &extension);
     project.git(&["add", "-A"]);
     project.git(&["commit", "-qm", "Trusted standalone probe"]);
-    project.json(&["sync"]);
+    project.ok("sync", json!({}));
     let input = project.canonical_head();
     let tree = git(
         &project.canonical(),
@@ -571,7 +571,7 @@ export default function () {
     project.write(".pi/extensions/probe/index.ts", &extension);
     project.git(&["add", "-A"]);
     project.git(&["commit", "-qm", "Install trusted fixture probe"]);
-    project.json(&["sync"]);
+    project.ok("sync", json!({}));
     let mut operator = machine.operator();
     operator.initialize();
     call(
@@ -627,6 +627,8 @@ export default function () {
         json!({"ticket": "Y-1"}),
     );
     hold.wait_held();
+    // Ping orders adapter acceptance, not the daemon's first attention sample.
+    // This block proves cancellation/EOF isolation, not since-wait semantics.
     let waiting = operator.send(
         "tools/call",
         json!({"name": "yard_attention", "arguments": args(&project, json!({}))}),

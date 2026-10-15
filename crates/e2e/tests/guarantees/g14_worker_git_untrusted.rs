@@ -61,7 +61,7 @@ fn planted_worker_git_never_runs_on_the_host() {
         &config("").replace("review = [\"correctness\"]", "review = \"none\""),
     );
     let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Add feature"]);
+    project.ok("ticket.new", json!({"title": "Add feature"}));
     let stopped = watch.attention();
     assert_eq!(
         (&stopped["data"]["kind"], &stopped["data"]["reason"]),
@@ -86,7 +86,7 @@ fn planted_worker_git_never_runs_on_the_host() {
     assert!(detail.contains(&corrupt), "{stopped}");
     git(&project.canonical(), &["fsck", "--strict", "--no-dangling"]);
 
-    project.json(&["attempt", "start", "Y-1"]);
+    project.ok("attempt.start", json!({"ticket": "Y-1"}));
     let approval = watch.attention();
     let planted: Vec<_> = std::fs::read_dir(&marker_dir)
         .unwrap()

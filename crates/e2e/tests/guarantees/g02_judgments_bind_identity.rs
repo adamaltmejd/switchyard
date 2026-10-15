@@ -80,7 +80,7 @@ fi"#,
     );
     let project = Project::new(&machine, "p", &configuration);
     let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Feature"]);
+    project.ok("ticket.new", json!({"title": "Feature"}));
     let original_item = approval(&mut watch);
     let original = project.rows("SELECT * FROM execution WHERE kind = 'gate' ORDER BY id");
     let original_checks = project.rows("SELECT * FROM \"check\" ORDER BY id");
@@ -97,18 +97,13 @@ fi"#,
         ("change-proof", 2, 3),
         ("change-tree", 3, 4),
     ] {
-        let revision = project.json(&["ticket", "show", "Y-1"])["revision"]
+        let revision = project.ok("ticket.show", json!({"ticket": "Y-1"}))["revision"]
             .as_i64()
             .unwrap();
-        project.json(&[
-            "ticket",
-            "edit",
-            "Y-1",
-            "--revision",
-            &revision.to_string(),
-            "--body",
-            body,
-        ]);
+        project.ok(
+            "ticket.edit",
+            json!({"revision": revision, "body": body, "ticket": "Y-1"}),
+        );
         // approval consumes future events. Searching retained history here would
         // return the old approval before the replacement executions finish.
         let item = approval(&mut watch);
@@ -241,7 +236,7 @@ fi"#,
         .git(&["rev-parse", "HEAD:.yard/Dockerfile"])
         .trim()
         .to_string();
-    project.json(&["sync"]);
+    project.ok("sync", json!({}));
     let revised = operator.call(
         "yard_attempt_revise",
         json!({"project": project.path,
@@ -300,7 +295,7 @@ fi"#,
     ))[0]
         .clone();
     let retained = project.rows("SELECT * FROM \"check\" WHERE execution = (SELECT max(id) FROM execution WHERE name = 'other' AND outcome = 'pass')")[0].clone();
-    let before_policy = project.json(&["attempt", "show", "Y-1"])["attempt"].clone();
+    let before_policy = project.ok("attempt.show", json!({"ticket": "Y-1"}))["attempt"].clone();
     let revised = operator.call(
         "yard_attempt_revise",
         json!({"project": project.path,
@@ -395,7 +390,8 @@ command = '''jq '{outcome: "retry", identity: .identity, report: {summary: "Retr
     // omitted from normal verification and needs exact operator acceptance.
     project.reconfigure(&failed_definition);
     let source = project.git(&["rev-parse", "HEAD"]).trim().to_string();
-    let mut graph = project.json(&["attempt", "show", "Y-1"])["attempt"]["plan"]["plan"].clone();
+    let mut graph =
+        project.ok("attempt.show", json!({"ticket": "Y-1"}))["attempt"]["plan"]["plan"].clone();
     for omitted in [
         "candidate-gate-unknown",
         "landing-gate-closed",
@@ -428,18 +424,13 @@ command = '''jq '{outcome: "retry", identity: .identity, report: {summary: "Retr
     let mut final_item = Value::Null;
     for (body, expected_closed) in [(None, 9), (Some("Bookkeeping after acceptance"), 10)] {
         if let Some(body) = body {
-            let revision = project.json(&["ticket", "show", "Y-1"])["revision"]
+            let revision = project.ok("ticket.show", json!({"ticket": "Y-1"}))["revision"]
                 .as_i64()
                 .unwrap();
-            project.json(&[
-                "ticket",
-                "edit",
-                "Y-1",
-                "--revision",
-                &revision.to_string(),
-                "--body",
-                body,
-            ]);
+            project.ok(
+                "ticket.edit",
+                json!({"revision": revision, "body": body, "ticket": "Y-1"}),
+            );
         }
         let raised = watch.attention();
         let item = raised["data"].clone();
@@ -548,7 +539,7 @@ command = '''jq '{outcome: "retry", identity: .identity, report: {summary: "Retr
     // current approval. Selected merged verification still runs. Sabotage:
     // drop references from queue qualification, carry candidate acceptance to
     // landing, or manufacture results for explicitly omitted landing nodes.
-    let current = project.json(&["attempt", "show", "Y-1"]);
+    let current = project.ok("attempt.show", json!({"ticket": "Y-1"}));
     let approved = operator.call(
         "yard_attempt_approve",
         json!({"project": project.path,
@@ -829,29 +820,13 @@ fn a_new_head_revision_or_proof_rejudges_but_template_sync_keeps_checks() {
     );
     let project = Project::new(&machine, "p", &admitted);
     let mut watch = project.watch(0);
-    project.json(&[
-        "ticket",
-        "new",
-        "--title",
-        "Add feature",
-        "--body",
-        "Create feature.txt",
-    ]);
+    project.ok(
+        "ticket.new",
+        json!({"title": "Add feature", "body": "Create feature.txt"}),
+    );
     let first_item = approval(&mut watch);
     let first = head(&first_item);
-    project.json(&[
-        "attempt",
-        "reject",
-        "--target",
-        "main",
-        "Y-1",
-        "--head",
-        &first,
-        "--proof",
-        &proof(&first_item),
-        "--text",
-        "Once more",
-    ]);
+    project.ok("attempt.reject", json!({"target": "main", "head": &first, "proof": &proof(&first_item), "text": "Once more", "ticket": "Y-1"}));
     let second = approval(&mut watch);
     let candidate = head(&second);
 
@@ -864,19 +839,11 @@ fn a_new_head_revision_or_proof_rejudges_but_template_sync_keeps_checks() {
     assert_eq!(judged(&project, &candidate), once);
 
     // A ticket edit supersedes the approval and the implementer runs.
-    let revision = project.json(&["ticket", "show", "Y-1"])["revision"]
+    let revision = project.ok("ticket.show", json!({"ticket": "Y-1"}))["revision"]
         .as_i64()
         .unwrap();
     assert_eq!(second["payload"]["revision"], revision);
-    project.json(&[
-        "ticket",
-        "edit",
-        "Y-1",
-        "--revision",
-        &revision.to_string(),
-        "--body",
-        "Create feature.txt and nothing else",
-    ]);
+    project.ok("ticket.edit", json!({"revision": revision, "body": "Create feature.txt and nothing else", "ticket": "Y-1"}));
     let third = approval(&mut watch);
 
     assert_eq!(head(&third), candidate);
@@ -900,21 +867,16 @@ fn a_new_head_revision_or_proof_rejudges_but_template_sync_keeps_checks() {
     // A delayed edit on the old revision cannot overwrite the accepted edit.
     // Sabotage: drop admit::edit's revision comparison; this edit writes.
     let seq = last_seq(&project);
-    let refused = project.refused(&[
-        "ticket",
-        "edit",
-        "Y-1",
-        "--revision",
-        &revision.to_string(),
-        "--body",
-        "Overwrite the accepted edit",
-    ]);
+    let refused = project.refused(
+        "ticket.edit",
+        json!({"revision": revision, "body": "Overwrite the accepted edit", "ticket": "Y-1"}),
+    );
     assert_eq!(refused["code"], "stale", "{refused}");
     assert_eq!(refused["data"]["expected"], revision);
     assert_eq!(refused["data"]["current"], revision + 1);
     assert_eq!(last_seq(&project), seq);
     assert_eq!(
-        project.json(&["ticket", "show", "Y-1"])["body"],
+        project.ok("ticket.show", json!({"ticket": "Y-1"}))["body"],
         "Create feature.txt and nothing else"
     );
 
@@ -938,19 +900,7 @@ fn a_new_head_revision_or_proof_rejudges_but_template_sync_keeps_checks() {
     // Sabotage: match only base and head in `checks::current`; the old gate
     // counts for the new proof and no gate reruns.
     let old_proof = proof(&fifth);
-    project.json(&[
-        "attempt",
-        "reject",
-        "--target",
-        "main",
-        "Y-1",
-        "--head",
-        &candidate,
-        "--proof",
-        &old_proof,
-        "--text",
-        "Change the proof",
-    ]);
+    project.ok("attempt.reject", json!({"target": "main", "head": &candidate, "proof": &old_proof, "text": "Change the proof", "ticket": "Y-1"}));
     let sixth = approval(&mut watch);
     assert_eq!(head(&sixth), candidate);
     let repair_prompt = machine
@@ -993,19 +943,20 @@ fn a_new_head_revision_or_proof_rejudges_but_template_sync_keeps_checks() {
     // Sabotage: drop the proof comparison in `admit::approval_item`; the
     // delayed approve names the old proof and is given anyway.
     let seq = last_seq(&project);
-    let refused = project.refused(&[
-        "attempt", "approve", "--target", "main", "Y-1", "--head", &candidate, "--proof",
-        &old_proof,
-    ]);
+    let refused = project.refused(
+        "attempt.approve",
+        json!({"target": "main", "head": &candidate, "proof": &old_proof, "ticket": "Y-1"}),
+    );
     assert_eq!(refused["code"], "stale", "{refused}");
     assert_eq!(refused["data"]["expected"], old_proof.as_str());
     assert_eq!(refused["data"]["current"], sixth["payload"]["proof"]);
     assert_eq!(last_seq(&project), seq);
     assert!(project.rows("SELECT id FROM approval").is_empty());
 
-    let refused = project.refused(&[
-        "attempt", "approve", "--target", "main", "Y-1", "--head", &first,
-    ]);
+    let refused = project.refused(
+        "attempt.approve",
+        json!({"target": "main", "head": &first, "ticket": "Y-1"}),
+    );
     assert_eq!(refused["code"], "stale", "{refused}");
     assert_eq!(refused["data"]["expected"], first.as_str());
     assert_eq!(refused["data"]["current"], candidate.as_str());
@@ -1013,10 +964,10 @@ fn a_new_head_revision_or_proof_rejudges_but_template_sync_keeps_checks() {
     assert!(project.rows("SELECT id FROM approval").is_empty());
 
     let new_proof = proof(&sixth);
-    project.json(&[
-        "attempt", "approve", "--target", "main", "Y-1", "--head", &candidate, "--proof",
-        &new_proof,
-    ]);
+    project.ok(
+        "attempt.approve",
+        json!({"target": "main", "head": &candidate, "proof": &new_proof, "ticket": "Y-1"}),
+    );
     assert_eq!(
         project.rows("SELECT head, proof FROM approval"),
         vec![json!({ "head": candidate, "proof": new_proof })]
@@ -1068,12 +1019,16 @@ fn a_sync_that_protects_an_auto_approved_path_withdraws_it() {
         "a check reran"
     );
 
-    project.json(&[
-        "attempt", "approve", "--target", "main", "Y-1", "--head", &head,
-    ]);
+    project.ok(
+        "attempt.approve",
+        json!({"target": "main", "head": &head, "ticket": "Y-1"}),
+    );
     release.write_all(b"go\n").unwrap();
     watch.event("landing.recorded", &[]);
-    assert_eq!(project.json(&["ticket", "show", "Y-1"])["state"], "done");
+    assert_eq!(
+        project.ok("ticket.show", json!({"ticket": "Y-1"}))["state"],
+        "done"
+    );
 }
 
 fn notes_machine(test: &str) -> Machine {
@@ -1115,7 +1070,7 @@ fn held_after_policy_change<'m>(
     let base = auto(unreviewed(&gates));
     let project = Project::new(machine, "p", &base);
     let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Add notes"]);
+    project.ok("ticket.new", json!({"title": "Add notes"}));
     let approved = watch.event("approval.given", &[("actor", "auto")]);
     let head = approved["data"]["head"].as_str().unwrap().to_string();
     watch.event("execution.started", &[("name", "held")]);
@@ -1161,9 +1116,10 @@ fn manual_policy_withdraws_auto_approval_without_rejudgment() {
             .len(),
         1
     );
-    project.json(&[
-        "attempt", "approve", "--target", "main", "Y-1", "--head", &head,
-    ]);
+    project.ok(
+        "attempt.approve",
+        json!({"target": "main", "head": &head, "ticket": "Y-1"}),
+    );
     release.write_all(b"go\n").unwrap();
     watch.event("landing.recorded", &[]);
 }
@@ -1172,7 +1128,7 @@ fn manual_policy_withdraws_auto_approval_without_rejudgment() {
 /// worker changes the head. After release it cannot cross the new head either.
 /// Refusals name the changed identity and write no rows; the current item's
 /// repair exit and its completed approval supply the same-project control.
-/// Expected revisions are the two CLI edits; heads come from host git.
+/// Expected revisions are the two operator edits; heads come from host git.
 /// Sabotage: omit ticket revision or head from candidate decisions, or let a
 /// repaired decision carry to the next candidate's check.
 /// G8: named original/fixer repairs precede an acceptance request. Sabotage:
@@ -1308,14 +1264,10 @@ runner = {kind = "agent", agent = "fixer", instructions = "Repair the frozen fai
         ),
     );
     let mut watch = project.watch(0);
-    project.json(&[
-        "ticket",
-        "new",
-        "--title",
-        "Delayed acceptance",
-        "--workflow",
-        "plan",
-    ]);
+    project.ok(
+        "ticket.new",
+        json!({"title": "Delayed acceptance", "workflow": "plan"}),
+    );
     watch.event("attempt.ended", &[("outcome", "planned")]);
     let cleanup = watch.find("planner cleanup", |event| {
         event["event"] == "execution.ended"
@@ -1347,7 +1299,7 @@ runner = {kind = "agent", agent = "fixer", instructions = "Repair the frozen fai
     assert!(admitted.get("error").is_none(), "{admitted}");
     let first = watch.attention();
     assert_eq!(first["data"]["kind"], "candidate");
-    let first_item = project.json(&["attempt", "show", "Y-1"])["attention"][0].clone();
+    let first_item = project.ok("attempt.show", json!({"ticket": "Y-1"}))["attention"][0].clone();
     let first_head = git(
         &project.path.join(".yard/local/attempts/2/clone"),
         &["rev-parse", "HEAD"],
@@ -1377,15 +1329,10 @@ runner = {kind = "agent", agent = "fixer", instructions = "Repair the frozen fai
     // Arm exactly one worker opening; a fresh session carries the full brief,
     // while resumed-session delta prose is not a fixture synchronization point.
     *edit_request.lock().unwrap() = Some(request_held.clone());
-    project.json(&[
-        "ticket",
-        "edit",
-        "Y-1",
-        "--revision",
-        "1",
-        "--body",
-        "New brief",
-    ]);
+    project.ok(
+        "ticket.edit",
+        json!({"revision": 1, "body": "New brief", "ticket": "Y-1"}),
+    );
     let edited = watch.until("edited worker started", |event| {
         assert_ne!(event["event"], "attention.raised", "{event}");
         event["event"] == "execution.started"
@@ -1450,7 +1397,7 @@ runner = {kind = "agent", agent = "fixer", instructions = "Repair the frozen fai
         json!({"identity": "head", "expected": first_head, "current": second_head})
     );
     assert_eq!(project.rows("SELECT * FROM audit ORDER BY seq"), before);
-    let item = project.json(&["attempt", "show", "Y-1"])["attention"][0].clone();
+    let item = project.ok("attempt.show", json!({"ticket": "Y-1"}))["attention"][0].clone();
     let repaired = operator.call("yard_attempt_repair", json!({
         "project": project.path, "ticket": "Y-1", "attention": item["attention"], "check": item["payload"]["evidence"]["check"]["check"], "plan_revision": 1,
         "target": "main", "head": second_head, "proof": item["payload"]["proof"], "text": "Use the admitted repair route"
@@ -1467,9 +1414,10 @@ runner = {kind = "agent", agent = "fixer", instructions = "Repair the frozen fai
         ),
         ""
     );
-    project.json(&[
-        "attempt", "approve", "Y-1", "--target", "main", "--head", head,
-    ]);
+    project.ok(
+        "attempt.approve",
+        json!({"target": "main", "head": head, "ticket": "Y-1"}),
+    );
     watch.event("landing.recorded", &[]);
     git(
         &project.canonical(),
@@ -1623,7 +1571,7 @@ fn selected_cleanup_reuses_only_unchanged_actual_judgment_inputs() {
         "-qm",
         "Retire audit-only hostile extension for ordinary work",
     ]);
-    project.json(&["sync"]);
+    project.ok("sync", json!({}));
     machine.wrapper(
         "pinfold",
         &format!(
@@ -1745,14 +1693,10 @@ instructions = "Judge only the declared fixture input."
     let mut watch = project.watch(0);
     let mut operator = machine.operator();
     operator.initialize();
-    project.json(&[
-        "ticket",
-        "new",
-        "--title",
-        "Cleanup actual inputs",
-        "--workflow",
-        "plan",
-    ]);
+    project.ok(
+        "ticket.new",
+        json!({"title": "Cleanup actual inputs", "workflow": "plan"}),
+    );
     let planned = watch.until("ordinary planning ended", |event| {
         if event["event"] == "execution.ended" && event["data"]["kind"] == "implementation" {
             assert_eq!(event["data"]["outcome"], "unchanged", "{event}");
@@ -1806,7 +1750,7 @@ instructions = "Judge only the declared fixture input."
     assert_eq!(ended["data"]["outcome"], "interrupted", "{ended}");
     // Ending and raising stopped share a transaction. A missing decision
     // fails at this terminal observation, rather than waiting for attention.
-    let item = project.json(&["attempt", "show", "Y-1"])["attention"]
+    let item = project.ok("attempt.show", json!({"ticket": "Y-1"}))["attention"]
         .as_array()
         .unwrap()
         .iter()
@@ -1867,7 +1811,7 @@ instructions = "Judge only the declared fixture input."
     };
     let fresh = original("cleanup-audit-current");
     assert_ne!(fresh["id"], interrupted);
-    let show = project.json(&["attempt", "show", "Y-1"]);
+    let show = project.ok("attempt.show", json!({"ticket": "Y-1"}));
     let shown = |id: &Value| {
         show["executions"]
             .as_array()
@@ -1976,19 +1920,7 @@ instructions = "Judge only the declared fixture input."
         json!({"expected": before_head, "current": after_head})
     );
     assert_eq!(project.rows("SELECT * FROM approval"), before);
-    project.json(&[
-        "attempt",
-        "reject",
-        "Y-1",
-        "--target",
-        "main",
-        "--head",
-        &after_head,
-        "--proof",
-        &after_proof,
-        "--text",
-        "Run the no-op selected cleanup",
-    ]);
+    project.ok("attempt.reject", json!({"target": "main", "head": &after_head, "proof": &after_proof, "text": "Run the no-op selected cleanup", "ticket": "Y-1"}));
     let second = approval(&mut watch);
     let feedback = json!({"kind": "verdict", "source": {"external": "feedback"},
         "value": {"reason": "repair", "detail": "Run the no-op selected cleanup", "rejected": after_head}});
@@ -2071,17 +2003,10 @@ instructions = "Judge only the declared fixture input."
         efforts.iter().all(|effort| effort == "medium"),
         "{efforts:?}"
     );
-    project.json(&[
-        "attempt",
-        "approve",
-        "Y-1",
-        "--target",
-        "main",
-        "--head",
-        &after_head,
-        "--proof",
-        &after_proof,
-    ]);
+    project.ok(
+        "attempt.approve",
+        json!({"target": "main", "head": &after_head, "proof": &after_proof, "ticket": "Y-1"}),
+    );
     watch.event("landing.recorded", &[]);
     assert_eq!(
         git(&project.canonical(), &["show", "refs/heads/main:chain.txt"]),

@@ -43,7 +43,7 @@ fn a_seat_that_exits_without_publishing_is_a_review_error() {
     machine.start();
     let project = Project::new(&machine, "p", &config(""));
     let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Add feature"]);
+    project.ok("ticket.new", json!({"title": "Add feature"}));
     let red = watch.attention();
     assert_eq!(
         (&red["data"]["kind"], &red["data"]["reason"]),
@@ -65,7 +65,7 @@ fn a_seat_that_exits_without_publishing_is_a_review_error() {
     );
     assert_eq!(kinds(&project, "implementation").len(), 1);
 
-    project.json(&["attempt", "start", "Y-1"]);
+    project.ok("attempt.start", json!({"ticket": "Y-1"}));
     let approval = watch.attention();
     assert_eq!(approval["data"]["kind"], "approval", "{approval}");
     let head = approval["data"]["payload"]["head"].clone();
@@ -156,9 +156,9 @@ export default async function () {
     project.write(".agents/skills/agentsskill/SKILL.md", &skill("agentsskill"));
     project.git(&["add", "-A"]);
     project.git(&["commit", "--quiet", "-m", "Add the agent environment"]);
-    project.json(&["sync"]);
+    project.ok("sync", json!({}));
     let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Add an extension"]);
+    project.ok("ticket.new", json!({"title": "Add an extension"}));
     let approval = watch.attention();
     assert_eq!(approval["data"]["kind"], "approval", "{approval}");
 
@@ -296,9 +296,9 @@ curl -s -X POST http://yard.mcp/mcp \
     .unwrap();
     project.git(&["add", "-A"]);
     project.git(&["commit", "--quiet", "-m", "Add claude rules"]);
-    project.json(&["sync"]);
+    project.ok("sync", json!({}));
     let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Add a hook"]);
+    project.ok("ticket.new", json!({"title": "Add a hook"}));
     let approval = watch.attention();
     assert_eq!(approval["data"]["kind"], "approval", "{approval}");
 
@@ -459,7 +459,7 @@ fi"#);
         ),
     );
     project.git(&["commit", "--quiet", "-am", "Conflicting auth"]);
-    let refused = project.refused(&["sync"]);
+    let refused = project.refused("sync", json!({}));
     assert_eq!(refused["code"], "invalid", "{refused}");
     assert!(
         refused["message"]
@@ -472,10 +472,10 @@ fi"#);
     assert_eq!(project.rows("SELECT seq FROM audit ORDER BY seq"), before);
     project.write(".yard/config.toml", &api);
     project.git(&["commit", "--quiet", "-am", "Direct Anthropic"]);
-    project.json(&["sync"]);
+    project.ok("sync", json!({}));
 
     let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "API review"]);
+    project.ok("ticket.new", json!({"title": "API review"}));
     let approval = watch.attention();
     assert_eq!(approval["data"]["kind"], "approval", "{approval}");
     let checks = project.rows("SELECT c.id, e.mcp FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE c.kind = 'review' ORDER BY c.id");
@@ -496,11 +496,14 @@ fi"#);
         assert_eq!(request.body["model"], "claude-opus-5-5");
     }
 
-    project.json(&["ticket", "park", "Y-1"]);
-    project.json(&["attempt", "abandon", "Y-1"]);
-    project.json(&["ticket", "abandon", "Y-1", "--reason", "Login control"]);
+    project.ok("ticket.park", json!({"ticket": "Y-1"}));
+    project.ok("attempt.abandon", json!({"ticket": "Y-1"}));
+    project.ok(
+        "ticket.abandon",
+        json!({"reason": "Login control", "ticket": "Y-1"}),
+    );
     project.reconfigure(&login);
-    project.json(&["ticket", "new", "--title", "Login review"]);
+    project.ok("ticket.new", json!({"title": "Login review"}));
     let approval = watch.attention();
     assert_eq!(approval["data"]["kind"], "approval", "{approval}");
     let login_requests = &machine.model.requests()[requests.len()..];
@@ -544,7 +547,7 @@ fi
     machine.start();
     let project = Project::new(&machine, "p", &config(""));
     let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Add feature"]);
+    project.ok("ticket.new", json!({"title": "Add feature"}));
     let approval = watch.find("registered review approves", |event| {
         event["event"] == "attention.raised" && event["data"]["kind"] == "approval"
     });
@@ -684,9 +687,9 @@ fi
     project.write(".agents/skills/baseskill/SKILL.md", base_skill);
     project.git(&["add", "-A"]);
     project.git(&["commit", "--quiet", "-m", "Add the codex layer"]);
-    project.json(&["sync"]);
+    project.ok("sync", json!({}));
     let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Add a hook"]);
+    project.ok("ticket.new", json!({"title": "Add a hook"}));
     let approval = watch.attention();
     assert_eq!(approval["data"]["kind"], "approval", "{approval}");
 
@@ -723,7 +726,7 @@ fi
     assert_credential_route(&machine, &token, "/backend-api/codex", Some(account_id));
     assert_own_session_only(&project, &machine, codex_seat);
 
-    project.json(&["ticket", "new", "--title", "Linked skill"]);
+    project.ok("ticket.new", json!({"title": "Linked skill"}));
     let item = watch.attention();
     assert_eq!(
         (&item["data"]["kind"], &item["data"]["reason"]),

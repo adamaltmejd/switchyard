@@ -14,6 +14,18 @@ pub(super) fn pre_target_binary() -> PathBuf {
         .clone()
 }
 
+/// The pre-target executable predates operator MCP. Its own CLI creates
+/// genuine historical state; successor calls never enter this setup.
+fn legacy_project<'a>(machine: &'a Machine, config: &str) -> Project<'a> {
+    let project = Project::checkout(machine, "p");
+    machine.legacy_cli(&project.path, &["init"]);
+    project.write(".yard/config.toml", config);
+    project.git(&["add", "-A"]);
+    project.git(&["commit", "--quiet", "-m", "yard"]);
+    machine.legacy_cli(&project.path, &["sync"]);
+    project
+}
+
 fn archived_binary(revision: &str, name: &str) -> PathBuf {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let target = yard().parent().unwrap().join(name);
@@ -113,27 +125,32 @@ fn an_upgrade_preserves_ended_planner_proposals_and_limit_overrides() {
     });
     machine.use_binary(Some(pre_target_binary()));
     machine.start();
-    let project = Project::new(
+    let project = legacy_project(
         &machine,
-        "p",
         &config("").replace("max_rounds = 3", "max_rounds = 1"),
     );
-    let mut watch = project.watch(0);
-    project.json(&[
-        "ticket",
-        "new",
-        "--title",
-        "Legacy plan",
-        "--workflow",
-        "plan",
-    ]);
+    let mut watch = machine.legacy_watch(&project.path, 0);
+    machine.legacy_cli(
+        &project.path,
+        &[
+            "ticket",
+            "new",
+            "--title",
+            "Legacy plan",
+            "--workflow",
+            "plan",
+        ],
+    );
     watch.until("legacy planner cleanup", |event| {
         event["event"] == "execution.ended" && event["data"]["kind"] == "cleanup"
     });
     let proposal = proposals(&project)[0].0;
     let rejected = proposals(&project)[1].0;
-    project.json(&["proposal", "reject", &rejected.to_string()]);
-    project.json(&["ticket", "new", "--title", "Add feature"]);
+    machine.legacy_cli(
+        &project.path,
+        &["proposal", "reject", &rejected.to_string()],
+    );
+    machine.legacy_cli(&project.path, &["ticket", "new", "--title", "Add feature"]);
     let limit = watch.attention();
     assert_eq!(
         (&limit["data"]["kind"], &limit["data"]["reason"]),
@@ -222,27 +239,29 @@ fn an_upgrade_preserves_ended_planner_proposals_and_limit_overrides() {
     );
     for ticket in ["Y-1", "Y-2"] {
         assert_eq!(
-            project.json(&["attempt", "show", ticket])["attempt"]["admission"],
+            project.ok("attempt.show", json!({"ticket": ticket}))["attempt"]["admission"],
             json!({"status": "unknown"})
         );
     }
-    let child = project.json(&["proposal", "accept", &proposal.to_string()]);
+    let child = project.ok("proposal.accept", json!({"attention": proposal}));
     assert_eq!(depends_on(&project, 1), [3]);
     assert_eq!(
         project.rows("SELECT target_branch FROM attempt WHERE ticket = 1"),
         vec![json!({ "target_branch": null })]
     );
     assert!(
-        project.json(&["ticket", "show", child["ticket"].as_str().unwrap()])["target"].is_null()
+        project.ok(
+            "ticket.show",
+            json!({"ticket": child["ticket"].as_str().unwrap()})
+        )["target"]
+            .is_null()
     );
     let head = payload["head"].as_str().unwrap();
-    let mut args = vec![
-        "attempt", "approve", "Y-2", "--target", "main", "--head", head,
-    ];
+    let mut args = json!({"ticket": "Y-2", "target": "main", "head": head});
     if !payload["proof"].as_str().unwrap().is_empty() {
-        args.extend(["--proof", payload["proof"].as_str().unwrap()]);
+        args["proof"] = payload["proof"].clone();
     }
-    project.json(&args);
+    project.ok("attempt.approve", args);
     let mut upgraded = project.watch(0);
     upgraded.event("landing.recorded", &[]);
     git(
@@ -253,7 +272,10 @@ fn an_upgrade_preserves_ended_planner_proposals_and_limit_overrides() {
         project.rows("SELECT overrode FROM approval WHERE attempt = 2"),
         vec![json!({ "overrode": 1 })]
     );
-    assert_eq!(project.json(&["ticket", "show", "Y-2"])["state"], "done");
+    assert_eq!(
+        project.ok("ticket.show", json!({"ticket": "Y-2"}))["state"],
+        "done"
+    );
 }
 
 fn propose(arguments: Value) -> ToolCall {
@@ -287,7 +309,7 @@ fn depends_on(project: &Project, ticket: i64) -> Vec<i64> {
 /// A ticket on `plan`: its clone refuses writes, it proposes children and a
 /// body edit, and the attempt ends with nothing raised; accepting them
 /// blocks the parent, which the scheduler does not start once they are
-/// done; `yard ticket done` then closes it and its dependents become ready.
+/// done; `yard_ticket_done` then closes it and its dependents become ready.
 /// G15: a read-only planner proposes children and a body edit. Same-run
 /// sibling dependencies block the parent; stale edits write nothing. A writable
 /// dependent keeps its own authority, and closing a live waiter refuses.
@@ -347,30 +369,13 @@ fn a_plan_proposes_children_that_block_it() {
     project.git(&["checkout", "--quiet", "-b", "feature/a"]);
     project.write(".yard/config.toml", &feature);
     project.git(&["commit", "--quiet", "-am", "Feature workflows"]);
-    project.json(&["sync", "feature/a"]);
+    project.ok("sync", json!({"branch": "feature/a"}));
     let mut watch = project.watch(0);
-    project.json(&[
-        "ticket",
-        "new",
-        "--title",
-        "Plan the release",
-        "--target",
-        "feature/a",
-        "--workflow",
-        "plan",
-    ]);
-    project.json(&[
-        "ticket",
-        "new",
-        "--title",
-        "Write here",
-        "--target",
-        "feature/a",
-        "--workflow",
-        "write",
-        "--depends-on",
-        "Y-1",
-    ]);
+    project.ok(
+        "ticket.new",
+        json!({"title": "Plan the release", "target": "feature/a", "workflow": "plan"}),
+    );
+    project.ok("ticket.new", json!({"title": "Write here", "target": "feature/a", "workflow": "write", "depends_on": ["Y-1"]}));
     let ended = watch.event("attempt.ended", &[("outcome", "planned")]);
     assert_eq!(ended["ticket"], "Y-1");
     let plan = answers.lock().unwrap()[0].clone();
@@ -412,17 +417,17 @@ fn a_plan_proposes_children_that_block_it() {
     let mut accept: Vec<&(i64, Value)> = pending.iter().filter(|(id, _)| *id != stale).collect();
     accept.sort_by_key(|(_, payload)| payload["title"].as_str().unwrap_or_default().to_owned());
     for (id, _) in accept {
-        project.json(&["proposal", "accept", &id.to_string()]);
+        project.ok("proposal.accept", json!({"attention": id}));
     }
     // The refusal changes no row. Cleanup executions for the ended plan
     // attempts land on their own schedule, so a `MAX(seq)` read would race
     // them; observe the body and revision the stale edit could change, and
     // the item that stays open.
-    let refused = project.refused(&["proposal", "accept", &stale.to_string()]);
+    let refused = project.refused("proposal.accept", json!({"attention": stale}));
     assert_eq!(refused["code"], "stale", "{refused}");
     assert_eq!(refused["data"]["expected"], 1);
     assert_eq!(refused["data"]["current"], 2);
-    let plan = project.json(&["ticket", "show", "Y-1"]);
+    let plan = project.ok("ticket.show", json!({"ticket": "Y-1"}));
     assert_eq!(
         (plan["body"].as_str(), plan["revision"].as_i64()),
         (Some("The plan: A, then B."), Some(2))
@@ -433,14 +438,20 @@ fn a_plan_proposes_children_that_block_it() {
     );
     // Reject it so no open edit proposal blocks the parent's readiness; the
     // `admit::scheduled` sabotage below must be free to start it again.
-    project.json(&["proposal", "reject", &stale.to_string()]);
+    project.ok("proposal.reject", json!({"attention": stale}));
 
     assert_eq!(depends_on(&project, 1), [3, 4]);
     for child in ["Y-3", "Y-4"] {
-        project.json(&["ticket", "done", child, "--reason", "Done by hand"]);
+        project.ok(
+            "ticket.done",
+            json!({"reason": "Done by hand", "ticket": child}),
+        );
     }
 
-    project.json(&["ticket", "done", "Y-1", "--reason", "Its children are done"]);
+    project.ok(
+        "ticket.done",
+        json!({"reason": "Its children are done", "ticket": "Y-1"}),
+    );
     let admitted = watch.event("attempt.admitted", &[]);
     assert_eq!(admitted["ticket"], "Y-2");
 
@@ -459,10 +470,14 @@ fn a_plan_proposes_children_that_block_it() {
         .find(|(_, payload)| payload["title"] == "Writable child")
         .unwrap()
         .0;
-    let child = project.json(&["proposal", "accept", &writable.to_string()]);
+    let child = project.ok("proposal.accept", json!({"attention": writable}));
     assert_eq!(depends_on(&project, 2), [1]);
     assert!(
-        project.json(&["ticket", "show", child["ticket"].as_str().unwrap()])["target"].is_null()
+        project.ok(
+            "ticket.show",
+            json!({"ticket": child["ticket"].as_str().unwrap()})
+        )["target"]
+            .is_null()
     );
 
     // A waiting attempt is live even with no execution running. Sabotage:
@@ -476,14 +491,26 @@ fn a_plan_proposes_children_that_block_it() {
             ))
             .is_empty()
     );
-    let refused = project.refused(&["ticket", "done", "Y-2", "--reason", "Not needed"]);
+    let refused = project.refused(
+        "ticket.done",
+        json!({"reason": "Not needed", "ticket": "Y-2"}),
+    );
     assert_eq!(refused["code"], "refused", "{refused}");
     assert_eq!(refused["data"]["attempt"], attempt);
-    assert_eq!(project.json(&["ticket", "show", "Y-2"])["state"], "open");
-    project.json(&["ticket", "park", "Y-2"]);
-    project.json(&["attempt", "abandon", "Y-2"]);
-    project.json(&["ticket", "done", "Y-2", "--reason", "Not needed"]);
-    assert_eq!(project.json(&["ticket", "show", "Y-2"])["state"], "done");
+    assert_eq!(
+        project.ok("ticket.show", json!({"ticket": "Y-2"}))["state"],
+        "open"
+    );
+    project.ok("ticket.park", json!({"ticket": "Y-2"}));
+    project.ok("attempt.abandon", json!({"ticket": "Y-2"}));
+    project.ok(
+        "ticket.done",
+        json!({"reason": "Not needed", "ticket": "Y-2"}),
+    );
+    assert_eq!(
+        project.ok("ticket.show", json!({"ticket": "Y-2"}))["state"],
+        "done"
+    );
 }
 
 /// G5: a real pre-capacity binary dies with its clone Git child held before
@@ -523,13 +550,13 @@ fn an_upgrade_retains_a_legacy_pre_box_child_without_an_ownership_proof() {
     machine.use_binary(Some(pre_target_binary()));
     machine.start();
     let configured = config("").replace("review = [\"correctness\"]", "review = \"none\"");
-    let project = Project::new(&machine, "p", &configured);
-    let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Control"]);
+    let project = legacy_project(&machine, &configured);
+    let mut watch = machine.legacy_watch(&project.path, 0);
+    machine.legacy_cli(&project.path, &["ticket", "new", "--title", "Control"]);
     let control = watch.attention();
     assert_eq!(control["data"]["kind"], "approval");
     std::fs::write(&armed, "").unwrap();
-    project.json(&["ticket", "new", "--title", "Legacy"]);
+    machine.legacy_cli(&project.path, &["ticket", "new", "--title", "Legacy"]);
     let pid = watch.said(&said_path).trim().to_string();
     drop(watch);
     machine.kill();
@@ -560,8 +587,8 @@ fn an_upgrade_retains_a_legacy_pre_box_child_without_an_ownership_proof() {
     );
     git(&project.path, &["add", ".yard/config.toml"]);
     git(&project.path, &["commit", "-qm", "Set shared capacity"]);
-    project.json(&["sync"]);
-    project.json(&["ticket", "new", "--title", "Waiter"]);
+    project.ok("sync", json!({}));
+    project.ok("ticket.new", json!({"title": "Waiter"}));
     let waiting = watch.event("execution.waiting", &[]);
     assert_eq!(waiting["ticket"], "Y-3");
     assert_eq!(waiting["data"]["reason"], "capacity");
@@ -572,7 +599,7 @@ fn an_upgrade_retains_a_legacy_pre_box_child_without_an_ownership_proof() {
     machine.start();
     // Serving and this supported read occur after startup reconciliation.
     // Historical ownership attention alone cannot prove reconsideration.
-    let status = project.json(&["status"]);
+    let status = project.ok("status", json!({}));
     let retained = status["attention"]
         .as_array()
         .unwrap()
@@ -588,7 +615,7 @@ fn an_upgrade_retains_a_legacy_pre_box_child_without_an_ownership_proof() {
     );
     let before = project.rows("SELECT * FROM execution WHERE id = 2");
     let attempt_before = project.rows("SELECT * FROM attempt WHERE ticket = 2");
-    let refused = project.refused(&["attempt", "stop", "Y-2"]);
+    let refused = project.refused("attempt.stop", json!({"ticket": "Y-2"}));
     assert_eq!(refused["code"], "refused");
     assert_eq!(refused["data"]["reason"], "ownership");
     assert_eq!(refused["data"]["ticket"], "Y-2");

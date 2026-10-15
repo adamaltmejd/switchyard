@@ -121,7 +121,7 @@ fn refuse_pending_continuation(conn: &rusqlite::Connection, attempt: i64) -> Res
 
 /// Whether the scheduler would admit a ready ticket given a free lane: its
 /// workflow exists, and a read-only workflow runs once, then only by
-/// `yard attempt start`.
+/// Operator `attempt.start`.
 pub fn admissible(
     conn: &rusqlite::Connection,
     loaded: &Loaded,
@@ -1761,7 +1761,7 @@ pub async fn attempt_revise(
     Ok(result)
 }
 
-/// `yard attempt start`: the scheduler's admission for one named ticket, or
+/// Operator `attempt.start`: the scheduler's admission for one named ticket, or
 /// the `start` of its live attempt's stopped or red item.
 pub async fn attempt_start(
     daemon: &Arc<Daemon>,

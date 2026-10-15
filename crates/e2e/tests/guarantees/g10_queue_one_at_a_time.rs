@@ -64,22 +64,24 @@ fn the_queue_lands_in_order_and_rejudges_a_red_merge() {
     let project = Project::new(&machine, "p", &unreviewed(&gate));
     let mut watch = project.watch(0);
     for title in ["First", "Second"] {
-        project.json(&["ticket", "new", "--title", title]);
+        project.ok("ticket.new", json!({"title": title}));
     }
     let heads: Vec<String> = ["Y-1", "Y-2"]
         .iter()
         .map(|ticket| approval_of(&mut watch, ticket))
         .collect();
     for (ticket, head) in ["Y-1", "Y-2"].iter().zip(&heads) {
-        project.json(&[
-            "attempt", "approve", "--target", "main", ticket, "--head", head,
-        ]);
+        project.ok(
+            "attempt.approve",
+            json!({"target": "main", "head": head, "ticket": ticket}),
+        );
     }
 
     let again = next_approval_of(&mut watch, "Y-2");
-    project.json(&[
-        "attempt", "approve", "--target", "main", "Y-2", "--head", &again,
-    ]);
+    project.ok(
+        "attempt.approve",
+        json!({"target": "main", "head": &again, "ticket": "Y-2"}),
+    );
     // The second red raises `red` before anything else starts on Y-2.
     let red = watch.until("Y-2 red or a repair", |event| {
         event["ticket"] == "Y-2"
@@ -200,16 +202,17 @@ fn a_ticket_binds_feature_inputs_repairs_and_lands_on_its_target() {
     );
     project.git(&["add", "image-input"]);
     project.git(&["commit", "--quiet", "-am", "Main image"]);
-    project.json(&["sync"]);
+    project.ok("sync", json!({}));
     let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Main target"]);
+    project.ok("ticket.new", json!({"title": "Main target"}));
     let main_head = approval_of(&mut watch, "Y-1");
-    project.json(&[
-        "attempt", "approve", "Y-1", "--target", "main", "--head", &main_head,
-    ]);
+    project.ok(
+        "attempt.approve",
+        json!({"target": "main", "head": &main_head, "ticket": "Y-1"}),
+    );
     watch.event("landing.recorded", &[]);
     let main = project.canonical_head();
-    project.json(&["sync"]);
+    project.ok("sync", json!({}));
 
     project.git(&["checkout", "--quiet", "-b", "feature/a"]);
     project.write("shared.txt", "base\n");
@@ -257,16 +260,12 @@ fn a_ticket_binds_feature_inputs_repairs_and_lands_on_its_target() {
             {"path": "AGENTS.md", "blob": object(&format!("{base}:AGENTS.md")), "executable": false}
         ]
     });
-    project.json(&["sync", "feature/a"]);
-    project.json(&[
-        "ticket",
-        "new",
-        "--title",
-        "Feature target",
-        "--target",
-        "missing",
-    ]);
-    let missing = project.refused(&["attempt", "start", "Y-2"]);
+    project.ok("sync", json!({"branch": "feature/a"}));
+    project.ok(
+        "ticket.new",
+        json!({"title": "Feature target", "target": "missing"}),
+    );
+    let missing = project.refused("attempt.start", json!({"ticket": "Y-2"}));
     assert_eq!(missing["code"], "refused");
     assert_eq!(
         missing["data"],
@@ -277,28 +276,19 @@ fn a_ticket_binds_feature_inputs_repairs_and_lands_on_its_target() {
             .rows("SELECT id FROM attempt WHERE ticket = 2")
             .is_empty()
     );
-    let stale = project.refused(&[
-        "ticket",
-        "edit",
-        "Y-2",
-        "--revision",
-        "0",
-        "--target",
-        "feature/a",
-    ]);
+    let stale = project.refused(
+        "ticket.edit",
+        json!({"revision": 0, "target": "feature/a", "ticket": "Y-2"}),
+    );
     assert_eq!(stale["code"], "stale");
     assert_eq!(stale["data"], json!({ "expected": 0, "current": 1 }));
-    project.json(&[
-        "ticket",
-        "edit",
-        "Y-2",
-        "--revision",
-        "1",
-        "--target",
-        "feature/a",
-    ]);
+    project.ok(
+        "ticket.edit",
+        json!({"revision": 1, "target": "feature/a", "ticket": "Y-2"}),
+    );
     hold.wait_held();
-    let admission = project.json(&["attempt", "show", "Y-2"])["attempt"]["admission"].clone();
+    let admission =
+        project.ok("attempt.show", json!({"ticket": "Y-2"}))["attempt"]["admission"].clone();
     assert_eq!(admission["status"], "recorded");
     assert_eq!(admission["target"], "feature/a");
     assert_eq!(admission["config_head"], base);
@@ -385,15 +375,10 @@ fn a_ticket_binds_feature_inputs_repairs_and_lands_on_its_target() {
         project.rows("SELECT target_branch, base FROM attempt WHERE ticket = 2"),
         vec![json!({ "target_branch": "feature/a", "base": base })]
     );
-    let live = project.refused(&[
-        "ticket",
-        "edit",
-        "Y-2",
-        "--revision",
-        "2",
-        "--target",
-        "main",
-    ]);
+    let live = project.refused(
+        "ticket.edit",
+        json!({"revision": 2, "target": "main", "ticket": "Y-2"}),
+    );
     assert_eq!(live["code"], "refused");
     let attempt_id = project.rows("SELECT id FROM attempt WHERE ticket = 2")[0]["id"].clone();
     assert_eq!(
@@ -411,9 +396,10 @@ fn a_ticket_binds_feature_inputs_repairs_and_lands_on_its_target() {
         base
     );
     let approvals = project.rows("SELECT * FROM approval");
-    let stale = project.refused(&[
-        "attempt", "approve", "Y-2", "--target", "main", "--head", &first,
-    ]);
+    let stale = project.refused(
+        "attempt.approve",
+        json!({"target": "main", "head": &first, "ticket": "Y-2"}),
+    );
     assert_eq!(stale["code"], "stale");
     assert_eq!(
         stale["data"],
@@ -436,16 +422,11 @@ fn a_ticket_binds_feature_inputs_repairs_and_lands_on_its_target() {
     );
     project.git(&["commit", "--quiet", "-am", "Conflict and feature inputs"]);
     let target = project.git(&["rev-parse", "HEAD"]).trim().to_string();
-    project.json(&["sync", "feature/a"]);
-    project.json(&[
-        "attempt",
-        "approve",
-        "Y-2",
-        "--target",
-        "feature/a",
-        "--head",
-        &first,
-    ]);
+    project.ok("sync", json!({"branch": "feature/a"}));
+    project.ok(
+        "attempt.approve",
+        json!({"target": "feature/a", "head": &first, "ticket": "Y-2"}),
+    );
     let repaired = next_approval_of(&mut watch, "Y-2");
     assert_ne!(repaired, first);
     let repair_prompt = machine
@@ -461,7 +442,7 @@ fn a_ticket_binds_feature_inputs_repairs_and_lands_on_its_target() {
         vec![json!({ "target_branch": "feature/a", "base": target, "head": repaired })]
     );
     assert_eq!(
-        project.json(&["attempt", "show", "Y-2"])["attempt"]["admission"],
+        project.ok("attempt.show", json!({"ticket": "Y-2"}))["attempt"]["admission"],
         admission
     );
     assert_eq!(project.rows("SELECT DISTINCT plan_revision FROM execution WHERE attempt = 2 AND kind IN ('gate', 'review')"), vec![json!({"plan_revision": 1})]);
@@ -473,13 +454,13 @@ fn a_ticket_binds_feature_inputs_repairs_and_lands_on_its_target() {
             .is_empty()
     );
     let results = project.rows("SELECT id, image_id, digest, plan_revision FROM execution WHERE attempt = 2 AND kind IN ('gate', 'review') ORDER BY id");
-    let seq = project.json(&["status"])["seq"].as_i64().unwrap();
+    let seq = project.ok("status", json!({}))["seq"].as_i64().unwrap();
     drop(watch);
     machine.kill();
     machine.start();
     let mut watch = project.watch(seq);
     assert_eq!(
-        project.json(&["attempt", "show", "Y-2"])["attempt"]["admission"],
+        project.ok("attempt.show", json!({"ticket": "Y-2"}))["attempt"]["admission"],
         admission
     );
     assert_eq!(
@@ -492,15 +473,10 @@ fn a_ticket_binds_feature_inputs_repairs_and_lands_on_its_target() {
         git(&project.canonical(), &["rev-parse", "refs/heads/feature/a"]).trim(),
         target
     );
-    project.json(&[
-        "attempt",
-        "approve",
-        "Y-2",
-        "--target",
-        "feature/a",
-        "--head",
-        &repaired,
-    ]);
+    project.ok(
+        "attempt.approve",
+        json!({"target": "feature/a", "head": &repaired, "ticket": "Y-2"}),
+    );
     let landed = watch.until("feature landing", |event| {
         event["event"] == "landing.recorded" && event["ticket"] == "Y-2"
     });
@@ -524,18 +500,18 @@ fn a_ticket_binds_feature_inputs_repairs_and_lands_on_its_target() {
         ),
         configured("feature-v2")
     );
-    assert_eq!(project.json(&["ticket", "show", "Y-2"])["state"], "done");
+    assert_eq!(
+        project.ok("ticket.show", json!({"ticket": "Y-2"}))["state"],
+        "done"
+    );
     // A future admission resolves the fixture's v2 definitions and Dockerfile.
-    project.json(&[
-        "ticket",
-        "new",
-        "--title",
-        "Future target",
-        "--target",
-        "feature/a",
-    ]);
+    project.ok(
+        "ticket.new",
+        json!({"title": "Future target", "target": "feature/a"}),
+    );
     approval_of(&mut watch, "Y-3");
-    let future = project.json(&["attempt", "show", "Y-3"])["attempt"]["admission"].clone();
+    let future =
+        project.ok("attempt.show", json!({"ticket": "Y-3"}))["attempt"]["admission"].clone();
     assert_eq!(future["config_head"], repaired);
     assert_eq!(future["revision"], 1);
     assert_eq!(
@@ -547,8 +523,8 @@ fn a_ticket_binds_feature_inputs_repairs_and_lands_on_its_target() {
         future["inputs"]["dockerfile_blob"],
         object(&format!("{target}:.yard/Dockerfile"))
     );
-    project.json(&["ticket", "park", "Y-3"]);
-    project.json(&["attempt", "abandon", "Y-3"]);
+    project.ok("ticket.park", json!({"ticket": "Y-3"}));
+    project.ok("attempt.abandon", json!({"ticket": "Y-3"}));
     assert_eq!(
         std::fs::read_to_string(&counter).unwrap(),
         "main\nmain\nfeature-v1\nfeature-v1\nfeature-v1\nfeature-v2\n"

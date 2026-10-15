@@ -20,14 +20,10 @@ fn configuration() -> String {
 }
 
 fn settle_planner(project: &Project<'_>, watch: &mut Watch) {
-    project.json(&[
-        "ticket",
-        "new",
-        "--title",
-        "Combine inputs",
-        "--workflow",
-        "plan",
-    ]);
+    project.ok(
+        "ticket.new",
+        json!({"title": "Combine inputs", "workflow": "plan"}),
+    );
     let planner = watch.event("attempt.ended", &[("outcome", "planned")]);
     let cleanup = watch.find("planner cleanup", |event| {
         event["event"] == "execution.ended"

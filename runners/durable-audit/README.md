@@ -83,7 +83,7 @@ a packaged cleanup profile with `access = "write-allowed"`, report output and
 `complete`. Keep the implementer and repair profiles ordinary. Cleanup shares
 their source clone; repair alone produces the final candidate. Arbitrary
 graphs and delegation remain refused. A read-only workflow with no seats may
-also set `profile = "durable"`; `yard ticket new --workflow NAME` then admits
+also set `profile = "durable"`; `yard_ticket_new` with `workflow: "NAME"` then admits
 that explicit selection. The profile is not inherited from the default.
 Admission freezes selected canonical
 Git blobs, the resolved runner and package identity. Yard generates launch

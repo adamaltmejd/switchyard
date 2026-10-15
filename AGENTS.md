@@ -23,7 +23,7 @@ rules for changing the repository.
   recovery path.
 - One current truth. Readiness, the current check, approval, liveness and
   merge readiness each have one authoritative reading.
-- The daemon is the only store writer. The CLI talks to the daemon; git and
+- The daemon is the only store writer. Operator MCP/API talks to the daemon; git and
   pinfold are child processes with explicit cwd, a scrubbed environment,
   bounded output and time.
 - No secret value in argv, logs, the store, or any file Yard writes into a
@@ -33,7 +33,7 @@ rules for changing the repository.
 - Plain prose, short sentences, in docs and comments. Comment only
   non-obvious intent, footguns, issue links and revisit triggers.
 - A ticket is admitted for a new guarantee, a bug reproduced through the
-  CLI, or a consolidation of one module that changes no test assertion and
+  supported operator MCP/API, or a consolidation of one module that changes no test assertion and
   names what it removes: a concept, a path, a special case, a duplicate.
   Fewer lines is the usual evidence, not the gate; a consolidation that adds
   an abstraction and removes nothing is rejected. A proposal born in an attempt
@@ -51,11 +51,15 @@ rules for changing the repository.
 - **End-to-end only.** No unit tests, mocks, runtime stubs, or test-only code
   paths or flags in the binary. A test builds the real binary, starts a real
   daemon on a real project with real pinfold boxes, and observes from
-  outside: exit codes, `--json` output, the store file, canonical git state,
+  outside: service exit codes, structured operator MCP/API output, the store file, canonical git state,
   host files, or acts from inside a box through `pinfold box exec`. The e2e
-  crate never imports yard's internals; its only seams are a user's: the CLI,
-  the socket, `config.toml`, `operator.env`, the git repositories, and the
+  crate never imports yard's internals; its only seams are a user's: service/MCP startup,
+  supported operator MCP/API, `config.toml`, `operator.env`, the git repositories, and the
   tools a worker calls.
+  Historical setup may use an explicitly selected real old executable's CLI
+  when it lacks successor operations. No version-detecting compatibility
+  dispatcher or successor task CLI is supported. Closed history fails event
+  waits promptly; an independent held FIFO may outlive planned daemon death.
 - **A small core.** Select tests by the cost of failure: unauthorized effects,
   stale identity, corruption and recovery, ownership, isolation, secrets, and
   representative end-to-end use. G1 to G15 are product requirements, not a
@@ -87,7 +91,7 @@ rules for changing the repository.
      identity it names. A timeout is not a pass.
   3. Names its sabotage: the change to the binary that makes it fail, in
      the test's comment.
-- **Deterministic.** No sleeps: wait on `status --history --since`. No
+- **Deterministic.** No sleeps: consume bounded `events` pages with an ordered `since` cursor. No
   retries: a flaky test is a bug to fix or delete. No test waits out a
   timeout or a clock; timeouts are configuration, not guarantees. The
   workers are real Pi in real boxes against a scripted fake model on the

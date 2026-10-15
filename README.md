@@ -62,62 +62,62 @@ Install and start the daemon as the user service:
 
     yard daemon install
 
-In a git checkout, scaffold `.yard` and register the project:
+Start the trusted operator MCP adapter on the host:
 
-    yard init
+    yard mcp
 
-Edit `.yard/config.toml` (agents, workflows, gates), commit, then import
-the branch into canonical:
+Connect an MCP client to its stdin/stdout and use `tools/list` for schemas.
+Operator tools take an absolute registered `project` path.
+`yard_init` instead takes `{"path":"/path/to/checkout"}`; it scaffolds
+`.yard` and registers the checkout. Edit `.yard/config.toml`, commit, then
+call `yard_sync` with `{"project":"/path/to/checkout"}`.
 
-    yard sync
-
-`yard sync feature/a` imports or consumes that local branch's committed
-history. Consume requires a clean checkout of the selected branch. Named
-import keeps the project default. `yard sync feature/a --default` selects
-it explicitly after its committed `target.ref` names `feature/a`, with no
-landing intent. Live attempts keep their admitted targets. Omitted sync uses canonical's symbolic HEAD.
-Selection uses an imported canonical head when the checkout branch is absent
-or behind, without changing the checkout. Its clean matching checkout rule
-applies only to consume.
-
-Check pinfold, the service, the configuration, the image, the credentials
-and registered project paths that are gone:
-
-    yard doctor
+`yard_sync` with `branch: "feature/a"` imports or consumes that local
+branch's committed history. Consume requires a clean checkout of the
+selected branch. Named import keeps the default; `default: true` selects
+it after its committed `target.ref` names that branch, with no landing
+intent. Live attempts keep their admitted targets. Omitted branch uses
+canonical's symbolic HEAD. Selection can use an already imported canonical
+head without consuming or switching the checkout. `yard_doctor` reports
+pinfold, configuration, image and credential availability.
 
 ## The loop
 
-    yard ticket new --title T --body B [--target BRANCH]
-    yard status --watch
-    yard attempt diff Y-n
-    yard attempt approve Y-n --target BRANCH --head SHA [--proof DIGEST]
-    yard sync
+1. Call `yard_ticket_new` with project, title, body and optional target.
+2. Poll `yard_attention`. An empty result is drained only when idle is true.
+3. Read `yard_attempt_show` and `yard_attempt_diff` for the named ticket.
+4. Call `yard_attempt_approve` with the exact target, head and other
+   identities named by the item, including proof and choice when present.
+5. Wait for `landing.recorded` through `yard_events`, then call `yard_sync`.
 
-A ticket freezes its effective target at admission; omission uses the project
-default. An inactive open ticket can change its override with revision-bound
-`ticket edit --target BRANCH`, or clear it with `--default-target`. Gates,
-review, repair and landing use the frozen branch and its trusted inputs.
+A ticket freezes its effective target at admission. An inactive ticket's
+override can change through revision-bound `yard_ticket_edit`; default_target
+clears it. Status omits bodies: use `yard_ticket_show` to read them.
+`yard_attempt_tail` and `yard_attempt_stats` provide explicit drilldowns.
 
-The rest is in the `yard-operator` skill
-(`.agents/skills/yard-operator/SKILL.md`).
+MCP returns `structuredContent.result` or `structuredContent.error`;
+stale errors retain expected/current identity data. History pages contain
+at most 500 events; advance since only through consumed events. Empty pages
+keep the cursor. Attention polls wait at most 25 seconds; with since they
+wait past older open items or old attempt ends. Repeat an empty non-idle
+poll at the same cursor. Cancelling observation leaves work running.
+Workers retain separate execution-scoped HTTP grants.
 
-`yard mcp` serves trusted operator MCP on stdio through the existing daemon
-socket. Tools cover the operations above, projects, tickets, proposals,
-attempt inspection and decisions, and bounded history and attention polls.
-Pass an absolute registered `project` path. Status omits ticket bodies;
-use `yard_ticket_show`, `yard_attempt_tail` and `yard_attempt_stats` for
-drilldowns. Cancelling a wait releases the request while work continues.
-Workers keep their separate execution-scoped HTTP grants.
 Attempt and project statistics expose local model-trial source choices,
 eligible samples, frozen plan provenance and partial usage. Picker selection
 measures usefulness to that picker, not correctness.
+
+The `yard-operator` skill (`.agents/skills/yard-operator/SKILL.md`) lists
+operations; `yard-drive` supplies board judgment. The executable retains
+only service commands, MCP startup and version. Construction remains on
+its frozen installed executable until a deliberate operator switchover.
 
 Use `yard_plan_catalog` with `project` to inspect target-bound presets,
 profiles, provider/model settings, selected skills and publication tools.
 New projects ship ordinary, small, skill audit, writable cleanup, failed-check
 classifier, concurrent review/check join, independent selector/integration,
 and implementation/review model-trial presets. Existing project templates
-are updated only by the operator through `yard sync`.
+are updated only by the operator through `yard_sync`.
 
 For example, resolve `{"project":"/path/to/project","preset":"ordinary",
 "overrides":{"implementer":{"profile":"trial-1"}}}` with
@@ -149,12 +149,12 @@ Repair retires approval and binds the exact failed evidence to the next
 implementer execution. The original failure stays failed. Its fresh candidate
 must pass selected verification and gain approval before landing.
 
-To explicitly accept landing omissions, approve with repeated
-`--observe-landing-skipped NODE`. This requests a decision after merge
+To explicitly accept landing omissions, approve with the
+`observe_landing_skipped` node array. This requests a decision after merge
 preparation, including an empty landing selection. Answer its attention with
-`attempt accept --accept-skipped NODE` for each requested node, the candidate
-bindings, `--landing`, `--base`, `--revision`, `--old`, `--merged` and nonempty
-`--text`. Omitted nodes keep no execution or result. Every retained landing
+`yard_attempt_accept` with `accept_skipped`, the candidate
+bindings, `landing`, `base`, `revision`, `old`, `merged` and nonempty
+`text`. Omitted nodes keep no execution or result. Every retained landing
 gate still runs. Ordinary omissions record no explicit acceptance.
 
 ## Development

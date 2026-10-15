@@ -50,7 +50,7 @@ pub fn empty_digest() -> String {
 
 /// Whether an operator approving or rejecting a candidate must name its
 /// proof digest. A real snapshot must be named; an empty proof, and the
-/// digest of an empty directory, take `--head` alone.
+/// digest of an empty directory, take `head` alone.
 pub fn required(digest: &str) -> bool {
     !digest.is_empty() && digest != empty_digest()
 }

@@ -20,16 +20,13 @@ fn openings(machine: &Machine) -> Vec<ModelRequest> {
 }
 
 fn edit_body(project: &Project, body: &str) {
-    let revision = project.json(&["ticket", "show", "Y-1"])["revision"].to_string();
-    project.json(&[
-        "ticket",
-        "edit",
-        "Y-1",
-        "--revision",
-        &revision,
-        "--body",
-        body,
-    ]);
+    let revision = project.ok("ticket.show", json!({"ticket": "Y-1"}))["revision"]
+        .as_i64()
+        .unwrap();
+    project.ok(
+        "ticket.edit",
+        json!({"revision": revision, "body": body, "ticket": "Y-1"}),
+    );
 }
 
 fn reasons(project: &Project) -> Vec<Value> {
@@ -206,7 +203,7 @@ fn an_edit_reaches_the_next_prompt_and_stop_delivers_it_sooner() {
     stage("v1");
     edited.git(&["add", "-A"]);
     edited.git(&["commit", "-qm", "Original startup input"]);
-    edited.json(&["sync"]);
+    edited.ok("sync", json!({}));
     let original_commit = edited.git(&["rev-parse", "HEAD"]).trim().to_string();
     let original_blob = edited
         .git(&["rev-parse", &format!("HEAD:{staged_path}")])
@@ -217,16 +214,19 @@ fn an_edit_reaches_the_next_prompt_and_stop_delivers_it_sooner() {
     ).replace("implementer = \"worker\"", "implementer = \"stopper\""));
     let mut edit_watch = edited.watch(0);
     let mut stop_watch = stopped.watch(0);
-    edited.json(&["ticket", "new", "--title", "Add feature", "--parked"]);
-    edited.json(&["ticket", "new", "--title", "Hold capacity"]);
+    edited.ok(
+        "ticket.new",
+        json!({"title": "Add feature", "parked": true}),
+    );
+    edited.ok("ticket.new", json!({"title": "Hold capacity"}));
     owner_hold.wait_held();
-    edited.json(&["ticket", "unpark", "Y-1"]);
+    edited.ok("ticket.unpark", json!({"ticket": "Y-1"}));
     let waiting = edit_watch.until("Y-1 waits before implementation startup", |event| {
         event["event"] == "execution.waiting"
             && event["ticket"] == "Y-1"
             && event["data"]["reason"] == "capacity"
     });
-    stopped.json(&["ticket", "new", "--title", "Add widget"]);
+    stopped.ok("ticket.new", json!({"title": "Add widget"}));
     stop_hold.wait_held();
 
     let execution = waiting["execution"].as_i64().unwrap();
@@ -267,7 +267,7 @@ fn an_edit_reaches_the_next_prompt_and_stop_delivers_it_sooner() {
         "-qm",
         "Adopted settings definitions and startup input",
     ]);
-    edited.json(&["sync"]);
+    edited.ok("sync", json!({}));
     let adopted_commit = edited.git(&["rev-parse", "HEAD"]).trim().to_string();
     let adopted_blob = edited
         .git(&["rev-parse", &format!("HEAD:{staged_path}")])
@@ -353,7 +353,7 @@ fn an_edit_reaches_the_next_prompt_and_stop_delivers_it_sooner() {
     edit_body(&edited, "Rename it too");
     successor_hold.release();
     edit_body(&stopped, "Rename it now");
-    stopped.json(&["attempt", "stop", "Y-1"]);
+    stopped.ok("attempt.stop", json!({"ticket": "Y-1"}));
 
     let approval = edit_watch.attention();
     assert_eq!(approval["data"]["kind"], "approval", "{approval}");
@@ -432,7 +432,7 @@ fn an_edit_reaches_the_next_prompt_and_stop_delivers_it_sooner() {
     assert_eq!(item["data"]["kind"], "stopped", "{item}");
     assert!(stop_hold.is_held(), "the worker's request was answered");
     assert_eq!(reasons(&stopped), [json!("first")]);
-    stopped.json(&["attempt", "start", "Y-1"]);
+    stopped.ok("attempt.start", json!({"ticket": "Y-1"}));
     let approval = stop_watch.attention();
     assert_eq!(approval["data"]["kind"], "approval", "{approval}");
     assert_eq!(reasons(&stopped), [json!("first"), json!("restart")]);

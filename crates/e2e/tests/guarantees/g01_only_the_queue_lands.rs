@@ -70,7 +70,7 @@ fn a_worker_cannot_land_by_push_rpc_or_canonical() {
     );
     let target = project.canonical_head();
     let mut watch = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Add feature"]);
+    project.ok("ticket.new", json!({"title": "Add feature"}));
     let approval = watch.attention();
     assert_eq!(approval["data"]["kind"], "approval", "{approval}");
 
@@ -83,9 +83,10 @@ fn a_worker_cannot_land_by_push_rpc_or_canonical() {
     assert_eq!(project.canonical_head(), target);
 
     let head = approval["data"]["payload"]["head"].as_str().unwrap();
-    project.json(&[
-        "attempt", "approve", "--target", "main", "Y-1", "--head", head,
-    ]);
+    project.ok(
+        "attempt.approve",
+        json!({"target": "main", "head": head, "ticket": "Y-1"}),
+    );
     watch.event("landing.recorded", &[]);
     git(
         &canonical,

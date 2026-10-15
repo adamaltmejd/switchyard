@@ -83,7 +83,7 @@ fi"#,
         &config("").replace("review = [\"correctness\"]", "review = \"none\""),
     );
     let mut history = project.watch(0);
-    project.json(&["ticket", "new", "--title", "Usage"]);
+    project.ok("ticket.new", json!({"title": "Usage"}));
     let approval = history.attention();
     assert_eq!(approval["data"]["kind"], "approval");
     let first = pi_usage(&project, 1);
@@ -95,17 +95,7 @@ fi"#,
             "fields": {"input": unknown, "output": unknown, "cost": unknown}
         })
     );
-    project.json(&[
-        "attempt",
-        "reject",
-        "--target",
-        "main",
-        "Y-1",
-        "--head",
-        approval["data"]["payload"]["head"].as_str().unwrap(),
-        "--text",
-        "Observe usage",
-    ]);
+    project.ok("attempt.reject", json!({"target": "main", "head": approval["data"]["payload"]["head"].as_str().unwrap(), "text": "Observe usage", "ticket": "Y-1"}));
     hold.wait_held();
     // End the real box while the next model request is held. EOF drains
     // already reported frames; operator stop could race their pipe delivery.
@@ -155,7 +145,7 @@ fi"#,
         assert_eq!(reopened[field], second[field], "{field}");
     }
     let mut history = project.watch(stopped["seq"].as_i64().unwrap());
-    project.json(&["attempt", "start", "Y-1"]);
+    project.ok("attempt.start", json!({"ticket": "Y-1"}));
     assert_eq!(history.attention()["data"]["kind"], "approval");
     let third = pi_usage(&project, 3);
     assert_eq!(third["resumed"], second["execution"]);
@@ -211,7 +201,7 @@ fi"#,
         json!({"project": project.path, "ticket": "Y-1"}),
     );
     assert_eq!(parked["result"]["parked"], true);
-    project.json(&["attempt", "abandon", "Y-1"]);
+    project.ok("attempt.abandon", json!({"ticket": "Y-1"}));
     let cleanup = history.until("old attempt cleanup", |event| {
         event["event"] == "execution.ended"
             && event["data"]["kind"] == "cleanup"
@@ -276,7 +266,7 @@ fi"#,
 }
 
 fn pi_usage(project: &Project, id: i64) -> Value {
-    let shown = project.json(&["attempt", "show", "Y-1"]);
+    let shown = project.ok("attempt.show", json!({"ticket": "Y-1"}));
     shown["executions"]
         .as_array()
         .unwrap()
