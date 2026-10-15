@@ -2504,7 +2504,10 @@ contract above still applies.
 
 `events` reads ordered bounded audit pages after a sequence. Clients advance
 only through consumed events; an empty page leaves the cursor unchanged.
-`attempt.tail` reads the live transcript as the harness wrote it. Approve
+`attempt.tail` reads the live transcript as the harness wrote it.
+Inspection and tail use the writer's execution location: scoped work and agent
+classification use effect storage; ordinary attempt work uses attempt storage.
+Command classification has no harness transcript. Approve
 and reject require the frozen `target` and exact `head`, plus any named
 proof and selection identity. A different target is stale and writes
 nothing. Status names each live attempt's and queued candidate's target.
