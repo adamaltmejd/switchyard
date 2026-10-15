@@ -1,0 +1,58 @@
+# Operator configuration fragment. Configure agents a, b, integrator and worker.
+# This selects a diff check. Select further checks explicitly at admission.
+[gates.integration]
+command = 'git diff --check "$YARD_BASE" HEAD'
+stage = "candidate"
+
+[profiles.integration-a]
+runner = {kind = "agent", agent = "a", instructions = "Produce input A."}
+access = "write-allowed"
+outputs = {result = "candidate"}
+outcomes = ["complete"]
+
+[profiles.integration-b]
+runner = {kind = "agent", agent = "b", instructions = "Produce input B."}
+access = "write-allowed"
+outputs = {result = "candidate"}
+outcomes = ["complete"]
+
+[profiles.integration]
+runner = {kind = "agent", agent = "integrator", instructions = "Integrate the named candidates. Resolve conflicts in your own workspace. Commit the combined result."}
+access = "write-allowed"
+outputs = {result = "candidate"}
+outcomes = ["complete"]
+
+[profiles.integration-picker]
+runner = {kind = "agent", agent = "worker", instructions = "Select the integrated candidate c."}
+access = "read-only"
+outputs = {result = "selection"}
+outcomes = ["complete"]
+
+[presets.integration.nodes.implementer]
+profile = "integration-a"
+routes = {complete = [{to = "integrate"}]}
+
+[presets.integration.nodes.writer-b]
+profile = "integration-b"
+routes = {complete = [{to = "integrate"}]}
+
+[presets.integration.nodes.integrate]
+profile = "integration"
+inputs = {a = {node = "implementer", output = "result", kind = "candidate"}, b = {node = "writer-b", output = "result", kind = "candidate"}}
+requires = ["a", "b"]
+routes = {complete = [{to = "selector"}]}
+
+[presets.integration.nodes.selector]
+profile = "integration-picker"
+inputs = {c = {node = "integrate", output = "result", kind = "candidate"}}
+requires = ["c"]
+routes = {complete = [{to = "candidate-gate-integration"}]}
+
+[presets.integration.nodes.candidate-gate-integration]
+runner = {kind = "command", gate = "integration"}
+access = "write-allowed"
+inputs = {candidate = {node = "selector", output = "result", kind = "selection"}}
+requires = ["candidate"]
+outputs = {result = "verdict"}
+outcomes = ["complete", "failed"]
+routes = {failed = [{to = "implementer", repeat = 3}]}

@@ -157,6 +157,11 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
     let model = harness
         .route(&stage, &daemon.machine)
         .map_err(Fail::refused)?;
+    let candidate_inputs = if selector && !finding_selector {
+        supervise::candidate_mounts(daemon, project, &row, false).await?
+    } else {
+        Vec::new()
+    };
     let bearer = daemon.grants.issue(crate::mcp::Grant {
         project: project.clone(),
         execution,
@@ -179,49 +184,7 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
             egress: &[],
         },
     );
-    if selector && !finding_selector {
-        for (name, candidate) in row
-            .inputs
-            .as_ref()
-            .and_then(Value::as_object)
-            .into_iter()
-            .flatten()
-            .filter(|(_, input)| input["kind"] == "candidate")
-        {
-            let path = dir
-                .join("candidates")
-                .join(crate::config::hex(name.as_bytes()));
-            let source = path.join("source");
-            let head = candidate["value"]["head"]
-                .as_str()
-                .ok_or_else(|| Fail::refused("invalid_candidate"))?;
-            daemon
-                .git
-                .clone_detached(&project.canonical_dir(), &source, head)
-                .await?;
-            spec.mounts.push(crate::r#box::Mount {
-                host: source,
-                guest: format!(
-                    "/yard/candidates/{}/source",
-                    crate::config::hex(name.as_bytes())
-                ),
-                readonly: true,
-            });
-            if let Some(digest) = candidate["value"]["proof"]
-                .as_str()
-                .filter(|digest| !digest.is_empty())
-            {
-                spec.mounts.push(crate::r#box::Mount {
-                    host: proof::snapshot_path(project, attempt.id, digest),
-                    guest: format!(
-                        "/yard/candidates/{}/proof",
-                        crate::config::hex(name.as_bytes())
-                    ),
-                    readonly: true,
-                });
-            }
-        }
-    }
+    spec.mounts.extend(candidate_inputs);
     let live = supervise::up_worker(daemon, project, execution, &spec, &secrets).await?;
     let timeout = Duration::from_secs(loaded.config.review.timeout_minutes * 60);
     let run = async {

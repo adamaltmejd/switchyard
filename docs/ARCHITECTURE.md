@@ -397,7 +397,7 @@ candidate producers, reviewers, selectors and native gates by admitted runner,
 access and output. Candidate-only roots may be named `selector`, contain
 `-gate-` or start with `review-`; those names supply no consumer authority.
 
-The root node name is its declared workspace identity. Each workspace owns
+The writer node name is its declared workspace identity. Each workspace owns
 one reusable full clone, index, harness state, input and live proof directory.
 Filesystem and branch components encode the node's bytes as lowercase hex,
 so case-folding filesystems do not alias distinct declared names.
@@ -434,7 +434,7 @@ new reader. Infrastructure interruptions take no verdict route.
 Trusted MCP `yard_attempt_stop` accepts an optional exact `execution`.
 Multiple running writers without that identity refuse as `ambiguous_execution`.
 Trusted MCP `yard_attempt_start` accepts `workspace` for explicit continuation
-of a declared root on a live writer attempt. Undeclared or omitted ambiguous
+of a declared writer on a live writer attempt. Undeclared or omitted ambiguous
 reuse refuses as `undeclared_workspace`; an owned workspace refuses as
 `workspace_owned`, naming its owner execution. An exact stopped/red attention
 may also identify its writer continuation. Continuation preserves the frozen
@@ -454,10 +454,47 @@ finish, `stopped:candidates` releases the lane and names the published candidate
 Inspection retains all candidate identities and execution settings.
 This boundary supplies no approval or landing.
 
+A writer graph may include one integration writer besides its independent
+roots. It matches a write-allowed candidate agent profile and requires at
+least two distinct named root candidates. Each source has a complete edge
+to it. `implementer` remains a root. The integration writer starts only when
+all named publications are eligible on the current ticket and plan revision.
+Its execution binds those immutable producer results before effects.
+The input name `feedback` is reserved for internal repair on candidate-producing
+writers. A declared source with that name is invalid at
+`nodes.<writer>.inputs.feedback`, with reason `invalid_input`, before admission
+creates an attempt or execution. Ordinary external repair feedback is unchanged.
+Changing a source invalidates consumers of the old integration result.
+An explicit integration start before its inputs are ready refuses as
+`integration_inputs`, naming its workspace, without taking a lane or owner.
+
+The integration writer starts at the frozen target in its own reusable clone.
+It receives fresh detached source snapshots, proof snapshots and validated
+Git bundles at `/yard/candidates/<hex-input>/source`, `/proof` and
+`/bundle/candidate.bundle`, read-only. Each bundle is exposed through its own
+directory mount, separate from the source and proof snapshots.
+Bundles export the exact canonical publication
+ref `refs/yard/candidates/<attempt>/<producer-execution>` and its ancestry.
+Canonical and other writers' live clones are never mounted. The agent fetches
+and combines the inputs in its own clone. A conflict left dirty follows the
+existing bounded dirty return and attention; it supplies no candidate or
+selection. Stop and daemon restart retain partial work for a new execution
+after checked release. There is no separate integration lifecycle.
+
+Integration publishes a new candidate with its own base, head, proof,
+producer settings and profile. Input checks, judgments and approvals do not
+carry. With a selector, consumed source candidates are excluded from its
+declared inputs; only terminal candidates and bound reviews reach selection.
+Selected downstream checks and approval bind the integrated output through
+the existing selection path. Without a selector the graph stops at candidates.
+`docs/examples/integration.toml` supplies an operator configuration fragment
+with integration profiles and a preset selecting the combined candidate and
+a candidate diff check. Further verification is an explicit plan selection.
+
 A writer graph may declare one read-only agent node named `selector`, matching
 a configured profile with `result: selection` and only `complete`.
-Every root and named reviewer has a complete edge to it. Its required inputs
-name every candidate and bound review exactly once. The same frozen reviewer
+Every unconsumed writer and named reviewer has a complete edge to it. Its required inputs
+name every unconsumed candidate and bound review exactly once. The same frozen reviewer
 profile may review every independent candidate. Review inputs carry the raw
 findings, check, reviewer definition, settings and frozen declared inputs, bound to that candidate's
 immutable producer result. The selector reads detached candidate clones and
@@ -1669,9 +1706,12 @@ Migration never infers picker provenance from a candidate head.
 Files live outside the clone while an attempt is live, under
 `.yard/local/attempts/<id>/`: transcripts, gate logs, harness state, the
 worker's live `proof/` directory and its `proof-snapshots/<digest>` copies.
-Writer graphs retain each root's `writers/<workspace-key>/clone`, `state`, `input`
+Writer graphs retain each writer's `writers/<workspace-key>/clone`, `state`, `input`
 and live `proof`. Their bounded proof snapshots share the attempt's
 content-addressed snapshot directory, with separate execution staging.
+Selectors and integration writers stage candidate input clones and bundles
+under `candidate-inputs/<execution>/`; these stay separate from writable trees
+and are removed with the attempt.
 Read-only audits use `audits/<execution>/` for checkout, proof copies,
 state and input; none is reused by another execution.
 Cleanup removes the whole attempt directory, including every writer workspace,
@@ -1798,6 +1838,7 @@ box spec names mounts, env, the harness, egress and memory.
 | Box | `/workspace` | Harness state | Egress | Env |
 |---|---|---|---|---|
 | implementer | its declared writer clone, writable; `/yard/proof` writable | writable | model route, MCP route, `isolation.egress` | the harness's env, git identity, `YARD_MCP_BEARER` (from) |
+| integration writer | its own retained writer clone, writable; `/yard/proof` writable; named candidate source/proof snapshots and bundles read-only under `/yard/candidates` | its own, writable | model route, MCP route, `isolation.egress` | implementer env and execution bearer |
 | read-only audit | a fresh detached checkout of its recorded head or admission base, read-only; `/yard/proof` is its frozen available proof or empty directory, read-only; selected packaged instructions and launch input at `/yard/input`, read-only | exclusive to its execution and admitted node, writable; matching Durable checkpoints continue only after checked predecessor release | model route, MCP route, `isolation.egress` | the harness's env, git identity, `YARD_MCP_BEARER` (from) |
 | standalone report | fresh exact-input checkout, read-only; no candidate proof mount | its own, writable; trusted environment from frozen target | model route, MCP route, frozen `isolation.egress` | harness env, git identity, execution bearer |
 | standalone command | fresh exact-input checkout; resolved read-only or write-allowed access; no proof mount | none | none | `HOME`, `PATH`, `YARD_BASE` equal to input |
@@ -2110,14 +2151,14 @@ combination, lifecycle or historical version.
 | # | Guarantee | Shown by |
 |---|---|---|
 | 1 | Only the queue lands | A real worker fails to push to canonical, reach its host path/socket, or use sessionless RPC. Explicit operator approval then lands that same candidate through the queue. |
-| 2 | Judgments bind candidate, choice, ticket and admitted plan identity; Durable continuation binds frozen checkpoint inputs; prepared continuation binds exact merged input; operator policy stays live | A declared closed gate reuses unchanged evidence but changed tree/proof or unknown inputs rerun. New head, ticket revision and proof invalidate judgments. Protected-path policy changes withdraw automatic approval; manual approval remains explicit. Stale candidate acceptance names the changed identity and writes nothing. Five distinct implementers receive their own frozen reviews; exact picker and replacement bindings select the only checked and landed candidate. Finding selections reject foreign and stale exact source identities, retain all duplicate contributors and historical inputs, and require fresh inputs after revision or candidate change. |
+| 2 | Judgments bind candidate, choice, ticket and admitted plan identity; integration publishes its own candidate bound to named inputs; Durable continuation binds frozen checkpoint inputs; prepared continuation binds exact merged input; operator policy stays live | A declared closed gate reuses unchanged evidence but changed tree/proof or unknown inputs rerun. New head, ticket revision and proof invalidate judgments. Protected-path policy changes withdraw automatic approval; manual approval remains explicit. Stale candidate acceptance names the changed identity and writes nothing. Five distinct implementers receive their own frozen reviews; exact picker and replacement bindings select the only checked and landed candidate. Named-input integration publishes C containing both fixture changes; stale A approval writes nothing and only C is approved and landed. Finding selections reject foreign and stale exact source identities, retain all duplicate contributors and historical inputs, and require fresh inputs after revision or candidate change. |
 | 3 | Landing is compare-and-swap with selected verification and durable exact prepared merged-ref evidence | A held native ref update stays undecided until its outcome is known. Canonical movement before compare-and-swap retires the landing without overwriting newer history. |
 | 4 | Capacity holds | Concurrent starts preserve one live attempt and the lane bound. Two held mixed reader/worker effects have exactly two native project boxes; the join waits for exact results. One-slot landing children exclude a worker and still land. An inherited native owner retains capacity across restart. Identical execution IDs in different projects keep separate grants. |
 | 5 | Intent precedes effect, and a restart loses only the turn; Durable continuation is a new exclusive execution after proved predecessor removal; individually useful work needs no ticket | A real held writable turn survives daemon death as interrupted work and resumes its retained tree. Startup removes a surviving host gate process group before requeue. A legacy owner without trustworthy lock proof remains reserved across upgrade. Matching Durable unsafe intent resumes only after old-box removal; corrupt checkpoint identity refuses before a fresh retry. A completed registered finding picker retains its immutable selection, reservation and exact ownership item across restart while a real runtime descendant holds its inherited effect lock after box removal; checked release reconciles only that item without replay. |
 | 6 | Inputs are validated at the boundary; new supported workflow admissions retain immutable resolved input evidence, and unrecorded history stays unknown; standalone scope is explicit | Malformed worker MCP input writes no proposal; the valid same-turn control succeeds. Unsupported selected admission creates no work, while a supported held execution keeps its frozen inputs across template sync. A real historical store preserves rows, audit and foreign keys and supports current decisions after upgrade. |
 | 7 | A ticket lands end to end and leaves only rows; usage is optional measured data with provenance; Codex token totals retain their meaning and unreported monetary cost is unknown | A real ticket goes through commit, gate, review, approval and native landing, then leaves rows while unrelated live work remains. Actual optional Pi frames retain unknown, interrupted partial and resumed explicit-zero measurements across reopen. Operator stdio preserves worker authorization and stale mutation identity while canceled waits and stdin EOF leave work running. Standalone command/report execution has no ticket or landing authority. |
 | 8 | Reviews, audits and read-only candidate and finding selections are explicit bounded publications; an empty selected panel is unreviewed; selected eligible merged failures require exact operator decisions | Silent or unregistered review publication cannot authorize approval; a proven same-project retry can. Report validation and held publication preserve exact frozen identity and eligibility, and successful text alone creates no report. Five-model selection binds own reviews and one replacement to actual landing. A correctly resealed changed packaged controller refuses before model/code effects; its unmodified control publishes through real Pi. The exact multi-model join picker refuses malformed groups and repeated contributors before a valid subset and two-source duplicate publication; checked ownership release makes one typed finding selection inspectable, preserves raw sources and grants no verdict, choice or landing authority. |
-| 9 | Each implementer execution starts from its frozen target and the right candidate; independent writers retain isolated reusable workspaces | A held worker receives operator edits and adopted definitions in its next execution. Stop/start delivers the edit while retaining configured model identity. Five independent writer workspaces preserve their own bytes, sessions and frozen read-only review inputs through continuation and restart. |
+| 9 | Each implementer execution starts from its frozen target and the right candidate; independent writers retain isolated reusable workspaces, including integration from named candidates | A held worker receives operator edits and adopted definitions in its next execution. Stop/start delivers the edit while retaining configured model identity. Five independent writer workspaces preserve their own bytes, sessions and frozen read-only review inputs through continuation and restart. Held integration retains partial work across restart; source writes and canonical access fail while its own write succeeds. Conflicts require repair before selection. |
 | 10 | The queue lands one at a time per target and re-judges what does not merge | Two approvals land in order; a red merge returns for repair. A feature ticket uses its frozen target source, definitions and image, repairs a real conflict, and lands only on that branch. |
 | 11 | Only the operator's sync changes `.yard` and canonical from outside | A worker configuration commit is refused before gates; operator sync makes the same configuration available to future admission. Named-branch import, divergence refusal and consume preserve main and another imported branch, with dirty/other-checkout refusals and allowed controls. |
 | 12 | Boxes hold nothing secret | Real Pi, Claude login/direct API and Codex routes keep upstream credentials on the host. Candidate extensions, hooks, config and guidance cannot alter their own review; trusted base inputs remain usable. A real packaged controller has no upstream key in environment, mounts, transcript or stored content. |

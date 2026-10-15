@@ -381,6 +381,32 @@ impl Git {
         Ok(())
     }
 
+    /// Export only the immutable publication named by the execution binding.
+    pub async fn candidate_bundle(
+        &self,
+        canonical: &Path,
+        destination: &Path,
+        reference: &str,
+        head: &str,
+    ) -> Result<(), String> {
+        if self.rev_parse(canonical, reference).await?.as_deref() != Some(head) {
+            return Err("candidate_bundle_identity".into());
+        }
+        self.run(
+            canonical,
+            &[
+                "bundle",
+                "create",
+                "--quiet",
+                destination.to_str().ok_or("bundle path is not UTF-8")?,
+                reference,
+            ],
+        )
+        .await?
+        .ok("candidate bundle")?;
+        Ok(())
+    }
+
     /// A fresh checkout of `commit` made from canonical's objects: nothing
     /// else of any clone reaches it.
     pub async fn clone_detached(
