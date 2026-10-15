@@ -1229,6 +1229,10 @@ split and stops.
 
 ## The loop
 
+An asynchronous attempt snapshot cannot override a changed pending continuation.
+Approval commits only while no continuation or owner is pending and the observed
+attempt executions remain current after input and policy reads.
+
 1. **File.** `yard_ticket_new`, or accept a proposal.
 2. **Plan.** A ticket on a read-only workflow is planned: its worker
    proposes children and the body; the operator decides before paying for
