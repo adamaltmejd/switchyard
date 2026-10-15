@@ -568,6 +568,7 @@ impl Plan {
                 .filter(|(_, node)| {
                     node.access == Access::WriteAllowed
                         && node.outputs.get("result") == Some(&Output::Candidate)
+                        && node.inputs.is_empty()
                 })
                 .map(|(name, _)| name.as_str())
                 .collect()
@@ -602,7 +603,7 @@ impl Plan {
         Some(order)
     }
 
-    /// Independent writers are roots. Each reader names exactly one producer.
+    /// Independent writers are roots; integration consumes their candidates.
     /// A selector may route an existing publication into native verification.
     pub fn writers(&self) -> bool {
         self.nodes
@@ -619,6 +620,18 @@ impl Plan {
         self.nodes
             .get("selector")
             .filter(|node| node.outputs.get("result") == Some(&Output::Selection))
+    }
+
+    pub fn integration(&self) -> Option<(&str, &Node)> {
+        if !self.writers() {
+            return None;
+        }
+        self.nodes.iter().find_map(|(name, node)| {
+            (node.access == Access::WriteAllowed
+                && node.outputs.get("result") == Some(&Output::Candidate)
+                && !node.inputs.is_empty())
+            .then_some((name.as_str(), node))
+        })
     }
 
     fn writer_selection(&self, config: &Config, workflow: &str) -> bool {
@@ -678,6 +691,22 @@ impl Plan {
             return false;
         }
         for (name, node) in &roots.nodes {
+            if roots.integration().is_some_and(|(_, integration)| {
+                node.access == Access::WriteAllowed
+                    && integration
+                        .inputs
+                        .values()
+                        .any(|input| input.node.as_deref() == Some(name))
+            }) {
+                if selector
+                    .inputs
+                    .values()
+                    .any(|input| input.node.as_deref() == Some(name))
+                {
+                    return false;
+                }
+                continue;
+            }
             let kind = if node.access == Access::WriteAllowed {
                 Output::Candidate
             } else {
@@ -705,7 +734,8 @@ impl Plan {
                 return false;
             }
         }
-        if selector.inputs.len() != roots.nodes.len() {
+        let consumed = roots.integration().map_or(0, |(_, node)| node.inputs.len());
+        if selector.inputs.len() + consumed != roots.nodes.len() {
             return false;
         }
         for (name, node) in &self.nodes {
@@ -797,6 +827,15 @@ impl Plan {
         {
             return false;
         }
+        if self
+            .nodes
+            .values()
+            .filter(|node| node.access == Access::WriteAllowed && !node.inputs.is_empty())
+            .count()
+            > 1
+        {
+            return false;
+        }
         for (name, node) in &self.nodes {
             if name.is_empty()
                 || !name
@@ -808,8 +847,33 @@ impl Plan {
             }
             if node.access == Access::WriteAllowed {
                 if node.operator_failure
-                    || !node.inputs.is_empty()
-                    || !node.requires.is_empty()
+                    || node.inputs.len() != node.requires.len()
+                    || node
+                        .inputs
+                        .keys()
+                        .any(|input| !node.requires.contains(input))
+                    || (!node.inputs.is_empty()
+                        && (name == "implementer"
+                            || node.inputs.len() < 2
+                            || node.inputs.values().any(|input| {
+                                input.kind != Output::Candidate
+                                    || input.output != "result"
+                                    || input
+                                        .node
+                                        .as_ref()
+                                        .and_then(|source| self.nodes.get(source))
+                                        .is_none_or(|source| {
+                                            source.access != Access::WriteAllowed
+                                                || !source.inputs.is_empty()
+                                        })
+                            })
+                            || node
+                                .inputs
+                                .values()
+                                .map(|input| &input.node)
+                                .collect::<BTreeSet<_>>()
+                                .len()
+                                != node.inputs.len()))
                     || node.outputs != BTreeMap::from([("result".into(), Output::Candidate)])
                     || node.outcomes != ["complete"]
                     || node.routes.keys().any(|outcome| outcome != "complete")
@@ -822,14 +886,33 @@ impl Plan {
                 {
                     return false;
                 }
+                for input in node.inputs.values() {
+                    if !self.nodes[input.node.as_ref().expect("validated source")]
+                        .routes
+                        .get("complete")
+                        .is_some_and(|routes| {
+                            routes
+                                .iter()
+                                .any(|route| route.to == *name && route.repeat.is_none())
+                        })
+                    {
+                        return false;
+                    }
+                }
                 for route in node.routes.values().flatten() {
                     if route.repeat.is_some()
                         || self.nodes.get(&route.to).is_none_or(|reader| {
-                            reader.access != Access::ReadOnly
-                                || reader
+                            if reader.access == Access::WriteAllowed {
+                                !reader
+                                    .inputs
+                                    .values()
+                                    .any(|input| input.node.as_deref() == Some(name))
+                            } else {
+                                reader
                                     .inputs
                                     .get("candidate")
                                     .is_none_or(|input| input.node.as_deref() != Some(name))
+                            }
                         })
                     {
                         return false;
@@ -1310,6 +1393,13 @@ impl Plan {
             }
             for (input, reference) in &node.inputs {
                 let path = format!("nodes.{name}.inputs.{input}");
+                if input == "feedback"
+                    && reference.node.is_some()
+                    && node.access == Access::WriteAllowed
+                    && node.outputs.get("result") == Some(&Output::Candidate)
+                {
+                    return Err(Invalid::new(path, "invalid_input"));
+                }
                 let outputs = match &reference.node {
                     Some(source) => {
                         &self

@@ -727,7 +727,9 @@ pub fn binding(
             if !producer.result_eligible {
                 return Ok(None);
             }
-            if reference.kind == crate::plan::Output::Verdict
+            if (reference.kind == crate::plan::Output::Verdict
+                || (reference.kind == crate::plan::Output::Candidate
+                    && !plan.nodes[source].inputs.is_empty()))
                 && binding(
                     conn,
                     attempt,
@@ -742,7 +744,12 @@ pub fn binding(
                     },
                 )?
                 .map(|(_, inputs)| inputs)
-                    != producer.inputs
+                    != producer.inputs.clone().map(|mut inputs| {
+                        if let Some(inputs) = inputs.as_object_mut() {
+                            inputs.remove("feedback");
+                        }
+                        inputs
+                    })
             {
                 return Ok(None);
             }
