@@ -2,7 +2,7 @@
 
 use e2e::*;
 use serde_json::{Value, json};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
@@ -10,8 +10,52 @@ use std::sync::{Arc, Mutex};
 pub(super) fn pre_target_binary() -> PathBuf {
     static BINARY: OnceLock<PathBuf> = OnceLock::new();
     BINARY
-        .get_or_init(|| archived_binary("c85369dfaec8f8554da49ddf02a4dbec03bcad02", "pre-target"))
+        .get_or_init(|| {
+            let binary =
+                archived_binary("81da8c677a0ab43966588429c24a8affedb9e8ec", "legacy-0.0.3");
+            let output = Command::new(&binary)
+                .args(["version", "--json"])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            let identity: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(identity["version"], "0.0.3");
+            binary
+        })
         .clone()
+}
+
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        let kind = entry.file_type().unwrap();
+        if kind.is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else if kind.is_symlink() {
+            std::os::unix::fs::symlink(std::fs::read_link(entry.path()).unwrap(), target).unwrap();
+        } else {
+            assert!(
+                kind.is_file(),
+                "backup includes only files, directories and links"
+            );
+            std::fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+/// The caller has killed and reaped its only writer. Include WAL and live
+/// artifacts with the project, and keep the registry alongside it.
+fn stopped_backup(project: &Project) -> PathBuf {
+    let backup = project.machine.root.join("backup");
+    copy_tree(&project.path, &backup.join("p"));
+    std::fs::copy(
+        project.machine.state.join("yard/projects"),
+        backup.join("projects"),
+    )
+    .unwrap();
+    backup
 }
 
 /// The pre-target executable predates operator MCP. Its own CLI creates
@@ -174,7 +218,53 @@ fn an_upgrade_preserves_ended_planner_proposals_and_limit_overrides() {
     )
     .unwrap();
     assert!(payload.get("target").is_none());
+    machine.legacy_cli(
+        &project.path,
+        &["ticket", "new", "--title", "Completed", "--parked"],
+    );
+    machine.legacy_cli(
+        &project.path,
+        &["ticket", "done", "Y-3", "--reason", "Operator completed"],
+    );
+    machine.legacy_cli(
+        &project.path,
+        &[
+            "ticket",
+            "new",
+            "--title",
+            "Parked",
+            "--parked",
+            "--depends-on",
+            "Y-3",
+        ],
+    );
+    // G5/G6: Git and the old store, before any upgrade, identify the failed
+    // candidate and decisions. Sabotage: remap or lose these rows on migration.
+    let head = payload["head"].as_str().unwrap();
+    assert_eq!(
+        git(
+            &project.path.join(".yard/local/attempts/2/clone"),
+            &["rev-parse", "HEAD"]
+        )
+        .trim(),
+        head
+    );
+    assert_eq!(
+        git(
+            &project.canonical(),
+            &["show", &format!("{head}:feature.txt")]
+        ),
+        "feature\n"
+    );
+    assert_eq!(
+        project.rows("SELECT verdict FROM \"check\" WHERE kind = 'review'"),
+        vec![json!({"verdict": "fail"})]
+    );
     machine.kill();
+    drop(watch);
+    let backup = stopped_backup(&project);
+    let tickets_before = project.rows("SELECT * FROM ticket ORDER BY id");
+    let dependencies_before = project.rows("SELECT * FROM dependency ORDER BY ticket, depends_on");
     let proposals_before =
         project.rows("SELECT * FROM attention WHERE kind = 'proposal' ORDER BY id");
     let limit_before = project.rows(&format!(
@@ -200,10 +290,176 @@ fn an_upgrade_preserves_ended_planner_proposals_and_limit_overrides() {
         .join(", ");
     let check_query = format!("SELECT {check_columns} FROM \"check\" ORDER BY id");
     let checks_before = project.rows(&check_query);
+    // G5: restore only an unupgraded stopped-writer copy under the real old
+    // binary. This extra machine starts no worker or model turn. Sabotage:
+    // omit WAL, canonical objects or retained artifacts from the snapshot.
+    let restored = Machine::new("g15-restore", |_| panic!("restore must not admit work"));
+    let armed = restored.root.join("armed");
+    let said = restored.root.join("said");
+    let release = restored.root.join("release");
+    let done = restored.root.join("done");
+    for fifo in [&said, &release, &done] {
+        assert!(Command::new("mkfifo").arg(fifo).status().unwrap().success());
+    }
+    restored.wrapper("git", &format!(
+        "if [ -e '{}' ]; then case \" $* \" in *' update-ref --no-deref refs/heads/main '*) echo $$ > '{}'; read line < '{}'; \"$REAL\" \"$@\"; status=$?; echo done > '{}'; exit $status;; esac; fi",
+        armed.display(), said.display(), release.display(), done.display()));
+    let restored_project = Project {
+        machine: &restored,
+        path: restored.root.join("p"),
+    };
+    copy_tree(&backup.join("p"), &restored_project.path);
+    let registry = std::fs::read_to_string(backup.join("projects")).unwrap();
+    assert_eq!(
+        registry.lines().collect::<Vec<_>>(),
+        [project.path.to_str().unwrap()]
+    );
+    std::fs::create_dir_all(restored.state.join("yard")).unwrap();
+    std::fs::write(
+        restored.state.join("yard/projects"),
+        format!("{}\n", restored_project.path.display()),
+    )
+    .unwrap();
+    restored.use_binary(Some(pre_target_binary()));
+    restored.start();
+    restored.legacy_cli(&restored_project.path, &["status"]);
+    assert_eq!(
+        restored_project.rows("SELECT * FROM ticket ORDER BY id"),
+        tickets_before
+    );
+    assert_eq!(restored_project.rows(&check_query), checks_before);
+    assert_eq!(
+        restored_project.rows("SELECT * FROM attention WHERE kind = 'proposal' ORDER BY id"),
+        proposals_before
+    );
+    assert_eq!(
+        git(
+            &restored_project.canonical(),
+            &["show", &format!("{head}:feature.txt")]
+        ),
+        "feature\n"
+    );
+    assert_eq!(
+        git(
+            &restored_project.path.join(".yard/local/attempts/2/clone"),
+            &["rev-parse", "HEAD"]
+        )
+        .trim(),
+        head
+    );
+    // Exercise the restored old decision as well. Hold its real Git effect
+    // before update-ref, back it up with the writer stopped, then upgrade this
+    // disposable restore. The original unupgraded snapshot remains untouched.
+    let since = restored_project.rows("SELECT COALESCE(MAX(seq), 0) AS seq FROM audit")[0]["seq"]
+        .as_i64()
+        .unwrap();
+    let mut restore_watch = restored.legacy_watch(&restored_project.path, since);
+    std::fs::write(&armed, "").unwrap();
+    restored.legacy_cli(
+        &restored_project.path,
+        &[
+            "attempt",
+            "approve",
+            "Y-2",
+            "--head",
+            head,
+            "--proof",
+            payload["proof"].as_str().unwrap(),
+            "--text",
+            "Keep legacy failure",
+        ],
+    );
+    let pid = restore_watch.said(&said).trim().to_string();
+    drop(restore_watch);
+    restored.kill();
+    assert!(restored.model.requests().is_empty());
+    assert!(
+        Command::new("kill")
+            .args(["-0", &pid])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let old_head = restored_project.canonical_head();
+    let intent = restored_project.rows(
+        "SELECT id, intent_state, intent_old, intent_merged FROM execution WHERE kind = 'landing'",
+    )[0]
+    .clone();
+    assert_eq!(intent["intent_state"], "open");
+    assert_eq!(intent["intent_old"], old_head);
+    let approvals = restored_project.rows("SELECT * FROM approval ORDER BY id");
+    assert_eq!(approvals[0]["overrode"], 1);
+    let landing_backup = stopped_backup(&restored_project);
+    let saved = Project {
+        machine: &restored,
+        path: landing_backup.join("p"),
+    };
+    assert_eq!(saved.rows("SELECT * FROM approval ORDER BY id"), approvals);
+    assert_eq!(saved.rows("SELECT id, intent_state, intent_old, intent_merged FROM execution WHERE kind = 'landing'"), vec![intent.clone()]);
+    assert_eq!(saved.canonical_head(), old_head);
+    std::fs::remove_file(&armed).unwrap();
+    restored.use_binary(None);
+    restored.start();
+    let mut restore_watch = restored_project.watch(0);
+    let owner = restore_watch.find("legacy landing ownership", |event| {
+        event["event"] == "attention.raised"
+            && event["execution"] == intent["id"]
+            && event["data"]["reason"] == "ownership"
+    });
+    assert_eq!(owner["data"]["kind"], "red");
+    assert_eq!(owner["data"]["payload"]["lock_contract"], false);
+    assert_eq!(restored_project.canonical_head(), old_head);
+    std::fs::write(&release, "go\n").unwrap();
+    assert_eq!(restore_watch.said(&done), "done\n");
+    assert_eq!(
+        restored_project.canonical_head(),
+        intent["intent_merged"].as_str().unwrap()
+    );
+    drop(restore_watch);
+    restored.kill();
+    restored.start();
+    // Canonical agreement alone is not ownership proof for this old intent.
+    // Sabotage: release the legacy reservation or replay its landing on reopen.
+    assert_eq!(
+        restored_project.rows(&format!(
+            "SELECT reserved, intent_state, intent_ref FROM execution WHERE id = {}",
+            intent["id"]
+        )),
+        vec![json!({"reserved": 1, "intent_state": "open", "intent_ref": "refs/heads/main"})]
+    );
+    assert!(
+        restored_project
+            .rows("SELECT seq FROM audit WHERE event = 'landing.recorded'")
+            .is_empty()
+    );
+    assert_eq!(
+        restored_project.rows("SELECT overrode FROM approval"),
+        vec![json!({"overrode": 1})]
+    );
+    assert_eq!(restored_project.rows(&check_query), checks_before);
+    restored.kill();
     machine.use_binary(None);
     machine.start();
+    let migrated_schema = project.rows("PRAGMA user_version");
     machine.kill();
     machine.start();
+    assert_eq!(project.rows("PRAGMA user_version"), migrated_schema);
+    assert_eq!(
+        project
+            .rows("SELECT * FROM ticket ORDER BY id")
+            .iter()
+            .map(|row| {
+                let mut row = row.clone();
+                row.as_object_mut().unwrap().remove("target_branch");
+                row
+            })
+            .collect::<Vec<_>>(),
+        tickets_before
+    );
+    assert_eq!(
+        project.rows("SELECT * FROM dependency ORDER BY ticket, depends_on"),
+        dependencies_before
+    );
     assert_eq!(
         project.rows("SELECT * FROM attention WHERE kind = 'proposal' ORDER BY id"),
         proposals_before
@@ -244,7 +500,7 @@ fn an_upgrade_preserves_ended_planner_proposals_and_limit_overrides() {
         );
     }
     let child = project.ok("proposal.accept", json!({"attention": proposal}));
-    assert_eq!(depends_on(&project, 1), [3]);
+    assert_eq!(depends_on(&project, 1), [5]);
     assert_eq!(
         project.rows("SELECT target_branch FROM attempt WHERE ticket = 1"),
         vec![json!({ "target_branch": null })]
@@ -256,8 +512,22 @@ fn an_upgrade_preserves_ended_planner_proposals_and_limit_overrides() {
         )["target"]
             .is_null()
     );
-    let head = payload["head"].as_str().unwrap();
-    let mut args = json!({"ticket": "Y-2", "target": "main", "head": head});
+    let children_before =
+        project.rows("SELECT * FROM ticket WHERE origin = 'proposal' ORDER BY id");
+    machine.kill();
+    machine.start();
+    let repeated = project.refused("proposal.accept", json!({"attention": proposal}));
+    assert_eq!(repeated["code"], "stale");
+    assert_eq!(
+        repeated["data"],
+        json!({"expected": proposal, "current": "resolved"})
+    );
+    assert_eq!(
+        project.rows("SELECT * FROM ticket WHERE origin = 'proposal' ORDER BY id"),
+        children_before
+    );
+    assert_eq!(depends_on(&project, 1), [5]);
+    let mut args = json!({"ticket": "Y-2", "target": "main", "head": head, "text": "Keep the legacy failed review"});
     if !payload["proof"].as_str().unwrap().is_empty() {
         args["proof"] = payload["proof"].clone();
     }
@@ -275,6 +545,18 @@ fn an_upgrade_preserves_ended_planner_proposals_and_limit_overrides() {
     assert_eq!(
         project.ok("ticket.show", json!({"ticket": "Y-2"}))["state"],
         "done"
+    );
+    machine.kill();
+    machine.start();
+    assert_eq!(
+        project
+            .rows("SELECT seq FROM audit WHERE event = 'landing.recorded'")
+            .len(),
+        1
+    );
+    assert_eq!(
+        project.rows("SELECT verdict FROM \"check\" WHERE kind = 'review'"),
+        vec![json!({"verdict": "fail"})]
     );
 }
 
@@ -307,9 +589,8 @@ fn depends_on(project: &Project, ticket: i64) -> Vec<i64> {
 }
 
 /// A ticket on `plan`: its clone refuses writes, it proposes children and a
-/// body edit, and the attempt ends with nothing raised; accepting them
-/// blocks the parent, which the scheduler does not start once they are
-/// done; `yard_ticket_done` then closes it and its dependents become ready.
+/// body edit. Accepted dependencies block the parent until its children are
+/// done; explicit close then makes its dependent ready.
 /// G15: a read-only planner proposes children and a body edit. Same-run
 /// sibling dependencies block the parent; stale edits write nothing. A writable
 /// dependent keeps its own authority, and closing a live waiter refuses.
@@ -521,14 +802,9 @@ fn a_plan_proposes_children_that_block_it() {
 /// Releasing the known fixture child does not invent a proof on the old
 /// row; a second startup reconsiders ownership after completion and keeps
 /// the ambiguous upgrade stopped for the Y80 rehearsal.
-/// Stop refuses the retained owner without claiming an undeliverable action.
-/// Stopping an admitted waiter succeeds; deliberately starting it again must
-/// wait on capacity before the old child is released.
 /// Sabotage: backfill only reservations without their legacy lock contract,
 /// or accept absence of the new lock as proof for a legacy execution,
 /// including when reconciliation probes it after the old child finishes.
-/// Acknowledge stop without a live handle; the refusal and missing successful
-/// stop audit fail. End or release the retained owner on refusal; its rows change.
 #[test]
 fn an_upgrade_retains_a_legacy_pre_box_child_without_an_ownership_proof() {
     let machine = Machine::new("g5-legacy-child", |request| {
@@ -571,6 +847,16 @@ fn an_upgrade_retains_a_legacy_pre_box_child_without_an_ownership_proof() {
         project.rows("SELECT id, status, handle FROM execution WHERE id = 2"),
         vec![json!({"id": 2, "status": "running", "handle": null})]
     );
+    let backup = stopped_backup(&project);
+    let saved = Project {
+        machine: &machine,
+        path: backup.join("p"),
+    };
+    assert_eq!(
+        saved.rows("SELECT id, status, handle FROM execution WHERE id = 2"),
+        vec![json!({"id": 2, "status": "running", "handle": null})]
+    );
+    assert_eq!(saved.canonical_head(), project.canonical_head());
     std::fs::remove_file(&armed).unwrap();
     machine.use_binary(None);
     machine.start();
@@ -612,25 +898,6 @@ fn an_upgrade_retains_a_legacy_pre_box_child_without_an_ownership_proof() {
     assert_eq!(
         project.rows("SELECT status, reserved, lock_contract FROM execution WHERE id = 2"),
         vec![json!({"status": "running", "reserved": 1, "lock_contract": 0})]
-    );
-    let before = project.rows("SELECT * FROM execution WHERE id = 2");
-    let attempt_before = project.rows("SELECT * FROM attempt WHERE ticket = 2");
-    let refused = project.refused("attempt.stop", json!({"ticket": "Y-2"}));
-    assert_eq!(refused["code"], "refused");
-    assert_eq!(refused["data"]["reason"], "ownership");
-    assert_eq!(refused["data"]["ticket"], "Y-2");
-    assert_eq!(refused["data"]["execution"], 2);
-    assert_eq!(refused["data"]["attempt"], attempt_before[0]["id"]);
-    assert_eq!(refused["data"]["attention"], retained["attention"]);
-    assert_eq!(project.rows("SELECT * FROM execution WHERE id = 2"), before);
-    assert_eq!(
-        project.rows("SELECT * FROM attempt WHERE ticket = 2"),
-        attempt_before
-    );
-    assert!(
-        project
-            .rows("SELECT seq FROM audit WHERE event = 'attempt.stopped' AND execution = 2")
-            .is_empty()
     );
     assert!(
         !machine

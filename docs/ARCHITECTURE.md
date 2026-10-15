@@ -2061,6 +2061,17 @@ remain NULL for historical rows; migration invents no producer or session
 compatibility evidence.
 Attempt and approval `choice` columns remain NULL for history without a picker.
 Migration never infers picker provenance from a candidate head.
+Supported 0.0.3 stores migrate once under the daemon's writer lock. IDs,
+edges, audit history, recorded failures and operator decisions survive.
+Unrecorded plan, producer and usage evidence stays unknown. An ended pre-target
+planner's proposals use current validated workflow configuration for acceptance;
+its historical target remains unknown and omitted child targets remain omitted.
+Legacy owners without trustworthy effect proof retain their reservations and
+require operator resolution; canonical agreement alone does not release them.
+A stopped-writer backup includes SQLite and any WAL, registry, canonical Git
+and required live artifacts. Restore the old binary only against a separate
+unupgraded copy. Development validation uses isolated state, sockets and runtime
+names. Publication and operational switchover remain operator actions.
 
 Files live outside the clone while an attempt is live, under
 `.yard/local/attempts/<id>/`: transcripts, gate logs, harness state, the
