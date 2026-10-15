@@ -2859,7 +2859,7 @@ fn policy_reapproval_keeps_the_selected_empty_panel() {
     assert_ne!(head, loser);
     assert_eq!(approved["data"]["head"], head);
     let judgments = format!(
-        "SELECT c.*, e.reason FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE e.attempt = {attempt} AND (e.reason = 'candidate' OR e.node = 'review-0') ORDER BY c.id"
+        "SELECT c.*, e.reason, e.head FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE e.attempt = {attempt} AND (e.reason = 'candidate' OR e.node = 'review-0') ORDER BY c.id"
     );
     let checks = project.rows(&judgments);
     assert_eq!(checks.len(), 2);

@@ -331,7 +331,7 @@ fn selected_failures_keep_exact_operator_accept_and_repair() {
     for check in fresh["checks"].as_array().unwrap() {
         assert_eq!(
             project.rows(&format!(
-                "SELECT head, verdict FROM \"check\" WHERE id = {check}"
+                "SELECT e.head, c.verdict FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE c.id = {check}"
             )),
             vec![json!({"head": fresh["head"], "verdict": "pass"})]
         );
