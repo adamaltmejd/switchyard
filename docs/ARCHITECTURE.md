@@ -1541,6 +1541,8 @@ retained executions and publications. Participant roles follow admitted output
 kinds; a candidate-producing node named selector is still an implementer.
 Each picker execution records an application fact once: candidate activation,
 or consumption of an eligible finding selection after checked ownership release.
+Finding application revalidates live, runnable state and current admitted
+candidate, ticket, plan and selector identity in the transaction recording it.
 Earlier application history stays unknown. Statistics distinguish `applied`,
 `superseded`, `unapplied` and `unknown`; current input and choice identity decide
 whether a recorded application is still current. Publication alone proves no

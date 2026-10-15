@@ -1264,7 +1264,24 @@ async fn advance(
             if let Some(row) = previous {
                 if project.tx(|tx| {
                     let now = attempts::get(tx, attempt.id)?;
-                    let current = crate::store::selections::finding_current(tx, &now, row)?;
+                    if now.state != "live"
+                        || now.plan_revision() != attempt.plan_revision()
+                        || now.candidate() != attempt.candidate()
+                        || now.proof != attempt.proof
+                        || now.next.is_some()
+                        || tickets::get(tx, ticket.id)?.revision != ticket.revision
+                        || runnable(tx, loaded, &now)?.is_none()
+                        || executions::attempt_work(tx, attempt.id)?
+                            .iter()
+                            .rev()
+                            .find(|row| row.node.as_deref() == Some(current))
+                            .map(|row| row.id)
+                            != Some(row.id)
+                    {
+                        return Ok(false);
+                    }
+                    let selected = executions::get(tx, row.id)?;
+                    let current = crate::store::selections::finding_current(tx, &now, &selected)?;
                     if current {
                         crate::store::selections::applied(tx, row.id)?;
                     }
