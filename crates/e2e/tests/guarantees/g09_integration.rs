@@ -282,7 +282,7 @@ fn integration_retains_partial_work_and_approves_only_its_output() {
         "choice": bound["choice"], "plan_revision": bound["plan_revision"]}),
     );
     assert!(accepted.get("error").is_none(), "{accepted}");
-    watch.event("attempt.landed", &[]);
+    watch.event("landing.recorded", &[]);
     let approved = project.rows("SELECT head FROM approval");
     assert_eq!(approved, vec![json!({"head": bound["head"]})]);
 }
