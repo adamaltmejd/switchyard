@@ -655,6 +655,7 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
         ),
         vec![json!({"status": "running", "reserved": 1, "result": null})]
     );
+    drop(watch);
     machine.kill();
     machine.start();
     restarted.wait_held();
@@ -713,7 +714,6 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
     let since = project.rows("SELECT COALESCE(MAX(seq), 0) AS seq FROM audit")[0]["seq"]
         .as_i64()
         .unwrap();
-    drop(watch);
     let mut watch = project.watch(since);
     picked.release();
     let owner = watch.said_before_end(&picker_owner_said, Some(picker_id));
@@ -905,8 +905,10 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
     );
     // Reopen an already committed selection. A supported revision below gives
     // a scheduler observation without polling or waiting out a clock.
+    drop(watch);
     machine.kill();
     machine.start();
+    let mut watch = project.watch(0);
 
     // An explicit revision invalidates branch consumers, never old evidence.
     let changed = operator.call(
