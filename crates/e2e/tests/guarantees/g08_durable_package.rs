@@ -580,13 +580,13 @@ const call = (method, params = {}) => new Promise((resolve, reject) => {
 });
 await call('Debugger.enable');
 const source = await (await import('node:fs/promises')).readFile('/opt/yard/durable-audit/runner.mjs', 'utf8');
-const lineNumber = source.split('\n').findIndex(line => line.includes('const path = allowed.get(args.file);'));
+const lineNumber = source.split('\n').findIndex(line => line.includes(BREAKPOINT_NEEDLE));
 if (lineNumber < 0) throw new Error('tool source missing');
 await call('Debugger.setBreakpointByUrl', {url:'file:///opt/yard/durable-audit/runner.mjs',lineNumber});
 writeSync(1, 'armed\n');
 // The debugger stays attached and paused until the real box is destroyed.
 "#;
-    let script = script.replace("const path = allowed.get(args.file);", line);
+    let script = script.replace("BREAKPOINT_NEEDLE", &serde_json::to_string(line).unwrap());
     let mut command = std::process::Command::new("pinfold");
     command
         .env("XDG_STATE_HOME", "/tmp/yard-e2e-state")
