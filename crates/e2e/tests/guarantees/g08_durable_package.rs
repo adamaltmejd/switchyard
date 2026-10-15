@@ -972,7 +972,12 @@ fn selected_durable_cleanup_commits_without_replaying_an_interrupted_write() {
                 }
                 let (name, result) = request.last_tool_result().unwrap();
                 if result.contains("interrupted") {
-                    let path = model_resumed_request.lock().unwrap().take().unwrap();
+                    let path = model_resumed_request
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .unwrap()
+                        .clone();
                     std::fs::write(path, "request\n").unwrap();
                     return Reply::Hold(
                         held_resumed.clone(),
@@ -991,6 +996,13 @@ fn selected_durable_cleanup_commits_without_replaying_an_interrupted_write() {
                 } else {
                     assert_eq!(name, "commit_source");
                     assert_eq!(result, "source_committed");
+                    let path = model_resumed_request
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .unwrap()
+                        .with_file_name("cleanup-inspection");
+                    std::fs::write(path, "request\n").unwrap();
                     Reply::Hold(
                         held_inspection.clone(),
                         Box::new(Reply::Tools(vec![audit_report()])),
@@ -1019,11 +1031,14 @@ git config filter.trip.required true &&
 printf 'chain.txt filter=trip\n' > .git/info/attributes &&
 touch -t 200001010000 chain.txt &&
 git -c core.fsmonitor=false status --porcelain && test -f .git/filter-ran &&
-git status --porcelain && test -f .git/fsmonitor-ran"#
+git status --porcelain && test -f .git/fsmonitor-ran &&
+mkdir .git/alternate && git archive HEAD | tar -x -C .git/alternate &&
+git config core.worktree /workspace/.git/alternate"#
                             }
                         } else {
                             r#"test ! -e .git/fsmonitor-ran && test ! -e .git/filter-ran &&
 git config --unset core.fsmonitor && git config --remove-section filter.trip &&
+git config --unset core.worktree &&
 test "$(cat chain.txt)" = cleaned && test "$(cat /yard/input/trusted/repair.md)" = trusted-repair && printf 'repaired\n' > chain.txt && git add chain.txt && git commit -qm Repair"#
                         },
                     )]);
@@ -1153,7 +1168,12 @@ files = [{{root = "source", path = "chain.txt"}}]
     project.git(&["rm", ".pi/extensions/unselected.js"]);
     project.git(&["commit", "-qm", "Retire audit-only hostile extension"]);
     project.json(&["sync"]);
-    for path in ["debug-armed", "debug-held", "cleanup-resumed"] {
+    for path in [
+        "debug-armed",
+        "debug-held",
+        "cleanup-resumed",
+        "cleanup-inspection",
+    ] {
         assert!(
             std::process::Command::new("mkfifo")
                 .arg(machine.root.join(path))
@@ -1180,6 +1200,8 @@ files = [{{root = "source", path = "chain.txt"}}]
         .path
         .join(format!(".yard/local/attempts/{attempt}/clone"));
     let inode = std::fs::metadata(clone.join(".git")).unwrap().ino();
+    // The predecessor's alternate worktree must never supply committed bytes.
+    std::fs::write(clone.join(".git/alternate/chain.txt"), "substitute\n").unwrap();
     // Positive controls above execute both predecessor helpers. Sabotage:
     // inspect packaged cleanup with plain status, or leave clean filters enabled.
     for marker in ["fsmonitor-ran", "filter-ran"] {
@@ -1273,7 +1295,7 @@ if printf 'changed\n' > /yard/proof/intrusion; then echo proof=written; else ech
         std::fs::read_to_string(clone.join("chain.txt")).unwrap(),
         "after-release\n"
     );
-    let replacement = project.rows(&format!("SELECT id, resumed, prepared FROM execution WHERE id = {replacement_id} AND attempt = {attempt} AND node = 'cleanup' AND status = 'running'"))[0].clone();
+    let replacement = project.rows(&format!("SELECT id, handle, resumed, prepared FROM execution WHERE id = {replacement_id} AND attempt = {attempt} AND node = 'cleanup' AND status = 'running'"))[0].clone();
     assert_ne!(replacement["id"], id);
     assert_eq!(replacement["resumed"], id);
     let prepared: Value = serde_json::from_str(replacement["prepared"].as_str().unwrap()).unwrap();
@@ -1281,7 +1303,27 @@ if printf 'changed\n' > /yard/proof/intrusion; then echo proof=written; else ech
     assert_eq!(prepared["durable"]["predecessor"], id);
     assert_eq!(project.rows(&format!("SELECT id FROM execution WHERE attempt = {attempt} AND node = 'cleanup' AND reserved = 1")).len(), 1);
     resumed.release();
-    inspection.wait_held();
+    assert_eq!(
+        watch.said_before_end(
+            &machine.root.join("cleanup-inspection"),
+            Some(replacement_id)
+        ),
+        "request\n"
+    );
+    // Sabotage: omit the explicit /workspace worktree from commit or final
+    // inspection. Native Git sees the substitute tree as dirty; cleanup must
+    // commit the actual declared source and inspect that clean source instead.
+    let redirected = machine.pinfold(&["box", "exec", replacement["handle"].as_str().unwrap(), "--",
+        "/usr/bin/env", "-i", "PATH=/usr/bin:/bin", "GIT_CONFIG_NOSYSTEM=1",
+        "GIT_CONFIG_GLOBAL=/dev/null", "GIT_TERMINAL_PROMPT=0", "sh", "-c", r#"
+git -C /workspace -c safe.directory=/workspace -c core.hooksPath=/dev/null -c core.fsmonitor=false show HEAD:chain.txt &&
+git -C /workspace -c safe.directory=/workspace -c core.hooksPath=/dev/null -c core.fsmonitor=false -c filter.trip.clean= -c filter.trip.required=false status --porcelain --untracked-files=all
+"#]);
+    assert!(redirected.status.success());
+    assert_eq!(
+        String::from_utf8(redirected.stdout).unwrap(),
+        "cleaned\n M chain.txt\n"
+    );
     // Force status to recheck content even after commit_source refreshed the
     // index. Without this, Git may skip the clean filter on matching stat data.
     std::fs::File::open(clone.join("chain.txt"))

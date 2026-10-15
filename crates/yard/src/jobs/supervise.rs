@@ -35,6 +35,7 @@ async fn packaged_status(daemon: &Daemon, name: &str) -> Option<String> {
         "GIT_CONFIG_GLOBAL=/dev/null",
         "GIT_TERMINAL_PROMPT=0",
         "/usr/bin/git",
+        "--work-tree=/workspace",
         "-c",
         "safe.directory=/workspace",
         "-c",

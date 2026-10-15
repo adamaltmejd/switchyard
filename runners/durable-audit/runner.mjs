@@ -291,6 +291,7 @@ async function main() {
       if (!paths.length) return text('undeclared_file');
       const filters = [];
       const git = async argv => promisify(execFile)('/usr/bin/git', [
+        '--work-tree=/workspace',
         '-c', 'safe.directory=/workspace', '-c', 'core.hooksPath=/dev/null',
         '-c', 'core.fsmonitor=false', '-c', 'commit.gpgSign=false', ...filters, ...argv,
       ], { cwd: '/workspace', timeout: 120000, maxBuffer: MAX_READ, encoding: 'buffer',
