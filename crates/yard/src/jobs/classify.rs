@@ -284,7 +284,6 @@ pub fn retry(conn: &Connection, row: &executions::Execution) -> Result<i64, Fail
 }
 
 /// Returns true when classification owns continuation, including attention.
-#[allow(clippy::too_many_arguments)]
 pub fn route(
     daemon: &Arc<Daemon>,
     project: &Arc<Project>,
@@ -405,7 +404,6 @@ pub fn route(
     Ok(handled)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn launch(
     tx: &Connection,
     loaded: &Loaded,
