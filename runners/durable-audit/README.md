@@ -1,6 +1,6 @@
 # Trusted Durable audit image
 
-This package supplies the explicitly selected read-only audit controller for
+This package supplies the explicitly selected audit and cleanup controller for
 a Yard-owned box. Yard freezes selected inputs and owns supervision and
 checked teardown on its existing execution lifecycle. No process here creates
 a box or reads the host.
@@ -77,7 +77,11 @@ files = [{root = "source", path = "crates/yard/src/pi.rs"}]
 Use `yard_attempt_start` with `workflow` naming an existing read-only workflow
 whose implementer is `worker`, and
 `overrides: {"implementer": {"profile": "durable"}}`. Only one read-only
-`implementer` node with report output and `complete` is supported. Arbitrary
+`implementer` node with report output and `complete` is supported there.
+The existing exclusive `implementer -> cleanup -> repair` graph also accepts
+a packaged cleanup profile with `access = "write-allowed"`, report output and
+`complete`. Keep the implementer and repair profiles ordinary. Cleanup shares
+their source clone; repair alone produces the final candidate. Arbitrary
 graphs and delegation remain refused. A read-only workflow with no seats may
 also set `profile = "durable"`; `yard ticket new --workflow NAME` then admits
 that explicit selection. The profile is not inherited from the default.
@@ -95,7 +99,7 @@ referenced regular files under the trusted root, separate from source, proof
 and writable state. Only declared regular files
 are readable; links and traversal are refused. No reference is followed
 automatically. The selected Markdown is included in the system instructions.
-Yard supplies frozen, read-only mounts from admitted identities even after
+Yard supplies frozen, read-only proof and trusted mounts from admitted identities even after
 later canonical or candidate edits. The native Pi bridge checks admitted
 launcher, controller and lock hashes before package code executes; the image
 launcher then verifies its sealed runtime closure before model calls.
@@ -117,8 +121,22 @@ At most 12 model HTTP requests and 64 executed tool calls are admitted.
 Each response is limited to 1 MiB and 60 seconds. Each file read returns at
 most 32768 bytes with a truncation flag; selected Markdown must fit.
 Launch input is at most 128 KiB, with at most 512 declared files and a
-32768-byte prompt. The model receives only `read_declared` and
-`yard_publish_report`. No shell, filesystem write or delegation tool exists.
+32768-byte prompt. The model receives `read_declared`, `write_declared`,
+`commit_source` and `yard_publish_report`. Writes and commits refuse with
+`source_write_refused` unless the daemon's frozen cleanup launch explicitly
+sets `source_write = true` under `package_launch = "source-write-v1"`.
+Audits retain read-only source mounts and no source-write authority.
+`write_declared` replaces one existing declared source file with at most
+32768 UTF-8 bytes. It refuses links, multiply linked files, traversal, `.git`
+and `.yard` paths. `commit_source` takes a nonempty message of at most 1024
+bytes and commits only declared source paths with boxed Git. Each Git call
+has an explicit cwd, scrubbed environment, disabled hooks, filters, fsmonitor and
+signing, 32768 bytes per output stream and a 120-second bound. Cleanup must
+leave a clean committed tree before publishing its report. Both tools are
+unsafe to replay; a deliberate continuation after checked predecessor release
+receives interruption instead of automatically rerunning a pending tool.
+Source access grants no candidate publication or operator landing tool.
+No shell or delegation tool exists.
 Report fields and byte bounds match Yard's validated publication contract;
 the daemon remains authoritative. Successful publication asks Durable to
 terminate. A bare answer raises `missing_report`. Logs contain only named

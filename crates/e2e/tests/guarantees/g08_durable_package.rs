@@ -550,7 +550,7 @@ fn a_packaged_audit_refuses_changed_assets_then_publishes_in_a_corrected_box() {
     assert!(!transcript(&project, 2).contains(SECRET));
 }
 
-fn debugger_holds_read(machine: &Machine, handle: &str) -> std::process::Child {
+fn debugger_holds_tool(machine: &Machine, handle: &str, line: &str) -> std::process::Child {
     use std::io::{BufRead, BufReader};
     let script = r#"
 import { writeSync } from 'node:fs';
@@ -581,11 +581,12 @@ const call = (method, params = {}) => new Promise((resolve, reject) => {
 await call('Debugger.enable');
 const source = await (await import('node:fs/promises')).readFile('/opt/yard/durable-audit/runner.mjs', 'utf8');
 const lineNumber = source.split('\n').findIndex(line => line.includes('const path = allowed.get(args.file);'));
-if (lineNumber < 0) throw new Error('read tool source missing');
+if (lineNumber < 0) throw new Error('tool source missing');
 await call('Debugger.setBreakpointByUrl', {url:'file:///opt/yard/durable-audit/runner.mjs',lineNumber});
 writeSync(1, 'armed\n');
 // The debugger stays attached and paused until the real box is destroyed.
 "#;
+    let script = script.replace("const path = allowed.get(args.file);", line);
     let mut command = std::process::Command::new("pinfold");
     command
         .env("XDG_STATE_HOME", "/tmp/yard-e2e-state")
@@ -614,7 +615,7 @@ writeSync(1, 'armed\n');
             "--no-addons",
             "--input-type=module",
             "-e",
-            script,
+            &script,
         ])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::inherit())
@@ -682,8 +683,7 @@ fn durable_checkpoint_scenario(name: &str, corrupt: bool) {
         Reply::Tools(vec![audit_report()])
     });
     machine.kill();
-    static SOURCE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
-    let source = SOURCE.get_or_init(checkpoint_daemon_source);
+    let source = checkpoint_source();
     machine.use_binary(Some(source.parent().unwrap().join("debug/yard")));
     machine.start();
     let project = fixture(&machine);
@@ -723,7 +723,8 @@ fn durable_checkpoint_scenario(name: &str, corrupt: bool) {
             .clone();
         let id = old["id"].as_i64().unwrap();
         let handle = old["handle"].as_str().unwrap();
-        let mut debugger = debugger_holds_read(&machine, handle);
+        let mut debugger =
+            debugger_holds_tool(&machine, handle, "const path = allowed.get(args.file);");
         assert_eq!(
             watch.said_before_end(&machine.root.join("debug-armed"), Some(id)),
             "armed\n"
@@ -900,4 +901,340 @@ fn durable_continuations_exclusively_resume_matching_interrupted_inputs() {
 #[test]
 fn durable_checkpoint_corruption_refuses_before_fresh_retry() {
     durable_checkpoint_scenario("g2-durable-corrupt", true);
+}
+
+fn checkpoint_source() -> &'static std::path::PathBuf {
+    static SOURCE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    SOURCE.get_or_init(checkpoint_daemon_source)
+}
+
+/// G2/G9/G13: one project refuses the audit's source write, then admits it
+/// for cleanup on the sequential handoff. The real debugger holds the write
+/// after fsync while its unsafe intent is pending. Host bytes, boxed SQLite,
+/// Git ancestry and execution history supply the expected values.
+/// Sabotage: grant audit writes, replay an unsafe write, reuse a workspace or
+/// checkpoint before checked release, or let cleanup publish/land a candidate.
+/// One machine adds an audit, implementation, interrupted cleanup, resumed
+/// cleanup and repair box; the debugger-enabled build is shared with G5.
+#[test]
+fn selected_durable_cleanup_commits_without_replaying_an_interrupted_write() {
+    use std::os::unix::fs::MetadataExt;
+    use std::sync::{Arc, Mutex};
+    let initial = Latch::new();
+    let held_initial = initial.clone();
+    let resumed = Latch::new();
+    let held_resumed = resumed.clone();
+    let audit_refusal = Arc::new(Mutex::new(false));
+    let observed_refusal = audit_refusal.clone();
+    let machine = Machine::new("g13-durable-cleanup", move |request| {
+        let write = |content| {
+            tool(
+                "write_declared",
+                json!({"file": "source:chain.txt", "content": content}),
+            )
+        };
+        match request.body["model"].as_str().unwrap() {
+            "audit-selected" => {
+                if request.opens() {
+                    return Reply::Tools(vec![write("first-write\n")]);
+                }
+                assert_eq!(
+                    request.last_tool_result().unwrap().1,
+                    "source_write_refused"
+                );
+                *observed_refusal.lock().unwrap() = true;
+                Reply::Tools(vec![audit_report()])
+            }
+            "cleanup-selected" => {
+                assert!(!request.has_tool("bash"));
+                assert!(!request.has_tool("yard_attempt_approve"));
+                if request.opens() {
+                    return Reply::Hold(
+                        held_initial.clone(),
+                        Box::new(Reply::Tools(vec![write("first-write\n")])),
+                    );
+                }
+                let (name, result) = request.last_tool_result().unwrap();
+                if result.contains("interrupted") {
+                    return Reply::Hold(
+                        held_resumed.clone(),
+                        Box::new(Reply::Tools(vec![write("cleaned\n")])),
+                    );
+                }
+                if name == "write_declared" {
+                    assert!(
+                        request
+                            .tool_results()
+                            .iter()
+                            .any(|(_, result)| result.contains("interrupted"))
+                    );
+                    assert_eq!(result, "source_written");
+                    Reply::Tools(vec![tool("commit_source", json!({"message": "Cleanup"}))])
+                } else {
+                    assert_eq!(name, "commit_source");
+                    assert_eq!(result, "source_committed");
+                    Reply::Tools(vec![audit_report()])
+                }
+            }
+            "implementer-selected" | "repair-selected" => {
+                if request.opens() {
+                    return Reply::Tools(vec![bash(
+                        if request.body["model"] == "implementer-selected" {
+                            "printf 'implemented\\n' > chain.txt && git add chain.txt && git commit -qm Implement"
+                        } else {
+                            "test \"$(cat chain.txt)\" = cleaned && test \"$(cat /yard/input/trusted/repair.md)\" = trusted-repair && printf 'repaired\\n' > chain.txt && git add chain.txt && git commit -qm Repair"
+                        },
+                    )]);
+                }
+                Reply::Text("done".into())
+            }
+            other => panic!("unexpected selected model {other}"),
+        }
+    });
+    machine.kill();
+    let source = checkpoint_source();
+    machine.use_binary(Some(source.parent().unwrap().join("debug/yard")));
+    machine.start();
+    let project = fixture(&machine);
+    project.write("chain.txt", "base\n");
+    project.write("repair.md", "trusted-repair\n");
+    project.write(
+        "runners/durable-audit/launch",
+        &std::fs::read_to_string(source.join("runners/durable-audit/launch")).unwrap(),
+    );
+    project.git(&["add", "-A"]);
+    project.git(&["commit", "-qm", "Selected cleanup fixture"]);
+    project.json(&["sync"]);
+    machine.wrapper(
+        "pinfold",
+        &format!(
+            r#"
+if [ "$1 $2" = 'image build' ]; then
+    previous=''
+    for arg do
+        if [ "$previous" = '--context' ]; then cp -R '{root}/build-inputs' "$arg/build-inputs"; fi
+        previous="$arg"
+    done
+fi
+"#,
+            root = machine.root.display()
+        ),
+    );
+    image(&project, "");
+    let mut extra = String::from(
+        "\n[gates.verify]\ncommand = 'test \"$(cat chain.txt)\" = repaired'\nstage = 'candidate'\nruns_in = 'host'\n",
+    );
+    for (role, output) in [("implementer", "candidate"), ("repair", "candidate")] {
+        extra.push_str(&format!("\n[agents.{role}]\nharness = 'pi'\nprovider = 'openrouter'\nmodel = '{role}-selected'\n[profiles.{role}]\naccess = 'write-allowed'\noutcomes = ['complete']\n[profiles.{role}.outputs]\nresult = '{output}'\n[profiles.{role}.runner]\nkind = 'agent'\nagent = '{role}'\ninstructions = 'Selected {role} role.'\n"));
+        if role == "repair" {
+            extra.push_str("skills = ['repair.md']\n");
+        }
+    }
+    for (role, access) in [("audit", "read-only"), ("cleanup", "write-allowed")] {
+        extra.push_str(&format!(
+            r#"
+[agents.{role}]
+harness = "pi"
+provider = "openrouter"
+model = "{role}-selected"
+[profiles.{role}]
+access = "{access}"
+outcomes = ["complete"]
+[profiles.{role}.outputs]
+result = "report"
+[profiles.{role}.runner]
+kind = "packaged"
+package = "durable-audit"
+agent = "{role}"
+instructions = "Selected {role} role."
+skill = "trusted/selected.md"
+references = ["trusted/reference.txt"]
+files = [{{root = "source", path = "chain.txt"}}]
+"#
+        ));
+    }
+    project.reconfigure(
+        &config(&extra)
+            .replace("review = [\"correctness\"]", "review = \"none\"")
+            .replace(
+                "[workflows.plan]",
+                "[workflows.plan]\nimplementer = \"audit\"\nprofile = \"audit\"",
+            ),
+    );
+    let mut watch = project.watch(0);
+    project.json(&[
+        "ticket",
+        "new",
+        "--title",
+        "Selected cleanup",
+        "--workflow",
+        "plan",
+    ]);
+    let planned = watch.event("attempt.ended", &[("outcome", "planned")]);
+    watch.find("audit cleanup released", |event| {
+        event["event"] == "execution.released"
+            && event["attempt"] == planned["attempt"]
+            && project.rows(&format!(
+                "SELECT kind FROM execution WHERE id = {}",
+                event["execution"]
+            ))[0]["kind"]
+                == "cleanup"
+    });
+    assert!(*audit_refusal.lock().unwrap());
+    assert_eq!(
+        std::fs::read_to_string(project.canonical().join("chain.txt")).unwrap(),
+        "base\n"
+    );
+    for path in ["debug-armed", "debug-held"] {
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(machine.root.join(path))
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    let mut operator = machine.operator();
+    operator.initialize();
+    let started = operator.call(
+        "yard_attempt_start",
+        json!({"project": project.path, "ticket": "Y-1",
+        "graph": super::g13_runs_where_its_row_says::sequential_handoff_graph()}),
+    );
+    assert!(started["error"].is_null(), "{started}");
+    let attempt = started["result"]["attempt"].as_i64().unwrap();
+    initial.wait_held();
+    let old = project.rows(&format!("SELECT id, handle FROM execution WHERE attempt = {attempt} AND node = 'cleanup' AND status = 'running'"))[0].clone();
+    let id = old["id"].as_i64().unwrap();
+    let handle = old["handle"].as_str().unwrap();
+    let clone = project
+        .path
+        .join(format!(".yard/local/attempts/{attempt}/clone"));
+    let inode = std::fs::metadata(clone.join(".git")).unwrap().ino();
+    let readonly = machine.pinfold(&["box", "exec", handle, "--", "sh", "-c", r#"
+test "$(cat /yard/input/trusted/trusted/reference.txt)" = TRUSTED_REFERENCE_Y92 || exit 1
+if printf 'changed\n' > /yard/input/trusted/trusted/reference.txt; then echo trusted=written; else echo trusted=refused; fi
+if printf 'changed\n' > /yard/proof/intrusion; then echo proof=written; else echo proof=refused; fi
+"#]);
+    assert!(readonly.status.success());
+    assert_eq!(
+        String::from_utf8(readonly.stdout).unwrap(),
+        "trusted=refused\nproof=refused\n"
+    );
+    let mut debugger = debugger_holds_tool(&machine, handle, "return text('source_written');");
+    assert_eq!(
+        watch.said_before_end(&machine.root.join("debug-armed"), Some(id)),
+        "armed\n"
+    );
+    initial.release();
+    assert_eq!(
+        watch.said_before_end(&machine.root.join("debug-held"), Some(id)),
+        "held\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(clone.join("chain.txt")).unwrap(),
+        "first-write\n"
+    );
+    let intent = machine.pinfold(&["box", "exec", handle, "--", "/opt/yard/durable-audit/node/bin/node", "--no-addons", "--input-type=module", "-e",
+        r#"import {DatabaseSync} from 'node:sqlite'; const db = new DatabaseSync('/yard/state/audit-checkpoints/session.sqlite',{readOnly:true}); console.log(JSON.stringify(db.prepare('SELECT record FROM tasks').all().map(r=>JSON.parse(r.record)).filter(r=>r.state.checkpoint?.phase === 'execute'))); db.close();"#]);
+    assert!(intent.status.success());
+    let tasks: Value = serde_json::from_slice(&intent.stdout).unwrap();
+    assert_eq!(tasks.as_array().unwrap().len(), 1);
+    assert_eq!(tasks[0]["state"]["checkpoint"]["replay"], "unsafe");
+    let refused = operator.call(
+        "yard_attempt_start",
+        json!({"project": project.path, "ticket": "Y-1", "workspace": "implementer"}),
+    );
+    assert_eq!(
+        refused["error"]["data"],
+        json!({"reason": "workspace_owned", "workspace": "implementer", "execution": id})
+    );
+    let refused = project.refused(&["attempt", "start", "Y-1"]);
+    assert_eq!(refused["data"]["reason"], "checkpoint_owned");
+    assert_eq!(refused["data"]["execution"], id);
+    assert_eq!(refused["data"]["checkpoint"], id);
+    machine.kill();
+    assert_eq!(
+        std::fs::read_to_string(clone.join("chain.txt")).unwrap(),
+        "first-write\n"
+    );
+    assert_eq!(
+        project.rows(&format!("SELECT reserved FROM execution WHERE id = {id}"))[0]["reserved"],
+        1
+    );
+    machine.start();
+    let _ = debugger.wait().unwrap();
+    assert!(
+        !machine
+            .pinfold(&["box", "exec", handle, "--", "true"])
+            .status
+            .success()
+    );
+    let old = project.rows(&format!(
+        "SELECT outcome, teardown, reserved FROM execution WHERE id = {id}"
+    ))[0]
+        .clone();
+    assert_eq!(
+        old,
+        json!({"outcome": "interrupted", "teardown": 1, "reserved": 0})
+    );
+    // An outside marker makes replay observable even though replacement is
+    // idempotent. The predecessor has been proved gone before this edit.
+    std::fs::write(clone.join("chain.txt"), "after-release\n").unwrap();
+    let mut watch = project.watch(project.json(&["status"])["seq"].as_i64().unwrap());
+    project.json(&["attempt", "start", "Y-1"]);
+    resumed.wait_held();
+    assert_eq!(
+        std::fs::read_to_string(clone.join("chain.txt")).unwrap(),
+        "after-release\n"
+    );
+    let replacement = project.rows(&format!("SELECT id, resumed, prepared FROM execution WHERE attempt = {attempt} AND node = 'cleanup' AND status = 'running'"))[0].clone();
+    assert_ne!(replacement["id"], id);
+    assert_eq!(replacement["resumed"], id);
+    let prepared: Value = serde_json::from_str(replacement["prepared"].as_str().unwrap()).unwrap();
+    assert_eq!(prepared["durable"]["checkpoint"], id);
+    assert_eq!(prepared["durable"]["predecessor"], id);
+    assert_eq!(project.rows(&format!("SELECT id FROM execution WHERE attempt = {attempt} AND node = 'cleanup' AND reserved = 1")).len(), 1);
+    resumed.release();
+    let approval = watch.until("cleanup handoff approval", |event| {
+        event["event"] == "attention.raised" && event["data"]["kind"] == "approval"
+    });
+    assert_eq!(std::fs::metadata(clone.join(".git")).unwrap().ino(), inode);
+    assert_eq!(
+        std::fs::read_to_string(clone.join("chain.txt")).unwrap(),
+        "repaired\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(project.canonical().join("chain.txt")).unwrap(),
+        "base\n"
+    );
+    let rows = project.rows(&format!("SELECT id, node, result, reserved, teardown FROM execution WHERE attempt = {attempt} AND kind = 'implementation' ORDER BY id"));
+    assert_eq!(
+        rows.iter()
+            .map(|row| row["node"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["implementer", "cleanup", "cleanup", "repair"]
+    );
+    for row in &rows {
+        assert_eq!(row["reserved"], 0);
+        assert_eq!(row["teardown"], 1);
+    }
+    let report: Value = serde_json::from_str(rows[2]["result"].as_str().unwrap()).unwrap();
+    assert_eq!(report["outputs"]["result"]["kind"], "report");
+    assert_eq!(project.rows(&format!("SELECT json_extract(data, '$.candidate') AS execution FROM audit WHERE event = 'attempt.candidate' AND attempt = {attempt} ORDER BY seq")), vec![json!({"execution": rows[0]["id"]}), json!({"execution": rows[3]["id"]})]);
+    let head = approval["data"]["payload"]["head"].as_str().unwrap();
+    assert_eq!(
+        git(&project.canonical(), &["log", "-3", "--format=%s", head])
+            .lines()
+            .collect::<Vec<_>>(),
+        ["Repair", "Cleanup", "Implement"]
+    );
+    project.json(&[
+        "attempt", "approve", "Y-1", "--target", "main", "--head", head,
+    ]);
+    watch.event("attempt.ended", &[("outcome", "landed")]);
+    assert_eq!(
+        std::fs::read_to_string(project.canonical().join("chain.txt")).unwrap(),
+        "repaired\n"
+    );
 }

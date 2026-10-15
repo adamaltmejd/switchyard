@@ -62,8 +62,15 @@ pub fn package_effort_capable(admission: &Value) -> bool {
     // Before capability recording, only these exact compiled package bytes
     // establish effort support. Other packages retain the six-field protocol.
     admission["package_launch"] == "effort"
+        || admission["package_launch"] == "source-write-v1"
         || (admission.get("package_launch").is_none()
             && admission["inputs"]["package"] == package_identity())
+}
+
+pub fn package_inputs<'a>(admission: &'a Value, node: &str) -> &'a Value {
+    admission["inputs"]["packaged_nodes"]
+        .get(node)
+        .unwrap_or(&admission["inputs"])
 }
 
 // Admission hashes belong to that attempt, not to a later daemon binary.

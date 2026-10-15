@@ -867,7 +867,7 @@ pub(super) async fn stage_selected(
         std::fs::create_dir(&trusted).map_err(|error| error.to_string())?;
         let admitted = attempt.admission.as_ref().expect("admitted plan");
         let sources = if matches!(runner, crate::plan::Runner::Packaged { .. }) {
-            &admitted["inputs"]["trusted_staged_sources"]
+            &crate::pi::package_inputs(admitted, node_name)["trusted_staged_sources"]
         } else {
             &admitted["inputs"]["selected_agent_sources"][node_name]
         };
@@ -936,8 +936,9 @@ pub async fn implement(
             .map_err(|error| Fail::refused(error.to_string()))?,
         None => loaded.config.workflow_plan(&attempt.workflow)?,
     };
-    let packaged = plan.packaged();
     let declared = &plan.nodes[row.node.as_deref().unwrap_or("implementer")];
+    let packaged =
+        matches!(declared.runner, crate::plan::Runner::Packaged { .. }).then_some(&declared.runner);
     let report_only = match declared.outputs.get("result") {
         Some(crate::plan::Output::Report) => true,
         Some(crate::plan::Output::Candidate) => false,
@@ -1045,7 +1046,12 @@ pub async fn implement(
     {
         return Ok(());
     }
-    let storage = if workflow.read_only {
+    if packaged.is_some() && !workflow.read_only {
+        std::fs::create_dir_all(audit_dir.parent().expect("audit parent"))
+            .map_err(|error| error.to_string())?;
+        std::fs::create_dir(&audit_dir).map_err(|error| error.to_string())?;
+    }
+    let storage = if workflow.read_only || packaged.is_some() {
         &audit_dir
     } else {
         &writer_dir
@@ -1072,7 +1078,7 @@ pub async fn implement(
         None
     };
     let proof_dir = (|| {
-        if workflow.read_only {
+        if workflow.read_only || packaged.is_some() {
             let snapshots = audit_dir.join("proof-snapshots");
             let source = row
                 .proof
@@ -1170,7 +1176,14 @@ pub async fn implement(
             }
             let mut launch = json!({"provider": provider, "model": implementer["model"],
             "prompt": prompt, "files": declared, "skill": format!("trusted:{skill}"),
-            "identity": admitted["inputs"]["package"]});
+            "identity": crate::pi::package_inputs(admitted, node_name)["package"]});
+            if !workflow.read_only {
+                if admitted["package_launch"] != "source-write-v1"
+                    || node_name != "cleanup" || !plan.handoff() || !report_only {
+                    return Err(Fail::refused("undeclared_source_write"));
+                }
+                launch["source_write"] = json!(true);
+            }
             if crate::pi::package_effort_capable(admitted) && !implementer["effort"].is_null() {
                 launch["effort"] = implementer["effort"].clone();
             }
@@ -1198,7 +1211,7 @@ pub async fn implement(
 
     // Writable sessions resume until their execution bound or version changes.
     let resume = match project.read(|conn| {
-        if workflow.read_only {
+        if workflow.read_only || packaged.is_some() {
             Ok(None)
         } else {
             executions::session(conn, attempt.id, execution)
@@ -1334,6 +1347,13 @@ pub async fn implement(
         },
     );
     spec.mounts.extend(candidate_inputs);
+    if packaged.is_some() {
+        for mount in &mut spec.mounts {
+            if mount.guest == "/yard/proof" {
+                mount.readonly = true;
+            }
+        }
+    }
     if let Some(checkpoint) = &checkpoint {
         // Staging never enters retained guest bytes. The only reused mount is
         // the checkpoint root, after the store's exclusive ownership claim.
@@ -1385,7 +1405,7 @@ pub async fn implement(
         tokio::time::Instant::now() + Duration::from_millis((total - spent).max(0) as u64)
     };
     let run = async {
-        if workflow.read_only {
+        if workflow.read_only || packaged.is_some() {
             let audit = if packaged.is_some() {
                 let bytes = std::fs::read(input.join("audit.json"))
                     .map_err(|error| Fail::invalid(error.to_string()))?;

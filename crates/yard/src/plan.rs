@@ -499,13 +499,13 @@ impl Config {
                         .values()
                         .any(|node| matches!(node.runner, Runner::Packaged { .. }))
                     {
-                        plan.packaged().is_some() && self.workflow(name).is_ok_and(|workflow| {
+                        (plan.packaged().is_some() && self.workflow(name).is_ok_and(|workflow| {
                             workflow.read_only
                                 && matches!(
                                     &plan.nodes["implementer"].runner,
                                     Runner::Packaged { agent, .. } if agent == &workflow.implementer
                                 )
-                        })
+                        })) || plan.handoff_selection(&ordinary, self)
                     } else {
                         plan.ordinary_selection(&ordinary, self.review.max_rounds, &self.profiles)
                             .is_some()
@@ -521,6 +521,13 @@ impl Config {
 }
 
 impl Plan {
+    pub fn packaged_cleanup(&self) -> Option<&Runner> {
+        self.nodes
+            .get("cleanup")
+            .filter(|node| self.handoff() && matches!(node.runner, Runner::Packaged { .. }))
+            .map(|node| &node.runner)
+    }
+
     pub fn packaged(&self) -> Option<&Runner> {
         let node = self.nodes.get("implementer")?;
         (self.inputs.is_empty()
@@ -699,7 +706,8 @@ impl Plan {
                 || node.inputs != inputs
                 || node.requires != requires
                 || node.outcomes != ["complete"]
-                || !matches!(node.runner, Runner::Agent { .. })
+                || !(matches!(node.runner, Runner::Agent { .. })
+                    || (name == "cleanup" && matches!(node.runner, Runner::Packaged { .. })))
                 || !config.profiles.values().any(|profile| {
                     profile.runner == node.runner
                         && profile.access == node.access

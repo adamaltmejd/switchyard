@@ -291,6 +291,10 @@ fn admit(
         admission["package_launch"] = json!("effort");
         admission["package_checkpoint"] = json!("exclusive-v1");
     }
+    if plan.packaged_cleanup().is_some() {
+        admission["package_launch"] = json!("source-write-v1");
+        admission["package_checkpoint"] = json!("exclusive-v1");
+    }
     let attempt = attempts::insert(
         tx,
         ticket.id,
@@ -339,7 +343,7 @@ fn writer_profiles(
 ) -> Value {
     json!(plan.nodes.iter()
         .filter(|(_, node)| node.access == crate::plan::Access::WriteAllowed
-            && matches!(node.runner, crate::plan::Runner::Agent { .. }))
+            && matches!(node.runner, crate::plan::Runner::Agent { .. } | crate::plan::Runner::Packaged { .. }))
         .map(|(name, node)| {
             let selected = request.overrides.get(name)
                 .or_else(|| request.graph.as_ref().and_then(|graph| graph.nodes.get(name)))
@@ -1422,7 +1426,10 @@ pub async fn attempt_revise(
             .iter()
             .filter(|(_, node)| {
                 node.access == crate::plan::Access::WriteAllowed
-                    && matches!(node.runner, crate::plan::Runner::Agent { .. })
+                    && matches!(
+                        node.runner,
+                        crate::plan::Runner::Agent { .. } | crate::plan::Runner::Packaged { .. }
+                    )
             })
             .any(|(name, node)| {
                 old.nodes.get(name).is_none_or(|previous| {
@@ -1449,12 +1456,37 @@ pub async fn attempt_revise(
                         *skills = old_skills.clone();
                         *references = old_references.clone();
                     }
+                    if let (
+                        crate::plan::Runner::Packaged {
+                            instructions,
+                            skill,
+                            references,
+                            files,
+                            ..
+                        },
+                        crate::plan::Runner::Packaged {
+                            instructions: old,
+                            skill: old_skill,
+                            references: old_references,
+                            files: old_files,
+                            ..
+                        },
+                    ) = (&mut node.runner, &previous.runner)
+                    {
+                        *instructions = old.clone();
+                        *skill = old_skill.clone();
+                        *references = old_references.clone();
+                        *files = old_files.clone();
+                    }
                     node != previous
                 })
             })
             || old.nodes.iter().any(|(name, node)| {
                 node.access == crate::plan::Access::WriteAllowed
-                    && matches!(node.runner, crate::plan::Runner::Agent { .. })
+                    && matches!(
+                        node.runner,
+                        crate::plan::Runner::Agent { .. } | crate::plan::Runner::Packaged { .. }
+                    )
                     && !plan.nodes.contains_key(name)
             }))
     {
@@ -1470,7 +1502,10 @@ pub async fn attempt_revise(
             if name != "implementer"
                 && (!(old.writers() || old.handoff())
                     || node.access != crate::plan::Access::WriteAllowed
-                    || !matches!(node.runner, crate::plan::Runner::Agent { .. }))
+                    || !matches!(
+                        node.runner,
+                        crate::plan::Runner::Agent { .. } | crate::plan::Runner::Packaged { .. }
+                    ))
             {
                 continue;
             }
@@ -1481,7 +1516,7 @@ pub async fn attempt_revise(
             };
             let mut settings = loaded.config.agents[agent].clone();
             let previous = &frozen.config.agents[agent];
-            if packaged
+            if matches!(node.runner, crate::plan::Runner::Packaged { .. })
                 && !crate::pi::package_effort_capable(&evidence)
                 && settings.effort.is_some()
                 && settings.effort != previous.effort
@@ -1535,6 +1570,13 @@ pub async fn attempt_revise(
         evidence["inputs"] = loaded
             .inputs(&daemon.git, &project.canonical_dir(), &plan)
             .await?;
+    }
+    if plan.packaged_cleanup().is_some() {
+        evidence["inputs"]["packaged_nodes"]["cleanup"]["package"] = attempt
+            .admission
+            .as_ref()
+            .expect("recorded plan")["inputs"]["packaged_nodes"]["cleanup"]["package"]
+            .clone();
     }
     let ordinary = loaded.config.workflow_plan(&attempt.workflow)?;
     let skipped = skipped_nodes(&plan, &ordinary);

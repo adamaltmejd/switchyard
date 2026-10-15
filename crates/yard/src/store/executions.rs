@@ -313,8 +313,8 @@ pub fn durable_checkpoint(conn: &Connection, current: i64, identity: Value) -> R
     }
     let previous = query(
         conn,
-        "attempt = ?1 AND kind = 'implementation' AND id < ?2 ORDER BY id DESC LIMIT 1",
-        params![row.attempt, current],
+        "attempt = ?1 AND kind = 'implementation' AND node IS ?3 AND id < ?2 ORDER BY id DESC LIMIT 1",
+        params![row.attempt, current, row.node],
     )?
     .pop();
     let previous = previous.filter(|previous| {
@@ -556,8 +556,11 @@ pub fn consumed_definition(
             let settings = admission["agents"].get(agent)?;
             let harness = settings["settings"]["harness"].as_str()?;
             settings["runner"]["version"].as_str()?;
-            let staged = inputs.get("trusted_staged_sources")?.as_array()?;
             let packaged = matches!(runner, crate::plan::Runner::Packaged { .. });
+            let package_inputs = crate::pi::package_inputs(admission, node);
+            let staged = if packaged { package_inputs } else { inputs }
+                .get("trusted_staged_sources")?
+                .as_array()?;
             let sources: Vec<_> = staged
                 .iter()
                 .filter(|source| {
@@ -579,7 +582,7 @@ pub fn consumed_definition(
                 definition["review"] = admission.get("review")?.clone();
             }
             if packaged {
-                definition["package"] = inputs.get("package")?.clone();
+                definition["package"] = package_inputs.get("package")?.clone();
                 if let Some(contract) = admission.get("package_launch") {
                     definition["package_launch"] = contract.clone();
                 }

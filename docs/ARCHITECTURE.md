@@ -202,10 +202,16 @@ automatically. A profile, preset or operator graph may select this runner.
 A read-only workflow with no seats may explicitly set `profile = "NAME"`
 to select a packaged profile on ordinary CLI or scheduler admission. This
 field is optional and is not inherited from the default workflow.
-Its only supported plan is one read-only `implementer` node matching a
+Its standalone supported plan is one read-only `implementer` node matching a
 configured read-only workflow's agent, with `result: report` and `complete`.
 It has no graph inputs, topology or operator-failure selection. Its runtime
-is `packaged-audit`. Other packaged shapes and delegation remain refused.
+is `packaged-audit`. The existing exclusive implementer, cleanup and repair
+path also accepts a selected packaged `cleanup` with write-allowed access,
+report output and `complete`. Implementer and repair remain ordinary agents;
+repair alone produces the final candidate. Other packaged shapes and delegation
+remain refused. Cleanup package and selected-file identities bind its node;
+the ordinary roles retain their own selected inputs.
+
 The selected controller and its box occupy one existing execution slot.
 Stop cancels work; the reservation remains until the controller, box and
 inherited host children are proved gone. Native publication and terminal
@@ -431,7 +437,9 @@ Independent writer workspaces cannot transfer between graph nodes.
 A selected ordinary linear graph may declare the fixed source-writing path
 `implementer -> cleanup -> repair`. All three agent nodes explicitly name
 `workspace: implementer` and match configured profiles. They share the
-ordinary attempt's clone, input, state and live proof. The implementer has no
+ordinary attempt's clone. Ordinary roles share input, state and live proof;
+packaged cleanup gets fresh execution input/state and read-only admitted proof.
+The implementer has no
 inputs and publishes `result: candidate`. Cleanup requires that candidate and
 publishes only `result: report`. Repair requires cleanup's report and accepts
 external verdict `feedback`; it publishes `result: candidate`. All three
@@ -632,8 +640,8 @@ attempt on a ready ticket. Its target comes from the ticket or project default.
 The same resolver validates the selection before any attempt, execution or
 lane reservation is written. A valid unsupported graph is refused with
 `input: plan`, its shape, `structurally_valid: true` and `runnable: false`.
-The ordinary linear subset, selected read-only and writer graphs, and single-node
-packaged audit above run using the existing lifecycle.
+The ordinary linear subset, its selected packaged cleanup, selected read-only
+and writer graphs, and single-node packaged audit above run using the existing lifecycle.
 With no selection,
 admission resolves the ticket's workflow; overrides alone patch that workflow.
 Selection on a live attempt or a stopped/red retry is refused with
@@ -770,7 +778,7 @@ for all three sets. Source validation checks each set against its recorded
 commit. An image commit binds the entire context; Dockerfile equality does
 not imply context equality. Quiescent ordinary candidate revisions may
 explicitly adopt definition and staging commits under plan CAS.
-For packaged audits those staging identities contain only selected Markdown
+For each packaged node those staging identities contain only selected Markdown
 and declared references (Markdown at most 32768 bytes, each reference at most
 1 MiB, the set at most 8 MiB). Admission also records the package identity.
 Configuration reads inventory only the configuration, Dockerfile and ordinary
@@ -1403,9 +1411,9 @@ opencode-go sends OpenAI-compatible `reasoning_effort`. Unsupported effort
 values refuse; omitted effort enables no reasoning capability. Explicit SDK
 maps preserve the accepted xhigh and max levels without clamping.
 An omitted effort adds no launch field, preserving the older sealed package
-protocol. New admissions record `package_launch = "effort"` separately from
+protocol. New singleton audit admissions record `package_launch = "effort"` separately from
 the sealed package identity; revisions preserve that launch contract.
-The recorded contract authorizes supported effort even when the receiving
+That contract and cleanup's `source-write-v1` authorize supported effort even when the receiving
 daemon's compiled package differs from the frozen package.
 Without that record, only an exact match to the daemon's compiled package
 establishes effort support. Other preserved packages receive the original
@@ -1436,10 +1444,25 @@ At most 512 regular files are declared under `/workspace`, `/yard/proof` and
 are refused. A traversal component in a declaration names `invalid_input`
 and `declared file` before model requests. Undeclared reads name
 `undeclared_file`. Read tools open only
-those files. Yard supplies frozen read-only mounts; this package
+those files. Yard supplies frozen read-only audit, proof and trusted mounts;
+selected cleanup alone receives its writable source clone. This package
 supplies no mount lifecycle. Only the trusted
 selected Markdown becomes instructions. Candidate code and extensions are
-never loaded. There is no shell, write, arbitrary host-read or delegation tool.
+never loaded. There is no shell, arbitrary host-read or delegation tool. `write_declared`
+and `commit_source` refuse as `source_write_refused` without explicit source-write
+launch authority. Only selected write-allowed cleanup receives that authority,
+under the recorded `package_launch = "source-write-v1"` contract. Its launch
+sets `source_write = true`; historical audit launches retain their original schema.
+`write_declared` replaces one declared existing regular source file with at most
+32768 UTF-8 bytes. Links, multiply linked files, traversal, `.git` and `.yard`
+components are refused. `commit_source` stages and commits only declared source
+paths with a nonempty message of at most 1024 bytes. Git runs inside the same
+box with explicit cwd, scrubbed environment, disabled hooks, filters, fsmonitor and
+signing, at most 32768 bytes per output stream and 120 seconds per call. Cleanup must leave
+a clean committed tree before its report can advance to repair. The daemon
+validates actual committed Git and proof output through the existing handoff;
+source-write authority grants no candidate publication or landing authority.
+
 Every read-only audit execution receives a fresh detached source checkout
 at its recorded head (or admission base) and a bounded, link-refusing copy
 of its available proof, both mounted read-only. Absent proof is an empty
@@ -1470,8 +1493,8 @@ The boxed controller checks its bounded checkpoint identity and storage;
 corruption or incompatibility names `checkpoint_invalid`. A supported retry
 after that error starts fresh. There is no host writer or live state copy.
 Durable reacquires the same submission. Interrupted tools are unsafe and are
-not replayed automatically; this policy also applies to future write-enabled
-tools. Native MCP publication and canonical input identities stay authoritative.
+not replayed automatically, including `write_declared` and `commit_source`.
+Native MCP publication and canonical input identities stay authoritative.
 Stop signals the existing controller to abort its work, then performs checked
 box teardown. Cancelling a waiter alone does not abort work. Failure to join
 abort still requires checked teardown before ownership can be released.
@@ -1887,7 +1910,8 @@ box spec names mounts, env, the harness, egress and memory.
 
 | Box | `/workspace` | Harness state | Egress | Env |
 |---|---|---|---|---|
-| implementer, sequential cleanup and repair | its declared writer clone, writable; `/yard/proof` writable | writable | model route, MCP route, `isolation.egress` | the harness's env, git identity, `YARD_MCP_BEARER` (from) |
+| implementer, ordinary sequential cleanup and repair | its declared writer clone, writable; `/yard/proof` writable | writable | model route, MCP route, `isolation.egress` | the harness's env, git identity, `YARD_MCP_BEARER` (from) |
+| packaged sequential cleanup | the exclusive handoff clone, writable; its admitted proof snapshot at `/yard/proof`, read-only; selected instructions and launch input at `/yard/input`, read-only | fresh Pi, scratch and input state per execution; only matching Durable checkpoints continue after checked predecessor release | model route, MCP route, `isolation.egress` | native Pi env and execution bearer; controller inherits routing only |
 | integration writer | its own retained writer clone, writable; `/yard/proof` writable; named candidate source/proof snapshots and bundles read-only under `/yard/candidates` | its own, writable | model route, MCP route, `isolation.egress` | implementer env and execution bearer |
 | read-only audit | a fresh detached checkout of its recorded head or admission base, read-only; `/yard/proof` is its frozen available proof or empty directory, read-only; selected packaged instructions and launch input at `/yard/input`, read-only | exclusive to its execution and admitted node, writable; matching Durable checkpoints continue only after checked predecessor release | model route, MCP route, `isolation.egress` | the harness's env, git identity, `YARD_MCP_BEARER` (from) |
 | standalone report | fresh exact-input checkout, read-only; no candidate proof mount | its own, writable; trusted environment from frozen target | model route, MCP route, frozen `isolation.egress` | harness env, git identity, execution bearer |
@@ -1916,7 +1940,7 @@ at the candidate stage, the approved candidate's at landing.
 
 Harness state (a harness's session store and launch files) for a write-allowed
 implementer is one directory per attempt under its files, mounted at one
-fixed path. A read-only audit or review seat gets fresh harness session,
+fixed path. A read-only audit, packaged cleanup or review seat gets fresh harness session,
 launch and scratch state per execution. A compatible Durable continuation
 exclusively mounts its retained checkpoint after checked predecessor release.
 Its row binds the admitted node and checkpoint. Whole-attempt cleanup removes
@@ -1964,7 +1988,7 @@ bound each refuse the execution naming the path. Each harness gets the paths
 it would load from a project, into its own state, and Yard's own keys ride
 the harness's highest-precedence layer, its argv.
 
-The selected packaged audit uses an empty broad agent environment. Its native
+The selected packaged audit or cleanup uses an empty broad agent environment. Its native
 Pi MCP extension is Yard-owned; only admitted selected canonical instructions
 and references are staged separately at `/yard/input/trusted`.
 
@@ -2070,8 +2094,10 @@ Operator stdio performs the allowed operations in the same project.
 Every payload is validated at the boundary (G6). A tool call outside the
 grant is refused and recorded.
 
-The selected packaged controller offers only `read_declared` and the anonymous
-native `yard_publish_report` bridge to its model. Pi retains the existing
+The selected packaged controller offers `read_declared`, `write_declared`,
+`commit_source` and the anonymous native `yard_publish_report` bridge to its model.
+The write and commit tools refuse without explicit cleanup source-write authority.
+Pi retains the existing
 audit grant and one MCP session; the child receives no bearer, session or
 additional worker grant. No model-elected child-launch tool is offered.
 
@@ -2211,11 +2237,11 @@ combination, lifecycle or historical version.
 | 6 | Inputs are validated at the boundary; new supported workflow admissions retain immutable resolved input evidence, and unrecorded history stays unknown; standalone scope is explicit | Malformed worker MCP input writes no proposal; the valid same-turn control succeeds. Unsupported selected admission creates no work, while a supported held execution keeps its frozen inputs across template sync. A real historical store preserves rows, audit and foreign keys and supports current decisions after upgrade. |
 | 7 | A ticket lands end to end and leaves only rows; usage is optional measured data with provenance; Codex token totals retain their meaning and unreported monetary cost is unknown | A real ticket goes through commit, gate, review, approval and native landing, then leaves rows while unrelated live work remains. Actual optional Pi frames retain unknown, interrupted partial and resumed explicit-zero measurements across reopen. Operator stdio preserves worker authorization and stale mutation identity while canceled waits and stdin EOF leave work running. Standalone command/report execution has no ticket or landing authority. |
 | 8 | Reviews, audits and read-only candidate and finding selections are explicit bounded publications; an empty selected panel is unreviewed; selected eligible merged failures require exact operator decisions | Silent or unregistered review publication cannot authorize approval; a proven same-project retry can. Report validation and held publication preserve exact frozen identity and eligibility, and successful text alone creates no report. Five-model selection binds own reviews and one replacement to actual landing. A correctly resealed changed packaged controller refuses before model/code effects; its unmodified control publishes through real Pi. The exact multi-model join picker refuses malformed groups and repeated contributors before a valid subset and two-source duplicate publication; checked ownership release makes one typed finding selection inspectable, preserves raw sources and grants no verdict, choice or landing authority. |
-| 9 | Each implementer execution starts from its frozen target and the right candidate; independent writers retain isolated reusable workspaces, including integration from named candidates; the bounded implementer, cleanup and repair path retains one exclusive clone | A held worker receives operator edits and adopted definitions in its next execution. Stop/start delivers the edit while retaining configured model identity. Five independent writer workspaces preserve their own bytes, sessions and frozen read-only review inputs through continuation and restart. Held integration retains partial work across restart; source writes and canonical access fail while its own write succeeds. Conflicts require repair before selection. Boxed Git inodes, fixture bytes and ancestry survive sequential selected roles; a held cleanup refuses a competing workspace retry, and checked release precedes handoff. |
+| 9 | Each implementer execution starts from its frozen target and the right candidate; independent writers retain isolated reusable workspaces, including integration from named candidates; the bounded implementer, cleanup and repair path retains one exclusive clone, including selected Durable cleanup | A held worker receives operator edits and adopted definitions in its next execution. Stop/start delivers the edit while retaining configured model identity. Five independent writer workspaces preserve their own bytes, sessions and frozen read-only review inputs through continuation and restart. Held integration retains partial work across restart; source writes and canonical access fail while its own write succeeds. Conflicts require repair before selection. Boxed Git inodes, fixture bytes and ancestry survive sequential selected roles; a held cleanup refuses a competing workspace retry, and checked release precedes handoff. Durable cleanup resumes a held unsafe source write in a new exclusive execution after checked release, without replay; its boxed commit passes the same clone to ordinary repair and native landing. |
 | 10 | The queue lands one at a time per target and re-judges what does not merge | Two approvals land in order; a red merge returns for repair. A feature ticket uses its frozen target source, definitions and image, repairs a real conflict, and lands only on that branch. |
 | 11 | Only the operator's sync changes `.yard` and canonical from outside | A worker configuration commit is refused before gates; operator sync makes the same configuration available to future admission. Named-branch import, divergence refusal and consume preserve main and another imported branch, with dirty/other-checkout refusals and allowed controls. |
 | 12 | Boxes hold nothing secret | Real Pi, Claude login/direct API and Codex routes keep upstream credentials on the host. Candidate extensions, hooks, config and guidance cannot alter their own review; trusted base inputs remain usable. A real packaged controller has no upstream key in environment, mounts, transcript or stored content. |
-| 13 | Every gate, seat and read-only audit runs where its row says; selected ordinary inputs and standalone source access are contained; source access and publication grants are independent | Boxed gates and reviews read the approved proof snapshot through read-only mounts and restricted routes. Host gates receive only named environment and the correct candidate/merged base. A superseded approval starts no host landing gate. An ordinary writable worker reads admitted skill/reference bytes after canonical and candidate edits, refuses trusted-input writes while source writes succeed, and excludes unselected guidance. Separately selected cleanup and repair settings start fresh sessions in one clone; writable cleanup publishes only a report and its operator landing call refuses with the exact execution. Distinct declared reviewer models and the post-join finding picker bind exact immutable review inputs and read-only candidate/proof mounts. |
+| 13 | Every gate, seat and read-only audit runs where its row says; selected ordinary inputs, packaged cleanup and standalone source access are contained; source access and publication grants are independent | Boxed gates and reviews read the approved proof snapshot through read-only mounts and restricted routes. Host gates receive only named environment and the correct candidate/merged base. A superseded approval starts no host landing gate. An ordinary writable worker reads admitted skill/reference bytes after canonical and candidate edits, refuses trusted-input writes while source writes succeed, and excludes unselected guidance. Separately selected cleanup and repair settings start fresh sessions in one clone; writable cleanup publishes only a report and its operator landing call refuses with the exact execution. The same project refuses the read-only Durable audit's write and permits selected cleanup's write and commit; cleanup publishes only a report, repair alone publishes the final candidate, and landing waits for operator approval. Distinct declared reviewer models and the post-join finding picker bind exact immutable review inputs and read-only candidate/proof mounts. |
 | 14 | Worker git is untrusted, and Yard stays local | A worker plants Git hooks, fsmonitor, filter, remote and a harness-state link and corrupts an object. Host markers stay absent, canonical fsck stays clean, refusal names the corrupt identity, and a legitimate recovery succeeds. |
 | 15 | Plans and proposals resolve | A read-only planner proposes bounded children and a body edit; stale edits preserve identity and rows. Accepted dependencies block the parent, and a writable dependent retains its ordinary workspace authority. Closing a live waiting attempt refuses. Actual legacy proposals and limit overrides remain usable after migration. |
 

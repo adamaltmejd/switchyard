@@ -702,24 +702,7 @@ export default function () {
     watch.find("planner release", |event| {
         event["event"] == "execution.released" && event["execution"] == cleanup["execution"]
     });
-    let graph = json!({"inputs": {"merged": "candidate", "feedback": "verdict"}, "nodes": {
-        "implementer": {"profile": "implementer", "workspace": "implementer",
-            "routes": {"complete": [{"to": "cleanup"}]}},
-        "cleanup": {"profile": "cleanup", "workspace": "implementer",
-            "inputs": {"candidate": {"node": "implementer", "output": "result", "kind": "candidate"}},
-            "requires": ["candidate"], "routes": {"complete": [{"to": "repair"}]}},
-        "repair": {"profile": "repair", "workspace": "implementer",
-            "inputs": {"cleanup": {"node": "cleanup", "output": "result", "kind": "report"},
-                "feedback": {"output": "feedback", "kind": "verdict"}},
-            "requires": ["cleanup"], "routes": {"complete": [{"to": "candidate-gate-verify"}]}},
-        "candidate-gate-verify": {"runner": {"kind": "command", "gate": "verify"},
-            "access": "write-allowed", "inputs": {"candidate": {"node": "repair", "output": "result", "kind": "candidate"}},
-            "requires": ["candidate"], "outputs": {"result": "verdict"}, "outcomes": ["complete", "failed"],
-            "routes": {"complete": [{"to": "landing-gate-verify"}], "failed": [{"to": "repair", "repeat": 1}]}},
-        "landing-gate-verify": {"runner": {"kind": "command", "gate": "verify"},
-            "access": "write-allowed", "inputs": {"merged": {"output": "merged", "kind": "candidate"}},
-            "requires": ["merged"], "outputs": {"result": "verdict"}, "outcomes": ["complete"]}
-    }});
+    let graph = sequential_handoff_graph();
     let mut operator = machine.operator();
     operator.initialize();
     let started = operator.call(
@@ -904,4 +887,26 @@ export default function () {
         git(&project.canonical(), &["show", "refs/heads/main:chain.txt"]),
         "repaired\n"
     );
+}
+
+// Shared by the ordinary and packaged cleanup host scenarios.
+pub(super) fn sequential_handoff_graph() -> Value {
+    json!({"inputs": {"merged": "candidate", "feedback": "verdict"}, "nodes": {
+        "implementer": {"profile": "implementer", "workspace": "implementer",
+            "routes": {"complete": [{"to": "cleanup"}]}},
+        "cleanup": {"profile": "cleanup", "workspace": "implementer",
+            "inputs": {"candidate": {"node": "implementer", "output": "result", "kind": "candidate"}},
+            "requires": ["candidate"], "routes": {"complete": [{"to": "repair"}]}},
+        "repair": {"profile": "repair", "workspace": "implementer",
+            "inputs": {"cleanup": {"node": "cleanup", "output": "result", "kind": "report"},
+                "feedback": {"output": "feedback", "kind": "verdict"}},
+            "requires": ["cleanup"], "routes": {"complete": [{"to": "candidate-gate-verify"}]}},
+        "candidate-gate-verify": {"runner": {"kind": "command", "gate": "verify"},
+            "access": "write-allowed", "inputs": {"candidate": {"node": "repair", "output": "result", "kind": "candidate"}},
+            "requires": ["candidate"], "outputs": {"result": "verdict"}, "outcomes": ["complete", "failed"],
+            "routes": {"complete": [{"to": "landing-gate-verify"}], "failed": [{"to": "repair", "repeat": 1}]}},
+        "landing-gate-verify": {"runner": {"kind": "command", "gate": "verify"},
+            "access": "write-allowed", "inputs": {"merged": {"output": "merged", "kind": "candidate"}},
+            "requires": ["merged"], "outputs": {"result": "verdict"}, "outcomes": ["complete"]}
+    }})
 }

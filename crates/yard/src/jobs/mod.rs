@@ -239,7 +239,14 @@ impl Loaded {
                     .push(json!({"path": entry.path, "blob": entry.oid, "executable": entry.exec}));
             }
             if matches!(node.runner, crate::plan::Runner::Packaged { .. }) {
-                inputs["trusted_staged_sources"] = json!(sources);
+                if plan.packaged().is_some() {
+                    inputs["trusted_staged_sources"] = json!(sources);
+                } else {
+                    inputs["packaged_nodes"] = json!({name: {
+                        "trusted_staged_sources": sources,
+                        "package": crate::pi::package_identity(),
+                    }});
+                }
             } else {
                 if inputs.get("selected_agent_sources").is_none() {
                     inputs["selected_agent_sources"] = json!({});
@@ -472,26 +479,41 @@ pub async fn load_attempt(
         loaded.config.workflow_plan(&attempt.workflow)?
     };
     let mut recorded_inputs = admission["inputs"].clone();
-    if admitted.packaged().is_some() {
+    if admitted.packaged().is_some() || admitted.packaged_cleanup().is_some() {
         if admission.get("package_checkpoint").is_some()
             && admission["package_checkpoint"] != "exclusive-v1"
         {
             return Err(Fail::refused("invalid admitted checkpoint contract"));
         }
-        if admission.get("package_launch").is_some() && admission["package_launch"] != "effort" {
+        if admission.get("package_launch").is_some()
+            && admission["package_launch"] != "effort"
+            && !(admitted.packaged_cleanup().is_some()
+                && admission["package_launch"] == "source-write-v1")
+        {
             return Err(Fail::refused("invalid admitted package launch contract"));
         }
-        if !crate::pi::valid_package_identity(&recorded_inputs["package"]) {
+        let package = if admitted.packaged_cleanup().is_some() {
+            &recorded_inputs["packaged_nodes"]["cleanup"]["package"]
+        } else {
+            &recorded_inputs["package"]
+        };
+        if !crate::pi::valid_package_identity(package) {
             return Err(Fail::refused("invalid admitted package identity"));
         }
-        recorded_inputs
-            .as_object_mut()
-            .expect("admitted inputs")
-            .remove("package");
+        if admitted.packaged().is_some() {
+            recorded_inputs
+                .as_object_mut()
+                .expect("admitted inputs")
+                .remove("package");
+        }
     }
     let mut expected_inputs = loaded
         .inputs(&daemon.git, &project.canonical_dir(), &admitted)
         .await?;
+    if admitted.packaged_cleanup().is_some() {
+        expected_inputs["packaged_nodes"]["cleanup"]["package"] =
+            recorded_inputs["packaged_nodes"]["cleanup"]["package"].clone();
+    }
     if !separate {
         for key in ["definition_commit", "staging_commit", "image_commit"] {
             expected_inputs
