@@ -212,10 +212,18 @@ fn tools(kind: Kind) -> Vec<Value> {
     });
     let selection = json!({
         "name": "yard_publish_selection",
-        "description": "Select exactly one declared candidate input once. This grants no write, approval or landing authority.",
-        "inputSchema": {"type": "object", "additionalProperties": false,
-            "properties": {"candidate": {"type": "string", "minLength": 1, "maxLength": 1024}},
-            "required": ["candidate"]}
+        "description": "Publish the admitted selection once: one candidate input, or finding groups with exact public source objects. This grants no write, repair, acceptance, approval or landing authority.",
+        "inputSchema": {"oneOf": [
+            {"type": "object", "additionalProperties": false,
+                "properties": {"candidate": {"type": "string", "minLength": 1, "maxLength": 1024}},
+                "required": ["candidate"]},
+            {"type": "object", "additionalProperties": false,
+                "properties": {"groups": {"type": "array", "maxItems": 200, "items": {
+                    "type": "object", "additionalProperties": false,
+                    "properties": {"reason": {"type": "string", "minLength": 1, "maxLength": 32768},
+                        "sources": {"type": "array", "minItems": 1, "items": {"type": "object"}}},
+                    "required": ["reason", "sources"]}}}, "required": ["groups"]}
+        ]}
     });
     match kind {
         Kind::Implementation => vec![context, progress, propose],
@@ -370,11 +378,13 @@ async fn call(daemon: &Arc<Daemon>, grant: &Grant, params: &Value) -> Value {
                         ..Default::default()
                     },
                     Some(&fail.message),
-                    json!({ "tool": name, "code": fail.code, "reason": fail.message }),
+                    json!({ "tool": name, "code": fail.code, "reason": fail.message, "data": fail.data }),
                 )
             });
             json!({
-                "content": [{ "type": "text", "text": format!("{}: {}", fail.code, fail.message) }],
+                "content": [{ "type": "text", "text": if fail.data.is_null() {
+                    format!("{}: {}", fail.code, fail.message)
+                } else { fail.to_json().to_string() } }],
                 "isError": true,
             })
         }

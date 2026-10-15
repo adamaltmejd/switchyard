@@ -954,6 +954,66 @@ async fn advance(
             unfinished = true;
             continue;
         }
+        if current == "selector" && plan.finding_selector().is_some() {
+            let previous = executions
+                .iter()
+                .rev()
+                .find(|row| row.node.as_deref() == Some(current));
+            if let Some(row) = previous {
+                if project
+                    .read(|conn| crate::store::selections::finding_current(conn, attempt, row))?
+                {
+                    completed.insert(current);
+                    continue;
+                }
+                if row.status == "running" || row.reserved {
+                    unfinished = true;
+                    continue;
+                }
+            }
+            let crate::plan::Runner::Agent { agent, .. } = &node.runner else {
+                return Err(Fail::refused("invalid selector"));
+            };
+            let settings = serde_json::to_value(&loaded.config.agents[agent]).expect("settings");
+            let execution = project.tx(|tx| {
+                let now = attempts::get(tx, attempt.id)?;
+                if now.state != "live"
+                    || now.plan_revision() != attempt.plan_revision()
+                    || now.candidate() != attempt.candidate()
+                    || now.proof != attempt.proof
+                    || now.next.is_some()
+                    || attempts::superseded_by_edit(tx, attempt.id, ticket.id, ticket.revision)?
+                    || executions::attempt_work(tx, attempt.id)?
+                        .iter()
+                        .rev()
+                        .find(|row| row.node.as_deref() == Some(current))
+                        .map(|row| row.id)
+                        != previous.map(|row| row.id)
+                    || crate::store::selections::inputs(tx, &now)?.is_none()
+                {
+                    return Ok(None);
+                }
+                executions::start(
+                    tx,
+                    executions::Start {
+                        kind: "review",
+                        node: Some(current),
+                        name: Some(current),
+                        reason: Some("first"),
+                        agent: Some((agent, &settings)),
+                        harness_version: crate::harness::get(&loaded.config.agents[agent].harness)
+                            .map(|h| h.version()),
+                        ..shared
+                    },
+                )
+                .map(Some)
+            })?;
+            if let Some(execution) = execution {
+                spawn(daemon, project, "review", execution);
+            }
+            unfinished = true;
+            continue;
+        }
         let (kind, name, digest) = match &node.runner {
             crate::plan::Runner::Command { gate } => {
                 ("gate", gate.as_str(), loaded.gate_digest.as_str())

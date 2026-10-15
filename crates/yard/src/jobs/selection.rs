@@ -6,10 +6,6 @@ use crate::store::{attempts, executions, selections, ticket_id, tickets};
 use serde_json::{Value, json};
 
 pub fn publish(grant: &Grant, arguments: &Value) -> Result<Value, Fail> {
-    crate::mcp::strict(arguments, &["candidate"])?;
-    let candidate = arguments["candidate"]
-        .as_str()
-        .ok_or_else(|| Fail::invalid("candidate is an input name"))?;
     grant.project.tx(|tx| {
         let row = executions::get(tx, grant.execution)?;
         let attempt = attempts::get(tx, row.required_attempt()?)?;
@@ -23,11 +19,29 @@ pub fn publish(grant: &Grant, arguments: &Value) -> Result<Value, Fail> {
             return Err(Fail::refused("duplicate_selection"));
         }
         let current = selections::inputs(tx, &attempt)?;
-        if row.plan_revision != attempt.plan_revision() || row.inputs != current {
+        if row.plan_revision != attempt.plan_revision()
+            || row.ticket_revision != Some(tickets::get(tx, attempt.ticket)?.revision)
+            || row.inputs != current
+        {
             return Err(Fail::stale("inputs", json!(row.inputs), json!(current))
                 .with(json!({"identity": "inputs", "expected": row.inputs, "current": current})));
         }
-        let value = selections::publication(&row, candidate)?;
+        let plan = crate::plan::Plan::admitted(
+            attempt
+                .admission
+                .as_ref()
+                .ok_or_else(|| Fail::refused("no_selector"))?,
+        )
+        .map_err(|error| Fail::refused(error.to_string()))?;
+        let value = if plan.finding_selector().is_some() {
+            selections::finding_publication(&row, arguments)?
+        } else {
+            crate::mcp::strict(arguments, &["candidate"])?;
+            let candidate = arguments["candidate"]
+                .as_str()
+                .ok_or_else(|| Fail::invalid("candidate is an input name"))?;
+            selections::publication(&row, candidate)?
+        };
         tx.execute(
             "UPDATE execution SET report = ?2 WHERE id = ?1 AND report IS NULL",
             rusqlite::params![row.id, value.to_string()],

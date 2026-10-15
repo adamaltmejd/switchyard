@@ -820,12 +820,19 @@ pub fn binding(
                 if output["kind"] != reference["kind"] {
                     return Ok(None);
                 }
+                let mut value = output["value"].clone();
+                if plan.finding_selector().is_some() && node == "selector" {
+                    value["review"] = json!({"check": check.to_json(),
+                        "findings": super::checks::findings(conn, check.id)?,
+                        "node": plan.nodes[source], "settings": producer.settings,
+                        "inputs": producer.inputs});
+                }
                 inputs.insert(
                     name.clone(),
                     json!({"kind": reference["kind"],
                     "source": {"execution": producer.id, "node": source,
                         "output": reference["output"], "plan_revision": producer.plan_revision},
-                    "value": output["value"]}),
+                    "value": value}),
                 );
                 continue;
             }
