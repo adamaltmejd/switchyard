@@ -44,6 +44,27 @@ async fn packaged_status(daemon: &Daemon, name: &str) -> Option<String> {
     ]
     .map(String::from)
     .into();
+    // Status can enter submodules and load their independent filter config.
+    // Check both index and HEAD, including staged gitlink deletions, without
+    // traversing any worktree or invoking content filters.
+    for args in [
+        vec!["ls-files", "--stage", "-z"],
+        vec!["ls-tree", "-r", "-z", "HEAD"],
+    ] {
+        let mut inspect = argv.clone();
+        inspect.extend(args.into_iter().map(String::from));
+        let out = daemon
+            .pinfold
+            .exec(name, Some("/workspace"), &inspect, Duration::from_secs(120))
+            .await
+            .ok()?;
+        if out.code != 0
+            || out.stdout.len() >= crate::r#box::OUTPUT_CAP
+            || out.stdout.split('\0').any(|row| row.starts_with("160000 "))
+        {
+            return None;
+        }
+    }
     let mut query = argv.clone();
     query.extend(
         [
@@ -60,7 +81,12 @@ async fn packaged_status(daemon: &Daemon, name: &str) -> Option<String> {
         .exec(name, Some("/workspace"), &query, Duration::from_secs(120))
         .await
         .ok()?;
-    if (configured.code != 0 && configured.code != 1) || configured.stdout.contains('\u{fffd}') {
+    // Box exec keeps a bounded tail. Never treat a possibly truncated
+    // configuration listing as a complete set of filter overrides.
+    if (configured.code != 0 && configured.code != 1)
+        || configured.stdout.len() >= crate::r#box::OUTPUT_CAP
+        || configured.stdout.contains('\u{fffd}')
+    {
         return None;
     }
     for key in configured.stdout.split('\0').filter(|key| !key.is_empty()) {
@@ -80,7 +106,7 @@ async fn packaged_status(daemon: &Daemon, name: &str) -> Option<String> {
         .exec(name, Some("/workspace"), &argv, Duration::from_secs(120))
         .await
         .ok()?;
-    (out.code == 0).then_some(out.stdout)
+    (out.code == 0 && out.stdout.len() < crate::r#box::OUTPUT_CAP).then_some(out.stdout)
 }
 
 /// Names only: route headers and environment values can contain credentials.
