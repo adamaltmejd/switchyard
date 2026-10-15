@@ -1371,6 +1371,13 @@ impl Plan {
             }
             for (input, reference) in &node.inputs {
                 let path = format!("nodes.{name}.inputs.{input}");
+                if input == "feedback"
+                    && reference.node.is_some()
+                    && node.access == Access::WriteAllowed
+                    && node.outputs.get("result") == Some(&Output::Candidate)
+                {
+                    return Err(Invalid::new(path, "invalid_input"));
+                }
                 let outputs = match &reference.node {
                     Some(source) => {
                         &self

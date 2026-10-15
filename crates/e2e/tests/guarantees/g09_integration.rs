@@ -19,7 +19,6 @@ fn configuration() -> String {
 }
 
 fn start(project: &Project<'_>) {
-    project.json(&["ticket", "new", "--title", "Combine inputs", "--parked"]);
     let mut operator = project.machine.operator();
     operator.initialize();
     let answer = operator.call(
@@ -62,6 +61,8 @@ fn fetch(input: &str) -> String {
 /// Expected contents and target come from the fixture and host Git.
 /// Sabotage: mount canonical into C, make candidate inputs writable, reuse
 /// A's candidate/approval for C, or recreate C's clone after interruption.
+/// Admission first refuses a source named feedback without any execution;
+/// sabotage: allow that source to collide with internal repair feedback.
 #[test]
 fn integration_retains_partial_work_and_approves_only_its_output() {
     let hold = Latch::new();
@@ -115,6 +116,29 @@ fn integration_retains_partial_work_and_approves_only_its_output() {
     let project = Project::new(&machine, "p", &configuration());
     let target = project.canonical_head();
     let watch = project.watch(0);
+    project.json(&["ticket", "new", "--title", "Combine inputs", "--parked"]);
+    let mut operator = machine.operator();
+    operator.initialize();
+    let refused = operator.call(
+        "yard_attempt_start",
+        json!({"project": project.path,
+        "ticket": "Y-1", "preset": "integration", "overrides": {"integrate": {
+            "inputs": {
+                "feedback": {"node": "implementer", "output": "result", "kind": "candidate"},
+                "b": {"node": "writer-b", "output": "result", "kind": "candidate"}
+            }, "requires": ["feedback", "b"]
+        }}}),
+    );
+    assert_eq!(refused["error"]["code"], "invalid", "{refused}");
+    assert_eq!(
+        refused["error"]["data"],
+        json!({
+            "input": "nodes.integrate.inputs.feedback", "reason": "invalid_input"
+        })
+    );
+    assert!(project.rows("SELECT id FROM attempt").is_empty());
+    assert!(project.rows("SELECT id FROM execution").is_empty());
+    drop(operator);
     start(&project);
     hold.wait_held();
     let row = project
@@ -239,6 +263,7 @@ fn integration_conflicts_require_repair_before_selection() {
     let project = Project::new(&machine, "p", &configuration());
     let target = project.canonical_head();
     let mut watch = project.watch(0);
+    project.json(&["ticket", "new", "--title", "Combine inputs", "--parked"]);
     start(&project);
     watch.until("integration conflict attention", |event| {
         event["event"] == "attention.raised" && event["data"]["reason"] == "dirty"
