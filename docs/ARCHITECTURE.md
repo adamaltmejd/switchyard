@@ -293,6 +293,7 @@ candidate bindings and nonempty text. It binds the complete admitted landing
 skipped selection. No child, check, result or passing judgment exists for
 an omission. The existing attention resolution is the sole decision truth.
 Answers prove checked release of the question's parent and predecessors.
+An earlier preparation release does not satisfy a later decision's parent release.
 Continuation proves every predecessor owner released before consuming the
 decision, revalidates its exact identity and runs every retained gate.
 Restart preserves decisions; fresh preparation requires a fresh answer.

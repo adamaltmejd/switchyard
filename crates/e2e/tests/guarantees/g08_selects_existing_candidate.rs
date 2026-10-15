@@ -316,6 +316,11 @@ fn selected_failures_keep_exact_operator_accept_and_repair() {
         "SELECT * FROM \"check\" WHERE id = {}",
         evidence["check"]["check"]
     )));
+    watch.find("selected landing repair parent released", |event| {
+        event["event"] == "execution.released"
+            && event["execution"] == evidence["landing"]["execution"]
+            && event["seq"].as_i64().unwrap() > failed["seq"].as_i64().unwrap()
+    });
     let repaired = operator.call("yard_attempt_repair", answer(&failed));
     assert_eq!(repaired["result"]["accepted"], false, "{repaired}");
     let fresh = approval(&mut watch);
@@ -361,6 +366,11 @@ fn selected_failures_keep_exact_operator_accept_and_repair() {
         "SELECT * FROM \"check\" WHERE id = {}",
         failed["data"]["payload"]["evidence"]["check"]["check"]
     )));
+    watch.find("selected landing acceptance parent released", |event| {
+        event["event"] == "execution.released"
+            && event["execution"] == failed["data"]["payload"]["evidence"]["landing"]["execution"]
+            && event["seq"].as_i64().unwrap() > failed["seq"].as_i64().unwrap()
+    });
     let accepted = operator.call("yard_attempt_accept", answer(&failed));
     assert_eq!(accepted["result"]["accepted"], true, "{accepted}");
     watch.event("landing.recorded", &[]);
@@ -1388,8 +1398,11 @@ fn only_the_declared_choice_is_checked_and_landed() {
         json!(["landing-gate-other"])
     );
     let identity = &payload["evidence"]["landing"];
+    // Preparation already released this parent once; wait for this decision's release.
     watch.find("selected omission released", |event| {
-        event["event"] == "execution.released" && event["execution"] == identity["execution"]
+        event["event"] == "execution.released"
+            && event["execution"] == identity["execution"]
+            && event["seq"].as_i64().unwrap() > omission["seq"].as_i64().unwrap()
     });
     let accepted = operator.call("yard_attempt_accept", json!({
         "project": project.path, "ticket": "Y-1", "attention": omission["attention"],
