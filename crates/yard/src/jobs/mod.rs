@@ -824,6 +824,7 @@ async fn advance(
     let mut accepted = Vec::new();
     let mut blocked = Vec::new();
     let mut chosen_blocked = Vec::new();
+    let mut chosen_failures = Vec::new();
     let concurrent = plan.concurrent();
     let active = executions
         .iter()
@@ -869,6 +870,9 @@ async fn advance(
             }
             let evidence = project.read(|conn| checks::evidence(conn, &check, &input))?;
             let decision = project.read(|conn| checks::decision(conn, attempt.id, &evidence))?;
+            if check.verdict != "pass" && node.operator_failure && decision.is_none() {
+                chosen_failures.push((check.clone(), evidence.clone()));
+            }
             if check.verdict != "pass" && decision.as_deref() != Some("accept") {
                 chosen_blocked.push(check.clone());
             }
@@ -1020,37 +1024,7 @@ async fn advance(
         let decision = project.read(|conn| checks::decision(conn, attempt.id, &evidence))?;
         let failed = check.verdict != "pass" || (outcome == "blocked" && !blocked.is_empty());
         if failed && node.operator_failure && decision.is_none() {
-            project.tx(|tx| {
-                let now = attempts::get(tx, attempt.id)?;
-                let ticket = tickets::get(tx, attempt.ticket)?;
-                let payload = json!({
-                    "actor": "operator", "target": attempt.target_branch, "choice": attempt.choice,
-                    "base": base, "head": head, "proof": attempt.proof.clone().unwrap_or_default(),
-                    "revision": input.ticket_revision, "plan_revision": attempt.plan_revision(),
-                    "gate_digest": loaded.gate_digest, "review_digest": review_digest,
-                    "evidence": evidence,
-                });
-                if now.state != "live"
-                    || stale_part(&payload, &now, &ticket, loaded)?.is_some()
-                    || checks::current(tx, kind, name, &input)?.map(|check| check.id)
-                        != Some(check.id)
-                {
-                    return Ok(());
-                }
-                attempts::raise(
-                    tx,
-                    attempts::Raise {
-                        kind: "candidate",
-                        reason: if kind == "gate" { "failed" } else { "blocked" },
-                        ticket: Some(ticket.id),
-                        attempt: Some(attempt.id),
-                        execution: Some(check.execution),
-                        payload,
-                        text: None,
-                    },
-                )
-                .map(drop)
-            })?;
+            raise_candidate_failure(project, loaded, attempt, &check, &input, &evidence)?;
             return Ok(());
         }
         selected.push(check.id);
@@ -1114,6 +1088,13 @@ async fn advance(
     }
     if unfinished || active {
         return Ok(());
+    }
+    if let Some((check, evidence)) = chosen_failures.first() {
+        let input = checks::Input {
+            digest: review_digest.clone(),
+            ..gate_input
+        };
+        return raise_candidate_failure(project, loaded, attempt, check, &input, evidence);
     }
     if let Some(trigger) = chosen_blocked.last() {
         review::blocked(
@@ -1265,6 +1246,47 @@ pub fn skipped_identity(attempt: &attempts::Attempt, ticket: &tickets::Ticket) -
         "head": attempt.head, "proof": attempt.proof.clone().unwrap_or_default(),
         "revision": ticket.revision, "plan_revision": attempt.plan_revision(),
         "skipped": skipped
+    })
+}
+
+fn raise_candidate_failure(
+    project: &Project,
+    loaded: &Loaded,
+    attempt: &attempts::Attempt,
+    check: &checks::Check,
+    input: &checks::Input,
+    evidence: &Value,
+) -> Result<(), Fail> {
+    project.tx(|tx| {
+        let now = attempts::get(tx, attempt.id)?;
+        let ticket = tickets::get(tx, attempt.ticket)?;
+        let payload = json!({
+            "actor": "operator", "target": attempt.target_branch, "choice": attempt.choice,
+            "base": input.base, "head": input.head, "proof": input.proof,
+            "revision": input.ticket_revision, "plan_revision": attempt.plan_revision(),
+            "gate_digest": loaded.gate_digest, "review_digest": loaded.review_digest(&attempt.workflow)?,
+            "evidence": evidence,
+        });
+        if now.state != "live"
+            || stale_part(&payload, &now, &ticket, loaded)?.is_some()
+            || checks::current(tx, &check.kind, &check.name, input)?.map(|check| check.id)
+                != Some(check.id)
+        {
+            return Ok(());
+        }
+        attempts::raise(
+            tx,
+            attempts::Raise {
+                kind: "candidate",
+                reason: if check.kind == "gate" { "failed" } else { "blocked" },
+                ticket: Some(ticket.id),
+                attempt: Some(attempt.id),
+                execution: Some(check.execution),
+                payload,
+                text: None,
+            },
+        )
+        .map(drop)
     })
 }
 

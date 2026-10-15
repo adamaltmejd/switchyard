@@ -25,6 +25,373 @@ fn approval(watch: &mut Watch) -> Value {
         .clone()
 }
 
+/// G2/G8: operator failure policy on a chosen source uses the same exact
+/// failed-check accept/repair path as ordinary verification. Two producers and
+/// their same-profile reviewers disagree; only B's failures can be answered.
+/// Git supplies heads and version bytes. Existing ordinary failure controls
+/// have no selector, and the five-model trial uses automatic repair/limit.
+/// Sabotage: reject operator_failure on admitted verification, skip selected
+/// review attention, omit the landing failed outcome, copy A's review, treat
+/// repair as acceptance, or rewrite failed evidence after acceptance.
+#[test]
+fn selected_failures_keep_exact_operator_accept_and_repair() {
+    let versions = AtomicUsize::new(0);
+    let machine = Machine::new("g8-selected-failure-policy", move |request| {
+        if request.has_tool("yard_publish_report") {
+            return planned(request);
+        }
+        if request.has_tool("yard_publish_selection") {
+            return act(
+                request,
+                vec![tool("yard_publish_selection", json!({"candidate": "b"}))],
+            );
+        }
+        if request.has_tool("yard_publish_review") {
+            if request.opens() {
+                return Reply::Tools(vec![bash("printf 'review-version-'; cat version.txt")]);
+            }
+            if let Some((_, text)) = request.tool_results().last()
+                && text.contains("review-version-")
+            {
+                let passing =
+                    text.contains("review-version-3") || text.contains("review-version-10");
+                return Reply::Tools(vec![publish(if passing {
+                    json!([])
+                } else {
+                    json!([{ "priority": "P1", "body": "selected-review-policy-failure" }])
+                })]);
+            }
+            return Reply::Text("reviewed".into());
+        }
+        if !request.opens() {
+            return Reply::Text("done".into());
+        }
+        let selected = request.body["model"] == "selected-producer";
+        let version = if selected {
+            versions.fetch_add(1, Ordering::SeqCst)
+        } else {
+            10
+        };
+        Reply::Tools(vec![bash(&format!(
+            "cd /workspace && printf '{}\\n' > source.txt && printf '{version}\\n' > version.txt && git add source.txt version.txt && git commit -qm Publication-{version}",
+            if selected { "B" } else { "A" }
+        ))])
+    });
+    machine.start();
+    let configuration = config(
+        "\n[agents.a]\nharness = 'pi'\nprovider = 'openrouter'\nmodel = 'losing-producer'\n\
+         [agents.b]\nharness = 'pi'\nprovider = 'openrouter'\nmodel = 'selected-producer'\n\
+         [profiles.a]\nrunner = {kind = 'agent', agent = 'a', instructions = 'Implement independently.'}\naccess = 'write-allowed'\noutputs = {result = 'candidate'}\noutcomes = ['complete']\n\
+         [profiles.b]\nrunner = {kind = 'agent', agent = 'b', instructions = 'Implement independently.'}\naccess = 'write-allowed'\noutputs = {result = 'candidate'}\noutcomes = ['complete']\n\
+         [profiles.reader]\nrunner = {kind = 'agent', agent = 'worker', instructions = 'Same frozen reviewer.'}\naccess = 'read-only'\noutputs = {result = 'verdict'}\noutcomes = ['complete', 'blocked']\n\
+         [profiles.picker]\nrunner = {kind = 'agent', agent = 'worker', instructions = 'Choose declared candidate b.'}\naccess = 'read-only'\noutputs = {result = 'selection'}\noutcomes = ['complete']\n\
+         [review.seats.selected]\nagent = 'worker'\ninstructions = 'Same frozen reviewer.'\n\
+         [gates.check]\ncommand = 'test \"$(cat source.txt)\" = B && { test \"$(cat version.txt)\" -ge 2 || { echo candidate-policy-failure; exit 1; }; }'\nstage = 'candidate'\n\
+         [gates.merged]\ncommand = 'test \"$(cat version.txt)\" -ge 4 || { echo merged-policy-failure; exit 1; }'\nstage = 'landing'\n"
+    ).replace("review = [\"correctness\"]", "review = [\"correctness\", \"selected\"]");
+    let project = Project::new(&machine, "p", &configuration);
+    let mut watch = project.watch(0);
+    project.json(&[
+        "ticket",
+        "new",
+        "--title",
+        "Selected operator failures",
+        "--workflow",
+        "plan",
+    ]);
+    let planner = watch.event("attempt.ended", &[]);
+    let cleanup = watch.find("planner cleanup", |event| {
+        event["event"] == "execution.ended"
+            && event["data"]["kind"] == "cleanup"
+            && event["attempt"] == planner["attempt"]
+    });
+    watch.find("planner released", |event| {
+        event["event"] == "execution.released" && event["execution"] == cleanup["execution"]
+    });
+    let mut nodes = json!({
+        "implementer": {"profile": "a", "routes": {"complete": [{"to": "review-0"}, {"to": "selector"}]}},
+        "writer-b": {"profile": "b", "routes": {"complete": [{"to": "review-1"}, {"to": "selector"}]}},
+        "review-0": {"profile": "reader", "operator_failure": true, "inputs": {"candidate": {"node": "implementer", "output": "result", "kind": "candidate"}}, "requires": ["candidate"], "routes": {"complete": [{"to": "selector"}]}},
+        "review-1": {"profile": "reader", "operator_failure": true, "inputs": {"candidate": {"node": "writer-b", "output": "result", "kind": "candidate"}}, "requires": ["candidate"], "routes": {"complete": [{"to": "selector"}]}},
+        "selector": {"profile": "picker", "inputs": {
+            "a": {"node": "implementer", "output": "result", "kind": "candidate"},
+            "b": {"node": "writer-b", "output": "result", "kind": "candidate"},
+            "ra": {"node": "review-0", "output": "result", "kind": "verdict"},
+            "rb": {"node": "review-1", "output": "result", "kind": "verdict"}
+        }, "requires": ["a", "b", "ra", "rb"], "routes": {"complete": [{"to": "candidate-gate-check"}]}}
+    });
+    for (name, gate, next, landing) in [
+        (
+            "candidate-gate-check",
+            "check",
+            Some("landing-gate-check"),
+            false,
+        ),
+        (
+            "landing-gate-check",
+            "check",
+            Some("landing-gate-merged"),
+            true,
+        ),
+        ("landing-gate-merged", "merged", None, true),
+    ] {
+        let mut node = json!({"runner": {"kind": "command", "gate": gate},
+            "access": "write-allowed", "operator_failure": true, "inputs": {},
+            "requires": [if landing {"merged"} else {"candidate"}],
+            "outputs": {"result": "verdict"}, "outcomes": ["complete", "failed"], "routes": {}});
+        node["inputs"][if landing { "merged" } else { "candidate" }] = if landing {
+            json!({"node": null, "output": "merged", "kind": "candidate"})
+        } else {
+            json!({"node": "selector", "output": "result", "kind": "selection"})
+        };
+        if let Some(next) = next {
+            node["routes"]["complete"] = json!([{"to": next}]);
+        }
+        if !landing {
+            node["routes"]["failed"] = json!([{"to": "implementer", "repeat": 3}]);
+        }
+        nodes[name] = node;
+    }
+    let mut operator = machine.operator();
+    operator.initialize();
+    let started = operator.call(
+        "yard_attempt_start",
+        json!({"project": project.path, "ticket": "Y-1",
+        "graph": {"inputs": {"merged": "candidate"}, "nodes": nodes}}),
+    );
+    assert!(started.get("error").is_none(), "{started}");
+    let answer = |item: &Value| {
+        let payload = &item["data"]["payload"];
+        let evidence = &payload["evidence"];
+        let mut params = json!({"project": project.path, "ticket": "Y-1", "attention": item["attention"],
+            "check": evidence["check"]["check"], "plan_revision": payload["plan_revision"],
+            "target": "main", "head": payload["head"], "proof": payload["proof"], "text": "Decide this exact failed result"});
+        if let Some(landing) = evidence.get("landing") {
+            for (key, value) in [
+                ("landing", &landing["execution"]),
+                ("child", &evidence["check"]["execution"]),
+                ("node", &evidence["node"]),
+                ("base", &landing["base"]),
+                ("revision", &landing["revision"]),
+                ("old", &landing["prepared"]["old"]),
+                ("merged", &landing["prepared"]["merged"]),
+            ] {
+                params[key] = value.clone();
+            }
+        }
+        params
+    };
+    let mut old = Vec::new();
+    let mut old_checks = Vec::new();
+    let mut repair_source = None;
+    let mut preceding_gate = Value::Null;
+    let mut accepted_review = Value::Null;
+    for (reason, accept, version) in [
+        ("failed", false, 0),
+        ("failed", true, 1),
+        ("blocked", false, 1),
+        ("blocked", true, 2),
+    ] {
+        let item = watch.attention();
+        assert_eq!(item["data"]["kind"], "candidate");
+        assert_eq!(item["data"]["reason"], reason);
+        let payload = &item["data"]["payload"];
+        assert!(payload["choice"].is_i64());
+        let attempt = item["attempt"].as_i64().unwrap();
+        let clone = project.path.join(format!(
+            ".yard/local/attempts/{attempt}/writers/7772697465722d62/clone"
+        ));
+        assert_eq!(
+            git(&clone, &["show", "HEAD:version.txt"]).trim(),
+            version.to_string()
+        );
+        assert_eq!(payload["head"], git(&clone, &["rev-parse", "HEAD"]).trim());
+        let evidence = &payload["evidence"];
+        assert_eq!(evidence["check"]["verdict"], "fail");
+        let choice = rows(
+            &project,
+            &format!("SELECT * FROM execution WHERE id = {}", payload["choice"]),
+        );
+        let chosen = &choice[0]["inputs"]["b"];
+        assert_eq!(chosen["source"]["node"], "writer-b");
+        assert_eq!(chosen["value"]["head"], payload["head"]);
+        assert_eq!(choice[0]["inputs"]["ra"]["value"]["verdict"], "pass");
+        if reason == "blocked" {
+            assert_eq!(evidence["inputs"]["candidate"], *chosen);
+            let mut foreign = answer(&item);
+            foreign["check"] = preceding_gate.clone();
+            let before = project.rows("SELECT * FROM audit ORDER BY seq");
+            let refused = operator.call("yard_attempt_accept", foreign);
+            assert_eq!(refused["error"]["code"], "stale");
+            assert_eq!(refused["error"]["data"]["identity"], "selected_result");
+            assert_eq!(refused["error"]["data"]["expected"], preceding_gate);
+            assert_eq!(
+                refused["error"]["data"]["current"],
+                evidence["check"]["check"]
+            );
+            assert_eq!(project.rows("SELECT * FROM audit ORDER BY seq"), before);
+        } else {
+            preceding_gate = evidence["check"]["check"].clone();
+        }
+        if let Some(source) = repair_source.take() {
+            let producer = rows(
+                &project,
+                &format!(
+                    "SELECT * FROM execution WHERE id = {}",
+                    chosen["source"]["execution"]
+                ),
+            );
+            assert_eq!(producer[0]["workspace"], "writer-b");
+            assert_eq!(producer[0]["reason"], "repair");
+            assert_eq!(
+                producer[0]["inputs"]["feedback"]["source"]["execution"],
+                source
+            );
+        }
+        let snapshot = rows(
+            &project,
+            &format!(
+                "SELECT * FROM execution WHERE id = {}",
+                evidence["check"]["execution"]
+            ),
+        );
+        old.extend(snapshot);
+        old_checks.extend(project.rows(&format!(
+            "SELECT * FROM \"check\" WHERE id = {}",
+            evidence["check"]["check"]
+        )));
+        if reason == "blocked" && accept {
+            accepted_review = evidence.clone();
+        }
+        let result = operator.call(
+            if accept {
+                "yard_attempt_accept"
+            } else {
+                "yard_attempt_repair"
+            },
+            answer(&item),
+        );
+        assert_eq!(result["result"]["accepted"], accept, "{result}");
+        if !accept {
+            repair_source = Some(evidence["check"]["execution"].clone());
+        }
+        old.extend(choice);
+    }
+    let first = approval(&mut watch);
+    assert_eq!(first["accepted"], json!([accepted_review]));
+    assert_eq!(first["checks"].as_array().unwrap().len(), 2);
+    assert!(
+        first["checks"]
+            .as_array()
+            .unwrap()
+            .contains(&accepted_review["check"]["check"])
+    );
+    let approved = operator.call("yard_attempt_approve", json!({"project": project.path, "ticket": "Y-1",
+        "target": "main", "head": first["head"], "proof": first["proof"], "choice": first["choice"], "plan_revision": first["plan_revision"]}));
+    assert!(approved.get("error").is_none(), "{approved}");
+    let failed = watch.attention();
+    assert_eq!(failed["data"]["kind"], "candidate");
+    assert_eq!(failed["data"]["reason"], "landing");
+    let evidence = &failed["data"]["payload"]["evidence"];
+    assert_eq!(evidence["result"]["outcome"], "failed");
+    assert_eq!(
+        evidence["check"]["head"],
+        git(
+            &project.canonical(),
+            &[
+                "rev-parse",
+                &format!("refs/yard/landings/{}", evidence["landing"]["execution"])
+            ]
+        )
+        .trim()
+    );
+    old.extend(rows(
+        &project,
+        &format!(
+            "SELECT * FROM execution WHERE id = {}",
+            evidence["check"]["execution"]
+        ),
+    ));
+    old_checks.extend(project.rows(&format!(
+        "SELECT * FROM \"check\" WHERE id = {}",
+        evidence["check"]["check"]
+    )));
+    let repaired = operator.call("yard_attempt_repair", answer(&failed));
+    assert_eq!(repaired["result"]["accepted"], false, "{repaired}");
+    let fresh = approval(&mut watch);
+    assert_ne!(fresh["head"], first["head"]);
+    assert_ne!(fresh["choice"], first["choice"]);
+    assert_eq!(fresh["accepted"], json!([]));
+    assert_eq!(fresh["checks"].as_array().unwrap().len(), 2);
+    for check in fresh["checks"].as_array().unwrap() {
+        assert_eq!(
+            project.rows(&format!(
+                "SELECT head, verdict FROM \"check\" WHERE id = {check}"
+            )),
+            vec![json!({"head": fresh["head"], "verdict": "pass"})]
+        );
+    }
+    let repairs = rows(
+        &project,
+        "SELECT * FROM execution WHERE kind = 'implementation' AND reason = 'repair' ORDER BY id",
+    );
+    assert_eq!(repairs.len(), 3);
+    let producer = repairs.last().unwrap();
+    assert_eq!(producer["workspace"], "writer-b");
+    assert_eq!(
+        producer["inputs"]["feedback"]["value"]["evidence"],
+        *evidence
+    );
+    assert_eq!(producer["head"], first["head"]);
+    let approved = operator.call("yard_attempt_approve", json!({"project": project.path, "ticket": "Y-1",
+        "target": "main", "head": fresh["head"], "proof": fresh["proof"], "choice": fresh["choice"], "plan_revision": fresh["plan_revision"]}));
+    assert!(approved.get("error").is_none(), "{approved}");
+    let failed = watch.attention();
+    assert_eq!(failed["data"]["kind"], "candidate");
+    assert_eq!(failed["data"]["reason"], "landing");
+    assert_eq!(failed["data"]["payload"]["choice"], fresh["choice"]);
+    old.extend(rows(
+        &project,
+        &format!(
+            "SELECT * FROM execution WHERE id = {}",
+            failed["data"]["payload"]["evidence"]["check"]["execution"]
+        ),
+    ));
+    old_checks.extend(project.rows(&format!(
+        "SELECT * FROM \"check\" WHERE id = {}",
+        failed["data"]["payload"]["evidence"]["check"]["check"]
+    )));
+    let accepted = operator.call("yard_attempt_accept", answer(&failed));
+    assert_eq!(accepted["result"]["accepted"], true, "{accepted}");
+    watch.event("landing.recorded", &[]);
+    assert_eq!(
+        git(&project.canonical(), &["show", "main:source.txt"]).trim(),
+        "B"
+    );
+    assert_eq!(
+        git(&project.canonical(), &["show", "main:version.txt"]).trim(),
+        "3"
+    );
+    for original in old {
+        assert_eq!(
+            rows(
+                &project,
+                &format!("SELECT * FROM execution WHERE id = {}", original["id"])
+            ),
+            vec![original]
+        );
+    }
+    for original in old_checks {
+        assert_eq!(
+            project.rows(&format!(
+                "SELECT * FROM \"check\" WHERE id = {}",
+                original["id"]
+            )),
+            vec![original]
+        );
+    }
+}
+
 /// Five different real Pi producers race on the same file. B publishes before
 /// the last writer, and is replaced after two choices and a passing check.
 /// Git in the fixture clones supplies heads; fixture bytes supply proof/content.

@@ -693,12 +693,15 @@ impl Plan {
             let Some(defined) = ordinary.nodes.get(name) else {
                 return false;
             };
+            let mut defined = defined.clone();
+            if defined.inputs.contains_key("merged") && node.operator_failure {
+                defined.outcomes.push("failed".into());
+            }
             if !matches!(node.runner, Runner::Command { .. })
                 || node.runner != defined.runner
                 || node.access != defined.access
                 || node.outputs != defined.outputs
                 || node.outcomes != defined.outcomes
-                || node.operator_failure != defined.operator_failure
             {
                 return false;
             }
@@ -778,12 +781,12 @@ impl Plan {
                     .bytes()
                     .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
                 || !matches!(node.runner, Runner::Agent { .. })
-                || node.operator_failure
             {
                 return false;
             }
             if node.access == Access::WriteAllowed {
-                if !node.inputs.is_empty()
+                if node.operator_failure
+                    || !node.inputs.is_empty()
                     || !node.requires.is_empty()
                     || node.outputs != BTreeMap::from([("result".into(), Output::Candidate)])
                     || node.outcomes != ["complete"]
