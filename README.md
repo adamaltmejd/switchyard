@@ -1,8 +1,7 @@
 # switchyard
 
-Switchyard (`yard`) turns tickets into landed code with coding agents: one
-ticket to one agent in one disposable box, gated, reviewed and landed
-through one verified merge queue. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+Switchyard (`yard`) turns tickets into landed code with isolated coding agents,
+gates, review and one verified merge queue. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 is the binding spec.
 
 ## Requirements
@@ -135,19 +134,12 @@ Existing capacity limits apply. Replace the scaffold's minimal Git gate
 with project checks before use. `test-audit` selects the installed
 `.agents/skills/test-audit/SKILL.md` and reads source without write access.
 
-Before admission, candidate gate, seat and landing gate overrides may select
-`operator_failure = true`. Eligible failures then ask the operator to
-`accept` the named attention with text or take `repair`. Acceptance keeps
-the failed evidence and runs every remaining selected candidate check
-before approval. A failed selected merged gate keeps approval active and
-asks the same question on its pinned prepared input. Its answer also names
-the original `landing`, `child`, `node`, candidate `base`, ticket `revision`,
-target `old` and `merged` head. Acceptance runs the remaining landing gates
-before queue landing and compare-and-swap. Infrastructure errors and unknown
-ownership cannot be accepted; fresh preparation inherits no answer.
-Repair retires approval and binds the exact failed evidence to the next
-implementer execution. The original failure stays failed. Its fresh candidate
-must pass selected verification and gain approval before landing.
+Before admission, set `operator_failure = true` on selected candidate gate,
+seat or landing gate overrides. Answer eligible failures with
+`yard_attempt_accept` or `yard_attempt_repair`, naming the exact identities in
+the attention and nonempty text. Failures stay failed; remaining selected
+checks still run. Infrastructure errors and unknown ownership cannot be
+accepted. See [Attention](docs/ARCHITECTURE.md#attention) for decision bindings.
 
 To explicitly accept landing omissions, approve with the
 `observe_landing_skipped` node array. This requests a decision after merge

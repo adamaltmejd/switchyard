@@ -85,43 +85,13 @@ their source clone; repair alone produces the final candidate. Arbitrary
 graphs and delegation remain refused. A read-only workflow with no seats may
 also set `profile = "durable"`; `yard_ticket_new` with `workflow: "NAME"` then admits
 that explicit selection. The profile is not inherited from the default.
-Admission freezes selected canonical
-Git blobs, the resolved runner and package identity. Yard generates launch
-JSON from those bindings, provider/model and ticket instructions. Candidate
-`audit.json`, code, skills and extensions never supply launch authority.
-Broad trusted base guidance, skills and extensions are excluded.
+Supported providers are `openrouter` and `opencode-go`. Declare regular files
+under source `/workspace`, proof `/yard/proof` or trusted `/yard/input/trusted`.
+Selected Markdown must fit 32768 bytes. Reads return at most 32768 bytes with
+a truncation flag. Admission, identity, checkpoint and execution bounds are
+specified in [Executions](../../docs/ARCHITECTURE.md#executions).
 
-Provider is the configured agent's `openrouter` or `opencode-go`. Their fixed guest base URLs are
-`http://openrouter.yard/api/v1` and `http://opencode-go.yard/zen/go/v1`.
-Source, proof and trusted roots are `/workspace`, `/yard/proof` and
-`/yard/input/trusted`. Yard stages only selected canonical Markdown and explicitly declared
-referenced regular files under the trusted root, separate from source, proof
-and writable state. Only declared regular files
-are readable; links and traversal are refused. No reference is followed
-automatically. The selected Markdown is included in the system instructions.
-Yard supplies frozen, read-only proof and trusted mounts from admitted identities even after
-later canonical or candidate edits. The native Pi bridge checks admitted
-launcher, controller and lock hashes before package code executes; the image
-launcher then verifies its sealed runtime closure before model calls.
-This package identity is separate from pinfold's native Pi artifact pin.
-
-Yard supplies fresh Pi and scratch state at `/yard/state`. Admissions with
-`package_checkpoint = "exclusive-v1"` can continue an interrupted submission
-after supported `start`, in a new execution. Checked predecessor teardown and
-exclusive reservation precede mounting matching checkpoint state at
-`/yard/state/audit-checkpoints`. Changed inputs start fresh; invalid checkpoint
-identity or storage names `checkpoint_invalid`. Older admissions stay fresh-only.
-The boxed controller writes SQLite only in checkpoints and uses scratch as cwd
-and HOME. The host never opens or evaluates checkpoint bytes. Interrupted
-tools are unsafe and never replay automatically. Stop aborts the controller's
-work before checked teardown. Usage subtracts the boxed invocation baseline.
-Native MCP publication remains necessary for report eligibility.
-
-At most 12 model HTTP requests and 64 executed tool calls are admitted.
-Each response is limited to 1 MiB and 60 seconds. Each file read returns at
-most 32768 bytes with a truncation flag; selected Markdown must fit.
-Launch input is at most 128 KiB, with at most 512 declared files and a
-32768-byte prompt. The model receives `read_declared`, `write_declared`,
+The model receives `read_declared`, `write_declared`,
 `commit_source` and `yard_publish_report`. Writes and commits refuse with
 `source_write_refused` unless the daemon's frozen cleanup launch explicitly
 sets `source_write = true` under `package_launch = "source-write-v1"`.
