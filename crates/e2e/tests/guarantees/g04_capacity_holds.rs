@@ -588,12 +588,15 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
         assert!(boxes.iter().any(|row| row["name"] == reader["handle"]));
     }
     let opens = |instructions: &str| {
+        // Picker context includes source instructions; count actual reviewer
+        // turns, not occurrences of those instructions in frozen evidence.
         machine
             .model
             .requests()
             .iter()
             .filter(|request| {
                 request.opens()
+                    && request.has_tool("yard_publish_review")
                     && request.prompt().contains("Graph")
                     && request.prompt().contains(instructions)
             })
