@@ -242,11 +242,59 @@ pub fn start_writer(
         .and_then(crate::harness::get)
         .map(|harness| harness.version());
     // Choice invalidation clears next. Freeze its instructions in this execution.
-    let pending_feedback = attempt.next.as_ref().map(|next| {
-        next.get("feedback").cloned().unwrap_or_else(
-            || json!({"kind": "verdict", "source": {"external": "feedback"}, "value": next}),
-        )
-    });
+    let audited_cleanup = node == "cleanup"
+        && plan.as_ref().is_some_and(|plan| {
+            plan.cleanup_audits().next().is_some()
+                && matches!(
+                    plan.nodes[node].runner,
+                    crate::plan::Runner::Packaged { .. }
+                )
+        });
+    let pending_feedback = attempt
+        .next
+        .as_ref()
+        .filter(|next| !audited_cleanup || reason == "repair" || next.get("feedback").is_some())
+        .map(|next| {
+            next.get("feedback").cloned().unwrap_or_else(
+                || json!({"kind": "verdict", "source": {"external": "feedback"}, "value": next}),
+            )
+        });
+    let inherited_feedback = if plan
+        .as_ref()
+        .is_some_and(|plan| plan.cleanup_audits().next().is_some())
+        && ((node == "repair" && reason == "first") || matches!(reason, "retry" | "restart"))
+    {
+        let predecessor = if node == "repair" && reason == "first" {
+            "cleanup"
+        } else {
+            node
+        };
+        executions::query(
+            tx,
+            "attempt = ?1 AND node = ?2 AND plan_revision = ?3 AND ticket_revision = ?4
+             AND kind = 'implementation' ORDER BY id DESC LIMIT 1",
+            rusqlite::params![
+                attempt.id,
+                predecessor,
+                attempt.plan_revision(),
+                ticket.revision
+            ],
+        )?
+        .pop()
+        .filter(|row| predecessor == node || row.result_eligible)
+        .and_then(|row| row.inputs?.get("feedback").cloned())
+    } else {
+        None
+    };
+    let feedback = feedback
+        .or_else(|| attempt.next.as_ref().and_then(|next| next.get("feedback")))
+        .or(inherited_feedback.as_ref())
+        .or(pending_feedback.as_ref());
+    let reason = if node == "repair" && reason == "first" && feedback.is_some() {
+        "repair"
+    } else {
+        reason
+    };
     if independent
         && executions::binding(
             tx,
@@ -290,7 +338,7 @@ pub fn start_writer(
             ticket: Some(ticket.id),
             agent: Some((name, &implementer)),
             harness_version,
-            feedback: feedback.or(pending_feedback.as_ref()),
+            feedback,
             ..Default::default()
         },
     )?;
@@ -2120,6 +2168,19 @@ async fn implementer_prompt(
         .as_str()
         .or(execution.detail.as_deref())
         .unwrap_or_default();
+    let reason = if matches!(reason, "retry" | "restart")
+        && plan
+            .as_ref()
+            .is_some_and(|plan| plan.cleanup_audits().next().is_some())
+        && execution
+            .inputs
+            .as_ref()
+            .is_some_and(|inputs| inputs.get("feedback").is_some())
+    {
+        "repair"
+    } else {
+        reason
+    };
     match reason {
         "dirty" => prompt.push_str(&format!(
             "Your clone was not clean when you stopped. Commit or remove these files:\n{detail}\n"

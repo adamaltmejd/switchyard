@@ -800,8 +800,10 @@ pub fn binding(
             );
         }
         if start.kind == "implementation"
-            // Packaged cleanup consumes declared inputs, not retry bookkeeping.
-            && !matches!(declared.runner, crate::plan::Runner::Packaged { .. })
+            // Audited cleanup carries repair feedback without adding it to the
+            // packaged model's declared launch inputs.
+            && (!matches!(declared.runner, crate::plan::Runner::Packaged { .. })
+                || (node == "cleanup" && plan.cleanup_audits().next().is_some()))
             && let Some(feedback) = start.feedback
         {
             inputs.insert("feedback".into(), feedback.clone());

@@ -500,7 +500,12 @@ and after each repair publication, on detached source and proof snapshots.
 Every audit must complete or release a valid evidence reference before the
 handoff or approval proceeds. Rejection after repair repeats cleanup then
 repair through the existing dispatch. Other handoff retry and failure routes
-retain their selected role. Repair publishes an immutable result even when
+retain their selected role. Routed repair feedback is frozen unchanged on
+cleanup, including packaged cleanup, and passed to the subsequent repair's
+inputs and prompt after cleanup's eligible checked release. This preserves
+failed-check, selected-finding contributor and rejected-candidate identities.
+Same-revision retries retain that bound feedback; a ticket or plan edit does
+not inherit it. Repair publishes an immutable result even when
 its Git head and proof did not change. A new publication schedules each audit
 again; matching inputs may end it with a reference instead of running a model.
 No audit borrows the writable clone or continues a Durable write checkpoint.
@@ -1564,8 +1569,10 @@ interrupted work still needs an explicit start or an edit.
 `prepared.durable` records checkpoint origin, predecessor and frozen node,
 typed inputs, candidate/proof, ticket/plan revisions, consumed code/package,
 model, selected skill/tool sources and containment/work policy identities.
-Packaged cleanup binds only declared node inputs; implicit controller retry
-feedback is not a consumed input or prompt.
+Packaged cleanup does not consume implicit controller retry bookkeeping.
+In the audited handoff, its execution inputs also carry routed repair feedback
+for the following repair. That feedback stays outside the packaged model
+prompt but binds the checkpoint identity and survives a matching retry.
 `resumed` names the predecessor execution. Only matching identities reuse
 that checkpoint; changed pending-work inputs start fresh. A competing start
 refuses as `checkpoint_owned`, naming checkpoint and execution identities.

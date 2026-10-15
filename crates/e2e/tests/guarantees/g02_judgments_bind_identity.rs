@@ -1300,6 +1300,8 @@ fn delayed_candidate_acceptance_names_the_changed_identity_and_writes_nothing() 
 /// enters either report harness, their selected sources or their model policy.
 /// Sabotage: reuse changed/unknown inputs, invalidate every result, copy a report
 /// as a new pass, retain old approval, or infer publication/landing from writes.
+/// Dropping feedback at packaged cleanup or starting repair as first work loses
+/// the rejected head and instructions in the repair input and host model prompt.
 /// One machine uses the existing package image fixture without a debugger build.
 /// Git and fixture bytes supply identities; host model counts expose replay.
 #[test]
@@ -1309,6 +1311,8 @@ fn selected_cleanup_reuses_only_unchanged_actual_judgment_inputs() {
         std::collections::BTreeMap::<String, usize>::new(),
     ));
     let observed = counts.clone();
+    let repair_prompts = Arc::new(Mutex::new(Vec::new()));
+    let captured_prompts = repair_prompts.clone();
     let machine = Machine::new("g2-cleanup-inputs", move |request| {
         let model = request.body["model"].as_str().unwrap();
         if request.opens() {
@@ -1345,17 +1349,30 @@ fn selected_cleanup_reuses_only_unchanged_actual_judgment_inputs() {
                 }
             }
             "cleanup-selected" => {
+                assert!(!request.has_tool("bash"));
                 if request.opens() {
-                    // The same operation is a no-op on its second invocation.
-                    Reply::Tools(vec![bash(
-                        "printf 'after\n' > chain.txt && git add chain.txt && (git diff --cached --quiet || git commit -qm Cleanup)",
-                    )])
+                    if observed.lock().unwrap()[model] == 1 {
+                        Reply::Tools(vec![tool(
+                            "write_declared",
+                            json!({
+                                "file": "source:chain.txt", "content": "after\n"
+                            }),
+                        )])
+                    } else {
+                        // The second cleanup leaves the published source unchanged.
+                        Reply::Tools(vec![report()])
+                    }
+                } else if request.last_tool_result().unwrap().0 == "write_declared" {
+                    assert_eq!(request.last_tool_result().unwrap().1, "source_written");
+                    Reply::Tools(vec![tool("commit_source", json!({"message": "Cleanup"}))])
                 } else {
+                    assert_eq!(request.last_tool_result().unwrap().1, "source_committed");
                     Reply::Tools(vec![report()])
                 }
             }
             "repair-selected" => {
                 if request.opens() {
+                    captured_prompts.lock().unwrap().push(request.last_user());
                     Reply::Tools(vec![bash(
                         "test \"$(cat chain.txt)\" = after && printf 'after\n' > /yard/proof/chain.txt",
                     )])
@@ -1428,12 +1445,21 @@ outcomes = ["complete"]
 [profiles.{role}.outputs]
 result = "{output}"
 [profiles.{role}.runner]
-kind = "agent"
+kind = "{}"
 agent = "{role}"
 instructions = "Run the selected fixture role."
-skills = ["trusted/selected.md"]
-"#
+"#,
+            if role == "cleanup" {
+                "packaged"
+            } else {
+                "agent"
+            }
         ));
+        configuration.push_str(if role == "cleanup" {
+            "package = 'durable-audit'\nskill = 'trusted/selected.md'\nreferences = ['trusted/reference.txt']\nfiles = [{root = 'source', path = 'chain.txt'}]\n"
+        } else {
+            "skills = ['trusted/selected.md']\n"
+        });
     }
     for name in ["current", "original", "unknown"] {
         configuration.push_str(&format!(
@@ -1637,6 +1663,20 @@ instructions = "Judge only the declared fixture input."
         "Run the no-op selected cleanup",
     ]);
     let second = approval(&mut watch);
+    let feedback = json!({"kind": "verdict", "source": {"external": "feedback"},
+        "value": {"reason": "repair", "detail": "Run the no-op selected cleanup", "rejected": after_head}});
+    for node in ["cleanup", "repair"] {
+        let row = &project.rows(&format!(
+            "SELECT inputs, reason FROM execution WHERE node = '{node}' ORDER BY id DESC LIMIT 1"
+        ))[0];
+        let inputs: Value = serde_json::from_str(row["inputs"].as_str().unwrap()).unwrap();
+        assert_eq!(inputs["feedback"], feedback);
+        assert_eq!(row["reason"], "repair");
+    }
+    assert!(
+        repair_prompts.lock().unwrap()[1]
+            .contains("Repair the candidate: Run the no-op selected cleanup")
+    );
     assert_eq!(head(&second), after_head);
     assert_eq!(proof(&second), after_proof);
     let publications = project.rows("SELECT id, result FROM execution WHERE node = 'repair' AND outcome = 'candidate' ORDER BY id");
