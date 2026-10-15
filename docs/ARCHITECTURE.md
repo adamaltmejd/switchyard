@@ -399,8 +399,11 @@ of a declared root on a live writer attempt. Undeclared or omitted ambiguous
 reuse refuses as `undeclared_workspace`; an owned workspace refuses as
 `workspace_owned`, naming its owner execution. An exact stopped/red attention
 may also identify its writer continuation. Continuation preserves the frozen
-graph and requires a lane and the shared execution capacity. It does not
-clear another workspace's attention. Each accepted writer start records its
+graph and requires a lane and the shared execution capacity. A refused
+continuation commits no lane or clock change. Workspace and attention starts
+validate, reserve the lane and create the writer in one transaction under the
+admission lock. Continuation does not clear another workspace's attention.
+Each accepted writer start records its
 own execution immediately, including while another writer's stopped attention
 remains open. It never replaces an attempt-wide pending continuation.
 A ticket edit discharges superseded stopped/red items after prior executions
