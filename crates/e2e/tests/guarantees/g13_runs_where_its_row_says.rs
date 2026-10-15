@@ -832,7 +832,7 @@ export default function () {
         verification.get("reference").is_none_or(Value::is_null),
         "{verification}"
     );
-    let judgments = project.rows(&format!("SELECT c.id, c.head, json_extract(e.inputs, '$.candidate.source.execution') AS producer FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE c.attempt = {attempt} AND e.parent IS NULL ORDER BY c.id"));
+    let judgments = project.rows(&format!("SELECT c.id, e.head, json_extract(e.inputs, '$.candidate.source.execution') AS producer FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE e.attempt = {attempt} AND e.parent IS NULL ORDER BY c.id"));
     assert_eq!(judgments.len(), 2, "{judgments:?}");
     assert_ne!(judgments[0]["id"], judgments[1]["id"]);
     assert_eq!(judgments[0]["head"], first["head"]);
