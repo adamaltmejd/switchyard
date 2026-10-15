@@ -1538,6 +1538,23 @@ fn selected_cleanup_reuses_only_unchanged_actual_judgment_inputs() {
             .success()
     );
     *request_signal.lock().unwrap() = Some(request_held.clone());
+    let input_armed = machine.root.join("repair-input-armed");
+    let input_claimed = machine.root.join("repair-input-claimed");
+    let input_held = machine.root.join("repair-input-held");
+    let input_release = machine.root.join("repair-input-release");
+    for fifo in [&input_held, &input_release] {
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    machine.wrapper("git", &format!(
+        "if [ -e '{}' ]; then case \" $* \" in *' cat-file -t '*':trusted/selected.md '*) if mv '{}' '{}' 2>/dev/null; then echo held > '{}'; read line < '{}'; fi;; esac; fi",
+        input_armed.display(), input_armed.display(), input_claimed.display(),
+        input_held.display(), input_release.display()));
     machine.start();
     let project = super::g08_durable_package::fixture(&machine);
     // Ordinary Pi loads trusted extensions. Retire this audit-only hostile
@@ -1897,7 +1914,44 @@ instructions = "Judge only the declared fixture input."
         json!({"expected": before_head, "current": after_head})
     );
     assert_eq!(project.rows("SELECT * FROM approval"), before);
+    // load_attempt reads selected input types after step snapshots the attempt.
+    // Hold that native read across rejection, so its old next=None cannot
+    // restore approval ahead of cleanup/repair. Sabotage: remove runnable's
+    // next comparison and the final approval continuation/owner/work checks.
+    std::fs::write(&input_armed, "").unwrap();
+    assert_eq!(watch.said(&input_held), "held\n");
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT state, next, head, proof FROM attempt WHERE id = {attempt}"
+        )),
+        vec![json!({"state": "live", "next": null, "head": after_head, "proof": after_proof})]
+    );
+    let current_approval = project.rows(&format!(
+        "SELECT id, payload FROM attention WHERE attempt = {attempt} AND kind = 'approval' AND state = 'open'"
+    ));
+    assert_eq!(current_approval.len(), 1);
+    let approval_payload: Value =
+        serde_json::from_str(current_approval[0]["payload"].as_str().unwrap()).unwrap();
+    assert_eq!(approval_payload, first["payload"]);
     project.ok("attempt.reject", json!({"target": "main", "head": &after_head, "proof": &after_proof, "text": "Run the no-op selected cleanup", "ticket": "Y-1"}));
+    let pending: Value = serde_json::from_str(
+        project.rows(&format!("SELECT next FROM attempt WHERE id = {attempt}"))[0]["next"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        pending,
+        json!({"reason": "repair", "detail": "Run the no-op selected cleanup", "rejected": after_head})
+    );
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT state, resolution FROM attention WHERE id = {}",
+            current_approval[0]["id"]
+        )),
+        vec![json!({"state": "resolved", "resolution": "reject"})]
+    );
+    std::fs::write(&input_release, "go\n").unwrap();
     let second = approval(&mut watch);
     let feedback = json!({"kind": "verdict", "source": {"external": "feedback"},
         "value": {"reason": "repair", "detail": "Run the no-op selected cleanup", "rejected": after_head}});
