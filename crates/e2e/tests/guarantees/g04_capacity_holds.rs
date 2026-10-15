@@ -623,21 +623,28 @@ fn concurrent_readers_share_capacity_and_join_exact_results_across_restart() {
     let picker_owner = machine.root.join("picker-owner");
     let picker_owner_said = machine.root.join("picker-owner-said");
     let picker_owner_release = machine.root.join("picker-owner-release");
+    let picker_owner_ready = machine.root.join("picker-owner-ready");
     fifo(&picker_owner_said);
     fifo(&picker_owner_release);
+    fifo(&picker_owner_ready);
     let mut release_picker_owner = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open(&picker_owner_release)
         .unwrap();
-    // A child inherits the execution lock after real down finishes. Redirect
-    // only stdio so its held FIFO does not delay successful command completion.
+    // Successful teardown closes live up's stdin, without a box down call.
+    // Delegate real exec, then retain its inherited lock in a child. Its FIFO
+    // acknowledgment precedes exec completion; only child stdio is redirected.
     machine.wrapper("pinfold", &format!(
-        "if [ \"$1 $2\" = 'box down' ] && [ -f '{}' ] && [ \"$3\" = \"$(cat '{}')\" ]; then\n\
+        "if [ \"$1 $2\" = 'box exec' ]; then\n\
          \"$REAL\" \"$@\"; result=$?\n\
-         sh -c 'echo \"$$ $1 $2\" > \"$3\"; read line < \"$4\"' sh \"$3\" \"$result\" '{}' '{}' </dev/null >/dev/null 2>&1 &\n\
+         if [ -f '{}' ]; then\n\
+         {{ read -r picker_box; read -r picker_lock; }} < '{}'\n\
+         if [ \"$3\" = \"$picker_box\" ]; then\n\
+         sh -c 'holder=missing; for fd in /dev/fd/*; do if [ \"$fd\" -ef \"$5\" ]; then holder=${{fd##*/}}; fi; done; echo \"$$ $1 $2 $holder\" > \"$3\"; read line < \"$4\"' sh \"$3\" \"$result\" '{}' '{}' \"$picker_lock\" </dev/null >/dev/null 2>&1 &\n\
+         read line < '{}'; fi; fi\n\
          exit \"$result\"; fi",
-        picker_owner.display(), picker_owner.display(), picker_owner_said.display(), picker_owner_release.display()
+        picker_owner.display(), picker_owner.display(), picker_owner_said.display(), picker_owner_release.display(), picker_owner_ready.display()
     ));
     machine.start();
     let fixture = config(r#"
@@ -932,12 +939,28 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
     let source_rows = project.rows("SELECT * FROM execution WHERE attempt = 3 AND kind = 'review' AND node != 'selector' AND status = 'ended' AND plan_revision = 1 ORDER BY id");
     let picker_id = pending_picker[0]["id"].as_i64().unwrap();
     let picker_box = pending_picker[0]["handle"].as_str().unwrap();
-    std::fs::write(&picker_owner, picker_box).unwrap();
+    let picker_lock_path = project
+        .path
+        .join(format!(".yard/local/attempts/3/effects/{picker_id}/lock"));
+    let picker_lock = std::fs::File::open(&picker_lock_path).unwrap();
+    std::fs::write(
+        &picker_owner,
+        format!("{picker_box}\n{}\n", picker_lock_path.display()),
+    )
+    .unwrap();
+    // Start at the currently held publication, excluding pre-restart history.
+    let since = project.rows("SELECT COALESCE(MAX(seq), 0) AS seq FROM audit")[0]["seq"]
+        .as_i64()
+        .unwrap();
+    drop(watch);
+    let mut watch = project.watch(since);
     picked.release();
-    // Ownership attention can precede this FIFO read: down has already returned.
-    let owner = said(&picker_owner_said);
+    let owner = watch.said_before_end(&picker_owner_said, Some(picker_id));
     let owner_fields: Vec<_> = owner.split_whitespace().collect();
-    assert_eq!(&owner_fields[1..], &[picker_box, "0"]);
+    assert_eq!(owner_fields.len(), 4);
+    assert_eq!(&owner_fields[1..3], &[picker_box, "0"]);
+    // The child compares its inherited descriptor to the actual effect inode.
+    assert!(owner_fields[3].parse::<u32>().unwrap() > 2);
     assert!(
         std::process::Command::new("kill")
             .args(["-0", owner_fields[0]])
@@ -945,6 +968,8 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
             .unwrap()
             .success()
     );
+    // Acknowledge only after the observer has received and checked the holder.
+    std::fs::write(&picker_owner_ready, "held\n").unwrap();
     let ownership = watch.find("selected picker retains owner", |event| {
         event["event"] == "attention.raised"
             && event["execution"] == picker_id
@@ -968,12 +993,6 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
             .iter()
             .any(|row| row["name"] == picker_box)
     );
-    let picker_lock = std::fs::File::open(
-        project
-            .path
-            .join(format!(".yard/local/attempts/3/effects/{picker_id}/lock")),
-    )
-    .unwrap();
     assert!(matches!(
         picker_lock.try_lock(),
         Err(std::fs::TryLockError::WouldBlock)
@@ -986,6 +1005,13 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
     machine.start();
     let mut watch = project.watch(0);
     assert_eq!(project.rows(&format!("SELECT report, result, outcome, reserved, teardown, lock_contract, mcp FROM execution WHERE id = {picker_id}")), held_selection);
+    assert!(
+        std::process::Command::new("kill")
+            .args(["-0", owner_fields[0]])
+            .status()
+            .unwrap()
+            .success()
+    );
     assert_eq!(
         project.rows(&format!(
             "SELECT state FROM attention WHERE id = {}",
@@ -997,6 +1023,7 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
         picker_lock.try_lock(),
         Err(std::fs::TryLockError::WouldBlock)
     ));
+    assert!(project.rows("SELECT id FROM attention WHERE attempt = 3 AND kind = 'approval' AND state = 'open'").is_empty());
     std::fs::remove_file(&picker_owner).unwrap();
     writeln!(release_picker_owner, "release").unwrap();
     watch.find("selected picker checked release", |event| {
