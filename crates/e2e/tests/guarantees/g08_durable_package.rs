@@ -1024,7 +1024,6 @@ git -C nested config filter.trip.clean 'touch /workspace/.git/nested-filter-ran;
 touch -t 200001010000 nested/file.txt &&
 git status --porcelain && test -f .git/nested-filter-ran"#
                             } else {
-                                // Relative to .git in both host publication and the box.
                                 r#"printf 'implemented\n' > chain.txt && git add chain.txt && git commit -qm Implement &&
 git config core.fsmonitor 'touch /workspace/.git/fsmonitor-ran; false' &&
 git config filter.trip.clean 'touch /workspace/.git/filter-ran; cat' &&
@@ -1033,8 +1032,7 @@ printf 'chain.txt filter=trip\n' > .git/info/attributes &&
 touch -t 200001010000 chain.txt &&
 git -c core.fsmonitor=false status --porcelain && test -f .git/filter-ran &&
 git status --porcelain && test -f .git/fsmonitor-ran &&
-mkdir .git/alternate && git archive HEAD | tar -x -C .git/alternate &&
-git config core.worktree alternate"#
+mkdir .git/alternate && git archive HEAD | tar -x -C .git/alternate"#
                             }
                         } else {
                             r#"test ! -e .git/fsmonitor-ran && test ! -e .git/filter-ran &&
@@ -1201,6 +1199,22 @@ files = [{{root = "source", path = "chain.txt"}}]
         .path
         .join(format!(".yard/local/attempts/{attempt}/clone"));
     let inode = std::fs::metadata(clone.join(".git")).unwrap().ino();
+    // Apply redirection only after ordinary boxed status and publication.
+    // Keep it relative so later host fetches can resolve the same repository.
+    assert_eq!(
+        std::fs::read_to_string(clone.join(".git/alternate/chain.txt")).unwrap(),
+        "implemented\n"
+    );
+    git(
+        &clone,
+        &[
+            "config",
+            "--file",
+            ".git/config",
+            "core.worktree",
+            "alternate",
+        ],
+    );
     // The predecessor's alternate worktree must never supply committed bytes.
     std::fs::write(clone.join(".git/alternate/chain.txt"), "substitute\n").unwrap();
     // Positive controls above execute both predecessor helpers. Sabotage:
