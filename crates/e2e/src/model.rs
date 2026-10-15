@@ -28,6 +28,17 @@ pub struct FakeModel {
     requests: Arc<Mutex<Vec<ModelRequest>>>,
 }
 
+impl Drop for FakeModel {
+    fn drop(&mut self) {
+        let count = self
+            .requests
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len();
+        let _ = writeln!(std::io::stderr().lock(), "fake_model_requests={count}");
+    }
+}
+
 impl FakeModel {
     /// Bind 127.0.0.1:0 and serve every request with `script` on its own
     /// thread until the process exits. A request whose body is not a JSON

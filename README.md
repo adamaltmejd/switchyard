@@ -6,7 +6,7 @@ is the binding spec.
 
 ## Requirements
 
-- pinfold 0.1.1 or newer, on the daemon's `PATH`
+- pinfold 0.2.3, on the daemon's `PATH`
 - a container runtime pinfold supports: rootless podman on Linux, Apple
   container on macOS
 - git, on the daemon's `PATH`
@@ -154,8 +154,12 @@ gate still runs. Ordinary omissions record no explicit acceptance.
     cargo fmt --check
     cargo clippy --all-targets --locked -- -D warnings
 
-The e2e suite (`cargo test -p e2e --locked`) runs on a host with the
-container runtime, not inside a box.
+The e2e suite (`cargo test -p e2e --locked -- --show-output`) runs on a host
+with the container runtime, not inside a box. Each FakeModel emits
+`fake_model_requests=N` at teardown from its recorded requests, including
+nested machines and tests that unwind after failure. Retain every count in
+the final host log. These observations are separate from static workload
+estimates, machine/build counts and box launches.
 CI pins pinfold 0.2.3.
 
 Development binaries use separate state, sockets, projects and runtime names.

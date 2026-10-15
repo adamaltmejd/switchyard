@@ -2595,6 +2595,8 @@ Release preparation includes version metadata and a dated
 checklist with whole-tree cleanup, a test-audit sweep, delete/add ratio,
 largest source file and this spec's line count. The operator passes this
 spec and README before release.
+Host fixture teardown reports recorded model-request counts. Release evidence
+keeps these observations separate from static workload estimates.
 
 Verification requires fmt, locked all-targets clippy, build, real host e2e
 on Linux x86_64 and arm64, and the operator's Mac release checks. Versioned
