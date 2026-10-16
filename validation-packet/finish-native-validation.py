@@ -51,21 +51,35 @@ def inspect_payload(row,label,variant=True):
         cmd(label+'-stop',[cli,'stop',name])
         cmd(label+'-delete',[cli,'delete',name])
 
-verified=[inspect_payload(r,'verify-'+str(r['case'])) for r in rows]
-# Same payload/metadata, differing Dockerfile. Fail after unpack, then rebuild it.
-failed=root/'failure-context'
-assert not failed.exists()
-shutil.copytree(Path(rows[0]['context']),failed,copy_function=shutil.copy2)
+prior=Path('/private/tmp/yard-apple-fix-finish-k1jlggcx')
+verified=[]
+for row in rows:
+    label='verify-'+str(row['case'])+'-contents'
+    assert json.loads((prior/(label+'.json')).read_text())['exit']==0
+    observed={};got=None
+    for line in (prior/(label+'.stdout')).read_text().splitlines():
+        if line.startswith('VARIANT='):got=int(line.split('=',1)[1])
+        else:
+            sha,path=line.split(None,1);observed[path.removeprefix('./')]=sha
+    assert observed==row['expected'] and got==row['case']
+    verified.append({'case':row['case'],'files':len(observed),'variant':got,'evidence':str(prior/(label+'.stdout'))})
+shutil.copytree(prior,out/'held-image-readers')
+# Reuse the exact owned payload, avoiding birth-time changes from copying it.
+failed=Path(rows[0]['context'])
 def metadata(payload):
     return [(str(p.relative_to(payload)),int(p.stat().st_birthtime),int(p.stat().st_mtime),p.stat().st_mode,p.stat().st_size) for p in sorted([*payload.rglob('*'),payload])]
 assert metadata(failed/'payload')==[tuple(x) for x in rows[0]['metadata']]
-(failed/'.yard/Dockerfile').write_text('FROM pinfold/profile-default:latest\nCOPY payload/ /probe/\nRUN exit 23\n')
+dockerfile=failed/'.yard/Dockerfile'
+original_dockerfile=dockerfile.read_text()
+(out/'Dockerfile-before').write_text(original_dockerfile)
+dockerfile.write_text('FROM pinfold/profile-default:latest\nCOPY payload/ /probe/\nRUN exit 23\n')
 failed_tag='yard-y80-failed-'+str(os.getpid())
 p=cmd('intentional-failure',[cli,'build','--file',str(failed/'.yard/Dockerfile'),'--tag',failed_tag,str(failed)],timeout=180,check=False)
 assert p.returncode!=0
 assert 'exit code: 23' in (p.stdout+p.stderr).decode(),(p.stdout+p.stderr)[-2000:]
-(failed/'.yard/Dockerfile').write_text('FROM pinfold/profile-default:latest\nCOPY payload/ /probe/\nRUN printf repaired > /yard-recovery\n')
+dockerfile.write_text('FROM pinfold/profile-default:latest\nCOPY payload/ /probe/\nRUN printf repaired > /yard-recovery\n')
 cmd('fresh-transfer-after-failure',[cli,'build','--file',str(failed/'.yard/Dockerfile'),'--tag',failed_tag,str(failed)],timeout=180)
+dockerfile.write_text(original_dockerfile)
 recovered=inspect_payload(dict(rows[0],case=80,tag=failed_tag),'verify-recovery',variant=False)
 p=cmd('remaining-transfer-staging',[cli,'exec','buildkit','sh','-c',"find /var/lib/container-builder-shim/fssync -maxdepth 1 -name 'transfer-*' -print"])
 assert not p.stdout.strip()
