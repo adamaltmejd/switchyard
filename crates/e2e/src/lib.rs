@@ -81,7 +81,9 @@ impl Machine {
         script: impl Fn(&ModelRequest) -> Reply + Send + Sync + 'static,
     ) -> Machine {
         // The daemon's socket lives under the state dir; keep it short.
-        let root = PathBuf::from("/tmp").join(format!("ye-{}-{test}", std::process::id()));
+        let root = std::fs::canonicalize("/tmp")
+            .expect("physical temporary directory")
+            .join(format!("ye-{}-{test}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let state = root.join("s");
         let config = root.join("c");
