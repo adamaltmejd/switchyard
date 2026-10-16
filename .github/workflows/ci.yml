@@ -38,6 +38,7 @@ jobs:
           export CARGO_TARGET_DIR=/tmp/yard-validate.5qmVHO/target
           export CARGO_INCREMENTAL=0
           export YARD_E2E_DURABLE_INPUTS=/tmp/yard-validate.5qmVHO/durable-inputs
+          pinfold build --profile default > "$YARD_MAC_DIAGNOSTIC/profile.log" 2>&1
           set +e
           cargo test -p e2e --locked an_upgrade_preserves_ended_planner_proposals_and_limit_overrides -- --show-output > "$YARD_MAC_DIAGNOSTIC/native.log" 2>&1
           yard_diagnostic_exit=$?
