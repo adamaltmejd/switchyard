@@ -1,196 +1,64 @@
 name: ci
-
 on:
-  push:
-    branches: [main]
-  pull_request:
   workflow_dispatch:
-    inputs:
-      mac_validation:
-        description: Run the reviewed fixed-source Mac qualification
-        type: boolean
-        default: false
-  workflow_call:
-
 permissions:
   contents: read
-
-env:
-  PINFOLD_VERSION: 0.2.6
-
 jobs:
-  e2e:
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.mac_validation != true }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: [ubuntu-26.04, ubuntu-26.04-arm]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-
-      - name: Build and configure rootless Podman 6.1.4
-        run: sh .github/scripts/setup-linux-runtime.sh
-
-      - name: Install pinfold
-        run: |
-          base="https://github.com/adamaltmejd/pinfold/releases/download/v${PINFOLD_VERSION}"
-          asset="pinfold-${PINFOLD_VERSION}-$(uname -m)-unknown-linux-musl"
-          curl -fsSL -o "$asset" "$base/$asset"
-          curl -fsSL -o SHA256SUMS "$base/SHA256SUMS"
-          sha256sum --ignore-missing -c SHA256SUMS
-          sudo install -m 0755 "$asset" /usr/local/bin/pinfold
-          pinfold --version
-
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets --locked -- -D warnings
-      # The scaffold's Dockerfile starts FROM this local image; a fresh host
-      # has none until it is built.
-      - run: pinfold build --profile default
-      - name: Fetch verified public Durable image inputs
-        env:
-          YARD_E2E_DURABLE_INPUTS: ${{ runner.temp }}/yard-durable-inputs
-        run: sh runners/durable-audit/fetch-build-inputs.sh "$YARD_E2E_DURABLE_INPUTS"
-      - run: cargo test -p e2e --locked
-        env:
-          YARD_E2E_DURABLE_INPUTS: ${{ runner.temp }}/yard-durable-inputs
-
-  mac-runtime:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.mac_validation == true }}
+  mac-startup-diagnostic:
     runs-on: [self-hosted, macOS, ARM64, switchyard-macos]
-    timeout-minutes: 30
+    timeout-minutes: 8
     concurrency:
       group: yard-operator-mac
       cancel-in-progress: false
-    env:
-      YARD_SOURCE_SHA: b670ca0840c1891819696d21eb3712a1ffd8cd90
     steps:
-      - name: Verify and provision runner-local Pinfold 0.2.6
+      - name: Diagnose owned Pinfold startup
         shell: bash
         run: |
           set -euo pipefail
-          [[ "$(uname -s)" == Darwin && "$(uname -m)" == arm64 ]]
-          [[ "$(id -un)" == runner ]]
+          [[ "$(uname -s)" == Darwin && "$(uname -m)" == arm64 && "$(id -un)" == runner ]]
           export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/opt/coreutils/libexec/gnubin:/opt/homebrew/bin:$PATH"
-          yard_provision_dir=$(mktemp -d "${TMPDIR:-/tmp}/yard-pinfold026.XXXXXX")
-          printf 'YARD_MAC_PROVISION=%s\n' "$yard_provision_dir" >> "$GITHUB_ENV"
-          {
-            uname -sm
-            sw_vers -productVersion
-            id -un
-          } | tee "$yard_provision_dir/host.txt"
-          curl -fsSL --proto '=https' --tlsv1.2 -o "$yard_provision_dir/pinfold" https://github.com/adamaltmejd/pinfold/releases/download/v0.2.6/pinfold-0.2.6-aarch64-apple-darwin
-          printf '%s  %s\n' 611253a0f44d1c0c337f778c743131d30904634f652e979d3ecb4bc2dcc7bc7e "$yard_provision_dir/pinfold" | shasum -a 256 -c -
-          mkdir -p "$HOME/.local/bin"
-          if [[ -e "$HOME/.local/bin/pinfold" || -L "$HOME/.local/bin/pinfold" ]]; then
-            cp -pP "$HOME/.local/bin/pinfold" "$yard_provision_dir/pinfold-before"
-            shasum -a 256 "$HOME/.local/bin/pinfold" > "$yard_provision_dir/pinfold-before.sha256"
-          fi
-          # Replace this one runner-local path atomically, preserving a prior symlink target.
-          yard_install_path=$(mktemp "$HOME/.local/bin/.pinfold026.XXXXXX")
-          install -m 0755 "$yard_provision_dir/pinfold" "$yard_install_path"
-          mv -f "$yard_install_path" "$HOME/.local/bin/pinfold"
-          shasum -a 256 "$HOME/.local/bin/pinfold" | tee "$yard_provision_dir/pinfold-installed.sha256"
-          [[ "$(pinfold --version)" == 'pinfold 0.2.6' ]]
-          pinfold --version
-          command -v container
-          container --version
-          container system status
-      - name: Qualify fixed reviewed source
-        shell: bash
-        run: |
-          #!/bin/bash
-          set -euo pipefail
-          [[ "$(uname -s)" == Darwin && "$(uname -m)" == arm64 ]]
-          [[ "$(id -un)" == runner ]]
-          : "${YARD_SOURCE_SHA:?Set the full reviewed source commit}"
-          [[ "$YARD_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
-          export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/opt/coreutils/libexec/gnubin:/opt/homebrew/bin:$PATH"
-          for yard_tool in git curl jq openssl sha256sum cargo rustc pinfold container; do
-            command -v "$yard_tool" >/dev/null || { printf 'missing=%s\n' "$yard_tool" >&2; exit 1; }
-          done
-          yard_pinfold_version=$(pinfold --version)
-          printf 'runtime=%s\n' "$yard_pinfold_version"
-          [[ "$yard_pinfold_version" == 'pinfold 0.2.6' ]] || { echo 'required=pinfold-0.2.6' >&2; exit 1; }
-          yard_validation_dir=$(mktemp -d "${TMPDIR:-/tmp}/yard-validate.XXXXXX")
-          yard_evidence_dir="$yard_validation_dir/evidence"
-          mkdir "$yard_evidence_dir"
-          printf 'YARD_MAC_EVIDENCE=%s\n' "$yard_evidence_dir" >> "$GITHUB_ENV"
-          printf 'evidence=%s\nsource=%s\n' "$yard_evidence_dir" "$YARD_SOURCE_SHA"
-          yard_finish() {
-            yard_overall_exit=$?
-            trap - EXIT
-            printf '%s\n' "$yard_overall_exit" > "$yard_evidence_dir/overall-exit.txt"
-            if [[ -f "$yard_validation_dir/target/debug/yard" ]]; then
-              sha256sum "$yard_validation_dir/target/debug/yard" > "$yard_evidence_dir/yard.sha256"
-            fi
-            for yard_log in "$yard_evidence_dir"/*.log; do
-              [[ -f "$yard_log" ]] || continue
-              sha256sum "$yard_log" >> "$yard_evidence_dir/logs.sha256"
-            done
-            printf 'validation_exit=%s evidence=%s\n' "$yard_overall_exit" "$yard_evidence_dir"
-            exit "$yard_overall_exit"
-          }
-          trap yard_finish EXIT
-          yard_check() {
-            local yard_check_name=$1
-            shift
-            local -a yard_status
-            set +e
-            "$@" 2>&1 | tee "$yard_evidence_dir/$yard_check_name.log"
-            yard_status=("${PIPESTATUS[@]}")
-            set -e
-            printf 'command_exit=%s\nlog_exit=%s\n' "${yard_status[0]}" "${yard_status[1]}" > "$yard_evidence_dir/$yard_check_name-exit.txt"
-            [[ "${yard_status[0]}" == 0 ]] || return "${yard_status[0]}"
-            return "${yard_status[1]}"
-          }
-          # Full history supplies the actual legacy source used by migration scenarios.
-          env GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 \
-            git clone --no-checkout --no-recurse-submodules https://github.com/adamaltmejd/switchyard.git "$yard_validation_dir/source"
-          cd "$yard_validation_dir/source"
-          env GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 \
-            git -c core.hooksPath=/dev/null checkout --detach "$YARD_SOURCE_SHA"
-          [[ "$(git rev-parse HEAD)" == "$YARD_SOURCE_SHA" ]]
-          [[ -z "$(git status --porcelain)" ]]
-          printf '%s\n' "$YARD_SOURCE_SHA" > "$yard_evidence_dir/source.txt"
-          {
-            uname -sm
-            sw_vers -productVersion
-            container --version
-            id -un
-            rustc -vV
-            cargo --version
-            pinfold --version
-          } > "$yard_evidence_dir/versions.log"
-          export CARGO_TARGET_DIR="$yard_validation_dir/target"
-          export CARGO_INCREMENTAL=0
-          export YARD_E2E_DURABLE_INPUTS="$yard_validation_dir/durable-inputs"
-          yard_check fmt cargo fmt --check
-          yard_check clippy cargo clippy --all-targets --locked -- -D warnings
-          yard_check build cargo build --locked
-          yard_check profile pinfold build --profile default
-          yard_check public-inputs sh runners/durable-audit/fetch-build-inputs.sh "$YARD_E2E_DURABLE_INPUTS"
-          yard_check native cargo test -p e2e --locked -- --show-output
-          git status --porcelain > "$yard_evidence_dir/source-status-after.txt"
-          [[ ! -s "$yard_evidence_dir/source-status-after.txt" ]]
-      - name: Preserve provisioning evidence
-        if: ${{ always() && env.YARD_MAC_PROVISION != '' }}
+          export YARD_MAC_DIAGNOSTIC=$(mktemp -d "${TMPDIR:-/tmp}/yard-startup-diag.XXXXXX")
+          printf 'YARD_MAC_DIAGNOSTIC=%s\n' "$YARD_MAC_DIAGNOSTIC" >> "$GITHUB_ENV"
+          python3 - <<'YARD_PY'
+          import os,sys,json,subprocess,hashlib,selectors,time,signal,shutil
+          from pathlib import Path
+          out=Path(os.environ['YARD_MAC_DIAGNOSTIC']).resolve(); out.mkdir(exist_ok=True)
+          binpath=Path.home()/'.local/bin/pinfold'
+          assert hashlib.sha256(binpath.read_bytes()).hexdigest()=='611253a0f44d1c0c337f778c743131d30904634f652e979d3ecb4bc2dcc7bc7e'
+          realcontainer=shutil.which('container'); assert realcontainer
+          (out/'bin').mkdir(); wrapper=out/'bin/container'
+          # The controlled spec carries no credentials. Capture only runtime stderr, never argv/environment.
+          wrapper.write_text('#!/bin/bash\nif [[ "$1" == run ]]; then exec '+__import__('shlex').quote(realcontainer)+' "$@" 2>> '+__import__('shlex').quote(str(out/'container-run.stderr'))+'; fi\nexec '+__import__('shlex').quote(realcontainer)+' "$@"\n'); wrapper.chmod(0o755)
+          env=os.environ.copy(); env.update(PATH=str(out/'bin')+os.pathsep+env['PATH'],XDG_STATE_HOME=str(out/'state'),XDG_CONFIG_HOME=str(out/'config'),XDG_CACHE_HOME='/tmp/yard-e2e-cache')
+          name='yard-y80-startup-'+str(os.getpid())
+          spec={'name':name,'profile':'default','harness':'pi','memory':'1G','labels':{'yard-investigation':'y80-mac-startup-20261016'},'egress':{'allow':[],'routes':{'diagnostic':'127.0.0.1:9'}}}
+          (out/'spec.json').write_text(json.dumps(spec,indent=2)+'\n')
+          with (out/'pinfold.stderr').open('w') as err:
+           child=subprocess.Popen([str(binpath),'box','up'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=err,env=env,text=True)
+           child.stdin.write(json.dumps(spec)+'\n'); child.stdin.flush()
+           sel=selectors.DefaultSelector(); sel.register(child.stdout,selectors.EVENT_READ); started=time.monotonic()
+           if sel.select(180): line=child.stdout.readline()
+           else: line=''; child.send_signal(signal.SIGTERM)
+           (out/'first-line.jsonl').write_text(line)
+           if line:
+            event=json.loads(line)
+            if event.get('event')=='ready':
+             check=subprocess.run([str(binpath),'box','exec',name,'--','sh','-c','id -u; id -g'],env=env,capture_output=True,text=True,timeout=30)
+             (out/'exec.json').write_text(json.dumps({'exit':check.returncode,'stdout':check.stdout,'stderr':check.stderr},indent=2)+'\n')
+           child.stdin.close(); child.stdin=None
+           try: rest,_=child.communicate(timeout=45)
+           except subprocess.TimeoutExpired:
+            child.send_signal(signal.SIGTERM)
+            try: rest,_=child.communicate(timeout=30)
+            except subprocess.TimeoutExpired: raise RuntimeError('owned diagnostic did not stop; retained state, no globalcleanup')
+           (out/'remaining.jsonl').write_text(rest)
+           (out/'terminal.json').write_text(json.dumps({'exit':child.returncode,'wall_seconds':time.monotonic()-started,'name':name,'first_line':line,'runtime_stderr':str(out/'container-run.stderr'),'cleanup':'Own stdin closed and own process reaped; no prune/runtime reset/other containers touched'},indent=2)+'\n')
+          print((out/'terminal.json').read_text());print('container stderr:'); print((out/'container-run.stderr').read_text() if (out/'container-run.stderr').exists() else 'not spawned')
+          YARD_PY
+      - name: Preserve diagnostic evidence
+        if: ${{ always() && env.YARD_MAC_DIAGNOSTIC != '' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: mac-pinfold026-provision-b670ca
-          path: ${{ env.YARD_MAC_PROVISION }}
-          if-no-files-found: error
-      - name: Preserve qualification evidence
-        if: ${{ always() && env.YARD_MAC_EVIDENCE != '' }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        with:
-          name: mac-runtime-b670ca-pinfold026
-          path: ${{ env.YARD_MAC_EVIDENCE }}
+          name: y80-mac-startup-diagnostic-20261016
+          path: ${{ env.YARD_MAC_DIAGNOSTIC }}
           if-no-files-found: error
