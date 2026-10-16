@@ -2437,6 +2437,10 @@ with dots replaced by underscores. The supported daemon methods are:
 
 Arguments name absolute registered `project`
 paths; `init` and `project.forget` instead take an absolute `path`.
+The daemon resolves existing paths to their canonical filesystem path for
+registration, lookup and forgetting. Symlink aliases name the same registered
+project, not another owner. A gone project can be forgotten by its recorded
+absolute path; unresolved aliases do not infer a former destination.
 Required identities and argument types are declared by each tool's schema.
 Unknown fields and wrong types are `invalid` before forwarding; daemon
 validation remains authoritative. Results carry the same compact JSON in
@@ -2484,7 +2488,7 @@ says so where it cannot. `yard daemon uninstall` stops and removes it;
 `yard daemon restart` goes through the service manager and returns once the
 new daemon answers, with its `pid` and `boundary`.
 
-The daemon owns the project registry, a list of absolute project paths in
+The daemon owns the project registry, a list of canonical absolute project paths in
 `$XDG_STATE_HOME/yard/projects`. `yard_init` registers a project and
 `yard_project_forget` removes one and retires its image name
 (`pinfold image rm`; a box's image stays until the box goes, and repeating

@@ -542,11 +542,20 @@ fn operator_wait_cancellation_keeps_work_and_worker_grants_separate() {
         _ => Reply::Text("done".into()),
     });
     machine.start();
-    let project = Project::new(
+    let mut project = Project::new(
         &machine,
         "p",
         &config("").replace("review = [\"correctness\"]", "review = \"none\""),
     );
+    // G6: init and later operator calls must resolve the same real symlink.
+    // Sabotage: canonicalize only init in the MCP forwarder, then exact-lookup
+    // the caller's alias in daemon::project. The existing sync/landing fails.
+    let canonical = std::fs::canonicalize(&project.path).unwrap();
+    let alias = machine.root.join("project-alias");
+    std::os::unix::fs::symlink(&project.path, &alias).unwrap();
+    project.path = alias;
+    let initialized = machine.ok("init", json!({"path": project.path}));
+    assert_eq!(initialized["project"], json!(canonical));
     // This trusted fixture extension uses the worker's real HTTP session.
     // It changes no Yard code and routes no public model call.
     let extension = r#"import { writeFileSync } from 'node:fs';
