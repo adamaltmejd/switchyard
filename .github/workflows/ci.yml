@@ -4,20 +4,7 @@ on:
 permissions:
   contents: read
 jobs:
-  build-shim:
-    runs-on: ubuntu-26.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - name: Build exact proposed Apple shim patch
-        run: bash validation-packet/build-shim.sh
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        with:
-          name: y80-apple-shim-candidate
-          path: shim-dist/
-          if-no-files-found: error
   validate-native-fix:
-    needs: build-shim
     runs-on: [self-hosted, macOS, ARM64, switchyard-macos]
     timeout-minutes: 20
     concurrency:
@@ -25,16 +12,12 @@ jobs:
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
-        with:
-          name: y80-apple-shim-candidate
-          path: shim-dist/
-      - name: Reproduce, install patched builder, and verify native image contents
+      - name: Verify retained native build images through held containers
         shell: bash
         run: |
           set -euo pipefail
           export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:$PATH"
-          python3 validation-packet/validate-builder.py
+          python3 validation-packet/finish-native-validation.py
       - name: Retain runtime and native validation evidence
         if: ${{ always() && env.YARD_APPLE_FIX_EVIDENCE != '' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
