@@ -4,47 +4,48 @@ on:
 permissions:
   contents: read
 jobs:
-  mac-matched-context:
+  mac-native-parallel-context:
     runs-on: [self-hosted, macOS, ARM64, switchyard-macos]
     timeout-minutes: 12
     concurrency:
       group: yard-operator-mac
       cancel-in-progress: false
     steps:
-      - name: Compare exact retained context through both drivers
+      - name: Isolate concurrent transfer below Pinfold
         shell: bash
         run: |
           set -euo pipefail
           [[ "$(uname -s)" == Darwin && "$(uname -m)" == arm64 && "$(id -un)" == runner ]]
           export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/opt/coreutils/libexec/gnubin:/opt/homebrew/bin:$PATH"
           [[ "$(shasum -a 256 "$HOME/.local/bin/pinfold" | cut -d' ' -f1)" == 611253a0f44d1c0c337f778c743131d30904634f652e979d3ecb4bc2dcc7bc7e ]]
-          yard_probe_dir=$(mktemp -d "${TMPDIR:-/tmp}/yard-matched-context.XXXXXX")
+          yard_probe_dir=$(mktemp -d "${TMPDIR:-/tmp}/yard-native-parallel.XXXXXX")
           export YARD_MAC_DIAGNOSTIC="$yard_probe_dir/evidence"
           mkdir "$YARD_MAC_DIAGNOSTIC"
           printf 'YARD_MAC_DIAGNOSTIC=%s\n' "$YARD_MAC_DIAGNOSTIC" >> "$GITHUB_ENV"
           python3 - <<'YARD_PY'
           from pathlib import Path
-          import os,json,subprocess,hashlib,time
-          out=Path(os.environ['YARD_MAC_DIAGNOSTIC']).resolve();base=Path('/private/tmp/yard-parallel-context.fZ4owi/contexts');records=[]
-          def builder():
-           p=subprocess.run(['container','list','--all','--format','json'],capture_output=True,text=True,timeout=30)
-           if p.returncode:return {'exit':p.returncode,'stderr':p.stderr}
-           rows=json.loads(p.stdout);return [{'id':r['id'],'status':r.get('status'),'image':r.get('configuration',{}).get('image')} for r in rows if r['id']=='buildkit']
-          report={'builder_before':builder(),'scope':'Exactretainedcontextbytesfromparallelfailure, onebuildatatime, firstPinfoldthendirectcontainer withsamecolorenvnormalization; no profilebuild/servicechange; removesonlyownnames/tags','cases':records}
-          for driver,index in [('pinfold',2),('pinfold',0),('container',0)]:
-           ctx=base/str(index);assert ctx.is_dir(); files=[{'path':str(p.relative_to(ctx)),'bytes':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()} for p in sorted(ctx.rglob('*')) if p.is_file()];name='yard-y80-matched-'+str(os.getpid())+'-'+driver+'-'+str(index);env=os.environ.copy();env.pop('NO_COLOR',None);env.pop('BUILDKIT_COLORS',None)
-           args=['pinfold','image','build',name,'--containerfile',str(ctx/'.yard/Dockerfile'),'--context',str(ctx)] if driver=='pinfold' else ['container','build','--file',str(ctx/'.yard/Dockerfile'),'--tag',name,str(ctx)]
-           started=time.monotonic()
-           with (out/(driver+'-'+str(index)+'.log')).open('wb') as log:p=subprocess.run(args,env=env,stdout=log,stderr=subprocess.STDOUT,timeout=180)
-           r={'driver':driver,'context':str(ctx),'exit':p.returncode,'wall_seconds':time.monotonic()-started,'files':files}
-           cleanargs=['pinfold','image','rm',name] if driver=='pinfold' else ['container','image','delete',name]
-           clean=subprocess.run(cleanargs,env=env,capture_output=True,text=True,timeout=30);r['only_own_name_retirement']={'exit':clean.returncode,'stdout':clean.stdout,'stderr':clean.stderr};records.append(r);(out/'report.json').write_text(json.dumps(report,indent=2)+'\n');print(json.dumps({k:r[k] for k in ['driver','context','exit','wall_seconds']}),flush=True)
-          report['builder_after']=builder();(out/'report.json').write_text(json.dumps(report,indent=2)+'\n')
+          from concurrent.futures import ThreadPoolExecutor
+          import os,json,subprocess,threading,time
+          out=Path(os.environ['YARD_MAC_DIAGNOSTIC']).resolve();base=Path('/private/tmp/yard-parallel-context.fZ4owi/contexts');report={'scope':'Same8retainedpubliccontexts, normal8wayconcurrency, no-cachetoforceactualtransfer; directcontainerfirst thenPinfoldonlyifnativepasses. NoYard/boxes/models/servicechange; own tags only.','batches':[]};env=os.environ.copy();env.pop('NO_COLOR',None);env.pop('BUILDKIT_COLORS',None)
+          for driver in ['container','pinfold']:
+           barrier=threading.Barrier(8)
+           def build(i):
+            ctx=base/str(i);assert ctx.is_dir();name='yard-y80-native-parallel-'+str(os.getpid())+'-'+driver+'-'+str(i)
+            args=['container','build','--no-cache','--file',str(ctx/'.yard/Dockerfile'),'--tag',name,str(ctx)] if driver=='container' else ['pinfold','image','build',name,'--containerfile',str(ctx/'.yard/Dockerfile'),'--context',str(ctx),'--no-cache']
+            barrier.wait(timeout=30);started=time.monotonic()
+            with (out/(driver+'-'+str(i)+'.log')).open('wb') as log:p=subprocess.run(args,env=env,stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,timeout=180)
+            return {'case':i,'kind':'public-input-directory' if i<2 else 'small-control','context':str(ctx),'name':name,'exit':p.returncode,'wall_seconds':time.monotonic()-started}
+           with ThreadPoolExecutor(max_workers=8) as executor:rows=list(executor.map(build,range(8)))
+           for r in rows:
+            args=['container','image','delete',r['name']] if driver=='container' else ['pinfold','image','rm',r['name']]
+            p=subprocess.run(args,env=env,capture_output=True,text=True,timeout=30);r['own_tag_retirement']={'exit':p.returncode,'stdout':p.stdout,'stderr':p.stderr}
+           report['batches'].append({'driver':driver,'cases':rows});(out/'report.json').write_text(json.dumps(report,indent=2)+'\n');print(json.dumps({'driver':driver,'results':[{k:r[k] for k in ['case','kind','exit','wall_seconds']} for r in rows]}),flush=True)
+           if any(r['exit'] for r in rows):break
           YARD_PY
       - name: Preserve build diagnostic evidence
         if: ${{ always() && env.YARD_MAC_DIAGNOSTIC != '' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: y80-mac-matched-context-20261016
+          name: y80-mac-native-parallel-context-20261016
           path: ${{ env.YARD_MAC_DIAGNOSTIC }}
           if-no-files-found: error
