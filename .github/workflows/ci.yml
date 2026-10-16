@@ -22,12 +22,14 @@ jobs:
           export YARD_REAL_CONTAINER=$(command -v container)
           export YARD_DIAG_RUNTIME_ERRORS="$YARD_MAC_DIAGNOSTIC/container-run.stderr"
           mkdir "$YARD_MAC_DIAGNOSTIC/bin"
-          cat > "$YARD_MAC_DIAGNOSTIC/bin/container" <<'YARD_SH'
-          #!/bin/bash
-          if [[ "$1" == run ]]; then exec "$YARD_REAL_CONTAINER" "$@" 2>> "$YARD_DIAG_RUNTIME_ERRORS"; fi
-          exec "$YARD_REAL_CONTAINER" "$@"
-          YARD_SH
-          chmod 0755 "$YARD_MAC_DIAGNOSTIC/bin/container"
+          python3 - "$YARD_REAL_CONTAINER" "$YARD_DIAG_RUNTIME_ERRORS" "$YARD_MAC_DIAGNOSTIC/bin/container" <<'YARD_PY'
+          import sys,shlex
+          from pathlib import Path
+          real,errors,path=sys.argv[1:]
+          p=Path(path)
+          p.write_text('#!/bin/bash\nif [[ "$1" == run ]]; then exec '+shlex.quote(real)+' "$@" 2>> '+shlex.quote(errors)+'; fi\nexec '+shlex.quote(real)+' "$@"\n')
+          p.chmod(0o755)
+          YARD_PY
           export PATH="$YARD_MAC_DIAGNOSTIC/bin:$PATH"
           [[ "$(shasum -a 256 "$HOME/.local/bin/pinfold" | cut -d' ' -f1)" == 611253a0f44d1c0c337f778c743131d30904634f652e979d3ecb4bc2dcc7bc7e ]]
           cd /tmp/yard-validate.5qmVHO/source
