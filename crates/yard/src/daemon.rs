@@ -181,7 +181,12 @@ async fn serve() -> Result<(), String> {
         Err(error) => return Err(format!("pinfold artifacts: {error}")),
     }
 
-    for root in registry()? {
+    let roots = registry()?;
+    // Reject alias collisions before opening stores or reconciling effects.
+    for root in &roots {
+        registered_project_path(root, &roots).map_err(|fail| fail.message)?;
+    }
+    for root in roots {
         if !root.join(crate::config::CONFIG_PATH).is_file() {
             eprintln!(
                 "yard daemon: skipping {}: no .yard/config.toml",
@@ -372,13 +377,9 @@ fn open_project(root: &Path) -> Result<Arc<Project>, String> {
     }))
 }
 
-fn project_path(params: &Value, field: &str) -> Result<PathBuf, Fail> {
-    let path = params[field]
-        .as_str()
-        .ok_or_else(|| Fail::invalid(format!("the call names no {field}")))?;
-    let path = Path::new(path);
+fn canonical_project_path(path: &Path) -> Result<PathBuf, Fail> {
     if !path.is_absolute() {
-        return Err(Fail::invalid(format!("{field} must be an absolute path")));
+        return Err(Fail::invalid("project path must be an absolute path"));
     }
     match std::fs::canonicalize(path) {
         Ok(root) => Ok(root),
@@ -386,6 +387,31 @@ fn project_path(params: &Value, field: &str) -> Result<PathBuf, Fail> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(path.to_path_buf()),
         Err(error) => Err(Fail::invalid(error.to_string())),
     }
+}
+
+fn registered_project_path(path: &Path, roots: &[PathBuf]) -> Result<PathBuf, Fail> {
+    let canonical = canonical_project_path(path)?;
+    let mut registered = None;
+    for root in roots {
+        if canonical_project_path(root)? == canonical {
+            if registered.as_ref().is_some_and(|previous| previous != root) {
+                return Err(Fail::refused(format!(
+                    "ambiguous project aliases for {}; operator resolution required",
+                    path.display()
+                )));
+            }
+            registered = Some(root.clone());
+        }
+    }
+    // Existing roots bind runtime ownership, including legacy alias spellings.
+    Ok(registered.unwrap_or(canonical))
+}
+
+fn project_path(params: &Value, field: &str) -> Result<PathBuf, Fail> {
+    let path = params[field]
+        .as_str()
+        .ok_or_else(|| Fail::invalid(format!("the call names no {field}")))?;
+    registered_project_path(Path::new(path), &registry()?)
 }
 
 /// The registered project at `params.project`.
