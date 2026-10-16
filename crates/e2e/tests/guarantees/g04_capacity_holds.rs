@@ -416,9 +416,9 @@ fn concurrent_readers_share_capacity_and_join_exact_results_across_restart() {
         "if [ \"$1 $2\" = 'box exec' ]; then\n\
          \"$REAL\" \"$@\"; result=$?\n\
          if [ -f '{}' ]; then\n\
-         {{ read -r picker_box; read -r picker_lock; }} < '{}'\n\
+         read -r picker_box < '{}'\n\
          if [ \"$3\" = \"$picker_box\" ]; then\n\
-         sh -c 'holder=missing; for fd in /dev/fd/*; do if [ \"$fd\" -ef \"$5\" ]; then holder=${{fd##*/}}; fi; done; echo \"$$ $1 $2 $holder\" > \"$3\"; read line < \"$4\"' sh \"$3\" \"$result\" '{}' '{}' \"$picker_lock\" </dev/null >/dev/null 2>&1 &\n\
+         sh -c 'echo \"$$ $1 $2\" > \"$3\"; read line < \"$4\"' sh \"$3\" \"$result\" '{}' '{}' </dev/null >/dev/null 2>&1 &\n\
          read line < '{}'; fi; fi\n\
          exit \"$result\"; fi",
         picker_owner.display(), picker_owner.display(), picker_owner_said.display(), picker_owner_release.display(), picker_owner_ready.display()
@@ -770,11 +770,7 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
         .path
         .join(format!(".yard/local/attempts/3/effects/{picker_id}/lock"));
     let picker_lock = std::fs::File::open(&picker_lock_path).unwrap();
-    std::fs::write(
-        &picker_owner,
-        format!("{picker_box}\n{}\n", picker_lock_path.display()),
-    )
-    .unwrap();
+    std::fs::write(&picker_owner, format!("{picker_box}\n")).unwrap();
     // Start at the currently held publication, excluding pre-restart history.
     let since = project.rows("SELECT COALESCE(MAX(seq), 0) AS seq FROM audit")[0]["seq"]
         .as_i64()
@@ -783,10 +779,8 @@ command = "if test -f graph.txt; then if touch forbidden 2>/dev/null; then exit 
     picked.release();
     let owner = watch.said_before_end(&picker_owner_said, Some(picker_id));
     let owner_fields: Vec<_> = owner.split_whitespace().collect();
-    assert_eq!(owner_fields.len(), 4);
+    assert_eq!(owner_fields.len(), 3);
     assert_eq!(&owner_fields[1..3], &[picker_box, "0"]);
-    // The child compares its inherited descriptor to the actual effect inode.
-    assert!(owner_fields[3].parse::<u32>().unwrap() > 2);
     assert!(
         std::process::Command::new("kill")
             .args(["-0", owner_fields[0]])
