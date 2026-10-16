@@ -4,70 +4,44 @@ on:
 permissions:
   contents: read
 jobs:
-  mac-fresh-context-tars:
+  mac-native-fresh-default:
     runs-on: [self-hosted, macOS, ARM64, switchyard-macos]
     timeout-minutes: 12
     concurrency:
       group: yard-operator-mac
       cancel-in-progress: false
     steps:
-      - name: Retain actual tar files from fresh concurrent contexts
+      - name: Reproduce through native container with default environment
         shell: bash
         run: |
           set -euo pipefail
           [[ "$(uname -s)" == Darwin && "$(uname -m)" == arm64 && "$(id -un)" == runner ]]
           export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/opt/coreutils/libexec/gnubin:/opt/homebrew/bin:$PATH"
           [[ "$(shasum -a 256 "$HOME/.local/bin/pinfold" | cut -d' ' -f1)" == 611253a0f44d1c0c337f778c743131d30904634f652e979d3ecb4bc2dcc7bc7e ]]
-          yard_probe_dir=$(mktemp -d "${TMPDIR:-/tmp}/yard-fresh-context.XXXXXX")
+          yard_probe_dir=$(mktemp -d "${TMPDIR:-/tmp}/yard-native-fresh.XXXXXX")
           export YARD_MAC_DIAGNOSTIC="$yard_probe_dir/evidence"
           mkdir "$YARD_MAC_DIAGNOSTIC"
           printf 'YARD_MAC_DIAGNOSTIC=%s\n' "$YARD_MAC_DIAGNOSTIC" >> "$GITHUB_ENV"
           python3 - <<'YARD_PY'
           from pathlib import Path
           from concurrent.futures import ThreadPoolExecutor
-          import os,json,subprocess,shutil,threading,time,hashlib,tarfile,re
-          out=Path(os.environ['YARD_MAC_DIAGNOSTIC']).resolve();work=out.parent;original=Path('/private/tmp/yard-parallel-context.fZ4owi/contexts');retained=work/'retained-tars';retained.mkdir();report={'scope':'Freshbyteidenticalpubliccontexts, defaultcache8wayconcurrency; perprocessTMPDIRforreadonlyhardlinkretentionofgeneratedUUID.tar. Pinfoldfirst, directnativeonlyiffailure. NoYard/boxes/models/runtimeconfig/cacheclear; onlyownnamesretired.','batches':[]};uuid=re.compile(r'[0-9a-fA-F]{8}-[0-9a-fA-F-]{27}\.tar$')
-          for driver in ['pinfold','container']:
-           base=work/driver;base.mkdir();tmpdirs=[];rows=[]
-           for i in range(8):
-            ctx=base/str(i);shutil.copytree(original/str(i),ctx,copy_function=shutil.copyfile);scratch=base/(str(i)+'-scratch');scratch.mkdir();tmpdirs.append((i,scratch));rows.append({'case':i,'context':str(ctx),'kind':'public-input-directory' if i<2 else 'small-control','name':'yard-y80-fresh-'+str(os.getpid())+'-'+driver+'-'+str(i),'dockerfile_sha256':hashlib.sha256((ctx/'.yard/Dockerfile').read_bytes()).hexdigest()})
-           stop=threading.Event();captured=[]
-           def observe():
-            while not stop.is_set():
-             for i,d in tmpdirs:
-              for p in d.glob('*.tar'):
-               if not uuid.fullmatch(p.name):continue
-               dest=retained/(driver+'-'+str(i)+'-'+p.name)
-               try:os.link(p,dest);captured.append((i,dest))
-               except (FileExistsError,FileNotFoundError):pass
-             time.sleep(.001)
-           thread=threading.Thread(target=observe);thread.start();barrier=threading.Barrier(8)
-           def build(r):
-            i=r['case'];ctx=Path(r['context']);env=os.environ.copy();env.update(TMPDIR=str(base/(str(i)+'-scratch'))+'/');env.pop('NO_COLOR',None);env.pop('BUILDKIT_COLORS',None)
-            args=['pinfold','image','build',r['name'],'--containerfile',str(ctx/'.yard/Dockerfile'),'--context',str(ctx)] if driver=='pinfold' else ['container','build','--file',str(ctx/'.yard/Dockerfile'),'--tag',r['name'],str(ctx)]
-            barrier.wait(timeout=30);started=time.monotonic()
-            with (out/(driver+'-'+str(i)+'.log')).open('wb') as log:p=subprocess.run(args,env=env,stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,timeout=180)
-            return {**r,'exit':p.returncode,'wall_seconds':time.monotonic()-started}
-           try:
-            with ThreadPoolExecutor(max_workers=8) as executor:rows=list(executor.map(build,rows))
-           finally:stop.set();thread.join()
-           archives=[]
-           for i,p in captured:
-            a={'case':i,'path':str(p),'bytes':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest(),'prefix_hex':p.open('rb').read(64).hex()}
-            try:
-             with tarfile.open(p,'r:') as tar:a['members']=[{'name':m.name,'size':m.size,'type':m.type.decode('ascii','replace')} for m in tar.getmembers()]
-             a['python_tar_valid']=True
-            except (tarfile.TarError,OSError,ValueError) as e:a.update(python_tar_valid=False,tar_error=str(e))
-            archives.append(a)
-           for r in rows:
-            args=['pinfold','image','rm',r['name']] if driver=='pinfold' else ['container','image','delete',r['name']];env=os.environ.copy();env.pop('NO_COLOR',None);env.pop('BUILDKIT_COLORS',None);p=subprocess.run(args,env=env,capture_output=True,text=True,timeout=30);r['only_own_name_retirement']={'exit':p.returncode,'stdout':p.stdout,'stderr':p.stderr}
-           report['batches'].append({'driver':driver,'cases':rows,'archives':archives});(out/'report.json').write_text(json.dumps(report,indent=2)+'\n');print(json.dumps({'driver':driver,'cases':[{k:r[k] for k in ['case','kind','exit']} for r in rows],'retained_tars':len(archives)}),flush=True)
-           if all(r['exit']==0 for r in rows):break
+          import os,json,subprocess,shutil,threading,time
+          out=Path(os.environ['YARD_MAC_DIAGNOSTIC']).resolve();base=out.parent/'contexts';base.mkdir();original=Path('/private/tmp/yard-parallel-context.fZ4owi/contexts');barrier=threading.Barrier(8);env=os.environ.copy();env.pop('NO_COLOR',None);env.pop('BUILDKIT_COLORS',None);rows=[]
+          for i in range(8):
+           ctx=base/str(i);shutil.copytree(original/str(i),ctx,copy_function=shutil.copyfile);rows.append({'case':i,'kind':'public-input-directory' if i<2 else 'small-control','context':str(ctx),'name':'yard-y80-native-fresh-'+str(os.getpid())+'-'+str(i)})
+          def build(r):
+           ctx=Path(r['context']);barrier.wait(timeout=30);started=time.monotonic()
+           with (out/(str(r['case'])+'.log')).open('wb') as log:p=subprocess.run(['container','build','--file',str(ctx/'.yard/Dockerfile'),'--tag',r['name'],str(ctx)],env=env,stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,timeout=180)
+           return {**r,'exit':p.returncode,'wall_seconds':time.monotonic()-started}
+          with ThreadPoolExecutor(max_workers=8) as executor:rows=list(executor.map(build,rows))
+          for r in rows:
+           p=subprocess.run(['container','image','delete',r['name']],env=env,capture_output=True,text=True,timeout=30);r['only_own_tag_retirement']={'exit':p.returncode,'stdout':p.stdout,'stderr':p.stderr}
+          report={'scope':'DirectApplecontaineronly; freshbyteidenticalcopies/defaultcache/defaultTMPDIR/8waynormalconcurrency; samecolorenvnormalizationasPinfold. NoYard/Pinfoldinvocation, no boxes/models/runtimeconfig/cacheclear; ownuniquetagsretiredafterallbuilds.','cases':rows};(out/'report.json').write_text(json.dumps(report,indent=2)+'\n');print(json.dumps(report,indent=2))
           YARD_PY
       - name: Preserve build diagnostic evidence
         if: ${{ always() && env.YARD_MAC_DIAGNOSTIC != '' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: y80-mac-fresh-context-tars-20261016
+          name: y80-mac-native-fresh-default-20261016
           path: ${{ env.YARD_MAC_DIAGNOSTIC }}
           if-no-files-found: error
