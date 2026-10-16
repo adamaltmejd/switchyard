@@ -6,6 +6,10 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
+      mac_only:
+        description: Run only the Mac qualification after setup correction
+        type: boolean
+        default: false
       mac_validation:
         description: Qualify the fixed reviewed source on the operator Mac
         type: boolean
@@ -20,6 +24,7 @@ env:
 
 jobs:
   e2e:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.mac_only != true }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:
@@ -164,7 +169,7 @@ jobs:
           export CARGO_TARGET_DIR="/private/tmp/yard-validate.se7gOT/target"
           [[ -d "$CARGO_TARGET_DIR" ]]
           export CARGO_INCREMENTAL=0
-          export YARD_E2E_DURABLE_INPUTS="/private/tmp/yard-validate.se7gOT/durable-inputs"
+          export YARD_E2E_DURABLE_INPUTS="$yard_validation_dir/durable-inputs"
           yard_check fmt cargo fmt --check
           yard_check clippy cargo clippy --all-targets --locked -- -D warnings
           yard_check build cargo build --locked
