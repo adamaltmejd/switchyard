@@ -507,7 +507,7 @@ pub(super) async fn work(
                 harness,
                 &argv,
                 &state,
-                &dir.join("transcript.jsonl"),
+                &supervise::transcript(project, row),
                 Duration::from_secs(scope["timeout_seconds"].as_u64().expect("timeout")),
                 deadline,
             )

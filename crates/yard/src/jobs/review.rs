@@ -220,7 +220,7 @@ pub async fn run(daemon: &Arc<Daemon>, project: &Arc<Project>, execution: i64) -
             harness,
             &argv,
             &state,
-            &supervise::transcript(project, attempt.id, execution),
+            &supervise::transcript(project, &project.read(|conn| executions::get(conn, execution))?),
             timeout,
             tokio::time::Instant::now() + timeout,
         )

@@ -563,10 +563,10 @@ references = ["reference.txt"]
 /// G2/G9/G13: one ordinary three-role path retains its clone while changing
 /// selected settings and grants. One machine, planner and three role boxes
 /// also reach native verification and landing.
-/// Expected bytes, inodes and ancestry come from the fixture, boxed Git and
-/// host Git; settings come from requests received by the host model.
-/// Sabotage: allocate a second clone for a sequential role; inode/ancestry or
-/// retained bytes differ. Bypass workspace ownership; the held retry starts.
+/// Expected bytes and .git inode come from the original host clone; ancestry
+/// comes from Git and settings from requests received by the host model.
+/// Sabotage: allocate a private repair clone; the original host chain.txt stays
+/// cleaned instead of repaired. Bypass workspace ownership; the held retry starts.
 /// Infer publication/operator authority from source access; cleanup publishes
 /// a candidate or its landing tool succeeds.
 #[test]
@@ -575,7 +575,7 @@ fn selected_cleanup_hands_one_exclusive_clone_to_separately_configured_repair() 
 
     let hold = Latch::new();
     let cleanup_hold = hold.clone();
-    let probes = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+    let probes = Arc::new(Mutex::new(Vec::<String>::new()));
     let captured = probes.clone();
     let machine = Machine::new("g13-handoff", move |request| {
         let model = request.body["model"].as_str().unwrap();
@@ -589,14 +589,14 @@ fn selected_cleanup_hands_one_exclusive_clone_to_separately_configured_repair() 
                     "test \"$(cat chain.txt)\" = implemented && \
                      test \"$(cat /yard/input/trusted/cleanup.md)\" = trusted-cleanup && \
                      printf 'cleaned\\n' > chain.txt && git add chain.txt && git commit -qm Cleanup && \
-                     echo inode=$(stat -c %i .git) && echo source_write=0 && \
+                     echo source_write=0 && \
                      cat /tmp/landing-probe.json",
                 )]),
                 2 => {
                     captured
                         .lock()
                         .unwrap()
-                        .push((model.into(), request.last_tool_result().unwrap().1));
+                        .push(request.last_tool_result().unwrap().1);
                     Reply::Hold(
                         cleanup_hold.clone(),
                         Box::new(Reply::Tools(vec![publish_report()])),
@@ -607,16 +607,12 @@ fn selected_cleanup_hands_one_exclusive_clone_to_separately_configured_repair() 
         }
         if request.opens() {
             let command = if model == "implementer-selected" {
-                "printf 'implemented\\n' > chain.txt && git add chain.txt && git commit -qm Implement && echo inode=$(stat -c %i .git)"
+                "printf 'implemented\\n' > chain.txt && git add chain.txt && git commit -qm Implement"
             } else {
-                "test \"$(cat chain.txt)\" = cleaned && test \"$(cat /yard/input/trusted/repair.md)\" = trusted-repair && printf 'repaired\\n' > chain.txt && git add chain.txt && git commit -qm Repair && echo inode=$(stat -c %i .git)"
+                "test \"$(cat chain.txt)\" = cleaned && test \"$(cat /yard/input/trusted/repair.md)\" = trusted-repair && printf 'repaired\\n' > chain.txt && git add chain.txt && git commit -qm Repair"
             };
             return Reply::Tools(vec![bash(command)]);
         }
-        captured
-            .lock()
-            .unwrap()
-            .push((model.into(), request.last_tool_result().unwrap().1));
         Reply::Text("done".into())
     });
     machine.start();
@@ -709,7 +705,7 @@ export default function () {
         json!({"reason": "workspace_owned", "workspace": "implementer", "execution": owner}),
         "{refused}"
     );
-    let probe = probes.lock().unwrap().last().unwrap().1.clone();
+    let probe = probes.lock().unwrap().last().unwrap().clone();
     assert!(probe.contains("source_write=0"), "{probe}");
     let reply: Value =
         serde_json::from_str(probe.lines().find(|line| line.starts_with('{')).unwrap()).unwrap();
@@ -753,18 +749,10 @@ export default function () {
     assert_eq!(result["outputs"]["result"]["kind"], "report");
     assert_eq!(project.rows(&format!("SELECT json_extract(data, '$.candidate') AS execution FROM audit WHERE event = 'attempt.candidate' AND attempt = {attempt} ORDER BY seq")), vec![json!({"execution": rows[0]["id"]}), json!({"execution": rows[2]["id"]})]);
     assert_eq!(std::fs::metadata(clone.join(".git")).unwrap().ino(), inode);
-    let probes = probes.lock().unwrap();
-    let inodes: Vec<_> = probes
-        .iter()
-        .map(|(_, probe)| {
-            probe
-                .lines()
-                .find(|line| line.starts_with("inode="))
-                .unwrap()
-        })
-        .collect();
-    assert_eq!(inodes.len(), 3);
-    assert!(inodes.iter().all(|value| *value == inodes[0]), "{inodes:?}");
+    assert_eq!(
+        std::fs::read_to_string(clone.join("chain.txt")).unwrap(),
+        "repaired\n"
+    );
     for role in ["implementer", "cleanup", "repair"] {
         let request = machine
             .model

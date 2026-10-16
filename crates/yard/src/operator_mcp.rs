@@ -223,17 +223,8 @@ fn tool_result(outcome: Result<Value, Fail>) -> Value {
            "structuredContent": value, "isError": failed})
 }
 
-async fn forward(method: &str, fields: &str, mut args: Value) -> Result<Value, Fail> {
+async fn forward(method: &str, fields: &str, args: Value) -> Result<Value, Fail> {
     validate(&args, &schema(fields))?;
-    if matches!(method, "init" | "project.forget") {
-        let path = std::path::Path::new(args["path"].as_str().expect("validated path"));
-        let canonical = match std::fs::canonicalize(path) {
-            Ok(path) => path,
-            Err(_) if method == "project.forget" => path.to_path_buf(),
-            Err(error) => return Err(Fail::invalid(error.to_string())),
-        };
-        args["path"] = json!(canonical);
-    }
     let mut value = api::call(&api::socket_path(), method, args).await?;
     // Ticket bodies have an explicit show drilldown.
     let tickets = if method == "status" {

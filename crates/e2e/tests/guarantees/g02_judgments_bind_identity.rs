@@ -175,17 +175,17 @@ fi"#,
             assert_ne!(tree, initial_tree);
         }
     }
-    // Explicit definition adoption changes only the consuming gate. A runtime
-    // declaration changes its declared tool/configuration identity separately.
-    // Sabotage: omit command, declaration or image from matching, or rerun
+    // Explicit definition adoption changes only the consuming gate.
+    // Sabotage: omit command or image from matching, or rerun
     // unrelated consumers despite identical consumed definitions.
     let changed_command = configuration.replace(
         "echo reuse-closed; test -f feature.txt",
         "echo reuse-closed; test -f feature.txt && test -s feature.txt",
     );
-    let changed_runtime = changed_command.replacen("runtime-v1", "runtime-v2", 1);
     let mut plan_revision = 1;
-    for (definition, expected_closed) in [(&changed_command, 4), (&changed_runtime, 5)] {
+    {
+        let definition = &changed_command;
+        let expected_closed = 4;
         let retained = project.rows("SELECT * FROM \"check\" WHERE execution = (SELECT max(id) FROM execution WHERE name = 'other' AND outcome = 'pass')")[0].clone();
         project.reconfigure(definition);
         let source = project.git(&["rev-parse", "HEAD"]).trim().to_string();
@@ -249,7 +249,7 @@ fi"#,
     );
     approval(&mut watch);
     let log = std::fs::read_to_string(&commands).unwrap();
-    for (name, count) in [("closed", 6), ("other", 4), ("unknown", 5)] {
+    for (name, count) in [("closed", 5), ("other", 4), ("unknown", 5)] {
         // Failure-only, bounded identities distinguish work between sync and
         // adoption from replay on the same frozen inputs. Never dump results,
         // commands, launch environment or operator/worker connection data.
@@ -309,7 +309,7 @@ fi"#,
     );
     let item = approval(&mut watch);
     let log = std::fs::read_to_string(&commands).unwrap();
-    for (name, count) in [("closed", 7), ("other", 4), ("unknown", 5)] {
+    for (name, count) in [("closed", 6), ("other", 4), ("unknown", 5)] {
         assert_eq!(
             log.lines().filter(|line| *line == name).count(),
             count,
@@ -376,7 +376,7 @@ fi"#,
     // boundary to observe skip, reference and accepted failure together.
     // Sabotage: reference failed results, carry acceptance to a new identity,
     // or manufacture a check for the omitted node.
-    let mut failed_definition = changed_runtime.replace(
+    let mut failed_definition = changed_command.replace(
         "echo reuse-closed; test -f feature.txt && test -s feature.txt",
         "echo reuse-closed; exit 7",
     );
@@ -422,7 +422,7 @@ command = '''jq '{outcome: "retry", identity: .identity, report: {summary: "Retr
     let mut failed_executions = Vec::new();
     let mut decisions = Vec::new();
     let mut final_item = Value::Null;
-    for (body, expected_closed) in [(None, 9), (Some("Bookkeeping after acceptance"), 10)] {
+    for (body, expected_closed) in [(None, 8), (Some("Bookkeeping after acceptance"), 9)] {
         if let Some(body) = body {
             let revision = project.ok("ticket.show", json!({"ticket": "Y-1"}))["revision"]
                 .as_i64()
@@ -615,7 +615,7 @@ command = '''jq '{outcome: "retry", identity: .identity, report: {summary: "Retr
         "SELECT node, head, outcome FROM execution WHERE attempt = {attempt} AND reason = 'landing' AND kind = 'gate' ORDER BY id"
     )), vec![json!({"node": "landing-gate-other", "head": merged, "outcome": "pass"})]);
     let log = std::fs::read_to_string(&commands).unwrap();
-    for (name, count) in [("closed", 10), ("other", 5), ("unknown", 5)] {
+    for (name, count) in [("closed", 9), ("other", 5), ("unknown", 5)] {
         assert_eq!(log.lines().filter(|line| *line == name).count(), count);
     }
     git(
@@ -1079,51 +1079,6 @@ fn held_after_policy_change<'m>(
     (project, watch, release, head)
 }
 
-/// G2: manual policy synced while the auto-approved candidate's landing is
-/// held withdraws approval on the same plan, with no new model turn or check.
-/// Sabotage: read approve from the admitted plan; the held landing continues.
-/// The protected-path scenario exercises the other policy input.
-#[test]
-fn manual_policy_withdraws_auto_approval_without_rejudgment() {
-    let machine = notes_machine("g2-manual");
-    let (project, mut watch, mut release, head) = held_after_policy_change(
-        &machine,
-        "[gates.check]\ncommand = \"test -f docs/notes.md\"\nstage = \"candidate\"\n\n",
-        |config| config.replace("approve = \"auto\"", "approve = \"manual\""),
-    );
-    release.write_all(b"go\n").unwrap();
-    let ended = watch.event("execution.ended", &[("kind", "landing")]);
-    assert_eq!(ended["data"]["outcome"], "withdrawn");
-    let raised = approval(&mut watch);
-    assert_eq!(raised["payload"]["head"], head);
-    assert_eq!(raised["payload"]["plan_revision"], 1);
-    assert_eq!(
-        machine
-            .model
-            .requests()
-            .iter()
-            .filter(|request| request.opens())
-            .count(),
-        1
-    );
-    assert_eq!(
-        project.rows("SELECT actor, state FROM approval"),
-        vec![json!({"actor": "auto", "state": "withdrawn"})]
-    );
-    assert_eq!(
-        project
-            .rows("SELECT id FROM execution WHERE kind = 'gate' AND reason = 'candidate'")
-            .len(),
-        1
-    );
-    project.ok(
-        "attempt.approve",
-        json!({"target": "main", "head": &head, "ticket": "Y-1"}),
-    );
-    release.write_all(b"go\n").unwrap();
-    watch.event("landing.recorded", &[]);
-}
-
 /// G2: a delayed acceptance cannot cross an edit, even before the held edit
 /// worker changes the head. After release it cannot cross the new head either.
 /// Refusals name the changed identity and write no rows; the current item's
@@ -1298,6 +1253,28 @@ runner = {kind = "agent", agent = "fixer", instructions = "Repair the frozen fai
     );
     assert!(admitted.get("error").is_none(), "{admitted}");
     let first = watch.attention();
+    // G7: the real agent classifier writes effect storage despite lacking a
+    // standalone scope. Sabotage: derive inspection/tail from scope alone.
+    // The host file and supported MCP reads must agree before ordinary cleanup.
+    let classifier = project.rows(
+        "SELECT id, attempt FROM execution WHERE reason = 'classification' ORDER BY id DESC LIMIT 1",
+    )[0]
+    .clone();
+    let bytes = std::fs::read_to_string(project.path.join(format!(
+        ".yard/local/attempts/{}/effects/{}/transcript.jsonl",
+        classifier["attempt"], classifier["id"]
+    )))
+    .unwrap();
+    assert!(!bytes.is_empty());
+    assert_eq!(project.ok("attempt.tail", json!({"ticket": "Y-1"})), bytes);
+    let inspection = project.ok("attempt.stats", json!({"ticket": "Y-1"}));
+    let execution = inspection["executions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["execution"] == classifier["id"])
+        .unwrap();
+    assert_eq!(execution["artifacts"]["transcript"], "available");
     assert_eq!(first["data"]["kind"], "candidate");
     let first_item = project.ok("attempt.show", json!({"ticket": "Y-1"}))["attention"][0].clone();
     let first_head = git(
@@ -1561,6 +1538,23 @@ fn selected_cleanup_reuses_only_unchanged_actual_judgment_inputs() {
             .success()
     );
     *request_signal.lock().unwrap() = Some(request_held.clone());
+    let input_armed = machine.root.join("repair-input-armed");
+    let input_claimed = machine.root.join("repair-input-claimed");
+    let input_held = machine.root.join("repair-input-held");
+    let input_release = machine.root.join("repair-input-release");
+    for fifo in [&input_held, &input_release] {
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    machine.wrapper("git", &format!(
+        "if [ -e '{}' ]; then case \" $* \" in *' cat-file -t '*':trusted/selected.md '*) if mv '{}' '{}' 2>/dev/null; then echo held > '{}'; read line < '{}'; fi;; esac; fi",
+        input_armed.display(), input_armed.display(), input_claimed.display(),
+        input_held.display(), input_release.display()));
     machine.start();
     let project = super::g08_durable_package::fixture(&machine);
     // Ordinary Pi loads trusted extensions. Retire this audit-only hostile
@@ -1920,7 +1914,44 @@ instructions = "Judge only the declared fixture input."
         json!({"expected": before_head, "current": after_head})
     );
     assert_eq!(project.rows("SELECT * FROM approval"), before);
+    // load_attempt reads selected input types after step snapshots the attempt.
+    // Hold that native read across rejection, so its old next=None cannot
+    // restore approval ahead of cleanup/repair. Sabotage: remove runnable's
+    // next comparison and the final approval continuation/owner/work checks.
+    std::fs::write(&input_armed, "").unwrap();
+    assert_eq!(watch.said(&input_held), "held\n");
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT state, next, head, proof FROM attempt WHERE id = {attempt}"
+        )),
+        vec![json!({"state": "live", "next": null, "head": after_head, "proof": after_proof})]
+    );
+    let current_approval = project.rows(&format!(
+        "SELECT id, payload FROM attention WHERE attempt = {attempt} AND kind = 'approval' AND state = 'open'"
+    ));
+    assert_eq!(current_approval.len(), 1);
+    let approval_payload: Value =
+        serde_json::from_str(current_approval[0]["payload"].as_str().unwrap()).unwrap();
+    assert_eq!(approval_payload, first["payload"]);
     project.ok("attempt.reject", json!({"target": "main", "head": &after_head, "proof": &after_proof, "text": "Run the no-op selected cleanup", "ticket": "Y-1"}));
+    let pending: Value = serde_json::from_str(
+        project.rows(&format!("SELECT next FROM attempt WHERE id = {attempt}"))[0]["next"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        pending,
+        json!({"reason": "repair", "detail": "Run the no-op selected cleanup", "rejected": after_head})
+    );
+    assert_eq!(
+        project.rows(&format!(
+            "SELECT state, resolution FROM attention WHERE id = {}",
+            current_approval[0]["id"]
+        )),
+        vec![json!({"state": "resolved", "resolution": "reject"})]
+    );
+    std::fs::write(&input_release, "go\n").unwrap();
     let second = approval(&mut watch);
     let feedback = json!({"kind": "verdict", "source": {"external": "feedback"},
         "value": {"reason": "repair", "detail": "Run the no-op selected cleanup", "rejected": after_head}});

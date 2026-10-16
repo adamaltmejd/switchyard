@@ -395,10 +395,9 @@ curl -s -X POST http://yard.mcp/mcp \
 
 /// G6/G8/G12: direct Anthropic authentication stays on the host even when
 /// a Claude API seat publishes without its init proof. Only the fresh,
-/// proven seat counts. Login is a successful control in the same project.
+/// proven same-head seat counts and controls the auth refusal.
 /// The fixture supplies the key, model and finding; the store and host
-/// requests observe them. Pi's stderr-proof test and Claude's login test
-/// do not exercise API-key auth with Claude's stdout registration proof.
+/// requests observe them. The dedicated Claude login scenario remains separate.
 /// Sabotage: inject the literal key into Claude's env; the probe finds it.
 /// Drop checks::current's registered condition; the first seat counts.
 /// Accept provider and login together; the named refusal disappears.
@@ -478,10 +477,11 @@ fi"#);
     project.ok("ticket.new", json!({"title": "API review"}));
     let approval = watch.attention();
     assert_eq!(approval["data"]["kind"], "approval", "{approval}");
-    let checks = project.rows("SELECT c.id, e.mcp FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE c.kind = 'review' ORDER BY c.id");
+    let checks = project.rows("SELECT c.id, e.mcp, e.head FROM \"check\" c JOIN execution e ON e.id = c.execution WHERE c.kind = 'review' ORDER BY c.id");
     assert_eq!(checks.len(), 2, "{checks:?}");
     assert_ne!(checks[0]["mcp"], "registered");
     assert_eq!(checks[1]["mcp"], "registered");
+    assert_eq!(checks[0]["head"], checks[1]["head"]);
     assert_eq!(
         approval["data"]["payload"]["checks"],
         json!([checks[1]["id"]])
@@ -495,74 +495,6 @@ fi"#);
         assert!(request.path.starts_with("/v1/messages"), "{}", request.path);
         assert_eq!(request.body["model"], "claude-opus-5-5");
     }
-
-    project.ok("ticket.park", json!({"ticket": "Y-1"}));
-    project.ok("attempt.abandon", json!({"ticket": "Y-1"}));
-    project.ok(
-        "ticket.abandon",
-        json!({"reason": "Login control", "ticket": "Y-1"}),
-    );
-    project.reconfigure(&login);
-    project.ok("ticket.new", json!({"title": "Login review"}));
-    let approval = watch.attention();
-    assert_eq!(approval["data"]["kind"], "approval", "{approval}");
-    let login_requests = &machine.model.requests()[requests.len()..];
-    assert!(!login_requests.is_empty());
-    for request in login_requests {
-        assert_eq!(
-            request.header("authorization"),
-            Some(format!("Bearer {SECRET}").as_str())
-        );
-    }
-}
-/// G8: an unproven native publication cannot approve the candidate.
-/// The next real seat retains proof and supplies the only selected check.
-/// Sabotage: remove the registered-MCP condition from current judgments.
-#[test]
-fn a_publication_without_a_registration_does_not_count() {
-    let machine = Machine::new("g8-noreg", |request| {
-        if seat(&request) {
-            return act(
-                request,
-                vec![publish(
-                    json!([{ "priority": "P2", "body": "the unproven publication" }]),
-                )],
-            );
-        }
-        implementer(request)
-    });
-    machine.wrapper(
-        "pinfold",
-        r#"
-if [ "$1 $2" = 'box exec' ] && [ "${3%-2}" != "$3" ]; then
-  err=$(mktemp)
-  "$REAL" "$@" 2>"$err"
-  code=$?
-  sed '/^yard-mcp /d' "$err" >&2
-  rm -f "$err"
-  exit "$code"
-fi
-"#,
-    );
-    machine.start();
-    let project = Project::new(&machine, "p", &config(""));
-    let mut watch = project.watch(0);
-    project.ok("ticket.new", json!({"title": "Add feature"}));
-    let approval = watch.find("registered review approves", |event| {
-        event["event"] == "attention.raised" && event["data"]["kind"] == "approval"
-    });
-    let reviews =
-        project.rows("SELECT id, mcp, head FROM execution WHERE kind = 'review' ORDER BY id");
-    assert_eq!(reviews.len(), 2);
-    assert_ne!(reviews[0]["mcp"], "registered");
-    assert_eq!(reviews[1]["mcp"], "registered");
-    assert_eq!(reviews[0]["head"], reviews[1]["head"]);
-    let checks = project.rows("SELECT id FROM \"check\" WHERE kind = 'review' ORDER BY id");
-    assert_eq!(checks.len(), 2);
-    assert_eq!(
-        approval["data"]["payload"]["checks"],
-        json!([checks[1]["id"]])
-    );
 }
 
 /// Whether `name` exists anywhere under `dir`.

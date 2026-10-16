@@ -122,11 +122,15 @@ pub fn runtime_evidence(spec: &BoxSpec) -> Value {
             "routes": egress.routes.keys().collect::<Vec<_>>() }))})
 }
 
-pub fn transcript(project: &Project, attempt: i64, execution: i64) -> PathBuf {
-    project
-        .attempt_dir(attempt)
-        .join("transcripts")
-        .join(format!("{execution}.jsonl"))
+pub fn transcript(project: &Project, row: &executions::Execution) -> PathBuf {
+    if row.scope.is_some() || row.reason.as_deref() == Some("classification") {
+        super::capacity::dir(project, row).join("transcript.jsonl")
+    } else {
+        project
+            .attempt_dir(row.attempt.expect("attempt execution"))
+            .join("transcripts")
+            .join(format!("{}.jsonl", row.id))
+    }
 }
 
 pub fn implementation_node(
@@ -741,7 +745,6 @@ pub fn labels(project: &Project) -> BTreeMap<String, String> {
 pub struct Run {
     pub terminal: Option<crate::harness::Event>,
     pub registered: Option<crate::harness::Registration>,
-    pub session_id: Option<String>,
     pub stopped: bool,
     pub timed_out: bool,
     pub exit_code: Option<i32>,
@@ -836,7 +839,6 @@ pub async fn run_harness(
                     for event in reader.stdout(&line) {
                         match &event {
                             crate::harness::Event::Started { session_id } => {
-                                run.session_id = Some(session_id.clone());
                                 project.read(|conn| executions::set_worker(conn, execution, Some(session_id), None))?;
                             }
                             crate::harness::Event::Registered(registration) => {
@@ -1640,7 +1642,7 @@ pub async fn implement(
             harness,
             &argv,
             &state,
-            &transcript(project, attempt.id, execution),
+            &transcript(project, &project.read(|conn| executions::get(conn, execution))?),
             Duration::from_secs(workflow.inactivity_timeout_minutes * 60),
             deadline,
         )

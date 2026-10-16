@@ -181,7 +181,12 @@ async fn serve() -> Result<(), String> {
         Err(error) => return Err(format!("pinfold artifacts: {error}")),
     }
 
-    for root in registry()? {
+    let roots = registry()?;
+    // Reject alias collisions before opening stores or reconciling effects.
+    for root in &roots {
+        registered_project_path(root, &roots).map_err(|fail| fail.message)?;
+    }
+    for root in roots {
         if !root.join(crate::config::CONFIG_PATH).is_file() {
             eprintln!(
                 "yard daemon: skipping {}: no .yard/config.toml",
@@ -372,20 +377,56 @@ fn open_project(root: &Path) -> Result<Arc<Project>, String> {
     }))
 }
 
+fn canonical_project_path(path: &Path) -> Result<PathBuf, Fail> {
+    if !path.is_absolute() {
+        return Err(Fail::invalid("project path must be an absolute path"));
+    }
+    match std::fs::canonicalize(path) {
+        Ok(root) => Ok(root),
+        // A gone project can still be forgotten by its registered absolute path.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(path.to_path_buf()),
+        Err(error) => Err(Fail::invalid(error.to_string())),
+    }
+}
+
+fn registered_project_path(path: &Path, roots: &[PathBuf]) -> Result<PathBuf, Fail> {
+    let canonical = canonical_project_path(path)?;
+    let mut registered = None;
+    for root in roots {
+        if canonical_project_path(root)? == canonical {
+            if registered.as_ref().is_some_and(|previous| previous != root) {
+                return Err(Fail::refused(format!(
+                    "ambiguous project aliases for {}; operator resolution required",
+                    path.display()
+                )));
+            }
+            registered = Some(root.clone());
+        }
+    }
+    // Existing roots bind runtime ownership, including legacy alias spellings.
+    Ok(registered.unwrap_or(canonical))
+}
+
+fn project_path(params: &Value, field: &str) -> Result<PathBuf, Fail> {
+    let path = params[field]
+        .as_str()
+        .ok_or_else(|| Fail::invalid(format!("the call names no {field}")))?;
+    registered_project_path(Path::new(path), &registry()?)
+}
+
 /// The registered project at `params.project`.
 pub fn project(daemon: &Daemon, params: &Value) -> Result<Arc<Project>, Fail> {
-    let root = params["project"]
-        .as_str()
-        .ok_or_else(|| Fail::invalid("the call names no project"))?;
+    let root = project_path(params, "project")?;
     daemon
         .projects
         .lock()
         .expect("projects lock")
-        .get(Path::new(root))
+        .get(&root)
         .cloned()
         .ok_or_else(|| {
             Fail::not_found(format!(
-                "{root} is not a registered project; call yard_init with that path"
+                "{} is not a registered project; call yard_init with that path",
+                root.display()
             ))
         })
 }
@@ -400,7 +441,7 @@ async fn handle(daemon: &Arc<Daemon>, method: &str, params: Value) -> Result<Val
         "init" => init(daemon, &params).await,
         "project.list" => Ok(json!(registry()?)),
         "project.forget" => {
-            let path = PathBuf::from(params["path"].as_str().unwrap_or_default());
+            let path = project_path(&params, "path")?;
             let project = daemon
                 .projects
                 .lock()
@@ -541,11 +582,7 @@ async fn attention(daemon: &Daemon, params: &Value) -> Result<Value, Fail> {
 
 /// Write the scaffold, create canonical and register the project.
 async fn init(daemon: &Arc<Daemon>, params: &Value) -> Result<Value, Fail> {
-    let root = PathBuf::from(
-        params["path"]
-            .as_str()
-            .ok_or_else(|| Fail::invalid("init names no path"))?,
-    );
+    let root = project_path(params, "path")?;
     if !root.join(".git").exists() {
         return Err(Fail::refused(format!(
             "{} is not the top of a git checkout",

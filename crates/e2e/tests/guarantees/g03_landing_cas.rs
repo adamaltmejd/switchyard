@@ -116,6 +116,8 @@ fn a_landing_whose_update_ref_is_held_stays_undecided_until_released() {
         .filter(|item| item["kind"] == "red")
         .collect();
     assert_eq!(red.len(), 1, "{status}");
+    assert_eq!(red[0]["reason"], "ownership");
+    assert_eq!(red[0]["execution"], intent["id"]);
     assert_eq!(
         project.rows("SELECT intent_state FROM execution WHERE kind = 'landing'")[0]["intent_state"],
         "open"

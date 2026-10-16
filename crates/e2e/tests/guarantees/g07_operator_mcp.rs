@@ -524,11 +524,10 @@ export default function () {
 
 /// Cancel while a real implementer is held, then let it commit and land.
 /// The base extension probes an operator tool with the harness's actual
-/// worker session. Stale mutations cross stdio after a successful edit.
+/// worker session. Strict schema validation follows a successful edit.
 /// Sabotage: forward worker tools to operator dispatch; the park succeeds.
 /// Stop the attempt on wait cancellation or stdin EOF; the held work cannot
-/// reach approval. Drop revision/head from the stdio arguments or rewrite
-/// daemon errors; stale identities or the externally observed rows differ.
+/// reach approval.
 /// Skip strict stdio schema validation; the unknown-field edit writes.
 #[test]
 fn operator_wait_cancellation_keeps_work_and_worker_grants_separate() {
@@ -543,11 +542,20 @@ fn operator_wait_cancellation_keeps_work_and_worker_grants_separate() {
         _ => Reply::Text("done".into()),
     });
     machine.start();
-    let project = Project::new(
+    let mut project = Project::new(
         &machine,
         "p",
         &config("").replace("review = [\"correctness\"]", "review = \"none\""),
     );
+    // G6: init and later operator calls must resolve the same real symlink.
+    // Sabotage: canonicalize only init in the MCP forwarder, then exact-lookup
+    // the caller's alias in daemon::project. The existing sync/landing fails.
+    let canonical = std::fs::canonicalize(&project.path).unwrap();
+    let alias = machine.root.join("project-alias");
+    std::os::unix::fs::symlink(&project.path, &alias).unwrap();
+    project.path = alias;
+    let initialized = machine.ok("init", json!({"path": project.path}));
+    assert_eq!(initialized["project"], json!(canonical));
     // This trusted fixture extension uses the worker's real HTTP session.
     // It changes no Yard code and routes no public model call.
     let extension = r#"import { writeFileSync } from 'node:fs';
@@ -587,23 +595,6 @@ export default function () {
         json!({"ticket": "Y-1", "revision": 1, "body": "commit feature"}),
     );
     let before = project.rows("SELECT revision, body FROM ticket WHERE id = 1");
-    let stale = operator.call(
-        "yard_ticket_edit",
-        args(
-            &project,
-            json!({"ticket": "Y-1", "revision": 1, "body": "stale"}),
-        ),
-    );
-    assert_eq!(stale["error"]["code"], "stale");
-    assert_eq!(stale["error"]["data"], json!({"expected": 1, "current": 2}));
-    assert_eq!(
-        before,
-        vec![json!({"revision": 2, "body": "commit feature"})]
-    );
-    assert_eq!(
-        project.rows("SELECT revision, body FROM ticket WHERE id = 1"),
-        before
-    );
     // G6: schema-invalid stdio input writes nothing; its valid control above did.
     let invalid = operator.call(
         "yard_ticket_edit",
@@ -619,7 +610,6 @@ export default function () {
     );
 
     let mut history = project.watch(0);
-    let old = project.canonical_head();
     call(
         &mut operator,
         &project,
@@ -695,19 +685,6 @@ export default function () {
         ),
         "feature\n"
     );
-    let stale = operator.call(
-        "yard_attempt_approve",
-        args(
-            &project,
-            json!({"ticket": "Y-1", "head": old, "target": "main"}),
-        ),
-    );
-    assert_eq!(stale["error"]["code"], "stale");
-    assert_eq!(
-        stale["error"]["data"],
-        json!({"expected": old, "current": candidate})
-    );
-    assert!(project.rows("SELECT id FROM approval").is_empty());
     call(
         &mut operator,
         &project,

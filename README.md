@@ -1,15 +1,14 @@
 # switchyard
 
-Switchyard (`yard`) turns tickets into landed code with coding agents: one
-ticket to one agent in one disposable box, gated, reviewed and landed
-through one verified merge queue. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+Switchyard (`yard`) turns tickets into landed code with isolated coding agents,
+gates, review and one verified merge queue. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 is the binding spec.
 
 ## Requirements
 
-- pinfold 0.1.1 or newer, on the daemon's `PATH`
-- a container runtime pinfold supports: rootless podman on Linux, Apple
-  container on macOS
+- pinfold 0.2.6, on the daemon's `PATH`
+- Linux: stable rootless Podman 6.1.4 or newer with the systemd cgroup manager
+- macOS 26 or newer: stable Apple container 1.5.0 or newer
 - git, on the daemon's `PATH`
 
 ## Install
@@ -135,19 +134,12 @@ Existing capacity limits apply. Replace the scaffold's minimal Git gate
 with project checks before use. `test-audit` selects the installed
 `.agents/skills/test-audit/SKILL.md` and reads source without write access.
 
-Before admission, candidate gate, seat and landing gate overrides may select
-`operator_failure = true`. Eligible failures then ask the operator to
-`accept` the named attention with text or take `repair`. Acceptance keeps
-the failed evidence and runs every remaining selected candidate check
-before approval. A failed selected merged gate keeps approval active and
-asks the same question on its pinned prepared input. Its answer also names
-the original `landing`, `child`, `node`, candidate `base`, ticket `revision`,
-target `old` and `merged` head. Acceptance runs the remaining landing gates
-before queue landing and compare-and-swap. Infrastructure errors and unknown
-ownership cannot be accepted; fresh preparation inherits no answer.
-Repair retires approval and binds the exact failed evidence to the next
-implementer execution. The original failure stays failed. Its fresh candidate
-must pass selected verification and gain approval before landing.
+Before admission, set `operator_failure = true` on selected candidate gate,
+seat or landing gate overrides. Answer eligible failures with
+`yard_attempt_accept` or `yard_attempt_repair`, naming the exact identities in
+the attention and nonempty text. Failures stay failed; remaining selected
+checks still run. Infrastructure errors and unknown ownership cannot be
+accepted. See [Attention](docs/ARCHITECTURE.md#attention) for decision bindings.
 
 To explicitly accept landing omissions, approve with the
 `observe_landing_skipped` node array. This requests a decision after merge
@@ -162,9 +154,13 @@ gate still runs. Ordinary omissions record no explicit acceptance.
     cargo fmt --check
     cargo clippy --all-targets --locked -- -D warnings
 
-The e2e suite (`cargo test -p e2e --locked`) runs on a host with the
-container runtime, not inside a box.
-CI pins pinfold 0.2.3.
+The e2e suite (`cargo test -p e2e --locked -- --show-output`) runs on a host
+with the container runtime, not inside a box. Each FakeModel emits
+`fake_model_requests=N` at teardown from its recorded requests, including
+nested machines and tests that unwind after failure. Retain every count in
+the final host log. These observations are separate from static workload
+estimates, machine/build counts and box launches.
+CI pins pinfold 0.2.6 and builds native Podman 6.1.4 on hosted Linux runners.
 
 Development binaries use separate state, sockets, projects and runtime names.
 They never open the construction backlog. Release preparation does not

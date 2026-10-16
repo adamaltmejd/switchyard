@@ -20,8 +20,9 @@ fn mkfifo(path: &Path) {
 /// The worker wrote a file and is held on its next request when
 /// the daemon dies.
 ///
-/// Sabotage: make `reconcile::project` leave running implementations
-/// running; the execution is not `interrupted`, and `start` is refused.
+/// Sabotage: recover the held implementation with an outcome other than
+/// `interrupted`, or discard its retained tree; the exact recovered outcome
+/// or the continued candidate's Git contents fail below.
 #[test]
 fn a_daemon_killed_mid_execution_interrupts_it_and_start_continues() {
     let hold = Latch::new();
@@ -52,7 +53,9 @@ fn a_daemon_killed_mid_execution_interrupts_it_and_start_continues() {
     hold.wait_held();
     let clone = project.path.join(".yard/local/attempts/1/clone");
     // The project's label, as pinfold reports it on the held worker's box.
-    let handle = project.rows("SELECT handle FROM execution WHERE id = 1")[0]["handle"].clone();
+    let execution =
+        project.rows("SELECT id, handle FROM execution WHERE kind = 'implementation'")[0].clone();
+    let handle = execution["handle"].clone();
     let worker = machine
         .boxes("dev.yard.project")
         .into_iter()
@@ -68,17 +71,36 @@ fn a_daemon_killed_mid_execution_interrupts_it_and_start_continues() {
     // Before restart: the execution is running and the tree holds the file.
     assert_eq!(
         project.rows("SELECT id, status FROM execution"),
-        vec![json!({ "id": 1, "status": "running" })]
+        vec![json!({ "id": execution["id"], "status": "running" })]
     );
     assert_eq!(
         std::fs::read_to_string(clone.join("feature.txt")).unwrap(),
         "feature\n"
     );
 
+    let since = project.rows("SELECT COALESCE(MAX(seq), 0) AS seq FROM audit")[0]["seq"]
+        .as_i64()
+        .unwrap();
     machine.start();
+    let mut watch = project.watch(since);
+    // Startup reconciles before serving, but external ownership can release
+    // later. Only this execution's fail-safe ownership attention is allowed.
+    for name in ["execution.released", "execution.ended"] {
+        let event = watch.until(name, |event| {
+            if event["event"] == "attention.raised" {
+                assert_eq!(event["data"]["kind"], "red", "{event}");
+                assert_eq!(event["data"]["reason"], "ownership", "{event}");
+                assert_eq!(event["execution"], execution["id"], "{event}");
+            }
+            event["event"] == name && event["execution"] == execution["id"]
+        });
+        if name == "execution.ended" {
+            assert_eq!(event["data"]["outcome"], "interrupted", "{event}");
+        }
+    }
     assert_eq!(
         project.rows("SELECT id, status, outcome FROM execution"),
-        vec![json!({ "id": 1, "status": "ended", "outcome": "interrupted" })]
+        vec![json!({ "id": execution["id"], "status": "ended", "outcome": "interrupted" })]
     );
     assert_eq!(
         machine.boxes(&label),
@@ -86,7 +108,6 @@ fn a_daemon_killed_mid_execution_interrupts_it_and_start_continues() {
         "the project has a box after restart"
     );
 
-    let mut watch = project.watch(0);
     project.ok("attempt.start", json!({"ticket": "Y-1"}));
     let candidate = watch.event("attempt.candidate", &[]);
     let head = candidate["data"]["head"].as_str().unwrap();

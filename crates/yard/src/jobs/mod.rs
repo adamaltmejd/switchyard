@@ -914,7 +914,10 @@ fn runnable(
     attempt: &attempts::Attempt,
 ) -> Result<Option<Option<attempts::Attention>>, Fail> {
     let current = attempts::get(conn, attempt.id)?;
-    if current.state != "live" || current.plan_revision() != attempt.plan_revision() {
+    if current.state != "live"
+        || current.plan_revision() != attempt.plan_revision()
+        || current.next != attempt.next
+    {
         return Ok(None);
     }
     if attempt.admission.is_none() && loaded.config.workflow(&attempt.workflow)?.read_only {
@@ -1662,6 +1665,11 @@ async fn advance(
         if now.state != "live"
             || attempts::superseded_by_edit(tx, attempt.id, ticket.id, ticket.revision)?
             || stale_part(&payload, &now, &tickets::get(tx, ticket.id)?, loaded)?.is_some()
+            // Git input and policy reads can overlap rejection or replacement work.
+            || now.next.is_some()
+            || runnable(tx, loaded, attempt)?.is_none()
+            || executions::attempt_work(tx, attempt.id)?.last().map(|row| row.id)
+                != executions.last().map(|row| row.id)
         {
             return Ok(());
         }

@@ -3038,11 +3038,7 @@ pub fn attempt_show(project: &Project, params: &Value) -> Result<Value, Fail> {
 /// Explicit drilldowns share the authoritative execution usage metadata.
 pub fn execution_inspection(project: &Project, row: &executions::Execution) -> Value {
     let mut value = row.to_json();
-    let transcript = if row.scope.is_some() {
-        super::capacity::dir(project, row).join("transcript.jsonl")
-    } else {
-        super::supervise::transcript(project, row.attempt.expect("attempt execution"), row.id)
-    };
+    let transcript = super::supervise::transcript(project, row);
     let proof = row
         .attempt
         .zip(row.proof.as_deref())
@@ -3121,7 +3117,7 @@ pub fn attempt_tail(project: &Project, params: &Value) -> Result<Value, Fail> {
         .into_iter()
         .rfind(|row| row.kind == "implementation" || row.kind == "review")
         .ok_or_else(|| Fail::not_found("no worker has run"))?;
-    let path = super::supervise::transcript(project, attempt.id, execution.id);
+    let path = super::supervise::transcript(project, &execution);
     let text = std::fs::read_to_string(&path)
         .map_err(|error| Fail::not_found(format!("{}: {error}", path.display())))?;
     Ok(json!(text))
