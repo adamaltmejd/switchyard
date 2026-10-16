@@ -7,8 +7,8 @@ is the binding spec.
 ## Requirements
 
 - pinfold 0.2.6, on the daemon's `PATH`
-- a container runtime pinfold supports: rootless podman on Linux, Apple
-  container on macOS
+- Linux: stable rootless Podman 6.1.4 or newer with the systemd cgroup manager
+- macOS 26 or newer: stable Apple container 1.5.0 or newer
 - git, on the daemon's `PATH`
 
 ## Install
@@ -160,7 +160,7 @@ with the container runtime, not inside a box. Each FakeModel emits
 nested machines and tests that unwind after failure. Retain every count in
 the final host log. These observations are separate from static workload
 estimates, machine/build counts and box launches.
-CI pins pinfold 0.2.6.
+CI pins pinfold 0.2.6 and builds native Podman 6.1.4 on hosted Linux runners.
 
 Development binaries use separate state, sockets, projects and runtime names.
 They never open the construction backlog. Release preparation does not
