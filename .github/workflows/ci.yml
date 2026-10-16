@@ -6,59 +6,48 @@ permissions:
 jobs:
   mac-startup-diagnostic:
     runs-on: [self-hosted, macOS, ARM64, switchyard-macos]
-    timeout-minutes: 8
+    timeout-minutes: 15
     concurrency:
       group: yard-operator-mac
       cancel-in-progress: false
     steps:
-      - name: Diagnose owned Pinfold startup
+      - name: Observe original legacy startup failure
         shell: bash
         run: |
           set -euo pipefail
           [[ "$(uname -s)" == Darwin && "$(uname -m)" == arm64 && "$(id -un)" == runner ]]
           export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/opt/coreutils/libexec/gnubin:/opt/homebrew/bin:$PATH"
-          export YARD_MAC_DIAGNOSTIC=$(mktemp -d "${TMPDIR:-/tmp}/yard-startup-diag.XXXXXX")
+          export YARD_MAC_DIAGNOSTIC=$(mktemp -d "${TMPDIR:-/tmp}/yard-legacy-diag.XXXXXX")
           printf 'YARD_MAC_DIAGNOSTIC=%s\n' "$YARD_MAC_DIAGNOSTIC" >> "$GITHUB_ENV"
-          python3 - <<'YARD_PY'
-          import os,sys,json,subprocess,hashlib,selectors,time,signal,shutil
-          from pathlib import Path
-          out=Path(os.environ['YARD_MAC_DIAGNOSTIC']).resolve(); out.mkdir(exist_ok=True)
-          binpath=Path.home()/'.local/bin/pinfold'
-          assert hashlib.sha256(binpath.read_bytes()).hexdigest()=='611253a0f44d1c0c337f778c743131d30904634f652e979d3ecb4bc2dcc7bc7e'
-          realcontainer=shutil.which('container'); assert realcontainer
-          (out/'bin').mkdir(); wrapper=out/'bin/container'
-          # The controlled spec carries no credentials. Capture only runtime stderr, never argv/environment.
-          wrapper.write_text('#!/bin/bash\nif [[ "$1" == run ]]; then exec '+__import__('shlex').quote(realcontainer)+' "$@" 2>> '+__import__('shlex').quote(str(out/'container-run.stderr'))+'; fi\nexec '+__import__('shlex').quote(realcontainer)+' "$@"\n'); wrapper.chmod(0o755)
-          env=os.environ.copy(); env.update(PATH=str(out/'bin')+os.pathsep+env['PATH'],XDG_STATE_HOME=str(out/'state'),XDG_CONFIG_HOME=str(out/'config'),XDG_CACHE_HOME='/tmp/yard-e2e-cache')
-          name='yard-y80-startup-'+str(os.getpid())
-          spec={'name':name,'image':'pinfold/profile-default:latest','harness':'pi','env':{'HOME':'/tmp'},'memory':'1G','labels':{'yard-investigation':'y80-mac-startup-20261016'},'egress':{'allow':[],'routes':{'diagnostic':'127.0.0.1:9'}}}
-          (out/'spec.json').write_text(json.dumps(spec,indent=2)+'\n')
-          with (out/'pinfold.stderr').open('w') as err:
-           child=subprocess.Popen([str(binpath),'box','up'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=err,env=env,text=True)
-           child.stdin.write(json.dumps(spec)+'\n'); child.stdin.flush()
-           sel=selectors.DefaultSelector(); sel.register(child.stdout,selectors.EVENT_READ); started=time.monotonic()
-           if sel.select(180): line=child.stdout.readline()
-           else: line=''; child.send_signal(signal.SIGTERM)
-           (out/'first-line.jsonl').write_text(line)
-           if line:
-            event=json.loads(line)
-            if event.get('event')=='ready':
-             check=subprocess.run([str(binpath),'box','exec',name,'--','sh','-c','id -u; id -g'],env=env,capture_output=True,text=True,timeout=30)
-             (out/'exec.json').write_text(json.dumps({'exit':check.returncode,'stdout':check.stdout,'stderr':check.stderr},indent=2)+'\n')
-           child.stdin.close(); child.stdin=None
-           try: rest,_=child.communicate(timeout=45)
-           except subprocess.TimeoutExpired:
-            child.send_signal(signal.SIGTERM)
-            try: rest,_=child.communicate(timeout=30)
-            except subprocess.TimeoutExpired: raise RuntimeError('owned diagnostic did not stop; retained state, no globalcleanup')
-           (out/'remaining.jsonl').write_text(rest)
-           (out/'terminal.json').write_text(json.dumps({'exit':child.returncode,'wall_seconds':time.monotonic()-started,'name':name,'first_line':line,'runtime_stderr':str(out/'container-run.stderr'),'cleanup':'Own stdin closed and own process reaped; no prune/runtime reset/other containers touched'},indent=2)+'\n')
-          print((out/'terminal.json').read_text());print('container stderr:'); print((out/'container-run.stderr').read_text() if (out/'container-run.stderr').exists() else 'not spawned')
-          YARD_PY
+          export YARD_REAL_CONTAINER=$(command -v container)
+          export YARD_DIAG_RUNTIME_ERRORS="$YARD_MAC_DIAGNOSTIC/container-run.stderr"
+          mkdir "$YARD_MAC_DIAGNOSTIC/bin"
+          cat > "$YARD_MAC_DIAGNOSTIC/bin/container" <<'YARD_SH'
+          #!/bin/bash
+          if [[ "$1" == run ]]; then exec "$YARD_REAL_CONTAINER" "$@" 2>> "$YARD_DIAG_RUNTIME_ERRORS"; fi
+          exec "$YARD_REAL_CONTAINER" "$@"
+          YARD_SH
+          chmod 0755 "$YARD_MAC_DIAGNOSTIC/bin/container"
+          export PATH="$YARD_MAC_DIAGNOSTIC/bin:$PATH"
+          [[ "$(shasum -a 256 "$HOME/.local/bin/pinfold" | cut -d' ' -f1)" == 611253a0f44d1c0c337f778c743131d30904634f652e979d3ecb4bc2dcc7bc7e ]]
+          cd /tmp/yard-validate.5qmVHO/source
+          [[ "$(git rev-parse HEAD)" == b670ca0840c1891819696d21eb3712a1ffd8cd90 ]]
+          [[ -z "$(git status --porcelain)" ]]
+          export CARGO_TARGET_DIR=/tmp/yard-validate.5qmVHO/target
+          export CARGO_INCREMENTAL=0
+          export YARD_E2E_DURABLE_INPUTS=/tmp/yard-validate.5qmVHO/durable-inputs
+          set +e
+          cargo test -p e2e --locked an_upgrade_preserves_ended_planner_proposals_and_limit_overrides -- --show-output > "$YARD_MAC_DIAGNOSTIC/native.log" 2>&1
+          yard_diagnostic_exit=$?
+          set -e
+          printf '%s\n' "$yard_diagnostic_exit" > "$YARD_MAC_DIAGNOSTIC/test-exit.txt"
+          cat "$YARD_MAC_DIAGNOSTIC/native.log"
+          if [[ -f "$YARD_DIAG_RUNTIME_ERRORS" ]]; then cat "$YARD_DIAG_RUNTIME_ERRORS"; fi
+          exit "$yard_diagnostic_exit"
       - name: Preserve diagnostic evidence
         if: ${{ always() && env.YARD_MAC_DIAGNOSTIC != '' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: y80-mac-startup-diagnostic-20261016
+          name: y80-mac-legacy-diagnostic-20261016
           path: ${{ env.YARD_MAC_DIAGNOSTIC }}
           if-no-files-found: error
