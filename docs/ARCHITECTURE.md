@@ -2254,6 +2254,9 @@ continuity and the next execution is fresh.
 The model route is an injecting route: the box sees a placeholder and
 pinfold's proxy adds the key. The MCP route names the daemon's listener. The
 harness runs from `/opt/pinfold/<name>` at the version pinfold carries.
+This release requires pinfold 0.2.6. Yard reads its harness artifact versions
+at daemon startup; the packaged Durable SDK and host Rust toolchain have
+independent pins.
 Where `YARD_BOX_MEMORY` is set, each box gets that share, swap equal. When
 a worker's stream ends without a terminal frame, `box stat` is read: an OOM
 count that rose is recorded as `oom`, a kill by the share, and the worker
