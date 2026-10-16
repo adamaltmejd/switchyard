@@ -1,156 +1,73 @@
 name: ci
-
 on:
   workflow_dispatch:
-
 permissions:
   contents: read
-
-env:
-  PINFOLD_VERSION: 0.2.6
-
 jobs:
-  daemon-lock-reproduction:
-    runs-on: ubuntu-26.04
-    timeout-minutes: 30
+  mac-fresh-context-tars:
+    runs-on: [self-hosted, macOS, ARM64, switchyard-macos]
+    timeout-minutes: 12
+    concurrency:
+      group: yard-operator-mac
+      cancel-in-progress: false
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-
-      - name: Build and configure rootless Podman 6.1.4
-        run: sh .github/scripts/setup-linux-runtime.sh
-
-      - name: Install pinfold
-        run: |
-          base="https://github.com/adamaltmejd/pinfold/releases/download/v${PINFOLD_VERSION}"
-          asset="pinfold-${PINFOLD_VERSION}-$(uname -m)-unknown-linux-musl"
-          curl -fsSL -o "$asset" "$base/$asset"
-          curl -fsSL -o SHA256SUMS "$base/SHA256SUMS"
-          sha256sum --ignore-missing -c SHA256SUMS
-          sudo install -m 0755 "$asset" /usr/local/bin/pinfold
-          pinfold --version
-
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      - name: Prepare diagnostic observer without changing lock results
+      - name: Retain actual tar files from fresh concurrent contexts
         shell: bash
         run: |
           set -euo pipefail
-          yard_diag="$RUNNER_TEMP/yard-daemon-lock-reproduction"
-          mkdir "$yard_diag"
-          printf 'YARD_LOCK_DIAGNOSTIC_DIR=%s\n' "$yard_diag" >> "$GITHUB_ENV"
-          printf '%s\n' 34f3159519d2bc65fa2f752b6328c65aeccd877c > "$yard_diag/candidate-source.txt"
-          git rev-parse HEAD > "$yard_diag/workflow-source.txt"
-          git diff --name-only 34f3159519d2bc65fa2f752b6328c65aeccd877c HEAD > "$yard_diag/source-difference.txt"
-          git diff --exit-code 34f3159519d2bc65fa2f752b6328c65aeccd877c HEAD -- . ':!.github/workflows/ci.yml'
-          cat > "$yard_diag/observer.c" <<'YARD_C'
-          #define _GNU_SOURCE
-          #include <dlfcn.h>
-          #include <dirent.h>
-          #include <errno.h>
-          #include <fcntl.h>
-          #include <stdio.h>
-          #include <stdlib.h>
-          #include <string.h>
-          #include <sys/file.h>
-          #include <sys/stat.h>
-          #include <sys/sysmacros.h>
-          #include <time.h>
-          #include <unistd.h>
-          static int (*real_flock)(int,int);
-          __attribute__((constructor)) static void setup(void) { real_flock=dlsym(RTLD_NEXT,"flock"); }
-          static void textfile(FILE *out,const char *path) {
-           char buffer[4096]; FILE *in=fopen(path,"r"); if(!in)return;
-           fprintf(out,"FILE %s\n",path); size_t n=fread(buffer,1,sizeof(buffer),in);fwrite(buffer,1,n,out);fputc('\n',out);fclose(in);
-          }
-          static void capture(int fd,int operation,int saved) {
-           char path[4096],self[128],target[4096]; struct stat wanted;
-           snprintf(self,sizeof(self),"/proc/self/fd/%d",fd);ssize_t n=readlink(self,target,sizeof(target)-1);if(n<0)return;target[n]=0;
-           if(!strstr(target,"-g15-")||!strstr(target,"/s/yard/daemon.lock"))return;
-           const char *dir=getenv("YARD_LOCK_DIAGNOSTIC_DIR");if(!dir||fstat(fd,&wanted))return;
-           snprintf(path,sizeof(path),"%s/%ld.lock-refusal.txt",dir,(long)getpid());int logfd=open(path,O_WRONLY|O_CREAT|O_APPEND|O_CLOEXEC,0600);if(logfd<0)return;FILE *out=fdopen(logfd,"a");if(!out){close(logfd);return;}
-           struct timespec t;clock_gettime(CLOCK_REALTIME,&t);
-           fprintf(out,"REFUSAL time=%lld.%09ld pid=%ld ppid=%ld fd=%d operation=%d errno=%d path=%s dev=%u:%u inode=%llu\n",(long long)t.tv_sec,t.tv_nsec,(long)getpid(),(long)getppid(),fd,operation,saved,target,major(wanted.st_dev),minor(wanted.st_dev),(unsigned long long)wanted.st_ino);
-           FILE *locks=fopen("/proc/locks","r");if(locks){char line[2048],key[128];snprintf(key,sizeof(key),"%02x:%02x:%llu",major(wanted.st_dev),minor(wanted.st_dev),(unsigned long long)wanted.st_ino);while(fgets(line,sizeof(line),locks))if(strstr(line,key))fprintf(out,"KERNEL_LOCK %s",line);fclose(locks);}
-           DIR *proc=opendir("/proc");struct dirent *p;int holders=0;
-           while(proc&&(p=readdir(proc))&&holders<32){if(p->d_name[0]<'0'||p->d_name[0]>'9')continue;snprintf(path,sizeof(path),"/proc/%s",p->d_name);struct stat ps;if(stat(path,&ps)||ps.st_uid!=getuid())continue;char fddir[4096];snprintf(fddir,sizeof(fddir),"/proc/%s/fd",p->d_name);DIR *fds=opendir(fddir);struct dirent *f;
-            while(fds&&(f=readdir(fds))&&holders<32){if(f->d_name[0]<'0'||f->d_name[0]>'9')continue;snprintf(path,sizeof(path),"/proc/%s/fd/%s",p->d_name,f->d_name);struct stat fs;if(stat(path,&fs)||fs.st_dev!=wanted.st_dev||fs.st_ino!=wanted.st_ino)continue;holders++;fprintf(out,"HOLDER pid=%s fd=%s dev=%u:%u inode=%llu\n",p->d_name,f->d_name,major(fs.st_dev),minor(fs.st_dev),(unsigned long long)fs.st_ino);
-             snprintf(path,sizeof(path),"/proc/%s/stat",p->d_name);textfile(out,path);snprintf(path,sizeof(path),"/proc/%s/comm",p->d_name);textfile(out,path);snprintf(path,sizeof(path),"/proc/%s/wchan",p->d_name);textfile(out,path);snprintf(path,sizeof(path),"/proc/%s/fdinfo/%s",p->d_name,f->d_name);textfile(out,path);
-            }if(fds)closedir(fds);
-           }if(proc)closedir(proc);
-           textfile(out,"/proc/loadavg");textfile(out,"/proc/pressure/cpu");textfile(out,"/proc/pressure/memory");textfile(out,"/proc/pressure/io");fflush(out);fclose(out);
-          }
-          int flock(int fd,int operation) {
-           if(!real_flock){errno=ENOSYS;return -1;}int result=real_flock(fd,operation);int saved=errno;
-           if(result<0&&(saved==EWOULDBLOCK||saved==EAGAIN)&&(operation&LOCK_NB))capture(fd,operation,saved);
-           errno=saved;return result;
-          }
-          YARD_C
-          printf '%s  %s\n' fe104fd6b6908bac92c1c3b64c01fdcd1b2c99bf4abbfd208ec4da02f658ecbb "$yard_diag/observer.c" | sha256sum -c -
-          cc -shared -fPIC -O2 -Wall -Wextra -Werror -o "$yard_diag/observer.so" "$yard_diag/observer.c" -ldl
-          cc --version > "$yard_diag/compiler.txt"
-          sha256sum "$yard_diag/observer.c" "$yard_diag/observer.so" > "$yard_diag/observer.sha256"
-          cat > "$yard_diag/retain-stores.py" <<'YARD_PY'
-          import datetime,json,os,sqlite3,time,sys
+          [[ "$(uname -s)" == Darwin && "$(uname -m)" == arm64 && "$(id -un)" == runner ]]
+          export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/opt/coreutils/libexec/gnubin:/opt/homebrew/bin:$PATH"
+          [[ "$(shasum -a 256 "$HOME/.local/bin/pinfold" | cut -d' ' -f1)" == 611253a0f44d1c0c337f778c743131d30904634f652e979d3ecb4bc2dcc7bc7e ]]
+          yard_probe_dir=$(mktemp -d "${TMPDIR:-/tmp}/yard-fresh-context.XXXXXX")
+          export YARD_MAC_DIAGNOSTIC="$yard_probe_dir/evidence"
+          mkdir "$YARD_MAC_DIAGNOSTIC"
+          printf 'YARD_MAC_DIAGNOSTIC=%s\n' "$YARD_MAC_DIAGNOSTIC" >> "$GITHUB_ENV"
+          python3 - <<'YARD_PY'
           from pathlib import Path
-          out=Path(sys.argv[1]);pattern=sys.argv[2];ticket=sys.argv[3].lower();terminal=sys.argv[4] if len(sys.argv)>4 else f'{ticket}-gate*-terminal.json';started=(out/'start.json').stat().st_mtime
-          saved=out/'native-stores';saved.mkdir(exist_ok=False);last={};count=0;deadline=time.monotonic()+7200
-          while not list(out.glob(terminal)) and time.monotonic()<deadline:
-           for root in Path('/tmp').glob(pattern):
+          from concurrent.futures import ThreadPoolExecutor
+          import os,json,subprocess,shutil,threading,time,hashlib,tarfile,re
+          out=Path(os.environ['YARD_MAC_DIAGNOSTIC']).resolve();work=out.parent;original=Path('/private/tmp/yard-parallel-context.fZ4owi/contexts');retained=work/'retained-tars';retained.mkdir();report={'scope':'Freshbyteidenticalpubliccontexts, defaultcache8wayconcurrency; perprocessTMPDIRforreadonlyhardlinkretentionofgeneratedUUID.tar. Pinfoldfirst, directnativeonlyiffailure. NoYard/boxes/models/runtimeconfig/cacheclear; onlyownnamesretired.','batches':[]};uuid=re.compile(r'[0-9a-fA-F]{8}-[0-9a-fA-F-]{27}\.tar$')
+          for driver in ['pinfold','container']:
+           base=work/driver;base.mkdir();tmpdirs=[];rows=[]
+           for i in range(8):
+            ctx=base/str(i);shutil.copytree(original/str(i),ctx,copy_function=shutil.copyfile);scratch=base/(str(i)+'-scratch');scratch.mkdir();tmpdirs.append((i,scratch));rows.append({'case':i,'context':str(ctx),'kind':'public-input-directory' if i<2 else 'small-control','name':'yard-y80-fresh-'+str(os.getpid())+'-'+driver+'-'+str(i),'dockerfile_sha256':hashlib.sha256((ctx/'.yard/Dockerfile').read_bytes()).hexdigest()})
+           stop=threading.Event();captured=[]
+           def observe():
+            while not stop.is_set():
+             for i,d in tmpdirs:
+              for p in d.glob('*.tar'):
+               if not uuid.fullmatch(p.name):continue
+               dest=retained/(driver+'-'+str(i)+'-'+p.name)
+               try:os.link(p,dest);captured.append((i,dest))
+               except (FileExistsError,FileNotFoundError):pass
+             time.sleep(.001)
+           thread=threading.Thread(target=observe);thread.start();barrier=threading.Barrier(8)
+           def build(r):
+            i=r['case'];ctx=Path(r['context']);env=os.environ.copy();env.update(TMPDIR=str(base/(str(i)+'-scratch'))+'/');env.pop('NO_COLOR',None);env.pop('BUILDKIT_COLORS',None)
+            args=['pinfold','image','build',r['name'],'--containerfile',str(ctx/'.yard/Dockerfile'),'--context',str(ctx)] if driver=='pinfold' else ['container','build','--file',str(ctx/'.yard/Dockerfile'),'--tag',r['name'],str(ctx)]
+            barrier.wait(timeout=30);started=time.monotonic()
+            with (out/(driver+'-'+str(i)+'.log')).open('wb') as log:p=subprocess.run(args,env=env,stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,timeout=180)
+            return {**r,'exit':p.returncode,'wall_seconds':time.monotonic()-started}
+           try:
+            with ThreadPoolExecutor(max_workers=8) as executor:rows=list(executor.map(build,rows))
+           finally:stop.set();thread.join()
+           archives=[]
+           for i,p in captured:
+            a={'case':i,'path':str(p),'bytes':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest(),'prefix_hex':p.open('rb').read(64).hex()}
             try:
-             if root.stat().st_mtime<started:continue
-            except OSError:continue
-            for db in root.glob('*/.yard/local/store.sqlite'):
-             try:
-              if db.is_symlink() or not db.resolve().is_relative_to(root.resolve()):continue
-              stat=db.stat();c=sqlite3.connect(f'file:{db}?mode=ro',uri=True,timeout=.1)
-              seq=c.execute('SELECT MAX(seq) FROM audit').fetchone()[0];key=str(db);identity=(stat.st_ino,seq)
-              if last.get(key)!=identity:
-               folder=saved/root.name;folder.mkdir(exist_ok=True);project=db.parents[2].name
-               tmp=folder/(project+'.next.sqlite');dest=folder/(project+'.sqlite');d=sqlite3.connect(tmp);c.backup(d);d.close();os.replace(tmp,dest)
-               (folder/(project+'.json')).write_text(json.dumps({'fixture':str(root),'project':project,'seq':seq,'observed_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'read_only_source':True})+'\n');last[key]=identity;count+=1
-              c.close()
-             except (OSError,sqlite3.Error):pass
-           time.sleep(1)
-          record={'snapshots':count,'stores':len(last),'output':str(saved),'terminal_observed':bool(list(out.glob(terminal)))};(saved/'manifest.json').write_text(json.dumps(record,indent=2)+'\n');print(json.dumps(record),flush=True)
+             with tarfile.open(p,'r:') as tar:a['members']=[{'name':m.name,'size':m.size,'type':m.type.decode('ascii','replace')} for m in tar.getmembers()]
+             a['python_tar_valid']=True
+            except (tarfile.TarError,OSError,ValueError) as e:a.update(python_tar_valid=False,tar_error=str(e))
+            archives.append(a)
+           for r in rows:
+            args=['pinfold','image','rm',r['name']] if driver=='pinfold' else ['container','image','delete',r['name']];env=os.environ.copy();env.pop('NO_COLOR',None);env.pop('BUILDKIT_COLORS',None);p=subprocess.run(args,env=env,capture_output=True,text=True,timeout=30);r['only_own_name_retirement']={'exit':p.returncode,'stdout':p.stdout,'stderr':p.stderr}
+           report['batches'].append({'driver':driver,'cases':rows,'archives':archives});(out/'report.json').write_text(json.dumps(report,indent=2)+'\n');print(json.dumps({'driver':driver,'cases':[{k:r[k] for k in ['case','kind','exit']} for r in rows],'retained_tars':len(archives)}),flush=True)
+           if all(r['exit']==0 for r in rows):break
           YARD_PY
-
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets --locked -- -D warnings
-      # The scaffold's Dockerfile starts FROM this local image; a fresh host
-      # has none until it is built.
-      - run: pinfold build --profile default
-      - name: Fetch verified public Durable image inputs
-        env:
-          YARD_E2E_DURABLE_INPUTS: ${{ runner.temp }}/yard-durable-inputs
-        run: sh runners/durable-audit/fetch-build-inputs.sh "$YARD_E2E_DURABLE_INPUTS"
-      - name: Reproduce original workload with refusal-time evidence
-        shell: bash
-        env:
-          YARD_E2E_DURABLE_INPUTS: ${{ runner.temp }}/yard-durable-inputs
-        run: |
-          set -euo pipefail
-          printf '{"scope":"Diagnostic only; real flock result and errno unchanged; no release qualification inferred"}\n' > "$YARD_LOCK_DIAGNOSTIC_DIR/start.json"
-          python3 "$YARD_LOCK_DIAGNOSTIC_DIR/retain-stores.py" "$YARD_LOCK_DIAGNOSTIC_DIR" 'ye-*' Y-80 terminal.json > "$YARD_LOCK_DIAGNOSTIC_DIR/store-observer.log" 2>&1 &
-          yard_store_observer=$!
-          export LD_PRELOAD="$YARD_LOCK_DIAGNOSTIC_DIR/observer.so"
-          set +e
-          cargo test -p e2e --locked -- --show-output 2>&1 | tee "$YARD_LOCK_DIAGNOSTIC_DIR/native.log"
-          yard_status=("${PIPESTATUS[@]}")
-          set -e
-          unset LD_PRELOAD
-          printf '{"child_exit":%s,"log_exit":%s}\n' "${yard_status[0]}" "${yard_status[1]}" > "$YARD_LOCK_DIAGNOSTIC_DIR/terminal.json"
-          wait "$yard_store_observer"
-          if [[ -f target/debug/yard ]]; then sha256sum target/debug/yard > "$YARD_LOCK_DIAGNOSTIC_DIR/yard.sha256"; fi
-          [[ "${yard_status[0]}" == 0 ]] || exit "${yard_status[0]}"
-          exit "${yard_status[1]}"
-      - name: Preserve diagnostic evidence
-        if: ${{ always() && env.YARD_LOCK_DIAGNOSTIC_DIR != '' }}
+      - name: Preserve build diagnostic evidence
+        if: ${{ always() && env.YARD_MAC_DIAGNOSTIC != '' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: y80-x64-daemon-lock-reproduction-20261016
-          path: ${{ env.YARD_LOCK_DIAGNOSTIC_DIR }}
+          name: y80-mac-fresh-context-tars-20261016
+          path: ${{ env.YARD_MAC_DIAGNOSTIC }}
           if-no-files-found: error
