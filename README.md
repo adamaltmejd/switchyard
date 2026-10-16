@@ -8,7 +8,8 @@ is the binding spec.
 
 - pinfold 0.2.6, on the daemon's `PATH`
 - Linux: stable rootless Podman 6.1.4 or newer with the systemd cgroup manager
-- macOS 26 or newer: stable Apple container 1.5.0 or newer
+- macOS 26 or newer: stable Apple container 1.5.0 or newer; builder-shim
+  0.13.1 requires the [context-transfer fix](docs/archive/2026-10-16-y80-final-qualification.md#apple-native-builder-fix)
 - git, on the daemon's `PATH`
 
 ## Install

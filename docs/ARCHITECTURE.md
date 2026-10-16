@@ -2257,6 +2257,8 @@ harness runs from `/opt/pinfold/<name>` at the version pinfold carries.
 This release requires pinfold 0.2.6. Linux requires stable rootless Podman
 6.1.4 or newer with the systemd cgroup manager. macOS requires version 26
 or newer and stable Apple container 1.5.0 or newer.
+Apple builder-shim 0.13.1 requires isolated context-transfer staging; the
+[qualified fix](archive/2026-10-16-y80-final-qualification.md#apple-native-builder-fix) records its source and build.
 Yard reads its harness artifact versions
 at daemon startup; the packaged Durable SDK and host Rust toolchain have
 independent pins.
