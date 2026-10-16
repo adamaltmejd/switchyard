@@ -84,6 +84,28 @@ jobs:
       group: yard-operator-mac
       cancel-in-progress: false
     steps:
+      - name: Observe required Mac host prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="/opt/homebrew/opt/coreutils/libexec/gnubin:/opt/homebrew/bin:$PATH"
+          printf 'platform=%s architecture=%s account=%s\n' "$(uname -s)" "$(uname -m)" "$(id -un)"
+          yard_missing=0
+          for yard_tool in git curl jq openssl sha256sum cargo rustc pinfold; do
+            if command -v "$yard_tool" >/dev/null; then
+              printf 'available=%s\n' "$yard_tool"
+            else
+              printf 'missing=%s\n' "$yard_tool"
+              yard_missing=1
+            fi
+          done
+          if command -v pinfold >/dev/null; then
+            pinfold --version
+          fi
+          [[ "$(uname -s)" == Darwin && "$(uname -m)" == arm64 ]] || { echo 'required=Darwin-arm64'; exit 1; }
+          [[ "$(id -un)" == runner ]] || { echo 'required=runner-account'; exit 1; }
+          [[ "$yard_missing" == 0 ]] || exit 1
+          [[ "$(pinfold --version)" == 'pinfold 0.2.3' ]] || { echo 'required=pinfold-0.2.3'; exit 1; }
       - name: Validate the fixed reviewed candidate on the real Mac runtime
         shell: bash
         env:
