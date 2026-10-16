@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      mac_validation:
+        description: Run fixed reviewed source on operator Mac alongside Linux
+        type: boolean
+        default: false
   workflow_call:
 
 permissions:
@@ -52,6 +57,250 @@ jobs:
         env:
           YARD_E2E_DURABLE_INPUTS: ${{ runner.temp }}/yard-durable-inputs
         run: sh runners/durable-audit/fetch-build-inputs.sh "$YARD_E2E_DURABLE_INPUTS"
-      - run: cargo test -p e2e --locked
+      - run: cargo test -p e2e --locked -- --show-output
         env:
           YARD_E2E_DURABLE_INPUTS: ${{ runner.temp }}/yard-durable-inputs
+
+  version:
+    runs-on: ubuntu-26.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Record Cargo.toml version
+        id: version
+        run: |
+          version="$(awk '
+            /^\[workspace\.package\]/ { f = 1; next }
+            /^\[/ { f = 0 }
+            f && $1 == "version" { gsub(/"/, "", $3); print $3; exit }
+          ' Cargo.toml)"
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-26.04
+            target: x86_64-unknown-linux-musl
+          - runner: ubuntu-26.04-arm
+            target: aarch64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Musl toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          rustup target add "${{ matrix.target }}"
+          cc="CC_${{ matrix.target }}"
+          echo "${cc//-/_}=musl-gcc" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: cargo build -p yard --release --locked --target "${{ matrix.target }}"
+
+      - name: Stage
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/yard" \
+            "dist/yard-${{ needs.version.outputs.version }}-${{ matrix.target }}"
+
+      - name: Record artifact identity
+        shell: bash
+        env:
+          YARD_ASSET_TARGET: ${{ matrix.target }}
+          YARD_ASSET_VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          asset="dist/yard-${YARD_ASSET_VERSION}-${YARD_ASSET_TARGET}"
+          "$asset" version --json > dist/version.json
+          (cd dist && shasum -a 256 "${asset#dist/}" > SHA256SUMS)
+          python3 - <<'PYCODE'
+          import hashlib, json, os, pathlib, subprocess
+          target = os.environ['YARD_ASSET_TARGET']
+          version = os.environ['YARD_ASSET_VERSION']
+          asset = pathlib.Path(f'dist/yard-{version}-{target}')
+          reported = json.loads(pathlib.Path('dist/version.json').read_text())
+          if reported.get('version') != version:
+              raise SystemExit(f'version mismatch: {reported!r}')
+          record = {'source': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+                    'target': target, 'version': version, 'asset': asset.name,
+                    'sha256': hashlib.sha256(asset.read_bytes()).hexdigest(),
+                    'reported_version': reported,
+                    'rustc': subprocess.check_output(['rustc', '--version'], text=True).strip()}
+          pathlib.Path('dist/manifest.json').write_text(json.dumps(record, indent=2) + '\n')
+          PYCODE
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: yard-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  macos:
+    needs: version
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build
+        run: cargo build -p yard --release --locked --target aarch64-apple-darwin
+
+      - name: Stage
+        run: |
+          mkdir -p dist
+          cp "target/aarch64-apple-darwin/release/yard" \
+            "dist/yard-${{ needs.version.outputs.version }}-aarch64-apple-darwin"
+
+      - name: Record artifact identity
+        shell: bash
+        env:
+          YARD_ASSET_TARGET: aarch64-apple-darwin
+          YARD_ASSET_VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          asset="dist/yard-${YARD_ASSET_VERSION}-${YARD_ASSET_TARGET}"
+          "$asset" version --json > dist/version.json
+          (cd dist && shasum -a 256 "${asset#dist/}" > SHA256SUMS)
+          python3 - <<'PYCODE'
+          import hashlib, json, os, pathlib, subprocess
+          target = os.environ['YARD_ASSET_TARGET']
+          version = os.environ['YARD_ASSET_VERSION']
+          asset = pathlib.Path(f'dist/yard-{version}-{target}')
+          reported = json.loads(pathlib.Path('dist/version.json').read_text())
+          if reported.get('version') != version:
+              raise SystemExit(f'version mismatch: {reported!r}')
+          record = {'source': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+                    'target': target, 'version': version, 'asset': asset.name,
+                    'sha256': hashlib.sha256(asset.read_bytes()).hexdigest(),
+                    'reported_version': reported,
+                    'rustc': subprocess.check_output(['rustc', '--version'], text=True).strip()}
+          pathlib.Path('dist/manifest.json').write_text(json.dumps(record, indent=2) + '\n')
+          PYCODE
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: yard-aarch64-apple-darwin
+          path: dist/*
+          if-no-files-found: error
+
+  mac-runtime:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.mac_validation == true }}
+    runs-on: [self-hosted, macOS, ARM64, switchyard-macos]
+    timeout-minutes: 30
+    concurrency:
+      group: yard-operator-mac
+      cancel-in-progress: false
+    env:
+      YARD_SOURCE_SHA: 34f3159519d2bc65fa2f752b6328c65aeccd877c
+    steps:
+      - name: Verify qualified runner runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(uname -s)" == Darwin && "$(uname -m)" == arm64 && "$(id -un)" == runner ]]
+          export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/opt/coreutils/libexec/gnubin:/opt/homebrew/bin:$PATH"
+          [[ "$(shasum -a 256 "$HOME/.local/bin/pinfold" | cut -d' ' -f1)" == 611253a0f44d1c0c337f778c743131d30904634f652e979d3ecb4bc2dcc7bc7e ]]
+          pinfold --version
+          sw_vers -productVersion
+          container --version
+          container system status
+      - name: Qualify fixed reviewed source
+        shell: bash
+        run: |
+          #!/bin/bash
+          set -euo pipefail
+          [[ "$(uname -s)" == Darwin && "$(uname -m)" == arm64 ]]
+          [[ "$(id -un)" == runner ]]
+          : "${YARD_SOURCE_SHA:?Set the full reviewed source commit}"
+          [[ "$YARD_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/opt/coreutils/libexec/gnubin:/opt/homebrew/bin:$PATH"
+          for yard_tool in git curl jq openssl sha256sum cargo rustc pinfold container python3; do
+            command -v "$yard_tool" >/dev/null || { printf 'missing=%s\n' "$yard_tool" >&2; exit 1; }
+          done
+          yard_pinfold_version=$(pinfold --version)
+          printf 'runtime=%s\n' "$yard_pinfold_version"
+          [[ "$yard_pinfold_version" == 'pinfold 0.2.6' ]] || { echo 'required=pinfold-0.2.6' >&2; exit 1; }
+          yard_validation_dir=$(mktemp -d "${TMPDIR:-/tmp}/yard-validate.XXXXXX")
+          yard_evidence_dir="$yard_validation_dir/evidence"
+          mkdir "$yard_evidence_dir"
+          yard_real_container=$(command -v container)
+          mkdir "$yard_validation_dir/runtime-observer"
+          python3 - "$yard_real_container" "$yard_evidence_dir/container-run.stderr" "$yard_validation_dir/runtime-observer/container" <<'YARD_DIAG_PY'
+          import sys,shlex
+          from pathlib import Path
+          real,errors,path=sys.argv[1:]
+          p=Path(path)
+          p.write_text('#!/bin/bash\nif [[ "$1" == run ]]; then exec '+shlex.quote(real)+' "$@" 2>> '+shlex.quote(errors)+'; fi\nexec '+shlex.quote(real)+' "$@"\n')
+          p.chmod(0o755)
+          YARD_DIAG_PY
+          shasum -a 256 "$yard_real_container" > "$yard_evidence_dir/container-real.sha256"
+          export PATH="$yard_validation_dir/runtime-observer:$PATH"
+          printf 'YARD_MAC_EVIDENCE=%s\n' "$yard_evidence_dir" >> "$GITHUB_ENV"
+          printf 'evidence=%s\nsource=%s\n' "$yard_evidence_dir" "$YARD_SOURCE_SHA"
+          yard_finish() {
+            yard_overall_exit=$?
+            trap - EXIT
+            printf '%s\n' "$yard_overall_exit" > "$yard_evidence_dir/overall-exit.txt"
+            if [[ -f "$yard_validation_dir/target/debug/yard" ]]; then
+              sha256sum "$yard_validation_dir/target/debug/yard" > "$yard_evidence_dir/yard.sha256"
+            fi
+            for yard_log in "$yard_evidence_dir"/*.log; do
+              [[ -f "$yard_log" ]] || continue
+              sha256sum "$yard_log" >> "$yard_evidence_dir/logs.sha256"
+            done
+            printf 'validation_exit=%s evidence=%s\n' "$yard_overall_exit" "$yard_evidence_dir"
+            exit "$yard_overall_exit"
+          }
+          trap yard_finish EXIT
+          yard_check() {
+            local yard_check_name=$1
+            shift
+            local -a yard_status
+            set +e
+            "$@" 2>&1 | tee "$yard_evidence_dir/$yard_check_name.log"
+            yard_status=("${PIPESTATUS[@]}")
+            set -e
+            printf 'command_exit=%s\nlog_exit=%s\n' "${yard_status[0]}" "${yard_status[1]}" > "$yard_evidence_dir/$yard_check_name-exit.txt"
+            [[ "${yard_status[0]}" == 0 ]] || return "${yard_status[0]}"
+            return "${yard_status[1]}"
+          }
+          # Full history supplies the actual legacy source used by migration scenarios.
+          env GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 \
+            git clone --no-checkout --no-recurse-submodules https://github.com/adamaltmejd/switchyard.git "$yard_validation_dir/source"
+          cd "$yard_validation_dir/source"
+          env GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 \
+            git -c core.hooksPath=/dev/null checkout --detach "$YARD_SOURCE_SHA"
+          [[ "$(git rev-parse HEAD)" == "$YARD_SOURCE_SHA" ]]
+          [[ -z "$(git status --porcelain)" ]]
+          printf '%s\n' "$YARD_SOURCE_SHA" > "$yard_evidence_dir/source.txt"
+          {
+            uname -sm
+            sw_vers -productVersion
+            container --version
+            id -un
+            rustc -vV
+            cargo --version
+            pinfold --version
+          } > "$yard_evidence_dir/versions.log"
+          export CARGO_TARGET_DIR="$yard_validation_dir/target"
+          export CARGO_INCREMENTAL=0
+          export YARD_E2E_DURABLE_INPUTS="$yard_validation_dir/durable-inputs"
+          yard_check fmt cargo fmt --check
+          yard_check clippy cargo clippy --all-targets --locked -- -D warnings
+          yard_check build cargo build --locked
+          yard_check profile pinfold build --profile default
+          yard_check public-inputs sh runners/durable-audit/fetch-build-inputs.sh "$YARD_E2E_DURABLE_INPUTS"
+          yard_check native cargo test -p e2e --locked -- --show-output
+          git status --porcelain > "$yard_evidence_dir/source-status-after.txt"
+          [[ ! -s "$yard_evidence_dir/source-status-after.txt" ]]
+      - name: Preserve qualification evidence
+        if: ${{ always() && env.YARD_MAC_EVIDENCE != '' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: mac-runtime-34f315-pinfold026
+          path: ${{ env.YARD_MAC_EVIDENCE }}
+          if-no-files-found: error
