@@ -1,0 +1,90 @@
+#!/bin/bash
+set -euo pipefail
+[[ "$(uname -s)" == Darwin && "$(uname -m)" == arm64 ]]
+[[ "$(id -un)" == runner ]]
+: "${YARD_SOURCE_SHA:?Set the full reviewed source commit}"
+[[ "$YARD_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/opt/coreutils/libexec/gnubin:/opt/homebrew/bin:$PATH"
+for yard_tool in git curl jq openssl sha256sum cargo rustc pinfold container python3; do
+  command -v "$yard_tool" >/dev/null || { printf 'missing=%s\n' "$yard_tool" >&2; exit 1; }
+done
+yard_pinfold_version=$(pinfold --version)
+printf 'runtime=%s\n' "$yard_pinfold_version"
+[[ "$yard_pinfold_version" == 'pinfold 0.2.6' ]] || { echo 'required=pinfold-0.2.6' >&2; exit 1; }
+yard_validation_dir=$(mktemp -d "${TMPDIR:-/tmp}/yard-validate.XXXXXX")
+yard_evidence_dir="$yard_validation_dir/evidence"
+mkdir "$yard_evidence_dir"
+container list --all --format json > "$yard_evidence_dir/builder-before.json"
+container exec buildkit sh -c 'sha256sum /proc/1/exe /usr/local/bin/container-builder-shim /usr/bin/buildkitd' > "$yard_evidence_dir/builder-before.sha256"
+yard_real_container=$(command -v container)
+mkdir "$yard_validation_dir/runtime-observer"
+python3 - "$yard_real_container" "$yard_evidence_dir/container-run.stderr" "$yard_validation_dir/runtime-observer/container" <<'YARD_DIAG_PY'
+import sys,shlex
+from pathlib import Path
+real,errors,path=sys.argv[1:]
+p=Path(path)
+p.write_text('#!/bin/bash\nif [[ "$1" == run ]]; then exec '+shlex.quote(real)+' "$@" 2>> '+shlex.quote(errors)+'; fi\nexec '+shlex.quote(real)+' "$@"\n')
+p.chmod(0o755)
+YARD_DIAG_PY
+shasum -a 256 "$yard_real_container" > "$yard_evidence_dir/container-real.sha256"
+export PATH="$yard_validation_dir/runtime-observer:$PATH"
+printf 'YARD_MAC_EVIDENCE=%s\n' "$yard_evidence_dir" >> "$GITHUB_ENV"
+printf 'evidence=%s\nsource=%s\n' "$yard_evidence_dir" "$YARD_SOURCE_SHA"
+yard_finish() {
+  yard_overall_exit=$?
+  trap - EXIT
+  container list --all --format json > "$yard_evidence_dir/builder-after.json" || true
+  container exec buildkit sh -c 'sha256sum /proc/1/exe /usr/local/bin/container-builder-shim /usr/bin/buildkitd' > "$yard_evidence_dir/builder-after.sha256" || true
+  printf '%s\n' "$yard_overall_exit" > "$yard_evidence_dir/overall-exit.txt"
+  if [[ -f "$yard_validation_dir/target/debug/yard" ]]; then
+    sha256sum "$yard_validation_dir/target/debug/yard" > "$yard_evidence_dir/yard.sha256"
+  fi
+  for yard_log in "$yard_evidence_dir"/*.log; do
+    [[ -f "$yard_log" ]] || continue
+    sha256sum "$yard_log" >> "$yard_evidence_dir/logs.sha256"
+  done
+  printf 'validation_exit=%s evidence=%s\n' "$yard_overall_exit" "$yard_evidence_dir"
+  exit "$yard_overall_exit"
+}
+trap yard_finish EXIT
+yard_check() {
+  local yard_check_name=$1
+  shift
+  local -a yard_status
+  set +e
+  "$@" 2>&1 | tee "$yard_evidence_dir/$yard_check_name.log"
+  yard_status=("${PIPESTATUS[@]}")
+  set -e
+  printf 'command_exit=%s\nlog_exit=%s\n' "${yard_status[0]}" "${yard_status[1]}" > "$yard_evidence_dir/$yard_check_name-exit.txt"
+  [[ "${yard_status[0]}" == 0 ]] || return "${yard_status[0]}"
+  return "${yard_status[1]}"
+}
+# Full history supplies the actual legacy source used by migration scenarios.
+env GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 \
+  git clone --no-checkout --no-recurse-submodules https://github.com/adamaltmejd/switchyard.git "$yard_validation_dir/source"
+cd "$yard_validation_dir/source"
+env GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 \
+  git -c core.hooksPath=/dev/null checkout --detach "$YARD_SOURCE_SHA"
+[[ "$(git rev-parse HEAD)" == "$YARD_SOURCE_SHA" ]]
+[[ -z "$(git status --porcelain)" ]]
+printf '%s\n' "$YARD_SOURCE_SHA" > "$yard_evidence_dir/source.txt"
+{
+  uname -sm
+  sw_vers -productVersion
+  container --version
+  id -un
+  rustc -vV
+  cargo --version
+  pinfold --version
+} > "$yard_evidence_dir/versions.log"
+export CARGO_TARGET_DIR="$yard_validation_dir/target"
+export CARGO_INCREMENTAL=0
+export YARD_E2E_DURABLE_INPUTS="$yard_validation_dir/durable-inputs"
+yard_check fmt cargo fmt --check
+yard_check clippy cargo clippy --all-targets --locked -- -D warnings
+yard_check build cargo build --locked
+yard_check profile pinfold build --profile default
+yard_check public-inputs sh runners/durable-audit/fetch-build-inputs.sh "$YARD_E2E_DURABLE_INPUTS"
+yard_check native cargo test -p e2e --locked -- --show-output
+git status --porcelain > "$yard_evidence_dir/source-status-after.txt"
+[[ ! -s "$yard_evidence_dir/source-status-after.txt" ]]

@@ -1,0 +1,36 @@
+diff --git a/pkg/fssync/diffcopy.go b/pkg/fssync/diffcopy.go
+--- a/pkg/fssync/diffcopy.go
++++ b/pkg/fssync/diffcopy.go
+@@ -39,8 +39,19 @@
+ // the local unpacked cache. The buffer size is larger than fsutil's default
+ // to reduce syscall overhead for large files.
+ func (f *FSSyncProxy) DiffCopy(ss filesync.FileSync_DiffCopyServer) error {
+ 	ctx := ss.Context()
+-	fs := NewFS(ctx, f, f.contextDir, f.basePath)
++	if err := os.MkdirAll(f.basePath, 0o755); err != nil {
++		return err
++	}
++	// Equal context hashes must not share writable transfer files.
++	transferPath, err := os.MkdirTemp(f.basePath, "transfer-")
++	if err != nil {
++		return err
++	}
++	// run waits for the walk and every file sender before returning.
++	defer os.RemoveAll(transferPath)
++
++	fs := NewFS(ctx, f, f.contextDir, transferPath)
+ 	s := &sender{
+ 		conn:         &syncStream{Stream: ss},
+ 		fs:           fs,
+diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -73,6 +73,8 @@
+ BuildKit ◄── PACKET_DATA            (shim reads from local cache)
+ ```
+ 
++Each `DiffCopy` transfer owns its unpacked context and removes it after all file senders finish. Unpacked contexts are not shared between transfers. BuildKit's layer cache is unchanged.
++
+ There is also a fallback path (`Info` → `Read`) used by `FS.Open` when the local cache is unpopulated — a narrow race window at the start of a build. The host enforces the same boundary rules on this path.
+ 
+ ### Context boundary rules
