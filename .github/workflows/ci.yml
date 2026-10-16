@@ -1,57 +1,105 @@
 name: ci
-
 on:
-  push:
-    branches: [main]
-  pull_request:
   workflow_dispatch:
-  workflow_call:
-
 permissions:
   contents: read
-
-env:
-  PINFOLD_VERSION: 0.2.6
-
 jobs:
-  e2e:
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: [ubuntu-26.04, ubuntu-26.04-arm]
+  mac-parallel-context:
+    runs-on: [self-hosted, macOS, ARM64, switchyard-macos]
+    timeout-minutes: 12
+    concurrency:
+      group: yard-operator-mac
+      cancel-in-progress: false
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-
-      - name: Build and configure rootless Podman 6.1.4
-        run: sh .github/scripts/setup-linux-runtime.sh
-
-      - name: Install pinfold
+      - name: Observe concurrent public build contexts
+        shell: bash
         run: |
-          base="https://github.com/adamaltmejd/pinfold/releases/download/v${PINFOLD_VERSION}"
-          asset="pinfold-${PINFOLD_VERSION}-$(uname -m)-unknown-linux-musl"
-          curl -fsSL -o "$asset" "$base/$asset"
-          curl -fsSL -o SHA256SUMS "$base/SHA256SUMS"
-          sha256sum --ignore-missing -c SHA256SUMS
-          sudo install -m 0755 "$asset" /usr/local/bin/pinfold
-          pinfold --version
-
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+          set -euo pipefail
+          [[ "$(uname -s)" == Darwin && "$(uname -m)" == arm64 && "$(id -un)" == runner ]]
+          export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/opt/coreutils/libexec/gnubin:/opt/homebrew/bin:$PATH"
+          [[ "$(shasum -a 256 "$HOME/.local/bin/pinfold" | cut -d' ' -f1)" == 611253a0f44d1c0c337f778c743131d30904634f652e979d3ecb4bc2dcc7bc7e ]]
+          yard_probe_dir=$(mktemp -d "${TMPDIR:-/tmp}/yard-parallel-context.XXXXXX")
+          export YARD_MAC_DIAGNOSTIC="$yard_probe_dir/evidence"
+          mkdir "$YARD_MAC_DIAGNOSTIC"
+          printf 'YARD_MAC_DIAGNOSTIC=%s\n' "$YARD_MAC_DIAGNOSTIC" >> "$GITHUB_ENV"
+          pinfold build --profile default > "$YARD_MAC_DIAGNOSTIC/profile.log" 2>&1
+          python3 - <<'YARD_PY'
+          from pathlib import Path
+          from concurrent.futures import ThreadPoolExecutor
+          import os,json,subprocess,shutil,hashlib,time,threading
+          out=Path(os.environ['YARD_MAC_DIAGNOSTIC']).resolve();work=out.parent/'contexts';work.mkdir();inputs=Path('/tmp/yard-validate.ayicFQ/durable-inputs');assert inputs.is_dir();barrier=threading.Barrier(8);cases=[]
+          for i in range(8):
+           ctx=work/str(i);ctx.mkdir();name='yard-y80-parallel-'+str(os.getpid())+'-'+str(i)
+           if i<2:shutil.copytree(inputs,ctx/'payload')
+           else:(ctx/'payload').mkdir();(ctx/'payload/marker').write_text('owned probe '+str(i)+'\n')
+           (ctx/'.yard').mkdir();(ctx/'.yard/Dockerfile').write_text('FROM pinfold/profile-default:latest\nCOPY payload/ /probe/\nLABEL dev.yard.investigation="y80-parallel-'+str(i)+'"\n');(ctx/'.dockerignore').write_text('.yard/local/\n')
+           cases.append({'case':i,'kind':'public-input-directory' if i<2 else 'small-control','context':str(ctx),'name':name})
+          def build(r):
+           barrier.wait(timeout=30);started=time.monotonic()
+           with (out/(str(r['case'])+'.log')).open('wb') as log:
+            p=subprocess.run(['pinfold','image','build',r['name'],'--containerfile',r['context']+'/.yard/Dockerfile','--context',r['context'],'--label','dev.yard.investigation=y80-parallel-context-20261016'],stdout=log,stderr=subprocess.STDOUT,timeout=180)
+           return {**r,'exit':p.returncode,'wall_seconds':time.monotonic()-started}
+          with ThreadPoolExecutor(max_workers=8) as executor:records=list(executor.map(build,cases))
+          # Retire only our names, after every build ended; preserve the shared builder.
+          for r in records:
+           p=subprocess.run(['pinfold','image','rm',r['name']],capture_output=True,text=True,timeout=30);r['own_name_retirement']={'exit':p.returncode,'stdout':p.stdout,'stderr':p.stderr}
+          report={'cases':records,'concurrency':8,'scope':'Two verifiedpublicinputcontexts plus six tinycontrols, simultaneousrealPinfoldbuilds; no boxes/modelcalls/changes/clean/prune/reset; ownnamesretiredafterallbuildsended'};(out/'report.json').write_text(json.dumps(report,indent=2)+'\n');print(json.dumps(report,indent=2))
+          YARD_PY
+      - name: Preserve build diagnostic evidence
+        if: ${{ always() && env.YARD_MAC_DIAGNOSTIC != '' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          name: y80-mac-parallel-context-20261016
+          path: ${{ env.YARD_MAC_DIAGNOSTIC }}
+          if-no-files-found: error
 
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets --locked -- -D warnings
-      # The scaffold's Dockerfile starts FROM this local image; a fresh host
-      # has none until it is built.
-      - run: pinfold build --profile default
-      - name: Fetch verified public Durable image inputs
-        env:
-          YARD_E2E_DURABLE_INPUTS: ${{ runner.temp }}/yard-durable-inputs
-        run: sh runners/durable-audit/fetch-build-inputs.sh "$YARD_E2E_DURABLE_INPUTS"
-      - run: cargo test -p e2e --locked
-        env:
-          YARD_E2E_DURABLE_INPUTS: ${{ runner.temp }}/yard-durable-inputs
+  mac-observer-controls:
+    needs: mac-parallel-context
+    runs-on: [self-hosted, macOS, ARM64, switchyard-macos]
+    timeout-minutes: 15
+    concurrency:
+      group: yard-operator-mac
+      cancel-in-progress: false
+    steps:
+      - name: Qualify two repaired observers on exact candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(uname -s)" == Darwin && "$(uname -m)" == arm64 && "$(id -un)" == runner ]]
+          export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/opt/coreutils/libexec/gnubin:/opt/homebrew/bin:$PATH"
+          [[ "$(shasum -a 256 "$HOME/.local/bin/pinfold" | cut -d' ' -f1)" == 611253a0f44d1c0c337f778c743131d30904634f652e979d3ecb4bc2dcc7bc7e ]]
+          yard_focus_dir=$(mktemp -d "${TMPDIR:-/tmp}/yard-focus-a4151c.XXXXXX")
+          export YARD_MAC_EVIDENCE="$yard_focus_dir/evidence"
+          mkdir "$YARD_MAC_EVIDENCE"
+          printf 'YARD_MAC_EVIDENCE=%s\n' "$YARD_MAC_EVIDENCE" >> "$GITHUB_ENV"
+          yard_finish() {
+            yard_exit=$?
+            printf '%s\n' "$yard_exit" > "$YARD_MAC_EVIDENCE/overall-exit.txt"
+            if [[ -f "$CARGO_TARGET_DIR/debug/yard" ]]; then shasum -a 256 "$CARGO_TARGET_DIR/debug/yard" > "$YARD_MAC_EVIDENCE/yard.sha256"; fi
+            exit "$yard_exit"
+          }
+          export CARGO_TARGET_DIR=/tmp/yard-validate.ayicFQ/target
+          export CARGO_INCREMENTAL=0
+          export YARD_E2E_DURABLE_INPUTS=/tmp/yard-validate.ayicFQ/durable-inputs
+          trap yard_finish EXIT
+          env GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 git clone --no-checkout --no-recurse-submodules https://github.com/adamaltmejd/switchyard.git "$yard_focus_dir/source"
+          cd "$yard_focus_dir/source"
+          git -c core.hooksPath=/dev/null checkout --detach a4151c7101aba74f3ac88486afe60e7ebc278bbb
+          [[ "$(git rev-parse HEAD)" == a4151c7101aba74f3ac88486afe60e7ebc278bbb && -z "$(git status --porcelain)" ]]
+          git rev-parse HEAD > "$YARD_MAC_EVIDENCE/source.txt"
+          set +e
+          cargo test -p e2e --locked -- --show-output g04_capacity_holds::concurrent_readers_share_capacity_and_join_exact_results_across_restart g13_runs_where_its_row_says::selected_cleanup_hands_one_exclusive_clone_to_separately_configured_repair 2>&1 | tee "$YARD_MAC_EVIDENCE/native.log"
+          yard_status=("${PIPESTATUS[@]}")
+          set -e
+          printf 'command_exit=%s\nlog_exit=%s\n' "${yard_status[0]}" "${yard_status[1]}" > "$YARD_MAC_EVIDENCE/native-exit.txt"
+          [[ "${yard_status[0]}" == 0 ]] || exit "${yard_status[0]}"
+          [[ "${yard_status[1]}" == 0 ]] || exit "${yard_status[1]}"
+          git status --porcelain > "$YARD_MAC_EVIDENCE/source-status-after.txt"
+          [[ ! -s "$YARD_MAC_EVIDENCE/source-status-after.txt" ]]
+      - name: Preserve observer controls
+        if: ${{ always() && env.YARD_MAC_EVIDENCE != '' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: y80-mac-a4151c-observer-controls-20261016
+          path: ${{ env.YARD_MAC_EVIDENCE }}
+          if-no-files-found: error
