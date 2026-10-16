@@ -34,10 +34,10 @@ jobs:
            elif case=='large-32MiB':
             with (ctx/'payload').open('wb') as f:
              for _ in range(32):f.write(b'\0'*1024**2)
-           elif case=='public-node-archive':shutil.copyfile(next(inputs.rglob('node-*.tar.xz')),ctx/'payload')
+           elif case=='public-node-archive':shutil.copyfile(next(inputs.rglob('node-*.tar.gz')),ctx/'payload')
            else:shutil.copytree(inputs,ctx/'build-inputs');copy='COPY build-inputs/ /probe-inputs/'
            (ctx/'Dockerfile').write_text('FROM pinfold/profile-default:latest\n'+copy+'\nLABEL dev.yard.investigation="y80-tar-'+case+'"\n')
-           name='yard-y80-tar-'+str(os.getpid())+'-'+case
+           name='yard-y80-tar-'+str(os.getpid())+'-'+case.lower()
            r={'case':case,'context':str(ctx),'name':name,'files':[{'path':str(p.relative_to(ctx)),'bytes':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()} for p in sorted(ctx.rglob('*')) if p.is_file()]};started=time.monotonic()
            with (out/(case+'.log')).open('wb') as log:
             p=subprocess.run(['pinfold','image','build',name,'--containerfile',str(ctx/'Dockerfile'),'--context',str(ctx),'--label','dev.yard.investigation=y80-tar-20261016'],stdout=log,stderr=subprocess.STDOUT,timeout=180)
