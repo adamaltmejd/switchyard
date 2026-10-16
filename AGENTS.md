@@ -48,6 +48,8 @@ rules for changing the repository.
 
 ## Tests
 
+Keep the smallest suite that proves the guarantees.
+
 - **End-to-end only.** No unit tests, mocks, runtime stubs, or test-only code
   paths or flags in the binary. A test builds the real binary, starts a real
   daemon on a real project with real pinfold boxes, and observes from
